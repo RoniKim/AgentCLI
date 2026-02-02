@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import time
+import traceback
 from pathlib import Path
 from typing import Optional, Any
 
@@ -600,6 +601,8 @@ async def main_async(args: argparse.Namespace) -> int:
                     save_state(state_path, state)
                     metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="exception")
                     eprint(f"[DEV ERROR] {ex}")
+                    if bool(getattr(args, "debug", False)):
+                        eprint(traceback.format_exc())
                     if cp:
                         restore_checkpoint(repo, cp)
                         metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="exception")
@@ -764,5 +767,14 @@ async def main_async(args: argparse.Namespace) -> int:
     return 0
 
 
+
 def run(args: argparse.Namespace) -> int:
-    return asyncio.run(main_async(args))
+    try:
+        return asyncio.run(main_async(args))
+    except KeyboardInterrupt:
+        return 130
+    except Exception as ex:
+        eprint(f"[FATAL] {ex}")
+        if bool(getattr(args, "debug", False)):
+            eprint(traceback.format_exc())
+        return 1

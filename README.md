@@ -12,10 +12,18 @@
 
 ```bash
 # 1) 의존성 설치
-pip install -U openai openai-agents python-dotenv pydantic
+pip install -U -r requirements.txt
 
-# 2) 실행
+# 2) 실행 (interactive shell, 기본)
 python agent_cli.py --repo "C:/Dev/BudgetBook"
+# then:
+# > /config
+# > /start --autopilot
+# > /status
+# > /stop
+
+# 2-b) 즉시 실행 (legacy)
+python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --autopilot
 ```
 
 ### Wizard로 config 생성
@@ -30,11 +38,13 @@ python agent_cli.py --repo "C:/Dev/BudgetBook" --wizard
 
 ```bash
 # STOP 파일로 안전하게 종료
-python agent_cli.py --repo "C:/Dev/BudgetBook" --loop --autopilot
+python agent_cli.py --repo "C:/Dev/BudgetBook"
+# > /start --loop --autopilot
 ```
 
 중단:
-- `run_dir/STOP` 파일이 존재하면 graceful stop
+- interactive shell에서 `/stop` 입력 (run_dir/STOP 생성)
+- 또는 `run_dir/STOP` 파일이 존재하면 graceful stop
 - `--loop-idle-exit-after`로 공회전 종료
 
 ## Structured PM Output (2.0)

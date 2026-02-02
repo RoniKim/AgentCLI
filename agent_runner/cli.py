@@ -72,6 +72,9 @@ DEFAULTS: Dict[str, Any] = {
     "qa_always": False,
     # prompts
     "prompts_dir": ".doc/agent_prompts",
+
+    # diagnostics
+    "debug": False,
 }
 
 
@@ -83,6 +86,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Config / wizard
     p.add_argument("--config", default="", help="Config file path (default: repo/.doc/agent_config.json)")
+    p.add_argument("--run-now", action="store_true", help="Run immediately (skip interactive shell entrypoint)")
     p.add_argument("--wizard", action="store_true", help="Run interactive wizard to create/update config")
     p.add_argument("--non-interactive", action="store_true", help="Disable interactive prompts")
     p.add_argument("--init-prompts", action="store_true", help="Create prompt templates in prompts_dir and exit")
@@ -180,6 +184,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # QA control
     p.add_argument("--qa-always", action="store_true", default=DEFAULTS["qa_always"])
+
+    # Diagnostics
+    p.add_argument("--debug", action="store_true", default=DEFAULTS["debug"], help="Print stack traces on unexpected errors")
 
     return p
 

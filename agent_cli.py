@@ -1,17 +1,46 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CLI-first multi-agent runner (PM → Dev → QA) with token-optimized unattended ops.
+"""CLI-first multi-agent runner (PM → Dev → QA).
 
-Entry point.
+This bundle supports two entry modes:
 
-Usage:
-  python agent_cli.py --repo /path/to/repo
+1) Interactive shell (default, Codex-CLI style)
+   - Allows checking/changing config before starting
+   - Commands: /repo, /config, /start, /stop, /status, /save, /load, /set, /add ...
 
-If no config exists, an interactive wizard can generate one (Codex-CLI style).
+2) Legacy immediate run
+   - For scripting / CI usage
+   - Use: python agent_cli.py --run-now --repo /path/to/repo [other args...]
+
+Notes:
+- If you pass one-shot flags like --wizard or --init-prompts, it runs immediately
+  (so existing workflows keep working).
 """
 
-from agent_runner.main import main
+from __future__ import annotations
+
+import sys
+
+
+_ONE_SHOT_FLAGS = {"--wizard", "--init-prompts", "-h", "--help"}
+
+
+def _has_any_flag(argv: list[str], flags: set[str]) -> bool:
+    return any(a in flags for a in argv)
+
+
+def _has_flag(argv: list[str], flag: str) -> bool:
+    return any(a == flag for a in argv)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    argv = sys.argv[1:]
+
+    # Legacy / non-interactive paths
+    if _has_flag(argv, "--run-now") or _has_any_flag(argv, _ONE_SHOT_FLAGS):
+        from agent_runner.main import main
+        raise SystemExit(main(argv))
+
+    # Default: interactive shell
+    from agent_runner.shell import shell_main
+    raise SystemExit(shell_main(argv))
