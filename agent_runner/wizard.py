@@ -47,6 +47,15 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
     iterations = _ask_int("Iterations per run", int(defaults.get("iterations", 30)))
     max_turns_per_task = _ask_int("Max turns per task", int(defaults.get("max_turns_per_task", 12)))
 
+    # When an agent hits MaxTurnsExceeded, we can safely re-run with a short CONTINUE prompt.
+    # This prevents long overnight runs from aborting due to turn caps.
+    dev_max_turns_continuations = _ask_int(
+        "Dev continuations on max-turns (0=disable)", int(defaults.get("dev_max_turns_continuations", 2))
+    )
+    pm_max_turns_continuations = _ask_int(
+        "PM continuations on max-turns (0=disable)", int(defaults.get("pm_max_turns_continuations", 1))
+    )
+
     loop = _ask_bool("Enable loop (unattended cycles)", bool(defaults.get("loop", False)))
     loop_sleep_seconds = _ask_int("Loop sleep seconds", int(defaults.get("loop_sleep_seconds", 60)))
     loop_max_cycles = _ask_int("Loop max cycles (0 = unlimited)", int(defaults.get("loop_max_cycles", 0)))
@@ -62,10 +71,13 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
     ).strip()
 
     cfg: Dict[str, Any] = {
+        "config_version": 2,
         "autopilot": autopilot,
         "continuous": continuous,
         "iterations": iterations,
         "max_turns_per_task": max_turns_per_task,
+        "dev_max_turns_continuations": dev_max_turns_continuations,
+        "pm_max_turns_continuations": pm_max_turns_continuations,
         "loop": loop,
         "loop_sleep_seconds": loop_sleep_seconds,
         "loop_max_cycles": loop_max_cycles,

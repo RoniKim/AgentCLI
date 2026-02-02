@@ -20,6 +20,27 @@
 
 ---
 
+
+### Max turns 초과(Dev/PM) 대응: Continuations
+
+에이전트가 `MaxTurnsExceeded`로 중단될 때, 러너가 **짧은 CONTINUE 프롬프트로 이어서 재시도**할 수 있습니다.
+
+- Dev: `--dev-max-turns-continuations` (기본 2)
+- PM: `--pm-max-turns-continuations` (기본 1)
+
+예시:
+
+```bash
+python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --autopilot --continuous \
+  --max-turns-per-task 10 --dev-max-turns-continuations 3
+```
+
+> 구버전 config가 `dev_max_turns_continuations=0`을 저장하고 있을 수 있습니다.  
+> 이 경우 `/wizard`로 config를 다시 저장하거나, `/set dev_max_turns_continuations 2`로 올리면
+> “밤새 돌다 max turns로 죽는” 케이스를 크게 줄일 수 있습니다.
+
+---
+
 ## 파일 구조
 
 ```text

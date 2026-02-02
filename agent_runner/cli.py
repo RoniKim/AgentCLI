@@ -26,6 +26,7 @@ DEFAULTS: Dict[str, Any] = {
     # Core / paths
     "repo": "",
     "config": "",
+    "config_version": 2,
     "run_dir": "",            # empty => auto
     "resume_latest": False,
     "env_file": "",           # empty => auto (python-side .env is still loaded)
@@ -259,6 +260,31 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         if v is None:
             continue
         eff[k] = v
+
+
+    # ---- MIGRATIONS (best-effort, for older saved configs) ----
+    # Older configs may pin some tuning knobs to 0 (meaning "no continuations") simply because
+    # they were created before these defaults were introduced. If the config has no explicit
+    # version marker, treat 0 as "legacy default" and lift it to current defaults.
+    cfg_ver = cfg.get("config_version", 0)
+    try:
+        cfg_ver_i = int(cfg_ver) if cfg_ver is not None else 0
+    except Exception:
+        cfg_ver_i = 0
+
+    # Only apply when user did NOT pass CLI flags for these and config looks legacy.
+    if cfg_ver_i < 2:
+        if getattr(args_ns, "dev_max_turns_continuations", None) is None:
+            v = eff.get("dev_max_turns_continuations", None)
+            if v in (0, None, ""):
+                eff["dev_max_turns_continuations"] = int(defaults.get("dev_max_turns_continuations", 2))
+        if getattr(args_ns, "pm_max_turns_continuations", None) is None:
+            v = eff.get("pm_max_turns_continuations", None)
+            if v in (0, None, ""):
+                eff["pm_max_turns_continuations"] = int(defaults.get("pm_max_turns_continuations", 1))
+
+    # Always stamp current config_version in effective args (save happens via /wizard).
+    eff["config_version"] = int(defaults.get("config_version", 2))
 
     # compat: stop_if_no_diff -> allow_no_diff inverse-ish (keep simple)
     if eff.get("stop_if_no_diff") is True and eff.get("allow_no_diff") is None:

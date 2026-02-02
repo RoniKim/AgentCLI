@@ -239,25 +239,47 @@ async def main_async(args: argparse.Namespace) -> int:
 
 
         async def _run_with_continuations(agent_obj, prompt: str, max_turns: int, *, label: str, timeout_sec: int = 0, max_continuations: int = 0) -> Any:
-            """Run an agent, optionally continuing if a max-turns exception occurs."""
-            cont_left = int(max_continuations)
+            """Run an agent, optionally continuing if a max-turns exception occurs.
+
+            Notes:
+            - max_continuations controls how many *additional* Runner.run calls we will attempt after a MaxTurnsExceeded-style failure.
+            - We detect turn-caps both by exception message and by exception class name (for SDK variations).
+            """
+            cont_left = int(max_continuations or 0)
+
+            def _is_max_turns(ex: Exception) -> bool:
+                try:
+                    msg = (str(ex) or "").lower()
+                except Exception:
+                    msg = ""
+                name = type(ex).__name__.lower()
+                return (
+                    "max turns" in msg
+                    or "max_turn" in msg
+                    or "maxturn" in msg
+                    or "maxturn" in name
+                    or "max_turn" in name
+                    or ("turn" in name and "max" in name)
+                )
+
             while True:
                 try:
                     if timeout_sec and timeout_sec > 0:
                         return await asyncio.wait_for(Runner.run(agent_obj, prompt, max_turns=max_turns), timeout=timeout_sec)
                     return await Runner.run(agent_obj, prompt, max_turns=max_turns)
                 except Exception as ex:
-                    msg = str(ex).lower()
-                    if cont_left > 0 and ("max turns" in msg or "max_turn" in msg or "maxturn" in msg):
+                    if cont_left > 0 and _is_max_turns(ex):
                         cont_left -= 1
                         prompt = (
                             prompt
-                            + "\n\n[CONTINUE] You hit a turn limit previously. Continue from where you left off. "
-                              "Do NOT restate a plan; apply changes now. Return only the required output."
+                            + f"\n\n[CONTINUE] You hit a turn limit previously while running '{label}'. Continue EXACTLY from where you left off.\n"
+                              "- Do NOT restate a plan.\n"
+                              "- Do NOT summarize.\n"
+                              "- Apply changes now (call tools / edit files).\n"
+                              "- End with only the required output."
                         )
                         continue
                     raise
-
         async def _run_pm_structured(pm_prompt: str, *, max_turns: int, cycle_idx: int, kind: str, output_path: Path) -> PMOutputV2 | None:
             """Run PM and validate its final output against PMOutputV2 schema."""
             retries = int(getattr(args, "pm_structured_retries", 2))
@@ -712,6 +734,9 @@ async def main_async(args: argparse.Namespace) -> int:
                     "codex_call_hint": codex_call_hint(autopilot),
                 }
                 dev_prompt = store.render("dev_task_prompt", DEV_TASK_TEMPLATE_DEFAULT, ctx)
+                dev_exc: Optional[Exception] = None
+                dev_is_max_turns = False
+                dev_final = ""
 
                 try:
                     dev_result = await _run_with_continuations(
@@ -722,24 +747,50 @@ async def main_async(args: argparse.Namespace) -> int:
                         timeout_sec=int(getattr(args, "dev_timeout_seconds", 0)) or 0,
                         max_continuations=int(getattr(args, "dev_max_turns_continuations", 0)) or 0,
                     )
-                    (task_dir / "dev_output.txt").write_text(
-                        (dev_result.final_output or "") + "\n", encoding="utf-8", errors="replace"
-                    )
-                    (run_dir / "dev_logs").mkdir(parents=True, exist_ok=True)
-                    (run_dir / "dev_logs" / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}.txt").write_text(
-                        (dev_result.final_output or "") + "\n", encoding="utf-8", errors="replace"
-                    )
+                    dev_final = (dev_result.final_output or "")
                 except Exception as ex:
-                    state.setdefault("failed", []).append({"task": next_task.id, "reason": "exception", "detail": str(ex)})
-                    save_state(state_path, state)
-                    metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="exception")
+                    dev_exc = ex
+                    dev_final = ""
+                    msg = (str(ex) or "").lower()
+                    name = type(ex).__name__.lower()
+                    dev_is_max_turns = (
+                        "max turns" in msg
+                        or "max_turn" in msg
+                        or "maxturn" in msg
+                        or "maxturn" in name
+                        or "max_turn" in name
+                        or ("turn" in name and "max" in name)
+                    )
                     eprint(f"[DEV ERROR] {ex}")
                     if bool(getattr(args, "debug", False)):
                         eprint(traceback.format_exc())
+
+                # Always persist whatever we have (even on exceptions)
+                dev_log = (dev_final or "")
+                if dev_exc:
+                    dev_log += "\n[EXCEPTION]\n" + str(dev_exc) + "\n"
+
+                (task_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
+                (run_dir / "dev_logs").mkdir(parents=True, exist_ok=True)
+                (run_dir / "dev_logs" / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}.txt").write_text(
+                    dev_log + "\n", encoding="utf-8", errors="replace"
+                )
+
+                # Non-max-turn exceptions are treated as fatal (rollback + stop)
+                if dev_exc and not dev_is_max_turns:
+                    state.setdefault("failed", []).append({"task": next_task.id, "reason": "exception", "detail": str(dev_exc)})
+                    save_state(state_path, state)
+                    metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="exception")
                     if cp:
                         restore_checkpoint(repo, cp)
                         metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="exception")
                     return 1, "dev_exception", 0
+
+                # Max-turns exceptions are recoverable: continue to diff/build gates.
+                if dev_exc and dev_is_max_turns:
+                    state.setdefault("warnings", []).append({"task": next_task.id, "reason": "max_turns_exceeded", "detail": str(dev_exc)})
+                    save_state(state_path, state)
+                    metrics.event("task_warn", cycle=cycle_idx, step=step, task_id=next_task.id, reason="max_turns_exceeded")
 
                 after = git_porcelain(repo)
                 changed = (before != after)
