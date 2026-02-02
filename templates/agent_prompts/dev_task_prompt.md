@@ -24,6 +24,10 @@ Constraints (non-negotiable):
 - Keep changes incremental and compilation-safe.
 - Avoid broad repo scan; use targeted rg/git ls-files.
 
+Invalid-task guard (must follow):
+- If this task is about PM artifacts / analysis docs only (PROJECT_ANALYSIS.md, REQUIREMENTS/AGENT_TASKS/BACKLOG/NOTES, or only .doc/ paths),
+  do NOT implement. Instead, write a short note to {run_dir}/NOTES.md explaining it's a PM-only deliverable task and stop.
+
 Docs read mode: {docs_read_mode}
 Digest file (preferred): {digest_rel}
 

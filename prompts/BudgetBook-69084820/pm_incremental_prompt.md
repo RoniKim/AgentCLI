@@ -39,6 +39,26 @@ Rules:
   - Mark the related UI task as BLOCKED and exclude it from backlog.
 - Keep backlog atomic; each task must create git diff.
 - Avoid broad scans. Only inspect changed files + their direct dependencies.
+## Backlog Guard (Dev-only, MUST FOLLOW)
+
+- BACKLOG.md and BACKLOG.json are for the Developer agent ONLY.
+- The backlog MUST contain ONLY implementation tasks that modify product/app code (NOT .doc/ or run artifacts).
+- HARD FORBIDDEN in backlog:
+  - Any task to update PROJECT_ANALYSIS.md or other PM cache artifacts
+  - Any task to create/update run-local artifacts (BACKLOG.* / NOTES.md / REQUIREMENTS.md / AGENT_TASKS.md)
+  - Any task whose only touched files are under .doc/ or {run_dir}
+- If blocked by backend or missing info, write it ONLY in {run_dir}/NOTES.md and exclude from backlog.
+- Task IDs MUST start at T3. Do NOT output T1 or T2.
+
+### BACKLOG.json format (strict)
+
+{run_dir}/BACKLOG.json must be:
+{ "version": 2, "tasks": [ { "id": "T3", "title": "…", "prompt": "…", "files": [], "done_when": "…", "blocked_by": [] } ] }
+
+### BACKLOG.md format (strict)
+- [ ] T3 <title>
+- [ ] T4 <title>
+
 - No questions. Output files and stop.
 
 When editing/creating files, call Codex MCP with {codex_call_hint}.

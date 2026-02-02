@@ -51,6 +51,44 @@ Hard rules:
 - Avoid broad repo scans: use REPO_INVENTORY.md as the file list; use targeted reads for critical files.
 - Backlog tasks MUST be atomic and implementable within one Dev iteration.
 - Each backlog task MUST be expected to produce a git diff.
+## Backlog Guard (Dev-only, MUST FOLLOW)
+
+- BACKLOG.md and BACKLOG.json are a contract for the Developer agent.
+  They MUST contain ONLY implementation tasks that modify product/app code (NOT .doc/ or run artifacts).
+- NEVER include backlog tasks for PM duties or artifact generation, including:
+  - Writing/updating the global analysis file ({analysis_md})
+  - Writing/creating any run-local deliverables: REQUIREMENTS.md, AGENT_TASKS.md, BACKLOG.md, BACKLOG.json, NOTES.md
+  - Any task that touches only files under .doc/ or {run_dir}
+- If anything is blocked or missing (e.g., cannot read REPO_INVENTORY.md, missing endpoint):
+  record it ONLY in {run_dir}/NOTES.md (section: "PM Issue" or "Backend Request").
+  Do NOT add a backlog task for it.
+- Task IDs MUST start at T3. Do NOT output T1 or T2.
+
+### BACKLOG.json format (strict)
+
+Write {run_dir}/BACKLOG.json as a JSON object:
+{
+  "version": 2,
+  "tasks": [
+    {
+      "id": "T3",
+      "title": "…",
+      "prompt": "Implementation-ready instructions for Dev",
+      "files": ["path/hint1", "path/hint2"],
+      "done_when": "Concrete verification (build/run/screens)",
+      "blocked_by": []
+    }
+  ]
+}
+- "prompt" is REQUIRED and must be detailed enough for Dev to implement without needing you again.
+- Exclude BLOCKED tasks (do not include them in tasks[]).
+
+### BACKLOG.md format (strict)
+
+Write {run_dir}/BACKLOG.md as checkbox list only:
+- [ ] T3 <title>
+- [ ] T4 <title>
+
 - No questions. No waiting. Produce the files.
 
 When editing/creating files, call Codex MCP with {codex_call_hint}.
