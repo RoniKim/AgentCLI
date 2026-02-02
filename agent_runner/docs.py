@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 
 from .utils import eprint
+from .config import app_home
 
 
 def resolve_docs_dir(repo: Path, docs_dir_arg: str) -> Optional[Path]:
@@ -94,9 +95,13 @@ def load_dotenv_best_effort(repo: Path, explicit_env_file: str = "", override: b
     if explicit_env_file:
         try_load(Path(explicit_env_file).expanduser())
 
+    # Prefer AgentCLI-side .env (outside the target repo).
+    try_load(app_home() / ".env")
+
     try_load(find_dotenv_upwards(Path.cwd()))
 
     try:
+        # (Legacy) search near this module as well.
         try_load(find_dotenv_upwards(Path(__file__).resolve().parent))
     except Exception:
         pass

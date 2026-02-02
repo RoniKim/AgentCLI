@@ -13,6 +13,11 @@ Files to touch (keep minimal):
 {files_hint}
 
 Constraints (non-negotiable):
+- HARD FORBIDDEN: Any SQL, migrations, *.sql edits, and any Supabase schema/view/rpc/policy changes.
+- If the task would require backend/SQL changes, STOP:
+  - write the missing endpoint contract to {run_dir}/NOTES.md
+  - do NOT add backend/SQL work to backlog
+  - do NOT implement fake persistence/workarounds
 - No secrets in client. Never embed SERVICE_ROLE_KEY or CRON_SECRET.
 - For PAD: writes MUST use RPC/Edge. Reads use Views/RPC. Do NOT direct-write forbidden tables.
 - Use idempotency keys where required (client_tx_id).

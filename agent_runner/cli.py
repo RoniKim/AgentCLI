@@ -1,260 +1,342 @@
 from __future__ import annotations
 
 import argparse
-import sys
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
-from .config import load_config, save_config, resolve_config_path, default_config_path, default_prompts_dir
+from .config import (
+    app_home,
+    legacy_config_path,
+    load_config,
+    resolve_config_path,
+    resolve_env_file,
+    resolve_prompts_dir,
+    save_config,
+)
 from .wizard import run_wizard
+
 from .prompts import ensure_default_prompt_files
 
 
+# ---- Defaults shown in /config ----
+# NOTE: cycle.py references many args attributes directly (args.foo). Those MUST exist to avoid AttributeError,
+# especially when starting from the interactive shell (/start) which constructs args from DEFAULTS.
 DEFAULTS: Dict[str, Any] = {
-    # core
-    "run_dir": "",
+    # Core / paths
+    "repo": "",
+    "config": "",
+    "run_dir": "",            # empty => auto
     "resume_latest": False,
-    "env_file": "",
-    # docs
-    "docs_dir": ".doc/Docs",
-    "docs_read_mode": "digest",
-    "docs_digest_file": ".doc/Docs/00_DOCS_DIGEST.md",
-    "generate_digest": False,
-    # autopilot
+    "env_file": "",           # empty => auto (python-side .env is still loaded)
+
+    # Runner behavior
     "autopilot": False,
-    # loop
     "loop": False,
     "loop_sleep_seconds": 60,
     "loop_max_cycles": 0,
-    "loop_idle_exit_after": 3600,
-    "stop_file": "STOP",
-    # PM turns
-    "pm_bootstrap_max_turns": 120,
-    "pm_incremental_max_turns": 30,
-    "pm_backlog_max_turns": 30,
-    "pm_structured_retries": 2,
-    "pm_max_turns_continuations": 1,
-    "pm_timeout_seconds": 0,
-    "dev_max_turns_continuations": 2,
-    "dev_timeout_seconds": 0,
-
-    # PM drift guards
-    "pm_include_working_tree": False,
-    "pm_refresh_backlog": False,
-    "pm_refresh_every_cycles": 0,
-    # Dev
+    "loop_idle_exit_after": 0,
     "continuous": False,
     "iterations": 30,
     "max_turns_per_task": 12,
-    "allow_no_diff": False,
-    "stop_if_no_diff": False,  # deprecated
-    # Gates
-    "no_build": False,
-    "require_build": False,  # deprecated
-    "dotnet_build_target": "",
-    "run_tests": False,
-    "dotnet_test_target": "",
-    "dotnet_test_filter": "",
-    "test_timeout_seconds": 3600,
     "isolate_task": False,
-    # Policy
+
+    # Safety / gates
     "no_policy_scan": False,
     "policy_rules_file": "",
     "policy_rule": [],
+
+    "no_build": False,
+    "require_build": False,
+    "run_tests": False,
+
+    # dotnet gates (used by cycle.py)
+    "dotnet_build_target": "",
+    "dotnet_test_target": "",
+    "dotnet_test_filter": "",
+
     # Models
     "pm_model": "gpt-5-mini",
     "dev_model": "gpt-5.2-codex",
     "qa_model": "gpt-5-mini",
+    "qa_always": False,
+
+    # Timeouts (seconds) - referenced by cycle.py
+    "pm_timeout_seconds": 900,
+    "dev_timeout_seconds": 900,
+    "mcp_timeout_seconds": 120,
+    "test_timeout_seconds": 3600,
+
+    # PM tuning knobs (referenced by cycle.py)
+    "pm_structured_retries": 2,
+    "pm_max_turns_continuations": 1,
+    "pm_bootstrap_max_turns": 28,
+    "pm_incremental_max_turns": 18,
+    "pm_refresh_backlog": False,
+    "pm_refresh_every_cycles": 0,
+    "pm_include_working_tree": False,
+
+    # Dev tuning knobs
+    "dev_max_turns_continuations": 2,
+
     # MCP
     "mcp_mode": "npx",
     "codex_package": "@openai/codex@latest",
-    "mcp_timeout_seconds": 360000,
-    # QA
-    "qa_always": False,
-    # prompts
-    "prompts_dir": ".doc/agent_prompts",
 
-    # diagnostics
+    # Docs
+    "docs_read_mode": "digest",
+    "docs_dir": ".doc/Docs",
+    "docs_digest_file": ".doc/DOCS_DIGEST.md",
+    "generate_digest": False,
+
+    # Prompts (python-side default when empty)
+    "prompts_dir": "",
+
+    # Misc / debug
     "debug": False,
+    "stop_file": "STOP",
+    "allow_no_diff": False,
+    "stop_if_no_diff": False,
 }
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description="CLI-first PM→Dev→QA runner (token-optimized).",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
+# ---- python-side .env loader (no repo .env) ----
+def _parse_env_lines(text: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if k:
+            out[k] = v
+    return out
 
-    # Config / wizard
-    p.add_argument("--config", default="", help="Config file path (default: repo/.doc/agent_config.json)")
-    p.add_argument("--run-now", action="store_true", help="Run immediately (skip interactive shell entrypoint)")
-    p.add_argument("--wizard", action="store_true", help="Run interactive wizard to create/update config")
+
+def load_python_side_env(explicit_env_file: Optional[str] = None, override: bool = False) -> None:
+    """
+    우선순위:
+      1) --env-file (absolute or relative to AgentCLI home)
+      2) AgentCLI 홈/.env
+    repo 쪽 .env는 의도적으로 로드하지 않는다(요청 사항).
+    """
+    paths: list[Path] = []
+    if explicit_env_file and str(explicit_env_file).strip():
+        p = resolve_env_file(explicit_env_file)
+        if p:
+            paths.append(p)
+    paths.append(app_home() / ".env")
+
+    for p in paths:
+        try:
+            if not p.exists():
+                continue
+            data = _parse_env_lines(p.read_text(encoding="utf-8", errors="replace"))
+            for k, v in data.items():
+                if override or not os.getenv(k):
+                    os.environ[k] = v
+        except Exception:
+            # env 로딩 실패는 치명적이지 않게
+            pass
+
+
+# 모듈 import 시점에 python-side .env 한번 로드(override=False)
+load_python_side_env(explicit_env_file=None, override=False)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(add_help=True)
+
+    # Core
+    p.add_argument("--repo", required=True, help="Repo root path")
+
+    # Config / UX
+    p.add_argument(
+        "--config",
+        default="",
+        help="Config file path (default: AgentCLI/configs/<repo-slug>.json). Relative paths resolve from AgentCLI home.",
+    )
+    p.add_argument("--run-now", action="store_true", help="Run immediately (skip interactive shell)")
+    p.add_argument("--wizard", action="store_true", help="Run wizard to create/update config")
     p.add_argument("--non-interactive", action="store_true", help="Disable interactive prompts")
     p.add_argument("--init-prompts", action="store_true", help="Create prompt templates in prompts_dir and exit")
-    p.add_argument("--prompts-dir", default=DEFAULTS["prompts_dir"], help="Prompt templates directory (relative to repo)")
 
-    # Repo / run dir
-    p.add_argument("--repo", required=True, help="Repo root path (e.g., C:\\Dev\\BudgetBook)")
-    p.add_argument("--run-dir", default=DEFAULTS["run_dir"], help="Resume an existing run folder under .doc/agent_runs/...")
-    p.add_argument("--resume-latest", action="store_true", default=DEFAULTS["resume_latest"],
-                   help="If --run-dir is omitted, reuse the latest run under repo/.doc/agent_runs")
-    p.add_argument("--env-file", default=DEFAULTS["env_file"], help="Optional: explicit .env file path (loaded before repo chdir)")
+    # Paths
+    p.add_argument("--run-dir", default=None, help="Fixed run_dir to reuse. Empty/None = auto")
+    p.add_argument("--resume-latest", action=argparse.BooleanOptionalAction, default=None, help="Resume latest run_dir")
+    p.add_argument("--env-file", default=None, help="Path to .env (absolute or relative to AgentCLI home)")
 
-    # Docs
-    p.add_argument("--docs-dir", default=DEFAULTS["docs_dir"], help="Docs dir relative to repo")
-    p.add_argument("--docs-read-mode", choices=["digest", "full", "none"], default=DEFAULTS["docs_read_mode"],
-                   help="digest=read headings digest only (recommended), full=allow opening docs, none=skip docs")
-    p.add_argument("--docs-digest-file", default=DEFAULTS["docs_digest_file"], help="Digest file path rel to repo")
-    p.add_argument("--generate-digest", action="store_true", default=DEFAULTS["generate_digest"],
-                   help="Generate/update docs digest locally (no tokens)")
+    # Behavior
+    p.add_argument("--autopilot", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--loop", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--loop-sleep-seconds", type=int, default=None)
+    p.add_argument("--loop-max-cycles", type=int, default=None)
+    p.add_argument("--loop-idle-exit-after", type=int, default=None)
 
-    p.add_argument("--autopilot", action="store_true", default=DEFAULTS["autopilot"],
-                   help="approval-policy=never, sandbox=workspace-write")
+    p.add_argument("--continuous", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--iterations", type=int, default=None)
+    p.add_argument("--max-turns-per-task", type=int, default=None)
+    p.add_argument("--isolate-task", action=argparse.BooleanOptionalAction, default=None)
 
-    # Loop
-    p.add_argument("--loop", action="store_true", default=DEFAULTS["loop"],
-                   help="Run PM→Dev→QA cycles repeatedly (unattended). Reuses the SAME run_dir and accumulates logs/state.")
-    p.add_argument("--loop-sleep-seconds", type=int, default=DEFAULTS["loop_sleep_seconds"],
-                   help="Sleep between cycles in --loop mode")
-    p.add_argument("--loop-max-cycles", type=int, default=DEFAULTS["loop_max_cycles"],
-                   help="Max cycles in --loop mode. 0 = unlimited")
-    p.add_argument("--loop-idle-exit-after", type=int, default=DEFAULTS["loop_idle_exit_after"],
-                   help="Exit if no progress for this many seconds in --loop mode")
-    p.add_argument("--stop-file", default=DEFAULTS["stop_file"],
-                   help="Stop-file name under run_dir to gracefully stop")
+    # Safety / gates
+    # NOTE: argparse.BooleanOptionalAction cannot be used with option strings starting with "--no-" (Python 3.14+).
+    # Keep backward-compatible flags while supporting an explicit enable flag.
+    p.add_argument("--no-policy-scan", dest="no_policy_scan", action="store_true", default=None, help="Disable policy scan")
+    p.add_argument("--policy-scan", dest="no_policy_scan", action="store_false", default=None, help="Enable policy scan")
 
-    # PM budgets
-    p.add_argument("--pm-bootstrap-max-turns", type=int, default=DEFAULTS["pm_bootstrap_max_turns"])
-    p.add_argument("--pm-incremental-max-turns", type=int, default=DEFAULTS["pm_incremental_max_turns"])
-    p.add_argument("--pm-backlog-max-turns", type=int, default=DEFAULTS["pm_backlog_max_turns"])
+    p.add_argument("--policy-rules-file", default=None, help="Path to policy rules file")
+    p.add_argument("--policy-rule", action="append", default=None, help="Inline policy rule (repeatable)")
 
-    # Structured output / resilience
-    p.add_argument("--pm-structured-retries", type=int, default=DEFAULTS["pm_structured_retries"],
-                   help="Retries to repair/validate PM JSON output schema")
-    p.add_argument("--pm-max-turns-continuations", type=int, default=DEFAULTS["pm_max_turns_continuations"],
-                   help="If PM hits max-turns, retry with a continuation prompt (best-effort)")
-    p.add_argument("--pm-timeout-seconds", type=int, default=DEFAULTS["pm_timeout_seconds"],
-                   help="Hard timeout for a PM run (0 disables)")
-    p.add_argument("--dev-max-turns-continuations", type=int, default=DEFAULTS["dev_max_turns_continuations"],
-                   help="If Dev hits max-turns, retry with a continuation prompt (best-effort)")
-    p.add_argument("--dev-timeout-seconds", type=int, default=DEFAULTS["dev_timeout_seconds"],
-                   help="Hard timeout for a Dev task run (0 disables)")
+    p.add_argument("--no-build", dest="no_build", action="store_true", default=None, help="Disable build gate")
+    p.add_argument("--build", dest="no_build", action="store_false", default=None, help="Enable build gate")
+    p.add_argument("--require-build", action=argparse.BooleanOptionalAction, default=None, help="Force build gate even if no_build is true")
+    p.add_argument("--run-tests", action=argparse.BooleanOptionalAction, default=None)
 
-    # PM drift guards
-    p.add_argument("--pm-include-working-tree", action="store_true", default=DEFAULTS["pm_include_working_tree"])
-    p.add_argument("--pm-refresh-backlog", action="store_true", default=DEFAULTS["pm_refresh_backlog"])
-    p.add_argument("--pm-refresh-every-cycles", type=int, default=DEFAULTS["pm_refresh_every_cycles"])
+    p.add_argument("--dotnet-build-target", default=None, help="dotnet build target (e.g., path to .sln or project)")
+    p.add_argument("--dotnet-test-target", default=None, help="dotnet test target (e.g., path to .sln or project)")
+    p.add_argument("--dotnet-test-filter", default=None, help="dotnet test filter (passed to --filter)")
 
-    # Dev
-    p.add_argument("--continuous", action="store_true", default=DEFAULTS["continuous"])
-    p.add_argument("--iterations", type=int, default=DEFAULTS["iterations"])
-    p.add_argument("--max-turns-per-task", type=int, default=DEFAULTS["max_turns_per_task"])
+    # Models / MCP
+    p.add_argument("--pm-model", default=None)
+    p.add_argument("--dev-model", default=None)
+    p.add_argument("--qa-model", default=None)
+    p.add_argument("--qa-always", action=argparse.BooleanOptionalAction, default=None)
 
-    p.add_argument("--allow-no-diff", action="store_true", default=DEFAULTS["allow_no_diff"])
-    p.add_argument("--stop-if-no-diff", action="store_true", default=DEFAULTS["stop_if_no_diff"],
-                   help="[deprecated] no-diff is failure by default; keep for compatibility")
+    p.add_argument("--mcp-mode", default=None, choices=["npx", "codex", "disabled"])
+    p.add_argument("--codex-package", default=None)
+    p.add_argument("--mcp-timeout-seconds", type=int, default=None)
 
-    # Build/Test gates
-    p.add_argument("--no-build", action="store_true", default=DEFAULTS["no_build"],
-                   help="Skip dotnet build (default is to build after each task)")
-    p.add_argument("--require-build", action="store_true", default=DEFAULTS["require_build"],
-                   help="[deprecated] build is ON by default unless --no-build")
-    p.add_argument("--dotnet-build-target", default=DEFAULTS["dotnet_build_target"])
+    # Docs / prompts
+    p.add_argument("--docs-read-mode", default=None, choices=["digest", "full", "none"])
+    p.add_argument("--docs-dir", default=None)
+    p.add_argument("--docs-digest-file", default=None, help="Digest output file path (relative to repo by default)")
+    p.add_argument("--generate-digest", action=argparse.BooleanOptionalAction, default=None, help="Force regenerate docs digest")
 
-    p.add_argument("--run-tests", action="store_true", default=DEFAULTS["run_tests"])
-    p.add_argument("--dotnet-test-target", default=DEFAULTS["dotnet_test_target"])
-    p.add_argument("--dotnet-test-filter", default=DEFAULTS["dotnet_test_filter"])
-    p.add_argument("--test-timeout-seconds", type=int, default=DEFAULTS["test_timeout_seconds"])
-
-    # Isolation
-    p.add_argument("--isolate-task", action="store_true", default=DEFAULTS["isolate_task"],
-                   help="Checkpoint repo before each task and rollback on failure")
-
-    # Policy scan
-    p.add_argument("--no-policy-scan", action="store_true", default=DEFAULTS["no_policy_scan"])
-    p.add_argument("--policy-rules-file", default=DEFAULTS["policy_rules_file"])
-    p.add_argument("--policy-rule", action="append", default=list(DEFAULTS["policy_rule"]))
-
-    # Models
-    p.add_argument("--pm-model", default=DEFAULTS["pm_model"])
-    p.add_argument("--dev-model", default=DEFAULTS["dev_model"])
-    p.add_argument("--qa-model", default=DEFAULTS["qa_model"])
-
-    # MCP server
-    p.add_argument("--mcp-mode", choices=["npx", "codex"], default=DEFAULTS["mcp_mode"])
-    p.add_argument("--codex-package", default=DEFAULTS["codex_package"])
-    p.add_argument("--mcp-timeout-seconds", type=int, default=DEFAULTS["mcp_timeout_seconds"])
-
-    # QA control
-    p.add_argument("--qa-always", action="store_true", default=DEFAULTS["qa_always"])
+    p.add_argument(
+        "--prompts-dir",
+        default=None,
+        help="Prompt templates directory. Absolute path or relative to AgentCLI home. Empty uses default AgentCLI/prompts/<repo-slug>/",
+    )
 
     # Diagnostics
-    p.add_argument("--debug", action="store_true", default=DEFAULTS["debug"], help="Print stack traces on unexpected errors")
+    p.add_argument("--debug", action=argparse.BooleanOptionalAction, default=None)
+
+    # Misc
+    p.add_argument("--stop-file", default=None)
+    p.add_argument("--allow-no-diff", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--stop-if-no-diff", action=argparse.BooleanOptionalAction, default=None)  # compat only
+    p.add_argument("--test-timeout-seconds", type=int, default=None)
+
+    # PM tuning knobs
+    p.add_argument("--pm-timeout-seconds", type=int, default=None)
+    p.add_argument("--dev-timeout-seconds", type=int, default=None)
+    p.add_argument("--pm-bootstrap-max-turns", type=int, default=None)
+    p.add_argument("--pm-incremental-max-turns", type=int, default=None)
+    p.add_argument("--pm-refresh-backlog", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--pm-refresh-every-cycles", type=int, default=None)
+    p.add_argument("--pm-include-working-tree", action=argparse.BooleanOptionalAction, default=None)
+
+    # Structured output knobs
+    p.add_argument("--pm-structured-retries", type=int, default=None)
+    p.add_argument("--pm-max-turns-continuations", type=int, default=None)
+    p.add_argument("--dev-max-turns-continuations", type=int, default=None)
 
     return p
 
 
-def _interactive_choose() -> str:
-    print("")
-    print("No config file found.")
-    print("1) Run setup wizard (recommended)")
-    print("2) Continue with built-in defaults (no config)")
-    print("3) Quit")
-    while True:
-        ans = input("Select [1/2/3]: ").strip()
-        if ans in ("1", "2", "3"):
-            return ans
-        print("Please enter 1, 2, or 3.")
+def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: argparse.Namespace) -> Dict[str, Any]:
+    eff = dict(defaults)
+    # config overlay
+    for k, v in cfg.items():
+        eff[k] = v
+
+    # cli args overlay (only if not None)
+    for k, v in vars(args_ns).items():
+        if v is None:
+            continue
+        eff[k] = v
+
+    # compat: stop_if_no_diff -> allow_no_diff inverse-ish (keep simple)
+    if eff.get("stop_if_no_diff") is True and eff.get("allow_no_diff") is None:
+        eff["allow_no_diff"] = False
+
+    # normalize policy_rule
+    pr = eff.get("policy_rule")
+    if pr is None:
+        eff["policy_rule"] = []
+    elif isinstance(pr, str):
+        eff["policy_rule"] = [pr]
+
+    return eff
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    argv = list(argv) if argv is not None else sys.argv[1:]
-
-    # Build parser with internal defaults first
     parser = _build_parser()
-    pre, _unknown = parser.parse_known_args(argv)
-
-    repo = Path(pre.repo).expanduser().resolve()
-    cfg_path = resolve_config_path(repo, pre.config)
-
-    cfg: Dict[str, Any] = {}
-    if pre.wizard:
-        # Always run wizard when explicitly requested
-        cfg = run_wizard(repo)
-        save_config(cfg_path, cfg)
-        print(f"[OK] Wrote config: {cfg_path}")
-    else:
-        if cfg_path.exists():
-            try:
-                cfg = load_config(cfg_path)
-            except Exception as ex:
-                print(f"[WARN] Failed to load config ({cfg_path}): {ex}")
-                cfg = {}
-        else:
-            # Config missing - interactive wizard offer
-            if (not pre.non_interactive) and sys.stdin.isatty():
-                choice = _interactive_choose()
-                if choice == "1":
-                    cfg = run_wizard(repo)
-                    save_config(cfg_path, cfg)
-                    print(f"[OK] Wrote config: {cfg_path}")
-                elif choice == "3":
-                    raise SystemExit(1)
-            else:
-                # Non-interactive: proceed with defaults for compatibility
-                cfg = {}
-
-    # Apply config on top of internal defaults (argparse CLI overrides after parsing)
-    if cfg:
-        parser.set_defaults(**cfg)
-
     args = parser.parse_args(argv)
 
-    # Init prompts and exit
-    prompts_dir = (repo / args.prompts_dir).resolve() if not Path(args.prompts_dir).is_absolute() else Path(args.prompts_dir).resolve()
-    if args.init_prompts:
-        ensure_default_prompt_files(prompts_dir)
-        print(f"[OK] Prompt templates ensured at: {prompts_dir}")
+    repo = Path(args.repo).expanduser().resolve()
+    args.repo = str(repo)
+
+    # Load python-side env first (explicit env_file wins)
+    if args.env_file:
+        load_python_side_env(explicit_env_file=str(args.env_file), override=False)
+    else:
+        load_python_side_env(explicit_env_file=None, override=False)
+
+    # Resolve config path (python-side default)
+    cfg_path = resolve_config_path(repo, args.config)
+    legacy_path = legacy_config_path(repo)
+
+    cfg: Dict[str, Any] = {}
+    # Wizard mode: create/update config and exit
+    if args.wizard:
+        cfg = run_wizard(repo=repo, defaults=DEFAULTS)
+        save_config(cfg_path, cfg)
+        print(f"[OK] Wrote config: {cfg_path}")
+        # ensure prompts exist in chosen prompts_dir
+        pd = resolve_prompts_dir(repo, str(cfg.get("prompts_dir", "")))
+        ensure_default_prompt_files(pd)
         raise SystemExit(0)
 
-    return args
+    # Normal mode: load config (prefer new location, fallback to legacy)
+    read_path = cfg_path if cfg_path.exists() else legacy_path
+    if read_path.exists():
+        try:
+            cfg = load_config(read_path)
+            if read_path != cfg_path:
+                print(f"[INFO] Loaded legacy config: {read_path}")
+                print(f"[INFO] Next save/wizard writes to: {cfg_path}")
+        except Exception as ex:
+            print(f"[WARN] Failed to load config ({read_path}): {ex}")
+            cfg = {}
+
+    eff = _merge_effective(DEFAULTS, cfg, args)
+
+    # Normalize config path into args.config (so /config prints the python-side path)
+    eff["config"] = str(cfg_path)
+
+    # Normalize prompts_dir to absolute python-side folder
+    eff_prompts_dir = resolve_prompts_dir(repo, str(eff.get("prompts_dir", "")))
+    eff["prompts_dir"] = str(eff_prompts_dir)
+
+    # Normalize env_file if provided (string)
+    if eff.get("env_file"):
+        p = resolve_env_file(str(eff["env_file"]))
+        eff["env_file"] = str(p) if p else ""
+
+    # If init-prompts requested: create templates and exit
+    if bool(eff.get("init_prompts", False)):
+        ensure_default_prompt_files(eff_prompts_dir)
+        print(f"[OK] Prompt templates ensured at: {eff_prompts_dir}")
+        raise SystemExit(0)
+
+    # Write back to args namespace
+    out = argparse.Namespace()
+    for k, v in eff.items():
+        setattr(out, k, v)
+
+    return out

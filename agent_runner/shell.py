@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .cli import DEFAULTS
-from .config import load_config, save_config, resolve_config_path, default_config_path
+from .config import load_config, save_config, resolve_config_path, default_config_path, legacy_config_path, resolve_prompts_dir
+from .docs import load_dotenv_best_effort
 from .cycle import run as run_cycle
 from .run_dir import make_run_dir
 
@@ -140,11 +141,17 @@ class RunnerShell:
         if not self.repo:
             return
         self.config_path = self.config_path or default_config_path(self.repo)
-        if self.config_path.exists():
+        # Prefer AgentCLI-side config. If missing, fall back to legacy repo/.doc config for compatibility.
+        load_path = self.config_path if self.config_path.exists() else legacy_config_path(self.repo)
+        if load_path.exists():
             try:
-                self.config = load_config(self.config_path)
+                self.config = load_config(load_path)
+                # If we loaded legacy config, we keep config_path pointing to the new default
+                # so that a subsequent /save migrates out of the repo.
+                if load_path != self.config_path:
+                    print(f"[INFO] Loaded legacy config: {load_path}")
             except Exception as ex:
-                print(f"[WARN] Failed to load config: {self.config_path} ({ex})")
+                print(f"[WARN] Failed to load config: {load_path} ({ex})")
                 self.config = {}
         else:
             self.config = {}
@@ -179,6 +186,12 @@ class RunnerShell:
         eff = self.effective()
         repo = self.repo
         cfgp = self.config_path or (default_config_path(repo) if repo else None)
+
+        # Ensure .env is loaded so env sanity reflects reality even in shell mode.
+        try:
+            _ = load_dotenv_best_effort(repo or Path.cwd(), explicit_env_file=str(eff.get("env_file") or ""), override=True)
+        except Exception:
+            pass
 
         print("\n=== AgentCLI Shell: Current Settings ===")
         print(f"repo:       {_shorten(repo)}")
@@ -240,7 +253,17 @@ class RunnerShell:
             pass
 
         eff = self.effective()
-        args = argparse.Namespace(repo=str(self.repo), **{k: eff.get(k) for k in DEFAULTS.keys()})
+        # NOTE: DEFAULTS includes "repo" so passing repo twice will crash.
+        args_dict = {k: eff.get(k) for k in DEFAULTS.keys()}
+        args_dict["repo"] = str(self.repo)
+
+        # Ensure prompts_dir is always a python-side absolute path (avoid empty => repo root)
+        try:
+            args_dict["prompts_dir"] = str(resolve_prompts_dir(self.repo, str(args_dict.get("prompts_dir") or "")))
+        except Exception:
+            pass
+
+        args = argparse.Namespace(**args_dict)
 
         def _target() -> None:
             self._runner_exit_code = None
@@ -365,7 +388,7 @@ class RunnerShell:
                     "  /config                    Show effective settings + env sanity",
                     "  /set <key> <value>         Override a setting (types inferred from defaults)",
                     "  /add <key> <value>         Append to a list setting (e.g., policy_rule)",
-                    "  /load [path]               Load config JSON (default: REPO/.doc/agent_config.json)",
+                    "  /load [path]               Load config JSON (default: AgentCLI-side configs/<repo-hash>.json)",
                     "  /save [path]               Save effective config JSON",
                     "  /start [--flags...]        Start runner in background (ex: /start --autopilot --loop)",
                     "  /stop [--wait]             Request graceful stop (creates run_dir/STOP)",
