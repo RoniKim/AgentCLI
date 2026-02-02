@@ -31,6 +31,12 @@ DEFAULTS: Dict[str, Any] = {
     "pm_bootstrap_max_turns": 120,
     "pm_incremental_max_turns": 30,
     "pm_backlog_max_turns": 30,
+    "pm_structured_retries": 2,
+    "pm_max_turns_continuations": 1,
+    "pm_timeout_seconds": 0,
+    "dev_max_turns_continuations": 2,
+    "dev_timeout_seconds": 0,
+
     # PM drift guards
     "pm_include_working_tree": False,
     "pm_refresh_backlog": False,
@@ -38,7 +44,7 @@ DEFAULTS: Dict[str, Any] = {
     # Dev
     "continuous": False,
     "iterations": 30,
-    "max_turns_per_task": 8,
+    "max_turns_per_task": 12,
     "allow_no_diff": False,
     "stop_if_no_diff": False,  # deprecated
     # Gates
@@ -114,6 +120,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pm-bootstrap-max-turns", type=int, default=DEFAULTS["pm_bootstrap_max_turns"])
     p.add_argument("--pm-incremental-max-turns", type=int, default=DEFAULTS["pm_incremental_max_turns"])
     p.add_argument("--pm-backlog-max-turns", type=int, default=DEFAULTS["pm_backlog_max_turns"])
+
+    # Structured output / resilience
+    p.add_argument("--pm-structured-retries", type=int, default=DEFAULTS["pm_structured_retries"],
+                   help="Retries to repair/validate PM JSON output schema")
+    p.add_argument("--pm-max-turns-continuations", type=int, default=DEFAULTS["pm_max_turns_continuations"],
+                   help="If PM hits max-turns, retry with a continuation prompt (best-effort)")
+    p.add_argument("--pm-timeout-seconds", type=int, default=DEFAULTS["pm_timeout_seconds"],
+                   help="Hard timeout for a PM run (0 disables)")
+    p.add_argument("--dev-max-turns-continuations", type=int, default=DEFAULTS["dev_max_turns_continuations"],
+                   help="If Dev hits max-turns, retry with a continuation prompt (best-effort)")
+    p.add_argument("--dev-timeout-seconds", type=int, default=DEFAULTS["dev_timeout_seconds"],
+                   help="Hard timeout for a Dev task run (0 disables)")
 
     # PM drift guards
     p.add_argument("--pm-include-working-tree", action="store_true", default=DEFAULTS["pm_include_working_tree"])

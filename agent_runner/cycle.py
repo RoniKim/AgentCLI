@@ -44,8 +44,12 @@ from .state import (
     save_state,
     mark_backlog_done,
     write_default_p0_backlog,
+    write_backlog_files,
 )
 from .utils import force_utf8_stdio, eprint, now_iso, run_cmd
+from .schemas import PMOutputV2
+from .structured import parse_as_model, dump_pretty, describe_parse_failure
+from .tracing import TraceCtx, new_trace_id
 
 
 def _load_json_if_exists(path: Path, default: Any) -> Any:
@@ -62,6 +66,10 @@ async def main_async(args: argparse.Namespace) -> int:
 
     try:
         from agents import Agent, Runner, set_default_openai_api
+        try:
+            from agents import ModelSettings  # type: ignore
+        except Exception:
+            ModelSettings = None  # type: ignore
         from agents.mcp import MCPServerStdio
         from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
     except ImportError:
@@ -97,6 +105,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
     # Observability
     metrics = MetricsLogger(run_dir / "metrics.jsonl")
+    trace_ctx = TraceCtx(trace_id=new_trace_id(), parent_span_id=None)
     stop_path = run_dir / str(getattr(args, "stop_file", "STOP"))
     cycle_summary_path = run_dir / "cycle_summary.log"
     last_run_summary_path = run_dir / "last_run_summary.json"
@@ -170,11 +179,24 @@ async def main_async(args: argparse.Namespace) -> int:
         dev_instructions = store.get("dev_instructions", DEV_INSTRUCTIONS_DEFAULT)
         qa_instructions = store.get("qa_instructions", QA_INSTRUCTIONS_DEFAULT)
 
+        # Enable parallel tool calls when supported by the SDK/model.
+        _ms = None
+        if ModelSettings is not None:
+            try:
+                _ms = ModelSettings(parallel_tool_calls=True)
+            except Exception:
+                _ms = None
+
+        def _agent_kwargs() -> dict:
+            return {"model_settings": _ms} if _ms is not None else {}
+
+
         pm = Agent(
             name="Project_Manager",
             model=args.pm_model,
             mcp_servers=[codex_mcp_server],
             instructions=f"{RECOMMENDED_PROMPT_PREFIX}\n{pm_instructions}".strip(),
+            **_agent_kwargs(),
         )
 
         dev = Agent(
@@ -182,6 +204,7 @@ async def main_async(args: argparse.Namespace) -> int:
             model=args.dev_model,
             mcp_servers=[codex_mcp_server],
             instructions=f"{RECOMMENDED_PROMPT_PREFIX}\n{dev_instructions}".strip(),
+            **_agent_kwargs(),
         )
 
         qa = Agent(
@@ -189,7 +212,67 @@ async def main_async(args: argparse.Namespace) -> int:
             model=args.qa_model,
             mcp_servers=[codex_mcp_server],
             instructions=f"{RECOMMENDED_PROMPT_PREFIX}\n{qa_instructions}".strip(),
+            **_agent_kwargs(),
         )
+
+
+        async def _run_with_continuations(agent_obj, prompt: str, max_turns: int, *, label: str, timeout_sec: int = 0, max_continuations: int = 0) -> Any:
+            """Run an agent, optionally continuing if a max-turns exception occurs."""
+            cont_left = int(max_continuations)
+            while True:
+                try:
+                    if timeout_sec and timeout_sec > 0:
+                        return await asyncio.wait_for(Runner.run(agent_obj, prompt, max_turns=max_turns), timeout=timeout_sec)
+                    return await Runner.run(agent_obj, prompt, max_turns=max_turns)
+                except Exception as ex:
+                    msg = str(ex).lower()
+                    if cont_left > 0 and ("max turns" in msg or "max_turn" in msg or "maxturn" in msg):
+                        cont_left -= 1
+                        prompt = (
+                            prompt
+                            + "\n\n[CONTINUE] You hit a turn limit previously. Continue from where you left off. "
+                              "Do NOT restate a plan; apply changes now. Return only the required output."
+                        )
+                        continue
+                    raise
+
+        async def _run_pm_structured(pm_prompt: str, *, max_turns: int, cycle_idx: int, kind: str, output_path: Path) -> PMOutputV2 | None:
+            """Run PM and validate its final output against PMOutputV2 schema."""
+            retries = int(getattr(args, "pm_structured_retries", 2))
+            max_cont = int(getattr(args, "pm_max_turns_continuations", 0))
+            last_raw = ""
+            repair_prompt = ""
+            for attempt in range(retries + 1):
+                prompt = pm_prompt if attempt == 0 else repair_prompt
+                res = await _run_with_continuations(
+                    pm,
+                    prompt,
+                    max_turns=max_turns,
+                    label=f"pm_{kind}",
+                    timeout_sec=int(getattr(args, "pm_timeout_seconds", 0)) or 0,
+                    max_continuations=max_cont,
+                )
+                last_raw = (getattr(res, "final_output", "") or "").strip()
+                try:
+                    output_path.write_text(last_raw + "\n", encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+
+                parsed = parse_as_model(last_raw, PMOutputV2)
+                if parsed is not None:
+                    return parsed
+
+                repair_prompt = (
+                    "Your previous response was invalid or did not match the required JSON schema. "
+                    "Return ONLY a single JSON object with keys: kind, summary, tasks, notes_md, warnings, open_questions, analysis_updated, analysis_path. "
+                    "No markdown, no prose outside JSON.\n\n"
+                    "Previous response (for repair):\n"
+                    + last_raw[:8000]
+                )
+
+            if last_raw:
+                describe_parse_failure(f"pm_{kind}", last_raw)
+            return None
 
         async def run_pm_if_needed(cycle_idx: int, curr_head: str, changed_files: list[str], repo_fp: str, force_refresh_backlog: bool = False) -> bool:
             """Returns True if PM is OK (ran successfully or skipped safely)."""
@@ -233,11 +316,34 @@ async def main_async(args: argparse.Namespace) -> int:
                         "codex_call_hint": codex_call_hint(autopilot),
                     }
                     pm_prompt = store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx)
-                    pm_result = await Runner.run(pm, pm_prompt, max_turns=args.pm_bootstrap_max_turns)
-                    pm_output_path.write_text((pm_result.final_output or "") + "\n", encoding="utf-8", errors="replace")
+                    pm_out = await _run_pm_structured(
+                        pm_prompt,
+                        max_turns=args.pm_bootstrap_max_turns,
+                        cycle_idx=cycle_idx,
+                        kind="bootstrap",
+                        output_path=pm_output_path,
+                    )
+                    if pm_out is None:
+                        metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=1, error="structured_output_failed")
+                        return False
+
+                    # Persist parsed JSON for debugging
+                    (run_dir / f"PM_OUTPUT_cycle_{cycle_idx:03d}.json").write_text(
+                        dump_pretty(pm_out.model_dump()) + "\n", encoding="utf-8", errors="replace"
+                    )
+                    if pm_out.notes_md:
+                        (run_dir / "NOTES_PM.md").write_text(
+                            pm_out.notes_md.strip() + "\n", encoding="utf-8", errors="replace"
+                        )
+                    if pm_out.tasks:
+                        write_backlog_files(run_dir, [t.model_dump() for t in pm_out.tasks])
+
                     last_pm_fp = repo_fp or last_pm_fp
-                    pm_fp_path.write_text(json.dumps({"fingerprint": last_pm_fp, "updated_at": now_iso()}, ensure_ascii=False, indent=2),
-                                          encoding="utf-8", errors="replace")
+                    pm_fp_path.write_text(
+                        json.dumps({"fingerprint": last_pm_fp, "updated_at": now_iso()}, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                        errors="replace",
+                    )
                     metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=0)
                     return True
 
@@ -272,12 +378,45 @@ async def main_async(args: argparse.Namespace) -> int:
                         "hint_block": hint_block,
                     }
                     pm_prompt = store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx)
-                    pm_result = await Runner.run(pm, pm_prompt, max_turns=args.pm_incremental_max_turns)
-                    pm_output_path.write_text((pm_result.final_output or "") + "\n", encoding="utf-8", errors="replace")
+                    pm_out = await _run_pm_structured(
+                        pm_prompt,
+                        max_turns=args.pm_incremental_max_turns,
+                        cycle_idx=cycle_idx,
+                        kind="incremental" if need_incremental else "refresh",
+                        output_path=pm_output_path,
+                    )
+                    if pm_out is None:
+                        metrics.event(
+                            "pm_end",
+                            cycle=cycle_idx,
+                            kind="incremental" if need_incremental else "refresh",
+                            rc=1,
+                            error="structured_output_failed",
+                        )
+                        return False
+
+                    (run_dir / f"PM_OUTPUT_cycle_{cycle_idx:03d}.json").write_text(
+                        dump_pretty(pm_out.model_dump()) + "\n", encoding="utf-8", errors="replace"
+                    )
+                    if pm_out.notes_md:
+                        (run_dir / "NOTES_PM.md").write_text(
+                            pm_out.notes_md.strip() + "\n", encoding="utf-8", errors="replace"
+                        )
+                    if pm_out.tasks:
+                        write_backlog_files(run_dir, [t.model_dump() for t in pm_out.tasks])
+
                     last_pm_fp = repo_fp or last_pm_fp
-                    pm_fp_path.write_text(json.dumps({"fingerprint": last_pm_fp, "updated_at": now_iso()}, ensure_ascii=False, indent=2),
-                                          encoding="utf-8", errors="replace")
-                    metrics.event("pm_end", cycle=cycle_idx, kind="incremental" if need_incremental else "refresh", rc=0)
+                    pm_fp_path.write_text(
+                        json.dumps({"fingerprint": last_pm_fp, "updated_at": now_iso()}, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    metrics.event(
+                        "pm_end",
+                        cycle=cycle_idx,
+                        kind="incremental" if need_incremental else "refresh",
+                        rc=0,
+                    )
                     return True
 
                 metrics.event("pm_skip", cycle=cycle_idx)
@@ -441,7 +580,14 @@ async def main_async(args: argparse.Namespace) -> int:
                 dev_prompt = store.render("dev_task_prompt", DEV_TASK_TEMPLATE_DEFAULT, ctx)
 
                 try:
-                    dev_result = await Runner.run(dev, dev_prompt, max_turns=args.max_turns_per_task)
+                    dev_result = await _run_with_continuations(
+                        dev,
+                        dev_prompt,
+                        max_turns=args.max_turns_per_task,
+                        label="dev",
+                        timeout_sec=int(getattr(args, "dev_timeout_seconds", 0)) or 0,
+                        max_continuations=int(getattr(args, "dev_max_turns_continuations", 0)) or 0,
+                    )
                     (task_dir / "dev_output.txt").write_text(
                         (dev_result.final_output or "") + "\n", encoding="utf-8", errors="replace"
                     )
