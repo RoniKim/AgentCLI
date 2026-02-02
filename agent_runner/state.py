@@ -25,8 +25,11 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
     - {"generated_at":..., "tasks":[...]}
     - {"tasks":[...]}
     - [...] (list of tasks)
+
+    This loader is intentionally tolerant of PM output drift:
+    - task keys may be {id,title,prompt,files,done_when} or include {description,files_changed,definition_of_done,...}
     """
-    data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    data = json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
 
     if isinstance(data, list):
         raw_tasks = data
@@ -40,19 +43,41 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
         raw_tasks = []
 
     items: list[TaskItem] = []
+    auto_i = 1
     for x in raw_tasks:
         if not isinstance(x, dict):
             continue
-        items.append(
-            TaskItem(
-                id=str(x.get("id", "")).strip(),
-                title=str(x.get("title", "")).strip(),
-                prompt=str(x.get("prompt", "")).strip(),
-                files=list(x.get("files", [])) if isinstance(x.get("files", []), list) else [],
-                done_when=str(x.get("done_when", "")).strip(),
-            )
-        )
-    return [t for t in items if t.id and t.title and t.prompt]
+
+        tid = str(x.get("id") or x.get("task_id") or x.get("key") or "").strip()
+        if not tid:
+            tid = f"T{auto_i:02d}"
+        auto_i += 1
+
+        title = str(x.get("title") or x.get("name") or "").strip() or tid
+        prompt = str(x.get("prompt") or x.get("description") or x.get("details") or "").strip()
+        if not prompt:
+            prompt = f"Implement {tid}: {title}"
+
+        files_val = x.get("files")
+        if not isinstance(files_val, list):
+            files_val = x.get("files_changed") if isinstance(x.get("files_changed"), list) else []
+        files = [str(p).strip() for p in (files_val or []) if str(p).strip()]
+
+        done_when = str(
+            x.get("done_when")
+            or x.get("definition_of_done")
+            or x.get("acceptance_criteria")
+            or x.get("dod")
+            or ""
+        ).strip()
+        if not done_when:
+            done_when = "Git diff exists and build passes."
+
+        # drop empty id/title/prompt
+        if tid and title and prompt:
+            items.append(TaskItem(id=tid, title=title, prompt=prompt, files=files, done_when=done_when))
+
+    return items
 
 
 def write_backlog_files(run_dir: Path, tasks: List[dict[str, Any]]) -> tuple[Path, Path]:
@@ -73,7 +98,7 @@ def write_backlog_files(run_dir: Path, tasks: List[dict[str, Any]]) -> tuple[Pat
 
 def parse_backlog_md(path: Path) -> list[TaskItem]:
     """Legacy fallback: parse simple checklist backlog."""
-    txt = path.read_text(encoding="utf-8", errors="replace")
+    txt = path.read_text(encoding="utf-8-sig", errors="replace")
     items: list[TaskItem] = []
     for line in txt.splitlines():
         m = re.match(r"^\s*-\s*\[\s*\]\s*(T\d+)\s+(.*)$", line)
@@ -95,7 +120,7 @@ def parse_backlog_md(path: Path) -> list[TaskItem]:
 
 def load_state(path: Path) -> dict[str, Any]:
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        return json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
     return {"done": [], "failed": []}
 
 

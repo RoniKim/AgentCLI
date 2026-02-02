@@ -27,6 +27,8 @@ from .metrics import MetricsLogger
 from .policy import load_policy_rules, policy_scan_text
 from .prompts import (
     PromptStore,
+    ensure_pm_instructions_have_output_schema,
+    append_pm_output_contract,
     codex_call_hint,
     PM_BOOTSTRAP_TEMPLATE_DEFAULT,
     PM_INCREMENTAL_TEMPLATE_DEFAULT,
@@ -49,7 +51,7 @@ from .state import (
 )
 from .utils import force_utf8_stdio, eprint, now_iso, run_cmd
 from .schemas import PMOutputV2
-from .structured import parse_as_model, dump_pretty, describe_parse_failure
+from .structured import parse_pm_output, dump_pretty, describe_parse_failure
 from .tracing import TraceCtx, new_trace_id
 
 
@@ -195,7 +197,7 @@ async def main_async(args: argparse.Namespace) -> int:
         client_session_timeout_seconds=args.mcp_timeout_seconds,
     ) as codex_mcp_server:
 
-        pm_instructions = store.get("pm_instructions", PM_INSTRUCTIONS_DEFAULT)
+        pm_instructions = ensure_pm_instructions_have_output_schema(store.get("pm_instructions", PM_INSTRUCTIONS_DEFAULT))
         dev_instructions = store.get("dev_instructions", DEV_INSTRUCTIONS_DEFAULT)
         qa_instructions = store.get("qa_instructions", QA_INSTRUCTIONS_DEFAULT)
 
@@ -278,7 +280,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 except Exception:
                     pass
 
-                parsed = parse_as_model(last_raw, PMOutputV2)
+                parsed = parse_pm_output(last_raw, kind_hint=kind)
                 if parsed is not None:
                     return parsed
 
@@ -292,6 +294,42 @@ async def main_async(args: argparse.Namespace) -> int:
 
             if last_raw:
                 describe_parse_failure(f"pm_{kind}", last_raw)
+
+            # Fallback: if PM wrote file-based artifacts (BACKLOG.json), continue with those.
+            try:
+                bj = run_dir / "BACKLOG.json"
+                if bj.exists():
+                    fb_tasks = load_backlog_json(bj)
+                    if fb_tasks:
+                        notes_md = None
+                        notes_p = run_dir / "NOTES.md"
+                        if notes_p.exists():
+                            try:
+                                notes_md = notes_p.read_text(encoding="utf-8-sig", errors="replace")
+                            except Exception:
+                                notes_md = notes_p.read_text(encoding="utf-8", errors="replace")
+                        return PMOutputV2(
+                            kind=kind,  # keep current mode hint
+                            summary="PM output JSON did not validate; loaded tasks from run_dir/BACKLOG.json.",
+                            tasks=[
+                                {
+                                    "id": t.id,
+                                    "title": t.title,
+                                    "prompt": t.prompt,
+                                    "files": t.files,
+                                    "done_when": t.done_when or "Git diff exists and build passes.",
+                                }
+                                for t in fb_tasks
+                            ],
+                            notes_md=notes_md,
+                            warnings=[],
+                            open_questions=[],
+                            analysis_updated=False,
+                            analysis_path=str(analysis_md),
+                        )
+            except Exception:
+                pass
+
             return None
 
         
@@ -368,7 +406,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "digest_rel": str(digest_rel),
                         "codex_call_hint": codex_call_hint(autopilot),
                     }
-                    pm_prompt = store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx)
+                    pm_prompt = append_pm_output_contract(store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx))
                     pm_out = await _run_pm_structured(
                         pm_prompt,
                         max_turns=args.pm_bootstrap_max_turns,
@@ -451,7 +489,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "current_backlog_block": current_backlog_block,
                         "hint_block": hint_block,
                     }
-                    pm_prompt = store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx)
+                    pm_prompt = append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx))
                     pm_out = await _run_pm_structured(
                         pm_prompt,
                         max_turns=args.pm_incremental_max_turns,

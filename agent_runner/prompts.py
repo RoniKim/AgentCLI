@@ -41,7 +41,43 @@ PM_INSTRUCTIONS_DEFAULT = (
     "- analysis_updated: boolean\n"
     "- analysis_path: string|null\n"
     "</response_schema>\n"
+)# --- PM output contract (always enforced) ---
+
+PM_OUTPUT_CONTRACT_SUFFIX = (
+    "<pm_output_contract>\n"
+    "FINAL RESPONSE MUST be ONLY a single JSON object (no markdown, no prose) that matches:\n"
+    "- kind: one of ['bootstrap','incremental','refresh','skip']\n"
+    "- summary: string\n"
+    "- tasks: array of {id,title,prompt,files,done_when}\n"
+    "- notes_md: string|null\n"
+    "- warnings: string[]\n"
+    "- open_questions: string[]\n"
+    "- analysis_updated: boolean\n"
+    "- analysis_path: string|null\n"
+    "\n"
+    "Rules:\n"
+    "- Every task MUST include 'prompt' and 'done_when'.\n"
+    "- Do NOT include extra keys.\n"
+    "- Do NOT ask the user questions in prose; use 'open_questions'.\n"
+    "</pm_output_contract>\n"
 )
+
+
+def ensure_pm_instructions_have_output_schema(text: str) -> str:
+    """Append a hard output contract if user-provided pm_instructions omitted it."""
+    s = (text or "").rstrip()
+    # Heuristic: if the key list exists, assume it's already present.
+    if "analysis_updated" in s and "open_questions" in s and "done_when" in s and "tasks" in s:
+        return s + "\n"
+    return (s + "\n\n" + PM_OUTPUT_CONTRACT_SUFFIX).strip() + "\n"
+
+
+def append_pm_output_contract(prompt_text: str) -> str:
+    """Always append the output contract to the end of a PM prompt template."""
+    s = (prompt_text or "").rstrip()
+    if "<pm_output_contract>" in s:
+        return s + "\n"
+    return (s + "\n\n" + PM_OUTPUT_CONTRACT_SUFFIX).strip() + "\n"
 
 DEV_INSTRUCTIONS_DEFAULT = (
     "You are the Developer implementing tasks in the repo (MAUI Blazor Hybrid).\n"
@@ -200,6 +236,19 @@ Repo: {repo}
 """
 
 
+def _read_text_robust(p: Path) -> str:
+    """Read text file robustly (handles UTF-8 BOM)."""
+    for enc in ("utf-8-sig", "utf-8"):
+        try:
+            return p.read_text(encoding=enc, errors="replace")
+        except Exception:
+            continue
+    # last resort
+    try:
+        return p.read_text(encoding="latin-1", errors="replace")
+    except Exception:
+        return ""
+
 @dataclass(frozen=True)
 class PromptStore:
     prompts_dir: Path
@@ -208,7 +257,7 @@ class PromptStore:
         p = self.prompts_dir / filename
         try:
             if p.exists() and p.is_file():
-                txt = p.read_text(encoding="utf-8", errors="replace")
+                txt = _read_text_robust(p)
                 if txt.strip():
                     return txt
         except Exception:
