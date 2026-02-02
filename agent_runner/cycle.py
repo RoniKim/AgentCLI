@@ -36,7 +36,7 @@ from .prompts import (
     DEV_INSTRUCTIONS_DEFAULT,
     QA_INSTRUCTIONS_DEFAULT,
 )
-from .run_dir import make_run_dir
+from .run_dir import make_run_dir, find_latest_run_dir
 from .state import (
     TaskItem,
     load_backlog_json,
@@ -65,24 +65,13 @@ def _load_json_if_exists(path: Path, default: Any) -> Any:
 async def main_async(args: argparse.Namespace) -> int:
     force_utf8_stdio()
 
-    try:
-        from agents import Agent, Runner, set_default_openai_api
-        try:
-            from agents import ModelSettings  # type: ignore
-        except Exception:
-            ModelSettings = None  # type: ignore
-        from agents.mcp import MCPServerStdio
-        from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
-    except ImportError:
-        eprint("Missing dependency: openai-agents. Install: pip install -U openai-agents openai")
-        return 2
-
     repo = Path(args.repo).expanduser().resolve()
     if not repo.exists():
         eprint(f"Repo not found: {repo}")
         return 2
 
-    # Load env (.env) BEFORE chdir(repo) so .env in agent folder also works
+    # Load env (.env) BEFORE importing agents so OPENAI_API_KEY is visible even if
+    # the SDK reads environment variables at import time.
     env_debug = load_dotenv_best_effort(repo, explicit_env_file=getattr(args, "env_file", ""), override=True)
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -95,13 +84,43 @@ async def main_async(args: argparse.Namespace) -> int:
             eprint(f" - {pth}")
         eprint(r"Fix: set OPENAI_API_KEY env var, or pass --env-file C:\path\to\.env")
         return 2
-    set_default_openai_api(api_key)
+
+    try:
+        from agents import Agent, Runner
+        try:
+            from agents import ModelSettings  # type: ignore
+        except Exception:
+            ModelSettings = None  # type: ignore
+
+        # Optional helper (newer SDKs): explicitly set the API key in-process.
+        try:
+            from agents import set_default_openai_key  # type: ignore
+        except Exception:
+            set_default_openai_key = None  # type: ignore
+
+        from agents.mcp import MCPServerStdio
+        from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
+
+        if set_default_openai_key is not None:
+            set_default_openai_key(api_key)
+    except ImportError:
+        eprint("Missing dependency: openai-agents. Install: pip install -U openai-agents openai")
+        return 2
 
     # Ensure tools run inside repo
     os.chdir(repo)
 
     # Run dir (resume or new). In --loop mode, run_dir must be reused for the whole session.
-    run_dir = Path(args.run_dir).expanduser().resolve() if args.run_dir else make_run_dir(repo)
+    if getattr(args, "run_dir", ""):
+        run_dir = Path(args.run_dir).expanduser().resolve()
+    elif bool(getattr(args, "resume_latest", False)):
+        latest = find_latest_run_dir(repo)
+        run_dir = latest.expanduser().resolve() if latest is not None else make_run_dir(repo)
+    else:
+        latest = find_latest_run_dir(repo)
+        if latest is not None and (bool(getattr(args, "loop", False)) or bool(getattr(args, "continuous", False))):
+            eprint(f"[WARN] No --run-dir specified. A previous run exists: {latest}. Use --resume-latest or --run-dir to resume.")
+        run_dir = make_run_dir(repo)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Observability
@@ -275,6 +294,39 @@ async def main_async(args: argparse.Namespace) -> int:
                 describe_parse_failure(f"pm_{kind}", last_raw)
             return None
 
+        
+        def _load_backlog_context_for_pm() -> tuple[str, list[TaskItem], set[str]]:
+            """Load backlog + state to provide PM with stable context for incremental planning."""
+            backlog_json = run_dir / "BACKLOG.json"
+            backlog_md = run_dir / "BACKLOG.md"
+
+            tasks: list[TaskItem] = []
+            if backlog_json.exists():
+                try:
+                    tasks = load_backlog_json(backlog_json)
+                except Exception:
+                    tasks = []
+            if not tasks and backlog_md.exists():
+                try:
+                    tasks = parse_backlog_md(backlog_md)
+                except Exception:
+                    tasks = []
+
+            state_path = run_dir / "STATE.json"
+            try:
+                state_obj = load_state(state_path)
+            except Exception:
+                state_obj = {"done": [], "failed": []}
+
+            done_ids = set(state_obj.get("done", []) or [])
+            lines: list[str] = []
+            for t in tasks:
+                mark = "x" if t.id in done_ids else " "
+                lines.append(f"- [{mark}] {t.id} {t.title}")
+
+            block = "\n".join(lines) if lines else "(no backlog found)"
+            return block, tasks, done_ids
+
         async def run_pm_if_needed(cycle_idx: int, curr_head: str, changed_files: list[str], repo_fp: str, force_refresh_backlog: bool = False) -> bool:
             """Returns True if PM is OK (ran successfully or skipped safely)."""
             nonlocal last_pm_fp, prev_head
@@ -336,8 +388,26 @@ async def main_async(args: argparse.Namespace) -> int:
                         (run_dir / "NOTES_PM.md").write_text(
                             pm_out.notes_md.strip() + "\n", encoding="utf-8", errors="replace"
                         )
-                    if pm_out.tasks:
-                        write_backlog_files(run_dir, [t.model_dump() for t in pm_out.tasks])
+                    current_backlog_block, existing_tasks, done_ids = _load_backlog_context_for_pm()
+                    existing_pending = [t for t in existing_tasks if t.id not in done_ids]
+
+                    merged_tasks: list[dict[str, Any]] = [t.model_dump() for t in (pm_out.tasks or [])]
+                    pm_ids = {str(t.get("id", "")).strip() for t in merged_tasks if isinstance(t, dict)}
+
+                    for t in existing_pending:
+                        if t.id not in pm_ids:
+                            merged_tasks.append(
+                                {
+                                    "id": t.id,
+                                    "title": t.title,
+                                    "prompt": t.prompt,
+                                    "files": t.files or [],
+                                    "done_when": t.done_when,
+                                }
+                            )
+
+                    if merged_tasks:
+                        write_backlog_files(run_dir, merged_tasks)
 
                     last_pm_fp = repo_fp or last_pm_fp
                     pm_fp_path.write_text(
@@ -364,6 +434,8 @@ async def main_async(args: argparse.Namespace) -> int:
                                 continue
                     hint_block = "\n".join(hint_lines) or "(none)"
 
+                    current_backlog_block, _, _ = _load_backlog_context_for_pm()
+
                     ctx = {
                         "analysis_md": str(analysis_md),
                         "inv_md": str(inv_md),
@@ -376,6 +448,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "prev_head": prev_head or curr_head,
                         "curr_head": curr_head,
                         "changed_files_block": changed_files_block,
+                        "current_backlog_block": current_backlog_block,
                         "hint_block": hint_block,
                     }
                     pm_prompt = store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx)
@@ -403,8 +476,26 @@ async def main_async(args: argparse.Namespace) -> int:
                         (run_dir / "NOTES_PM.md").write_text(
                             pm_out.notes_md.strip() + "\n", encoding="utf-8", errors="replace"
                         )
-                    if pm_out.tasks:
-                        write_backlog_files(run_dir, [t.model_dump() for t in pm_out.tasks])
+                    current_backlog_block, existing_tasks, done_ids = _load_backlog_context_for_pm()
+                    existing_pending = [t for t in existing_tasks if t.id not in done_ids]
+
+                    merged_tasks: list[dict[str, Any]] = [t.model_dump() for t in (pm_out.tasks or [])]
+                    pm_ids = {str(t.get("id", "")).strip() for t in merged_tasks if isinstance(t, dict)}
+
+                    for t in existing_pending:
+                        if t.id not in pm_ids:
+                            merged_tasks.append(
+                                {
+                                    "id": t.id,
+                                    "title": t.title,
+                                    "prompt": t.prompt,
+                                    "files": t.files or [],
+                                    "done_when": t.done_when,
+                                }
+                            )
+
+                    if merged_tasks:
+                        write_backlog_files(run_dir, merged_tasks)
 
                     last_pm_fp = repo_fp or last_pm_fp
                     pm_fp_path.write_text(
@@ -525,14 +616,18 @@ async def main_async(args: argparse.Namespace) -> int:
             backlog_md = run_dir / "BACKLOG.md"
             state = load_state(state_path)
             done_set = set(state.get("done", []))
-            before_done = len(done_set)
 
-            if args.pm_refresh_backlog and (before_done >= len(tasks)):
+            task_ids = {t.id for t in tasks}
+            before_done = len(done_set.intersection(task_ids))
+
+            if args.pm_refresh_backlog and (before_done >= len(task_ids)):
                 pm_ok2 = await run_pm_if_needed(cycle_idx, curr_head, changed_files, repo_fp, force_refresh_backlog=True)
                 if not pm_ok2:
                     return 1, "pm_failed", 0
                 ensure_backlog()
                 tasks = load_tasks()
+                task_ids = {t.id for t in tasks}
+                before_done = len(done_set.intersection(task_ids))
 
             tasks_root = run_dir / "tasks"
             tasks_root.mkdir(parents=True, exist_ok=True)
@@ -725,12 +820,27 @@ async def main_async(args: argparse.Namespace) -> int:
                 "policy_scan_enabled": policy_scan_enabled,
             }
             last_run_summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
-            append_cycle_summary(f"{now_iso()} cycle={cycle_idx} done={len(done_set)}/{len(tasks)} failed={failed_count} dt={cycle_dt:.1f}s")
-            metrics.event("cycle_end", cycle=cycle_idx, rc=0, done=len(done_set), total=len(tasks), failed=failed_count, duration_seconds=cycle_dt)
+            done_count = len(done_set.intersection(task_ids))
+            total_count = len(task_ids)
+            append_cycle_summary(f"{now_iso()} cycle={cycle_idx} done={done_count}/{total_count} failed={failed_count} dt={cycle_dt:.1f}s")
+            metrics.event("cycle_end", cycle=cycle_idx, rc=0, done=done_count, total=total_count, failed=failed_count, duration_seconds=cycle_dt)
 
-            done_delta = len(done_set) - before_done
+            done_delta = done_count - before_done
 
-            if len(done_set) >= len(tasks):
+            # Update repo snapshot at END of cycle as well (helps resume/restart correctness when HEAD changes during work).
+            try:
+                latest_head = git_head(repo).strip()
+                if latest_head:
+                    snapshot_json.write_text(
+                        json.dumps({"head": latest_head, "updated_at": now_iso()}, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    prev_head = latest_head
+            except Exception:
+                pass
+
+            if total_count > 0 and done_count >= total_count:
                 return 0, "all_tasks_done", done_delta
 
             return 0, "ok", done_delta

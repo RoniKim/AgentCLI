@@ -122,6 +122,9 @@ Git:
 - changed files (name-only):
 {changed_files_block}
 
+Current backlog (from run_dir; [x]=done, [ ]=pending):
+{current_backlog_block}
+
 Dev change-hints (optional, run-local; use as clues):
 {hint_block}
 

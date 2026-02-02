@@ -13,6 +13,7 @@ from .prompts import ensure_default_prompt_files
 DEFAULTS: Dict[str, Any] = {
     # core
     "run_dir": "",
+    "resume_latest": False,
     "env_file": "",
     # docs
     "docs_dir": ".doc/Docs",
@@ -95,6 +96,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # Repo / run dir
     p.add_argument("--repo", required=True, help="Repo root path (e.g., C:\\Dev\\BudgetBook)")
     p.add_argument("--run-dir", default=DEFAULTS["run_dir"], help="Resume an existing run folder under .doc/agent_runs/...")
+    p.add_argument("--resume-latest", action="store_true", default=DEFAULTS["resume_latest"],
+                   help="If --run-dir is omitted, reuse the latest run under repo/.doc/agent_runs")
     p.add_argument("--env-file", default=DEFAULTS["env_file"], help="Optional: explicit .env file path (loaded before repo chdir)")
 
     # Docs
