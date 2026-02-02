@@ -1,5 +1,3 @@
----
-
 # CLI-first Multi-Agent Runner 2.0 (PM → Dev → QA)
 
 이 번들은 **CLI 기반**으로 동작하는 PM→Dev→QA 자동 개발 러너입니다.
@@ -11,7 +9,7 @@
 * Dev를 **패치(apply_patch) 중심**으로 유도해 불필요한 장황 출력/토큰 낭비를 줄임
 * (선택) **max turns** 등으로 끊기면 **continuation**으로 이어서 재시도(베스트-에포트)
 
----
+
 
 ## 파일 구조 (신형 번들)
 
