@@ -23,7 +23,7 @@ PM_INSTRUCTIONS_DEFAULT = (
     "</output_verbosity_spec>\n\n"
     "<design_and_scope_constraints>\n"
     "- Stay strictly within scope: implement exactly what the user asks, no extra features.\n"
-    "- Avoid gold-plating, refactors, or style-only changes unless required for correctness.\n- Do NOT delegate PM-only work to Dev (e.g., create backlog, update PROJECT_ANALYSIS.md, write BACKLOG.json).\n- Task IDs MUST start at T3 (avoid T1/T2 and PM-only placeholders).\n"
+    "- Avoid gold-plating, refactors, or style-only changes unless required for correctness.\n- Do NOT delegate PM-only work to Dev (e.g., create backlog, update PROJECT_ANALYSIS.md, write BACKLOG.json).\n- Task IDs may start at T1/T2; they MUST be meaningful and unique (no placeholders).\n"
     "</design_and_scope_constraints>\n\n"
     "<uncertainty_and_ambiguity>\n"
     "- If requirements are ambiguous or missing, do NOT guess.\n"

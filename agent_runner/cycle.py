@@ -532,7 +532,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
             Goals:
             - Prevent PM from delegating PM-only work to Dev (e.g., "create backlog" tasks)
-            - Enforce task IDs >= T3, without breaking existing stable IDs
+            - Keep task IDs stable and unique (T1/T2 allowed)
             - Keep token usage predictable by keeping tasks atomic and concrete
             """
 
@@ -590,9 +590,9 @@ async def main_async(args: argparse.Namespace) -> int:
                 except Exception:
                     pass
 
-            # Enforce IDs >= T3 and unique.
+            # Enforce unique IDs; keep existing IDs if valid.
             used: set[str] = set()
-            next_num = 3
+            next_num = 1
             out: list[dict[str, Any]] = []
             for t in filtered:
                 tid = str(t.get("id") or "").strip()
@@ -605,7 +605,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 else:
                     n = 0
 
-                if n >= 3 and tid not in used:
+                if n >= 1 and tid and tid not in used:
                     fixed_id = tid
                 else:
                     while True:
