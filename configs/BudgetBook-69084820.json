@@ -55,5 +55,21 @@
   "debug": true,
   "stop_file": "STOP",
   "allow_no_diff": true,
-  "stop_if_no_diff": false
+  "stop_if_no_diff": false,
+  "config_version": 2,
+  "reporter_model": "gpt-5-nano",
+  "report_max_turns": 8,
+  "dev_auto_escalate": true,
+  "dev_max_escalations": 2,
+  "dev_model_tier1": "gpt-5.1-codex",
+  "dev_model_tier2": "gpt-5.2-codex",
+  "dev_escalate_on": [
+    "no_diff",
+    "build_failed",
+    "test_failed"
+  ],
+  "tool_backend": "auto",
+  "tool_name": "Codex_CLI",
+  "tool_command": "",
+  "tool_args": []
 }
