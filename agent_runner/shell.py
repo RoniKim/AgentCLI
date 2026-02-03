@@ -212,8 +212,11 @@ class RunnerShell:
         print(f"dev_auto_escalate: {bool(eff.get('dev_auto_escalate'))} (max={eff.get('dev_max_escalations')}, on={eff.get('dev_escalate_on')})")
         print(f"mcp_mode:   {eff.get('mcp_mode')} (package={eff.get('codex_package')})")
         print(f"docs_read_mode: {eff.get('docs_read_mode')} (docs_dir={eff.get('docs_dir')})")
+        print(f"execution_backend: {eff.get('execution_backend')}")
+        print(f"roles:      {eff.get('roles')}")
         print(f"debug:      {bool(eff.get('debug', False))}")
         print(f"OPENAI_API_KEY set: {_yesno(bool(os.getenv('OPENAI_API_KEY', '').strip()))}")
+        print(f"ANTHROPIC_API_KEY set: {_yesno(bool(os.getenv('ANTHROPIC_API_KEY', '').strip()))}")
         print("======================================\n")
 
     def _runner_is_alive(self) -> bool:
@@ -448,6 +451,8 @@ class RunnerShell:
                     "  /repo <path>               Set repo root",
                     "  /config                    Show effective settings + env sanity",
                     "  /set <key> <value>         Override a setting (types inferred from defaults)",
+                    "  (예: /set execution_backend codex|claudecode)",
+                    "  (예: /set roles PM,Dev,QA  |  /set roles PM,Dev)",
                     "  /add <key> <value>         Append to a list setting (e.g., policy_rule)",
                     "  /load [path]               Load config JSON (default: AgentCLI-side configs/<repo-hash>.json)",
                     "  /save [path]               Save effective config JSON",
@@ -495,6 +500,8 @@ def _build_completer() -> Any:
                 "--pm-model",
                 "--dev-model",
                 "--qa-model",
+                "--execution-backend",
+                "--roles",
             }
         ),
         ignore_case=True,

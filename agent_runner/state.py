@@ -1,18 +1,5 @@
 from __future__ import annotations
 
-"""
-State and backlog utilities for the agent runner.
-
-This module defines the TaskItem dataclass and helper functions for
-loading and saving state, parsing and writing backlog files, and
-constructing a generic fallback backlog when the project manager fails
-to produce one.  The default tasks generated here are intended to be
-repository-agnostic so they can apply to any codebase.  In contrast
-with the original AgentCLI implementation, the fallback tasks avoid
-hard‑coded C# project specifics and instead focus on documentation,
-inventory, and test scaffolding that are universally helpful.
-"""
-
 import json
 import re
 from dataclasses import dataclass
@@ -24,14 +11,6 @@ from .utils import now_iso
 
 @dataclass
 class TaskItem:
-    """Simple representation of a backlog task.
-
-    The Agent runner represents tasks using this dataclass.  Each task
-    has an ID (e.g. ``T1``), a title, a prompt describing the work to
-    perform, an optional list of file paths relevant to the task, and a
-    ``done_when`` string that indicates the acceptance criteria.
-    """
-
     id: str
     title: str
     prompt: str
@@ -40,24 +19,15 @@ class TaskItem:
 
 
 def load_backlog_json(path: Path) -> list[TaskItem]:
-    """Load backlog tasks from a JSON file.
+    """Load backlog tasks from BACKLOG.json.
 
     Supported shapes:
+    - {"generated_at":..., "tasks":[...]}
+    - {"tasks":[...]}
+    - [...] (list of tasks)
 
-    - ``{"generated_at": ..., "tasks": [...]}``
-    - ``{"tasks": [...]}``
-    - ``[...]`` (a list of task dictionaries)
-
-    The loader tolerates drift in PM output by accepting various
-    synonymous keys such as ``description`` for ``prompt`` and
-    ``definition_of_done`` for ``done_when``.  Missing IDs are
-    auto‑assigned sequentially starting at ``T01``.
-
-    Args:
-        path: Path to the JSON file.
-
-    Returns:
-        A list of ``TaskItem`` instances.
+    This loader is intentionally tolerant of PM output drift:
+    - task keys may be {id,title,prompt,files,done_when} or include {description,files_changed,definition_of_done,...}
     """
     data = json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
 
@@ -111,16 +81,7 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
 
 
 def write_backlog_files(run_dir: Path, tasks: List[dict[str, Any]]) -> tuple[Path, Path]:
-    """Write ``BACKLOG.json`` and ``BACKLOG.md`` from a normalized task list.
-
-    Args:
-        run_dir: The run directory where backlog files will be stored.
-        tasks: A list of task dictionaries as produced by the PM or
-            normalized via ``_normalize_backlog_tasks``.
-
-    Returns:
-        A tuple of paths ``(BACKLOG.json, BACKLOG.md)``.
-    """
+    """Write BACKLOG.json and BACKLOG.md from a normalized task dict list."""
     backlog = {"generated_at": now_iso(), "tasks": tasks}
     run_dir.mkdir(parents=True, exist_ok=True)
     bj = run_dir / "BACKLOG.json"
@@ -136,7 +97,7 @@ def write_backlog_files(run_dir: Path, tasks: List[dict[str, Any]]) -> tuple[Pat
 
 
 def parse_backlog_md(path: Path) -> list[TaskItem]:
-    """Legacy fallback: parse a simple checklist backlog from a markdown file."""
+    """Legacy fallback: parse simple checklist backlog."""
     txt = path.read_text(encoding="utf-8-sig", errors="replace")
     items: list[TaskItem] = []
     for line in txt.splitlines():
@@ -158,25 +119,17 @@ def parse_backlog_md(path: Path) -> list[TaskItem]:
 
 
 def load_state(path: Path) -> dict[str, Any]:
-    """Load task progress state from ``STATE.json``.
-
-    The state file tracks which tasks have been completed or failed.  If
-    the file does not exist, a default structure with empty lists is
-    returned.
-    """
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
     return {"done": [], "failed": []}
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
-    """Persist the state dictionary to ``STATE.json``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
 
 
 def mark_backlog_done(backlog_md: Path, task_id: str) -> None:
-    """Mark a task as completed in ``BACKLOG.md`` by replacing ``[ ]`` with ``[x]``."""
     if not backlog_md.exists():
         return
     txt = backlog_md.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -193,68 +146,35 @@ def mark_backlog_done(backlog_md: Path, task_id: str) -> None:
 
 
 def write_default_p0_backlog(run_dir: Path) -> None:
-    """Write a generic fallback backlog if the PM fails to produce one.
+    """Fallback backlog used if PM fails to generate one.
 
-    In situations where the project manager cannot generate a backlog
-    (for example, due to an LLM error or invalid response), this
-    function constructs a minimal set of universally applicable tasks to
-    bootstrap the development cycle.  The tasks are intentionally
-    language‑agnostic and avoid references to specific frameworks or
-    languages so they can be applied to any repository.
-
-    The default backlog contains the following tasks:
-
-    - **T1**: Create or update the project README with a clear
-      description, installation instructions, and usage examples.
-    - **T2**: Produce a file inventory listing all files and
-      directories in the repository along with a brief description of
-      their purpose.  Save this as ``FILE_INVENTORY.md``.
-    - **T3**: Introduce a basic unit test suite for key functions or
-      classes in the project.  Use an appropriate test framework
-      depending on the project's language (e.g. pytest, unittest, jest).
-
-    Args:
-        run_dir: The run directory where backlog files will be written.
+    IMPORTANT: this must be repository-agnostic. We avoid hardcoded language/framework
+    tasks to prevent the Dev agent from doing irrelevant work.
     """
-    tasks = [
-        {
-            "id": "T1",
-            "title": "Create or update README",
-            "prompt": (
-                "Write or update a README.md file in the repository root that describes what the project does, "
-                "how to set it up, and how to use it. If a README already exists, ensure it is comprehensive "
-                "and up to date."
-            ),
-            "files": ["README.md"],
-            "done_when": "A detailed README.md exists and includes description, setup, and usage."
-        },
-        {
-            "id": "T2",
-            "title": "Generate repository file inventory",
-            "prompt": (
-                "List all files and directories in the repository and write a brief description of each. "
-                "Save this information to a FILE_INVENTORY.md file at the root of the repository."
-            ),
-            "files": ["FILE_INVENTORY.md"],
-            "done_when": "FILE_INVENTORY.md exists and lists files and directories with descriptions."
-        },
-        {
-            "id": "T3",
-            "title": "Add a basic unit test suite",
-            "prompt": (
-                "Identify core functions or classes in the repository and create a basic set of unit tests. "
-                "Choose a standard test framework appropriate for the project's language (e.g., pytest for Python, "
-                "unittest, jest for JavaScript). Ensure the tests run without errors."
-            ),
-            "files": [],
-            "done_when": "A test suite exists and passes when executed."
-        },
-    ]
+    backlog = {
+        "generated_at": now_iso(),
+        "tasks": [
+            {
+                "id": "T0",
+                "title": "PM failed to generate BACKLOG: write a diagnostic report and stop",
+                "prompt": (
+                    "PM 단계가 BACKLOG를 생성하지 못했습니다. 레포의 실제 코드는 수정하지 마세요. "
+                    "현재 run_dir(이번 실행 폴더)에 `PM_FAILURE.md`를 생성하고 다음 내용을 기록하세요: "
+                    "(1) 어떤 에러/원인으로 PM이 실패했는지 추정, (2) 재현/재시도 방법(예: --debug, --pm-model, --pm-timeout-seconds), "
+                    "(3) 사용자가 확인해야 할 설정(execution_backend, OPENAI_API_KEY/ANTHROPIC_API_KEY, docs_dir 등). "
+                    "작성 후 작업을 종료(추가 코드 변경 없이)하세요."
+                ),
+                "files": ["(run_dir)/PM_FAILURE.md"],
+                "done_when": "PM_FAILURE.md exists in run_dir and no product/source files were modified.",
+            }
+        ],
+    }
+
     run_dir.mkdir(parents=True, exist_ok=True)
-    backlog = {"generated_at": now_iso(), "tasks": tasks}
     (run_dir / "BACKLOG.json").write_text(json.dumps(backlog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+
     md_lines = ["# BACKLOG", ""]
-    for t in tasks:
+    for t in backlog["tasks"]:
         md_lines.append(f"- [ ] {t['id']} {t['title']}")
     md_lines.append("")
     (run_dir / "BACKLOG.md").write_text("\n".join(md_lines), encoding="utf-8", errors="replace")

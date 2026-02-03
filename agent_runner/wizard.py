@@ -12,6 +12,17 @@ def _ask_str(prompt: str, default: str) -> str:
     return s if s else default
 
 
+def _ask_choice(prompt: str, default: str, choices: list[str]) -> str:
+    cs = "/".join(choices)
+    while True:
+        s = input(f"{prompt} ({cs}) [{default}]: ").strip().lower()
+        if not s:
+            return default
+        if s in choices:
+            return s
+        print(f"  (invalid choice: {s}; expected one of {cs})")
+
+
 def _ask_int(prompt: str, default: int) -> int:
     s = input(f"{prompt} [{default}]: ").strip()
     if not s:
@@ -41,6 +52,8 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
     print("=== AgentCLI Wizard (python-side config/prompts) ===")
     print(f"repo: {repo}")
     print("")
+
+    execution_backend = _ask_choice("Execution backend (runner)", str(defaults.get("execution_backend", "codex")).lower(), ["codex", "claudecode"])
 
     autopilot = _ask_bool("Enable autopilot", bool(defaults.get("autopilot", False)))
     continuous = _ask_bool("Enable continuous (execute tasks after backlog)", bool(defaults.get("continuous", False)))
@@ -96,6 +109,7 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
 
     cfg: Dict[str, Any] = {
         "config_version": 2,
+        "execution_backend": execution_backend,
         "autopilot": autopilot,
         "continuous": continuous,
         "iterations": iterations,

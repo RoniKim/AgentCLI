@@ -77,6 +77,12 @@ async def main_async(args: argparse.Namespace) -> int:
         eprint(f"Repo not found: {repo}")
         return 2
 
+    # Execution backend routing (default: codex)
+    backend = str(getattr(args, "execution_backend", "codex") or "codex").strip().lower()
+    if backend in ("claudecode", "claude", "claude-code", "claude_code"):
+        from .backends.claudecode import main_async_claudecode
+        return await main_async_claudecode(args, repo)
+
     # Load env (.env) BEFORE importing agents so OPENAI_API_KEY is visible even if
     # the SDK reads environment variables at import time.
     env_debug = load_dotenv_best_effort(repo, explicit_env_file=getattr(args, "env_file", ""), override=True)
@@ -191,6 +197,15 @@ async def main_async(args: argparse.Namespace) -> int:
 
     # Ensure continuous in loop mode
     continuous = bool(args.continuous or args.loop)
+
+    # Roles/stages selection (forward-compatible with pluggable stages).
+    # Current implementation supports coarse on/off for PM/Dev/QA.
+    roles_raw = str(getattr(args, "roles", "PM,Dev,QA") or "PM,Dev,QA")
+    roles_set = {
+        t.strip().lower()
+        for t in re.split(r"[\s,;]+", roles_raw)
+        if t and t.strip()
+    } or {"pm", "dev", "qa"}
 
     def append_cycle_summary(line: str) -> None:
         try:
@@ -921,8 +936,13 @@ async def main_async(args: argparse.Namespace) -> int:
             backlog_json = run_dir / "BACKLOG.json"
             backlog_md = run_dir / "BACKLOG.md"
             if not backlog_json.exists() and not backlog_md.exists():
-                eprint("[PM WARNING] BACKLOG not created by PM. Creating default P0 backlog to continue.")
-                write_default_p0_backlog(run_dir)
+                # Avoid generating misleading hardcoded tasks.
+                eprint("[PM ERROR] BACKLOG not created by PM. Stopping to avoid running irrelevant tasks.")
+                try:
+                    stop_path.write_text("BACKLOG missing\n", encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+                metrics.event("pm_backlog_missing", cycle=-1)
 
         def load_tasks() -> list[TaskItem]:
             backlog_json = run_dir / "BACKLOG.json"
@@ -985,11 +1005,18 @@ async def main_async(args: argparse.Namespace) -> int:
             repo_fp = repo_fingerprint(repo)
 
             # PM phase
-            pm_ok = await run_pm_if_needed(cycle_idx, curr_head, changed_files, repo_fp, force_refresh_backlog=False)
-            if not pm_ok:
-                if pm_stop_reason.get("reason") == "quota_exhausted" or stop_path.exists():
-                    return 0, "quota_exhausted", 0
-                return 1, "pm_failed", 0
+            if "pm" in roles_set:
+                pm_ok = await run_pm_if_needed(cycle_idx, curr_head, changed_files, repo_fp, force_refresh_backlog=False)
+                if not pm_ok:
+                    if pm_stop_reason.get("reason") == "quota_exhausted" or stop_path.exists():
+                        return 0, "quota_exhausted", 0
+                    return 1, "pm_failed", 0
+            else:
+                metrics.event("pm_skip", cycle=cycle_idx, reason="roles_disabled")
+                # If PM is disabled, we require an existing BACKLOG artifact.
+                if not (run_dir / "BACKLOG.json").exists() and not (run_dir / "BACKLOG.md").exists():
+                    eprint("[ERR] roles excludes PM but no BACKLOG exists. Run with PM enabled at least once.")
+                    return 1, "pm_disabled_no_backlog", 0
 
             # Update snapshot head only when HEAD changes
             if curr_head:
@@ -1011,6 +1038,13 @@ async def main_async(args: argparse.Namespace) -> int:
                 print("PM/backlog prepared. Re-run with --continuous to execute tasks automatically.")
                 metrics.event("cycle_end", cycle=cycle_idx, rc=0, reason="prepared_only")
                 return 0, "prepared_only", 0
+
+            # Dev phase can be disabled (forward-compatible with stage plugins)
+            if "dev" not in roles_set:
+                metrics.event("dev_skip", cycle=cycle_idx, reason="roles_disabled")
+                if "qa" in roles_set:
+                    await run_qa_if_needed(cycle_idx, ran_tasks=False)
+                return 0, "dev_disabled", 0
 
             # Dev loop
             state_path = run_dir / "STATE.json"
@@ -1326,7 +1360,10 @@ async def main_async(args: argparse.Namespace) -> int:
                 pass
 
             ran_tasks = (len(done_set) > before_done)
-            await run_qa_if_needed(cycle_idx, ran_tasks=ran_tasks)
+            if "qa" in roles_set:
+                await run_qa_if_needed(cycle_idx, ran_tasks=ran_tasks)
+            else:
+                metrics.event("qa_skip", cycle=cycle_idx, reason="roles_disabled")
 
             cycle_dt = time.time() - cycle_t0
             failed_count = len(state.get("failed", []))

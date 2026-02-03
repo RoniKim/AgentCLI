@@ -18,6 +18,21 @@ from .wizard import run_wizard
 
 from .prompts import ensure_default_prompt_files
 
+import re
+
+
+def _normalize_execution_backend(v: Any) -> str:
+    s = str(v or "").strip().lower()
+    if not s:
+        return "codex"
+    if s in {"codex", "openai", "openai-agents", "agents"}:
+        return "codex"
+    if s in {"claude", "claude-code", "claude_code", "claudecode", "anthropic"}:
+        return "claudecode"
+    s = re.sub(r"[^a-z0-9_-]+", "", s)
+    return s or "codex"
+
+
 
 # ---- Defaults shown in /config ----
 # NOTE: cycle.py references many args attributes directly (args.foo). Those MUST exist to avoid AttributeError,
@@ -30,6 +45,13 @@ DEFAULTS: Dict[str, Any] = {
     "run_dir": "",            # empty => auto
     "resume_latest": False,
     "env_file": "",           # empty => auto (python-side .env is still loaded)
+
+    # Execution backend engine (default: codex)
+    "execution_backend": "codex",
+
+    # Pipeline roles (comma-separated). Default keeps legacy order.
+    # Example: "PM,Dev,QA" or "PM,Dev".
+    "roles": "PM,Dev,QA",
 
     # Runner behavior
     "autopilot": False,
@@ -189,6 +211,25 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--resume-latest", action=argparse.BooleanOptionalAction, default=None, help="Resume latest run_dir")
     p.add_argument("--env-file", default=None, help="Path to .env (absolute or relative to AgentCLI home)")
 
+    # Execution backend
+    p.add_argument(
+        "--execution-backend",
+        dest="execution_backend",
+        default=None,
+        choices=["codex", "claudecode"],
+        help="Execution backend engine (codex|claudecode). Default is codex.",
+    )
+
+    p.add_argument(
+        "--roles",
+        default=None,
+        help=(
+            "Comma-separated pipeline roles/stages to run. "
+            "Examples: PM,Dev,QA (default), or PM,Dev (skip QA). "
+            "Forward-compatible with plugin stages."
+        ),
+    )
+
     # Behavior
     p.add_argument("--autopilot", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--loop", action=argparse.BooleanOptionalAction, default=None)
@@ -330,6 +371,9 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         eff["policy_rule"] = []
     elif isinstance(pr, str):
         eff["policy_rule"] = [pr]
+
+    # normalize execution_backend
+    eff["execution_backend"] = _normalize_execution_backend(eff.get("execution_backend", defaults.get("execution_backend", "codex")))
 
 
     # normalize dev_escalate_on (repeatable CLI flag)
