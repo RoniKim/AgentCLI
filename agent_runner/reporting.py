@@ -1,0 +1,332 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Optional
+
+from .docs import read_text_robust
+from .gitops import git_head, git_porcelain, list_untracked
+from .state import TaskItem, load_backlog_json, parse_backlog_md, load_state
+from .todo import read_current_todo
+from .utils import now_iso
+
+
+def _read_text_limited(p: Path, max_chars: int = 8000) -> str:
+    if not p or not p.exists() or not p.is_file():
+        return ""
+    try:
+        txt, _enc = read_text_robust(p)
+    except Exception:
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return ""
+    if max_chars and len(txt) > max_chars:
+        return txt[:max_chars] + "\n\n...(truncated)"
+    return txt
+
+
+def _last_n_lines(txt: str, n: int = 60) -> str:
+    lines = (txt or "").splitlines()
+    if len(lines) <= n:
+        return txt
+    return "\n".join(lines[-n:])
+
+
+def _load_backlog_tasks(run_dir: Path) -> list[TaskItem]:
+    bj = run_dir / "BACKLOG.json"
+    bm = run_dir / "BACKLOG.md"
+    if bj.exists():
+        try:
+            return load_backlog_json(bj)
+        except Exception:
+            return []
+    if bm.exists():
+        try:
+            return parse_backlog_md(bm)
+        except Exception:
+            return []
+    return []
+
+
+def collect_shutdown_context(repo: Path, run_dir: Path) -> dict[str, Any]:
+    """Collect run-local context for shutdown reporting.
+
+    This is designed to work even when model/tool usage is unavailable.
+    """
+
+    ctx: dict[str, Any] = {
+        "generated_at": now_iso(),
+        "repo": str(repo),
+        "run_dir": str(run_dir),
+    }
+
+    # Git
+    try:
+        ctx["git_head"] = git_head(repo).strip()
+    except Exception:
+        ctx["git_head"] = ""
+
+    try:
+        ctx["git_porcelain"] = git_porcelain(repo)
+    except Exception:
+        ctx["git_porcelain"] = ""
+
+    try:
+        ctx["untracked"] = list_untracked(repo)[:200]
+    except Exception:
+        ctx["untracked"] = []
+
+    # State / backlog
+    state_path = run_dir / "STATE.json"
+    state = {}
+    try:
+        state = load_state(state_path)
+    except Exception:
+        state = {"done": [], "failed": []}
+
+    tasks = _load_backlog_tasks(run_dir)
+    task_ids = [t.id for t in tasks]
+    done_set = set(state.get("done", []) or [])
+
+    ctx["state"] = state
+    ctx["tasks_total"] = len(tasks)
+    ctx["tasks_done"] = len([tid for tid in task_ids if tid in done_set])
+
+    backlog_lines: list[str] = []
+    for t in tasks[:200]:
+        mark = "x" if t.id in done_set else " "
+        backlog_lines.append(f"- [{mark}] {t.id} {t.title}")
+    ctx["backlog_lines"] = backlog_lines
+
+    # TODO
+    try:
+        todo_path, todo_text = read_current_todo(repo)
+        ctx["todo_path"] = str(todo_path) if todo_path else ""
+        ctx["todo_text"] = (todo_text or "")
+    except Exception:
+        ctx["todo_path"] = ""
+        ctx["todo_text"] = ""
+
+    # Recent dev output
+    dev_logs_dir = run_dir / "dev_logs"
+    latest_dev_log: Optional[Path] = None
+    if dev_logs_dir.exists() and dev_logs_dir.is_dir():
+        try:
+            files = [p for p in dev_logs_dir.glob("*.txt") if p.is_file()]
+            files.sort(key=lambda p: p.stat().st_mtime)
+            latest_dev_log = files[-1] if files else None
+        except Exception:
+            latest_dev_log = None
+
+    ctx["latest_dev_log_path"] = str(latest_dev_log) if latest_dev_log else ""
+    ctx["latest_dev_log_tail"] = _last_n_lines(_read_text_limited(latest_dev_log, 12000), 120) if latest_dev_log else ""
+
+    # Recent task dir build/test logs
+    tasks_root = run_dir / "tasks"
+    latest_task_dir: Optional[Path] = None
+    if tasks_root.exists() and tasks_root.is_dir():
+        try:
+            dirs = [p for p in tasks_root.iterdir() if p.is_dir()]
+            dirs.sort(key=lambda p: p.stat().st_mtime)
+            latest_task_dir = dirs[-1] if dirs else None
+        except Exception:
+            latest_task_dir = None
+
+    ctx["latest_task_dir"] = str(latest_task_dir) if latest_task_dir else ""
+    if latest_task_dir:
+        b = latest_task_dir / "dotnet_build.txt"
+        t = latest_task_dir / "dotnet_test.txt"
+        ctx["build_log_tail"] = _last_n_lines(_read_text_limited(b, 12000), 120) if b.exists() else ""
+        ctx["test_log_tail"] = _last_n_lines(_read_text_limited(t, 12000), 120) if t.exists() else ""
+
+    # Analysis hints
+    hints_dir = run_dir / "analysis_hints"
+    hint_files: list[str] = []
+    if hints_dir.exists() and hints_dir.is_dir():
+        try:
+            mds = [p for p in hints_dir.glob("*.md") if p.is_file()]
+            mds.sort(key=lambda p: p.stat().st_mtime)
+            for p in mds[-30:]:
+                hint_files.append(p.name)
+        except Exception:
+            hint_files = []
+    ctx["analysis_hints"] = hint_files
+
+    # Runner summaries
+    cycle_summary = run_dir / "cycle_summary.log"
+    if cycle_summary.exists():
+        ctx["cycle_summary_tail"] = _last_n_lines(_read_text_limited(cycle_summary, 12000), 80)
+    else:
+        ctx["cycle_summary_tail"] = ""
+
+    last_run_summary = run_dir / "last_run_summary.json"
+    if last_run_summary.exists():
+        try:
+            ctx["last_run_summary"] = json.loads(last_run_summary.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            ctx["last_run_summary"] = {}
+    else:
+        ctx["last_run_summary"] = {}
+
+    return ctx
+
+
+def build_local_shutdown_report(
+    *,
+    repo: Path,
+    run_dir: Path,
+    reason: str,
+    last_task_id: Optional[str] = None,
+) -> str:
+    ctx = collect_shutdown_context(repo, run_dir)
+
+    tasks_done = int(ctx.get("tasks_done") or 0)
+    tasks_total = int(ctx.get("tasks_total") or 0)
+
+    todo_path = (ctx.get("todo_path") or "").strip()
+    todo_text = (ctx.get("todo_text") or "").strip()
+    todo_preview = "\n".join(todo_text.splitlines()[:60]) if todo_text else "(none)"
+
+    backlog_lines = ctx.get("backlog_lines") or []
+    backlog_preview = "\n".join(backlog_lines[:120]) if backlog_lines else "(no backlog found)"
+
+    porcelain = (ctx.get("git_porcelain") or "").strip()
+    porcelain_preview = "\n".join(porcelain.splitlines()[:200]) if porcelain else "(clean or unavailable)"
+
+    untracked = ctx.get("untracked") or []
+    untracked_preview = "\n".join([f"- {p}" for p in untracked[:80]]) if untracked else "(none)"
+
+    latest_dev_log_path = (ctx.get("latest_dev_log_path") or "").strip() or "(none)"
+    latest_dev_log_tail = (ctx.get("latest_dev_log_tail") or "").strip() or "(none)"
+
+    build_tail = (ctx.get("build_log_tail") or "").strip()
+    test_tail = (ctx.get("test_log_tail") or "").strip()
+
+    hints = ctx.get("analysis_hints") or []
+    hints_preview = "\n".join([f"- {n}" for n in hints[:40]]) if hints else "(none)"
+
+    cycle_summary_tail = (ctx.get("cycle_summary_tail") or "").strip() or "(none)"
+
+    resume_cmd = (
+        f"python agent_cli.py --repo \"{repo}\" --resume-latest --continuous --autopilot"
+    )
+
+    lines: list[str] = []
+    lines.append("# Shutdown Report")
+    lines.append("")
+    lines.append(f"- generated_at: {ctx.get('generated_at')}")
+    lines.append(f"- reason: {reason}")
+    if last_task_id:
+        lines.append(f"- last_task: {last_task_id}")
+    lines.append(f"- repo: {repo}")
+    lines.append(f"- run_dir: {run_dir}")
+    head = (ctx.get("git_head") or "").strip()
+    if head:
+        lines.append(f"- git_head: {head}")
+    lines.append("")
+
+    lines.append("## Progress")
+    lines.append("")
+    lines.append(f"- done: {tasks_done}/{tasks_total}")
+    lines.append("")
+
+    lines.append("## Backlog snapshot")
+    lines.append("")
+    lines.append(backlog_preview)
+    lines.append("")
+
+    lines.append("## State")
+    lines.append("")
+    state = ctx.get("state") or {}
+    try:
+        failed = state.get("failed") or []
+        warnings = state.get("warnings") or []
+        lines.append(f"- failed_count: {len(failed)}")
+        lines.append(f"- warnings_count: {len(warnings)}")
+        if failed:
+            lines.append("")
+            lines.append("### Failed")
+            for f in failed[:20]:
+                if isinstance(f, dict):
+                    lines.append(f"- {f.get('task')} ({f.get('reason')})")
+                else:
+                    lines.append(f"- {str(f)}")
+        if warnings:
+            lines.append("")
+            lines.append("### Warnings")
+            for w in warnings[:20]:
+                if isinstance(w, dict):
+                    lines.append(f"- {w.get('task')} ({w.get('reason')})")
+                else:
+                    lines.append(f"- {str(w)}")
+    except Exception:
+        lines.append("- (state parse failed)")
+    lines.append("")
+
+    lines.append("## Git status (porcelain)")
+    lines.append("")
+    lines.append("```text")
+    lines.append(porcelain_preview)
+    lines.append("```")
+    lines.append("")
+
+    lines.append("## Untracked files")
+    lines.append("")
+    lines.append(untracked_preview)
+    lines.append("")
+
+    lines.append("## Recent Dev output")
+    lines.append("")
+    lines.append(f"- latest_dev_log: {latest_dev_log_path}")
+    lines.append("")
+    lines.append("```text")
+    lines.append(latest_dev_log_tail)
+    lines.append("```")
+    lines.append("")
+
+    if build_tail:
+        lines.append("## Recent build log tail")
+        lines.append("")
+        lines.append("```text")
+        lines.append(build_tail)
+        lines.append("```")
+        lines.append("")
+
+    if test_tail:
+        lines.append("## Recent test log tail")
+        lines.append("")
+        lines.append("```text")
+        lines.append(test_tail)
+        lines.append("```")
+        lines.append("")
+
+    lines.append("## Analysis hints")
+    lines.append("")
+    lines.append(hints_preview)
+    lines.append("")
+
+    lines.append("## Cycle summary tail")
+    lines.append("")
+    lines.append("```text")
+    lines.append(cycle_summary_tail)
+    lines.append("```")
+    lines.append("")
+
+    lines.append("## TODO (selected)")
+    lines.append("")
+    lines.append(f"- todo_path: {todo_path or '(none)'}")
+    lines.append("")
+    lines.append("```text")
+    lines.append(todo_preview)
+    lines.append("```")
+    lines.append("")
+
+    lines.append("## How to resume")
+    lines.append("")
+    lines.append("```bash")
+    lines.append(resume_cmd)
+    lines.append("```")
+    lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"

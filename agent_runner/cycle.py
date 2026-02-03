@@ -39,7 +39,10 @@ from .prompts import (
     PM_INSTRUCTIONS_DEFAULT,
     DEV_INSTRUCTIONS_DEFAULT,
     QA_INSTRUCTIONS_DEFAULT,
+    REPORTER_INSTRUCTIONS_DEFAULT,
+    PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT,
 )
+from .reporting import collect_shutdown_context, build_local_shutdown_report
 from .run_dir import make_run_dir, find_latest_run_dir
 from .state import (
     TaskItem,
@@ -242,6 +245,15 @@ async def main_async(args: argparse.Namespace) -> int:
             **_agent_kwargs(),
         )
 
+        reporter_instructions = store.get("reporter_instructions", REPORTER_INSTRUCTIONS_DEFAULT)
+        reporter = Agent(
+            name="PM_Reporter",
+            model=args.pm_model,
+            instructions=f"{RECOMMENDED_PROMPT_PREFIX}\n{reporter_instructions}".strip(),
+            **_agent_kwargs(),
+        )
+
+
 
         def _iter_exc_chain(ex: Exception, max_depth: int = 6):
             """Yield exception + its causes/contexts (best-effort)."""
@@ -289,6 +301,11 @@ async def main_async(args: argparse.Namespace) -> int:
                 "hard limit",
                 "plan and billing",
                 "payment required",
+                # Codex/CLI style usage-limit strings
+                "you've hit your usage limit",
+                "purchase more credits",
+                "upgrade to pro",
+                "codex/settings/usage",
             )
             for e in _iter_exc_chain(ex):
                 try:
@@ -299,6 +316,81 @@ async def main_async(args: argparse.Namespace) -> int:
                 if any(n in msg for n in needles) or any(n in rep for n in needles):
                     return True
             return False
+
+
+
+
+        def is_quota_text(text: str) -> bool:
+            s = (text or "").lower()
+            if not s:
+                return False
+            return (
+                "you've hit your usage limit" in s
+                or "purchase more credits" in s
+                or "upgrade to pro" in s
+                or "codex/settings/usage" in s
+                or ("usage limit" in s and "try again at" in s)
+            )
+
+        async def write_shutdown_report(stop_reason: str, *, cycle: int, step: int, last_task_id: Optional[str] = None) -> None:
+            """Best-effort shutdown report.
+
+            1) Always write SHUTDOWN_CONTEXT.json + a local fallback SHUTDOWN_REPORT.md.
+            2) If PM model call succeeds, overwrite SHUTDOWN_REPORT.md with PM-authored markdown.
+
+            This MUST NOT rely on MCP tools; it should still work when Codex credits are exhausted.
+            """
+            report_path = run_dir / "SHUTDOWN_REPORT.md"
+            ctx_path = run_dir / "SHUTDOWN_CONTEXT.json"
+
+            # Build context JSON (best-effort)
+            ctx_obj: dict[str, Any]
+            try:
+                ctx_obj = collect_shutdown_context(repo, run_dir)
+                ctx_obj["stop_reason"] = stop_reason
+                if last_task_id:
+                    ctx_obj["last_task_id"] = last_task_id
+                ctx_path.write_text(
+                    json.dumps(ctx_obj, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except Exception:
+                ctx_obj = {"stop_reason": stop_reason}
+                try:
+                    ctx_path.write_text(
+                        json.dumps(ctx_obj, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                except Exception:
+                    pass
+
+            # Always write a local fallback first.
+            try:
+                local_md = build_local_shutdown_report(repo, run_dir, reason=stop_reason, last_task_id=last_task_id)
+                report_path.write_text(local_md, encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+            # Try to have PM author a concise report, overwriting the fallback.
+            try:
+                prompt = store.render(
+                    "pm_shutdown_report_prompt",
+                    PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT,
+                    {
+                        "stop_reason": stop_reason,
+                        "context_json": json.dumps(ctx_obj, ensure_ascii=False, indent=2),
+                    },
+                )
+                res = await Runner.run(reporter, prompt, max_turns=int(getattr(args, "report_max_turns", 8)) or 8)
+                out = (res.final_output or "").strip()
+                if out:
+                    report_path.write_text(out + "\n", encoding="utf-8", errors="replace")
+                    (run_dir / "PM_SHUTDOWN_REPORT_OUTPUT.txt").write_text(out + "\n", encoding="utf-8", errors="replace")
+                metrics.event("shutdown_report", cycle=cycle, step=step, reason=stop_reason, ok=bool(out))
+            except Exception as ex:
+                metrics.event("shutdown_report", cycle=cycle, step=step, reason=stop_reason, ok=False, error=str(ex))
 
 
         async def _run_with_continuations(agent_obj, prompt: str, max_turns: int, *, label: str, timeout_sec: int = 0, max_continuations: int = 0) -> Any:
@@ -755,6 +847,10 @@ async def main_async(args: argparse.Namespace) -> int:
                     except Exception:
                         pass
                     metrics.event("runner_stop", cycle=cycle_idx, reason="quota_exhausted")
+                    try:
+                        await write_shutdown_report("quota_exhausted", cycle=cycle_idx, step=-1)
+                    except Exception:
+                        pass
                 metrics.event("pm_end", cycle=cycle_idx, rc=1, error=str(ex))
                 return False
 
@@ -954,14 +1050,19 @@ async def main_async(args: argparse.Namespace) -> int:
                 )
 
                 # Quota/credits exhausted: graceful stop with artifacts preserved.
-                if dev_exc and dev_quota_exhausted:
+                dev_quota_exhausted = dev_quota_exhausted or is_quota_text(dev_log)
+                if dev_quota_exhausted:
                     state.setdefault("warnings", []).append(
-                        {"task": next_task.id, "reason": "quota_exhausted", "detail": str(dev_exc)}
+                        {"task": next_task.id, "reason": "quota_exhausted", "detail": str(dev_exc) if dev_exc else "usage limit"}
                     )
                     save_state(state_path, state)
                     metrics.event("runner_stop", cycle=cycle_idx, step=step, task_id=next_task.id, reason="quota_exhausted")
                     try:
                         stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
+                    except Exception:
+                        pass
+                    try:
+                        await write_shutdown_report("quota_exhausted", cycle=cycle_idx, step=step, last_task_id=next_task.id)
                     except Exception:
                         pass
                     return 0, "quota_exhausted", 0
@@ -1137,6 +1238,9 @@ async def main_async(args: argparse.Namespace) -> int:
             print(f"[CYCLE] {now_iso()} idx={cycle_idx} rc={rc} reason={reason} progress_delta={delta}")
 
             if rc != 0:
+                break
+
+            if reason == "quota_exhausted":
                 break
 
             if args.loop:
