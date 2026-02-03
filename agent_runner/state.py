@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+"""
+State and backlog utilities for the agent runner.
+
+This module defines the TaskItem dataclass and helper functions for
+loading and saving state, parsing and writing backlog files, and
+constructing a generic fallback backlog when the project manager fails
+to produce one.  The default tasks generated here are intended to be
+repository-agnostic so they can apply to any codebase.  In contrast
+with the original AgentCLI implementation, the fallback tasks avoid
+hard‑coded C# project specifics and instead focus on documentation,
+inventory, and test scaffolding that are universally helpful.
+"""
+
 import json
 import re
 from dataclasses import dataclass
@@ -11,6 +24,14 @@ from .utils import now_iso
 
 @dataclass
 class TaskItem:
+    """Simple representation of a backlog task.
+
+    The Agent runner represents tasks using this dataclass.  Each task
+    has an ID (e.g. ``T1``), a title, a prompt describing the work to
+    perform, an optional list of file paths relevant to the task, and a
+    ``done_when`` string that indicates the acceptance criteria.
+    """
+
     id: str
     title: str
     prompt: str
@@ -19,15 +40,24 @@ class TaskItem:
 
 
 def load_backlog_json(path: Path) -> list[TaskItem]:
-    """Load backlog tasks from BACKLOG.json.
+    """Load backlog tasks from a JSON file.
 
     Supported shapes:
-    - {"generated_at":..., "tasks":[...]}
-    - {"tasks":[...]}
-    - [...] (list of tasks)
 
-    This loader is intentionally tolerant of PM output drift:
-    - task keys may be {id,title,prompt,files,done_when} or include {description,files_changed,definition_of_done,...}
+    - ``{"generated_at": ..., "tasks": [...]}``
+    - ``{"tasks": [...]}``
+    - ``[...]`` (a list of task dictionaries)
+
+    The loader tolerates drift in PM output by accepting various
+    synonymous keys such as ``description`` for ``prompt`` and
+    ``definition_of_done`` for ``done_when``.  Missing IDs are
+    auto‑assigned sequentially starting at ``T01``.
+
+    Args:
+        path: Path to the JSON file.
+
+    Returns:
+        A list of ``TaskItem`` instances.
     """
     data = json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
 
@@ -81,7 +111,16 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
 
 
 def write_backlog_files(run_dir: Path, tasks: List[dict[str, Any]]) -> tuple[Path, Path]:
-    """Write BACKLOG.json and BACKLOG.md from a normalized task dict list."""
+    """Write ``BACKLOG.json`` and ``BACKLOG.md`` from a normalized task list.
+
+    Args:
+        run_dir: The run directory where backlog files will be stored.
+        tasks: A list of task dictionaries as produced by the PM or
+            normalized via ``_normalize_backlog_tasks``.
+
+    Returns:
+        A tuple of paths ``(BACKLOG.json, BACKLOG.md)``.
+    """
     backlog = {"generated_at": now_iso(), "tasks": tasks}
     run_dir.mkdir(parents=True, exist_ok=True)
     bj = run_dir / "BACKLOG.json"
@@ -97,7 +136,7 @@ def write_backlog_files(run_dir: Path, tasks: List[dict[str, Any]]) -> tuple[Pat
 
 
 def parse_backlog_md(path: Path) -> list[TaskItem]:
-    """Legacy fallback: parse simple checklist backlog."""
+    """Legacy fallback: parse a simple checklist backlog from a markdown file."""
     txt = path.read_text(encoding="utf-8-sig", errors="replace")
     items: list[TaskItem] = []
     for line in txt.splitlines():
@@ -119,17 +158,25 @@ def parse_backlog_md(path: Path) -> list[TaskItem]:
 
 
 def load_state(path: Path) -> dict[str, Any]:
+    """Load task progress state from ``STATE.json``.
+
+    The state file tracks which tasks have been completed or failed.  If
+    the file does not exist, a default structure with empty lists is
+    returned.
+    """
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
     return {"done": [], "failed": []}
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
+    """Persist the state dictionary to ``STATE.json``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
 
 
 def mark_backlog_done(backlog_md: Path, task_id: str) -> None:
+    """Mark a task as completed in ``BACKLOG.md`` by replacing ``[ ]`` with ``[x]``."""
     if not backlog_md.exists():
         return
     txt = backlog_md.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -146,39 +193,68 @@ def mark_backlog_done(backlog_md: Path, task_id: str) -> None:
 
 
 def write_default_p0_backlog(run_dir: Path) -> None:
-    """Fallback backlog used if PM fails to generate one."""
-    backlog = {
-        "generated_at": now_iso(),
-        "tasks": [
-            {
-                "id": "T3",
-                "title": "Startup minimum supported version gate",
-                "prompt": "Implement startup flow: call rpc/get_current_app_version once, compare with current app version, and route to UpdateRequired page when below minimum. No secrets. Add safe error UI.",
-                "files": ["MauiProgram.cs", "Components/Pages/UpdateRequired.razor", "Components/Pages/Home.razor", "Services/ApiService.cs"],
-                "done_when": "Below-min app version shows UpdateRequired UX; normal path continues; build passes.",
-            },
-            {
-                "id": "T4",
-                "title": "Supabase API client wrapper (RPC/Views policy)",
-                "prompt": "Create/adjust ApiService/Supabase wrapper enforcing: RPC for writes, Views/RPC for reads, retries/backoff for 429/5xx. Do not embed service-role/cron secrets.",
-                "files": ["Services/ApiService.cs"],
-                "done_when": "Reusable wrapper exists; no forbidden endpoints/keys; build passes.",
-            },
-            {
-                "id": "T5",
-                "title": "Auth-aware boot (session restore + token handling)",
-                "prompt": "Implement session restore via SecureStorage. Handle access token expiry and refresh flow (if applicable), with safe retry/backoff. Route to sign-in when needed. Ensure no secrets stored in repo.",
-                "files": ["Services/AuthService.cs", "Services/SecureStorageAdapter.cs"],
-                "done_when": "Cold start restores session when available; invalid session routes to login; build passes.",
-            },
-        ],
-    }
+    """Write a generic fallback backlog if the PM fails to produce one.
 
+    In situations where the project manager cannot generate a backlog
+    (for example, due to an LLM error or invalid response), this
+    function constructs a minimal set of universally applicable tasks to
+    bootstrap the development cycle.  The tasks are intentionally
+    language‑agnostic and avoid references to specific frameworks or
+    languages so they can be applied to any repository.
+
+    The default backlog contains the following tasks:
+
+    - **T1**: Create or update the project README with a clear
+      description, installation instructions, and usage examples.
+    - **T2**: Produce a file inventory listing all files and
+      directories in the repository along with a brief description of
+      their purpose.  Save this as ``FILE_INVENTORY.md``.
+    - **T3**: Introduce a basic unit test suite for key functions or
+      classes in the project.  Use an appropriate test framework
+      depending on the project's language (e.g. pytest, unittest, jest).
+
+    Args:
+        run_dir: The run directory where backlog files will be written.
+    """
+    tasks = [
+        {
+            "id": "T1",
+            "title": "Create or update README",
+            "prompt": (
+                "Write or update a README.md file in the repository root that describes what the project does, "
+                "how to set it up, and how to use it. If a README already exists, ensure it is comprehensive "
+                "and up to date."
+            ),
+            "files": ["README.md"],
+            "done_when": "A detailed README.md exists and includes description, setup, and usage."
+        },
+        {
+            "id": "T2",
+            "title": "Generate repository file inventory",
+            "prompt": (
+                "List all files and directories in the repository and write a brief description of each. "
+                "Save this information to a FILE_INVENTORY.md file at the root of the repository."
+            ),
+            "files": ["FILE_INVENTORY.md"],
+            "done_when": "FILE_INVENTORY.md exists and lists files and directories with descriptions."
+        },
+        {
+            "id": "T3",
+            "title": "Add a basic unit test suite",
+            "prompt": (
+                "Identify core functions or classes in the repository and create a basic set of unit tests. "
+                "Choose a standard test framework appropriate for the project's language (e.g., pytest for Python, "
+                "unittest, jest for JavaScript). Ensure the tests run without errors."
+            ),
+            "files": [],
+            "done_when": "A test suite exists and passes when executed."
+        },
+    ]
     run_dir.mkdir(parents=True, exist_ok=True)
+    backlog = {"generated_at": now_iso(), "tasks": tasks}
     (run_dir / "BACKLOG.json").write_text(json.dumps(backlog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
-
     md_lines = ["# BACKLOG", ""]
-    for t in backlog["tasks"]:
+    for t in tasks:
         md_lines.append(f"- [ ] {t['id']} {t['title']}")
     md_lines.append("")
     (run_dir / "BACKLOG.md").write_text("\n".join(md_lines), encoding="utf-8", errors="replace")
