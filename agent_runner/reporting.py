@@ -135,10 +135,37 @@ def collect_shutdown_context(repo: Path, run_dir: Path) -> dict[str, Any]:
 
     ctx["latest_task_dir"] = str(latest_task_dir) if latest_task_dir else ""
     if latest_task_dir:
-        b = latest_task_dir / "dotnet_build.txt"
-        t = latest_task_dir / "dotnet_test.txt"
-        ctx["build_log_tail"] = _last_n_lines(_read_text_limited(b, 12000), 120) if b.exists() else ""
-        ctx["test_log_tail"] = _last_n_lines(_read_text_limited(t, 12000), 120) if t.exists() else ""
+        # Build/test logs are written per-attempt under tasks/<task_id>/attempt_XX/
+        attempt_dir: Optional[Path] = None
+        try:
+            attempts = [p for p in latest_task_dir.iterdir() if p.is_dir() and p.name.startswith("attempt_")]
+            attempts.sort(key=lambda p: p.stat().st_mtime)
+            attempt_dir = attempts[-1] if attempts else None
+        except Exception:
+            attempt_dir = None
+
+        search_dirs = [attempt_dir, latest_task_dir]
+        build_tail = ""
+        test_tail = ""
+        for d in [p for p in search_dirs if p]:
+            # New generic names
+            b1 = d / "build.txt"
+            t1 = d / "test.txt"
+            # Legacy names
+            b0 = d / "dotnet_build.txt"
+            t0 = d / "dotnet_test.txt"
+            if not build_tail:
+                for bp in (b1, b0):
+                    if bp.exists():
+                        build_tail = _last_n_lines(_read_text_limited(bp, 12000), 120)
+                        break
+            if not test_tail:
+                for tp in (t1, t0):
+                    if tp.exists():
+                        test_tail = _last_n_lines(_read_text_limited(tp, 12000), 120)
+                        break
+        ctx["build_log_tail"] = build_tail
+        ctx["test_log_tail"] = test_tail
 
     # Analysis hints
     hints_dir = run_dir / "analysis_hints"

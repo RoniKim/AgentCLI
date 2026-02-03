@@ -12,7 +12,7 @@ from typing import Optional, Any
 
 from .analysis_cache import merge_dev_hints_to_global_changelog
 from .docs import load_dotenv_best_effort, resolve_docs_dir, generate_docs_digest, read_text_robust
-from .gates import dotnet_build, dotnet_test
+from .gates import run_build_gate, run_test_gate
 from .gitops import (
     git_head,
     git_changed_files,
@@ -1218,7 +1218,13 @@ async def main_async(args: argparse.Namespace) -> int:
 
                     if build_enabled:
                         metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
-                        ok = dotnet_build(repo=repo, build_target=args.dotnet_build_target, log_path=attempt_dir / "dotnet_build.txt")
+                        ok = run_build_gate(
+                            repo=repo,
+                            build_cmd=getattr(args, "build_cmd", []),
+                            build_timeout_sec=int(getattr(args, "build_timeout_seconds", 1800)),
+                            legacy_build_target=str(getattr(args, "dotnet_build_target", "") or ""),
+                            log_path=attempt_dir / "build.txt",
+                        )
                         metrics.event("build_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
                         if not ok:
                             if dev_auto_escalate and (attempt + 1) < max_attempts and "build_failed" in dev_escalate_on:
@@ -1226,7 +1232,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 continue
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
                             save_state(state_path, state)
-                            eprint(f"[STOP] Build failed after {next_task.id}. See {attempt_dir / 'dotnet_build.txt'}")
+                            eprint(f"[STOP] Build failed after {next_task.id}. See {attempt_dir / 'build.txt'}")
                             if cp:
                                 restore_checkpoint(repo, cp)
                                 metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="build_failed")
@@ -1234,12 +1240,13 @@ async def main_async(args: argparse.Namespace) -> int:
 
                     if run_tests:
                         metrics.event("test_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
-                        ok = dotnet_test(
+                        ok = run_test_gate(
                             repo=repo,
-                            test_target=args.dotnet_test_target,
-                            test_filter=args.dotnet_test_filter,
-                            log_path=attempt_dir / "dotnet_test.txt",
-                            timeout_sec=int(args.test_timeout_seconds),
+                            test_cmd=getattr(args, "test_cmd", []),
+                            test_timeout_sec=int(getattr(args, "test_timeout_seconds", 3600)),
+                            legacy_test_target=str(getattr(args, "dotnet_test_target", "") or ""),
+                            legacy_test_filter=str(getattr(args, "dotnet_test_filter", "") or ""),
+                            log_path=attempt_dir / "test.txt",
                         )
                         metrics.event("test_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
                         if not ok:
@@ -1248,7 +1255,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 continue
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "test_failed"})
                             save_state(state_path, state)
-                            eprint(f"[STOP] Tests failed after {next_task.id}. See {attempt_dir / 'dotnet_test.txt'}")
+                            eprint(f"[STOP] Tests failed after {next_task.id}. See {attempt_dir / 'test.txt'}")
                             if cp:
                                 restore_checkpoint(repo, cp)
                                 metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="test_failed")

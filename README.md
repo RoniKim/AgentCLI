@@ -63,7 +63,7 @@ python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --aut
 │  ├─ main.py                # --run-now(즉시 실행) 진입
 │  ├─ shell.py               # Interactive Shell (/start, /stop, /config, /set, /save, /load ...)
 │  ├─ cycle.py               # 러너 본체: PM→Dev→QA 사이클/루프/종료조건/게이트/산출물
-│  ├─ config.py              # config 로드/저장(기본: REPO/.doc/agent_config.json)
+│  ├─ config.py              # config 로드/저장(기본: AgentCLI/configs/<repo-hash>.json, legacy: REPO/.doc/agent_config.json)
 │  ├─ prompts.py             # 프롬프트 템플릿 로딩/렌더링 + 기본 템플릿 생성
 │  ├─ schemas.py             # PM 구조화 출력(pydantic 모델)
 │  ├─ structured.py          # JSON 파싱/리페어/검증 유틸
@@ -92,8 +92,8 @@ python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --aut
 * **Node.js + npx** (기본 MCP 모드가 `--mcp-mode npx` 이므로 필요)
 * (선택) **.NET SDK**
 
-  * 기본 설정은 **태스크마다 `dotnet build`를 수행**합니다.
-  * 레포가 .NET이 아니라면 `--no-build`를 권장합니다.
+  * 기본 build/test 게이트는 dotnet 기반입니다(레포 루트의 *.csproj 감지 등).
+  * 레포가 .NET이 아니면 `--no-build`를 쓰거나, config에서 `build_cmd`/`test_cmd`로 게이트 명령을 지정하세요.
 
 ---
 
@@ -155,7 +155,8 @@ python agent_cli.py --repo "C:/Dev/BudgetBook"
 * `/add <key> <value>` : 리스트 설정에 append (예: `policy_rule`)
 * `/load [path]` / `/save [path]` : config JSON 로드/저장
 
-  * 기본 경로: `REPO/.doc/agent_config.json`
+  * 기본 경로: `AgentCLI/configs/<repo-hash>.json`
+  * 레거시 호환: `REPO/.doc/agent_config.json` (존재할 때만 자동 로드)
 * `/start [--flags...]` : 러너를 **백그라운드 스레드로 실행**
 * `/todo --save` : `REPO/.doc/todo/Today_<hash>.md` 생성 후 선택 + 열기
 * `/todo --load latest|<path>` : 기존 TODO 선택 + 열기 (PM은 TODO를 최우선 반영하여 BACKLOG 생성)

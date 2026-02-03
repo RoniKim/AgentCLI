@@ -56,6 +56,13 @@ DEFAULTS: Dict[str, Any] = {
     "dotnet_test_target": "",
     "dotnet_test_filter": "",
 
+    # generic gates (preferred)
+    # If provided, these override dotnet_* targets/filters and are used as-is.
+    # Format: ["cmd", "arg1", "arg2", ...]
+    "build_cmd": [],
+    "test_cmd": [],
+    "build_timeout_seconds": 1800,
+
     # Models
     "pm_model": "gpt-5-mini",
     "dev_model": "gpt-5.1-codex-mini",
@@ -212,6 +219,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dotnet-test-target", default=None, help="dotnet test target (e.g., path to .sln or project)")
     p.add_argument("--dotnet-test-filter", default=None, help="dotnet test filter (passed to --filter)")
 
+    # Generic gates (preferred): comma-separated argv list.
+    # Examples:
+    #   --build-cmd "dotnet,build,My.sln"
+    #   --test-cmd  "dotnet,test,--filter,FullyQualifiedName~MyTest"
+    p.add_argument("--build-cmd", default=None, help="Build command (comma-separated argv list)")
+    p.add_argument("--test-cmd", default=None, help="Test command (comma-separated argv list)")
+    p.add_argument("--build-timeout-seconds", type=int, default=None)
+
     # Models / MCP
     p.add_argument("--pm-model", default=None)
     p.add_argument("--dev-model", default=None)
@@ -323,6 +338,53 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         eff["dev_escalate_on"] = list(defaults.get("dev_escalate_on", []))
     elif isinstance(de, str):
         eff["dev_escalate_on"] = [de]
+
+    # ---- normalize generic gate commands ----
+    def _norm_cmd(v: Any) -> list[str]:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            out = []
+            for it in v:
+                s = str(it).strip()
+                if s:
+                    out.append(s)
+            return out
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return []
+            if "," in s:
+                return [p.strip() for p in s.split(",") if p.strip()]
+            # fallback: whitespace split
+            return [p for p in s.split() if p]
+        return []
+
+    eff["build_cmd"] = _norm_cmd(eff.get("build_cmd"))
+    eff["test_cmd"] = _norm_cmd(eff.get("test_cmd"))
+
+    # Migration: if generic commands are empty but legacy dotnet targets are set,
+    # keep behavior by synthesizing build_cmd/test_cmd. (This does NOT delete dotnet_* keys.)
+    if not eff["build_cmd"]:
+        bt = str(eff.get("dotnet_build_target", "") or "").strip()
+        if bt:
+            eff["build_cmd"] = ["dotnet", "build", bt]
+    if not eff["test_cmd"]:
+        tt = str(eff.get("dotnet_test_target", "") or "").strip()
+        tf = str(eff.get("dotnet_test_filter", "") or "").strip()
+        if tt or tf:
+            cmd = ["dotnet", "test"]
+            if tt:
+                cmd.append(tt)
+            if tf:
+                cmd.extend(["--filter", tf])
+            eff["test_cmd"] = cmd
+
+    # build_timeout_seconds default fallback
+    try:
+        eff["build_timeout_seconds"] = int(eff.get("build_timeout_seconds") or defaults.get("build_timeout_seconds") or 1800)
+    except Exception:
+        eff["build_timeout_seconds"] = int(defaults.get("build_timeout_seconds") or 1800)
 
     return eff
 

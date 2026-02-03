@@ -61,8 +61,21 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
     loop_max_cycles = _ask_int("Loop max cycles (0 = unlimited)", int(defaults.get("loop_max_cycles", 0)))
     loop_idle_exit_after = _ask_int("Loop idle exit after seconds (0 = disabled)", int(defaults.get("loop_idle_exit_after", 0)))
 
-    no_build = _ask_bool("Disable dotnet build gate (no_build)", bool(defaults.get("no_build", False)))
+    no_build = _ask_bool("Disable build gate (no_build)", bool(defaults.get("no_build", False)))
     run_tests = _ask_bool("Enable tests gate (run_tests)", bool(defaults.get("run_tests", False)))
+
+    # Optional: generic build/test commands (preferred). If empty, legacy dotnet auto-detect may run.
+    use_custom_gates = _ask_bool("Use custom build/test commands (build_cmd/test_cmd)", False)
+    build_cmd: list[str] = []
+    test_cmd: list[str] = []
+    if use_custom_gates:
+        build_raw = _ask_str("build_cmd (comma-separated argv; empty=none)", "").strip()
+        test_raw = _ask_str("test_cmd  (comma-separated argv; empty=none)", "").strip()
+        build_cmd = [p.strip() for p in build_raw.split(",") if p.strip()] if build_raw else []
+        test_cmd = [p.strip() for p in test_raw.split(",") if p.strip()] if test_raw else []
+
+    build_timeout_seconds = _ask_int("Build timeout seconds", int(defaults.get("build_timeout_seconds", 1800)))
+    test_timeout_seconds = _ask_int("Test timeout seconds", int(defaults.get("test_timeout_seconds", 3600)))
 
     # Models (cost saver defaults)
     pm_model = _ask_str("PM model", str(defaults.get("pm_model", "gpt-5-mini")))
@@ -95,6 +108,10 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
         "loop_idle_exit_after": loop_idle_exit_after,
         "no_build": no_build,
         "run_tests": run_tests,
+        "build_cmd": build_cmd,
+        "test_cmd": test_cmd,
+        "build_timeout_seconds": build_timeout_seconds,
+        "test_timeout_seconds": test_timeout_seconds,
         "pm_model": pm_model,
         "dev_model": dev_model,
         "dev_model_tier1": dev_model_tier1,
