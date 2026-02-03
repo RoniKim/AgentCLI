@@ -23,7 +23,12 @@ PM_INSTRUCTIONS_DEFAULT = (
     "</output_verbosity_spec>\n\n"
     "<design_and_scope_constraints>\n"
     "- Stay strictly within scope: implement exactly what the user asks, no extra features.\n"
-    "- Avoid gold-plating, refactors, or style-only changes unless required for correctness.\n- Do NOT delegate PM-only work to Dev (e.g., create backlog, update PROJECT_ANALYSIS.md, write BACKLOG.json).\n- Task IDs may start at T1/T2; they MUST be meaningful and unique (no placeholders).\n"
+    "- Avoid gold-plating, refactors, or style-only changes unless required for correctness.\n"
+    "- Do NOT delegate PM-only work to Dev (e.g., create backlog, update PROJECT_ANALYSIS.md, write BACKLOG.json).\n"
+    "- Task IDs may start at T1/T2; they MUST be meaningful and unique (no placeholders).\n"
+    "- Backlog tasks MUST be development work only: feature implementation, UI/screens, bugfixes, tests, and required in-repo docs for the change.\n"
+    "- Do NOT include tasks whose deliverable is planning/analysis/review/triage, inventory generation, prompt changes, backlog/report creation, or run-artifact maintenance.\n"
+    "- 'UI design' means implement UI in code (Blazor/XAML/CSS), NOT external mockups (Figma etc.).\n"
     "</design_and_scope_constraints>\n\n"
     "<uncertainty_and_ambiguity>\n"
     "- If requirements are ambiguous or missing, do NOT guess.\n"
@@ -57,6 +62,8 @@ PM_OUTPUT_CONTRACT_SUFFIX = (
     "\n"
     "Rules:\n"
     "- Every task MUST include 'prompt' and 'done_when'.\n"
+    "- Tasks MUST be development work only (features, UI/screens, bugfixes, tests, required in-repo docs).\n"
+    "- Do NOT output tasks for PM/meta work (planning, analysis/review/triage, inventory, prompts, backlog/report creation, run artifacts).\n"
     "- Do NOT include extra keys.\n"
     "- Do NOT ask the user questions in prose; use 'open_questions'.\n"
     "</pm_output_contract>\n"
@@ -120,6 +127,11 @@ Backlog generation (v2.0):
 - Instead, return tasks in your final JSON response (schema in pm_instructions).
 - The runner will write BACKLOG.json and BACKLOG.md from your JSON.
 
+Hard constraint on tasks (important):
+- Tasks MUST be development work only (features, UI/screens, bugfixes, tests, required in-repo docs).
+- Do NOT include PM/meta work as tasks (planning, analysis/review/triage, inventory, prompt/backlog/report creation, run artifacts).
+- 'UI design' must be implemented in code, not external mockups.
+
 Optional: include run-local notes in JSON field 'notes_md'.
 
 User TODO (highest priority; if present, reflect into backlog tasks):
@@ -170,6 +182,11 @@ Dev change-hints (optional, run-local; use as clues):
 Backlog generation (v2.0):
 - Return tasks in your final JSON response (schema in pm_instructions).
 - The runner will write BACKLOG.json and BACKLOG.md from your JSON.
+
+Hard constraint on tasks (important):
+- Tasks MUST be development work only (features, UI/screens, bugfixes, tests, required in-repo docs).
+- Do NOT include PM/meta work as tasks (planning, analysis/review/triage, inventory, prompt/backlog/report creation, run artifacts).
+- 'UI design' must be implemented in code, not external mockups.
 
 Optional: include run-local notes in JSON field 'notes_md'.
 

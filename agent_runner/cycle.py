@@ -538,32 +538,71 @@ async def main_async(args: argparse.Namespace) -> int:
 
             def _looks_like_pm_work(t: dict[str, Any]) -> bool:
                 txt = f"{t.get('title','')}\n{t.get('prompt','')}".lower()
+                # Disallow PM/meta tasks: the backlog should contain only development work
+                # (features, UI/screens, bugfixes, tests, and required in-repo docs).
                 forbidden = (
+                    # backlog / planning / analysis
                     "create backlog",
                     "generate backlog",
                     "backlog.json",
                     "backlog.md",
+                    "backlog",
+                    "triage",
+                    "prioritize",
+                    "roadmap",
+                    "plan",
+                    "planning",
+                    "analysis",
+                    "review",
+                    "audit",
+                    # inventory / prompt / reports
+                    "repo_inventory",
+                    "repo inventory",
+                    "inventory",
+                    "prompt engineering",
+                    "update prompts",
+                    "pm instructions",
+                    "status report",
+                    "progress report",
+                    "shutdown report",
+                    "postmortem",
+                    # runner artifacts / cache
                     "project_analysis.md",
                     "project analysis",
+                    "pm_cache",
+                    "pm cache",
+                    "agent_runs",
+                    "run_dir",
+                    "state.json",
+                    "notes_pm.md",
                     "requirements.md",
                     "agent_tasks.md",
                     "notes.md",
-                    "pm_cache",
-                    "pm cache",
+                    # Korean common terms
+                    "백로그",
+                    "분석",
+                    "검토",
+                    "리포트",
+                    "보고서",
+                    "인벤토리",
+                    "프롬프트",
+                    "계획",
+                    "정리",
                 )
                 if any(k in txt for k in forbidden):
+                    # Allow cases where the task clearly includes implementation + fix.
+                    positive = ("implement", "fix", "build", "test", "ui", "screen", "page", "component", "refactor")
+                    if any(p in txt for p in positive):
+                        return False
                     return True
                 files = t.get("files") or []
                 if isinstance(files, list) and files:
                     fl = [str(x).replace("\\", "/").lower().strip() for x in files if str(x).strip()]
-                    # Allow todo feature (repo-local .doc/todo) but forbid run artifacts & PM cache.
-                    if all(
-                        (p.startswith(".doc/") or "/.doc/" in p)
-                        and (".doc/todo" not in p)
-                        for p in fl
-                    ):
-                        if any("agent_runs" in p or "pm_cache" in p or "pm_cache" in p for p in fl):
-                            return True
+                    # If the task only touches internal runner artifacts (.doc), treat as PM/meta.
+                    if all((p.startswith(".doc/") or "/.doc/" in p) for p in fl):
+                        return True
+                    if any("agent_runs" in p or "pm_cache" in p or "project_analysis" in p or "repo_inventory" in p for p in fl):
+                        return True
                 return False
 
             # Filter + keep order
