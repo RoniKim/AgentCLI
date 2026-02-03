@@ -102,6 +102,13 @@ DEFAULTS: Dict[str, Any] = {
     "mcp_mode": "npx",
     "codex_package": "@openai/codex@latest",
 
+    # Tool backend (extensible). If tool_command is set, it overrides everything.
+    # tool_backend presets: auto|codex|claude|disabled
+    "tool_backend": "auto",
+    "tool_name": "Codex_CLI",
+    "tool_command": "",
+    "tool_args": [],
+
     # Docs
     "docs_read_mode": "digest",
     "docs_dir": ".doc/Docs",
@@ -245,6 +252,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--codex-package", default=None)
     p.add_argument("--mcp-timeout-seconds", type=int, default=None)
 
+    # Tool backend overrides (extensible)
+    p.add_argument("--tool-backend", default=None, choices=["auto", "codex", "claude", "disabled"], help="Tool backend preset")
+    p.add_argument("--tool-name", default=None, help="Tool server display name")
+    p.add_argument("--tool-command", default=None, help="Override tool server command (e.g., codex, claude, npx)")
+    p.add_argument("--tool-args", default=None, help="Override tool server args (comma-separated argv or shell string)")
+
     # Docs / prompts
     p.add_argument("--docs-read-mode", default=None, choices=["digest", "full", "none"])
     p.add_argument("--docs-dir", default=None)
@@ -362,6 +375,12 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
 
     eff["build_cmd"] = _norm_cmd(eff.get("build_cmd"))
     eff["test_cmd"] = _norm_cmd(eff.get("test_cmd"))
+
+    # ---- normalize tool backend overrides ----
+    eff["tool_args"] = _norm_cmd(eff.get("tool_args"))
+    eff["tool_command"] = str(eff.get("tool_command") or "")
+    eff["tool_backend"] = str(eff.get("tool_backend") or "auto")
+    eff["tool_name"] = str(eff.get("tool_name") or "Codex_CLI")
 
     # Migration: if generic commands are empty but legacy dotnet targets are set,
     # keep behavior by synthesizing build_cmd/test_cmd. (This does NOT delete dotnet_* keys.)

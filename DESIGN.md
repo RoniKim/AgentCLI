@@ -33,6 +33,16 @@ SDK/모델이 max turns 예외를 내는 경우, 러너가 **continuation 프롬
 - `run_dir/metrics.jsonl`: 단계별 이벤트를 JSONL로 기록
 - `run_dir/tasks/*`: 태스크별 로그, 빌드/테스트 결과, 정책 스캔 결과
 
+### 5) Pipeline 모듈화 + Tool Backend 확장성
+
+- 오케스트레이션 로직은 `agent_runner/pipeline/manager.py`로 이동했고, 기존 `agent_runner/cycle.py`는 호환 래퍼로 유지한다.
+- 도구(MCP stdio 서버) 실행은 `agent_runner/pipeline/tooling.py`로 추출해, 이후 다른 CLI(예: Claude Code 등) 추가 시
+  메인 루프를 건드리지 않고도 `--tool-command/--tool-args` 또는 `--tool-backend` 프리셋으로 교체할 수 있다.
+
+예시:
+- 기본(Codex): `--mcp-mode npx` 또는 `--tool-backend codex`
+- 커스텀: `--tool-command "claude" --tool-args "mcp-server"`
+
 ## 트레이드오프
 
 - 완전한 'API 레벨 Strict Structured Outputs'는 OpenAI Responses API의 `response_format=json_schema`에 의존한다.
