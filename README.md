@@ -187,6 +187,39 @@ python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --autopilot --continuou
 
 ## 추천 실행 프리셋 (예시)
 
+### 비용 절감 모델 프리셋
+
+기본값은 비용을 크게 줄이기 위해 아래처럼 설정되어 있습니다.
+
+- PM: `gpt-5-mini`
+- Dev(기본): `gpt-5.1-codex-mini`
+- Dev(상향): `gpt-5.1-codex` → `gpt-5.2-codex` (실패 시 자동 상향 재시도)
+- QA: `gpt-5-mini`
+- Reporter(종료 보고서): `gpt-5-nano`
+
+config 예시(핵심만):
+
+```json
+{
+  "pm_model": "gpt-5-mini",
+  "dev_model": "gpt-5.1-codex-mini",
+  "dev_auto_escalate": true,
+  "dev_max_escalations": 2,
+  "dev_model_tier1": "gpt-5.1-codex",
+  "dev_model_tier2": "gpt-5.2-codex",
+  "dev_escalate_on": ["no_diff", "build_failed", "test_failed"],
+  "qa_model": "gpt-5-mini",
+  "reporter_model": "gpt-5-nano",
+  "report_max_turns": 8
+}
+```
+
+설명:
+- Dev가 `no_diff/build_failed/test_failed`로 멈출 상황이면, 동일 태스크를 상위 모델로 **최대 2번까지** 재시도합니다.
+- base 모델이 존재하지 않거나(예: model not found) 호출이 실패하면, 자동으로 tier1/tier2로 폴백합니다.
+- Codex 사용량 제한(usage limit) 발생 시에는 즉시 중단하고 `SHUTDOWN_REPORT.md`를 남깁니다.
+
+
 ### A) 스모크 테스트(백로그만 준비)
 
 토큰 사용을 최소화하고 “환경/산출물”만 확인할 때:

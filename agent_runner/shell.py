@@ -208,6 +208,8 @@ class RunnerShell:
         print(f"pm_model:   {eff.get('pm_model')}")
         print(f"dev_model:  {eff.get('dev_model')}")
         print(f"qa_model:   {eff.get('qa_model')}")
+        print(f"reporter_model: {eff.get('reporter_model')}")
+        print(f"dev_auto_escalate: {bool(eff.get('dev_auto_escalate'))} (max={eff.get('dev_max_escalations')}, on={eff.get('dev_escalate_on')})")
         print(f"mcp_mode:   {eff.get('mcp_mode')} (package={eff.get('codex_package')})")
         print(f"docs_read_mode: {eff.get('docs_read_mode')} (docs_dir={eff.get('docs_dir')})")
         print(f"debug:      {bool(eff.get('debug', False))}")

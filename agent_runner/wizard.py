@@ -64,6 +64,17 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
     no_build = _ask_bool("Disable dotnet build gate (no_build)", bool(defaults.get("no_build", False)))
     run_tests = _ask_bool("Enable tests gate (run_tests)", bool(defaults.get("run_tests", False)))
 
+    # Models (cost saver defaults)
+    pm_model = _ask_str("PM model", str(defaults.get("pm_model", "gpt-5-mini")))
+    dev_model = _ask_str("Dev model (base)", str(defaults.get("dev_model", "gpt-5.1-codex-mini")))
+    dev_model_tier1 = _ask_str("Dev model tier1 (escalation)", str(defaults.get("dev_model_tier1", "gpt-5.1-codex")))
+    dev_model_tier2 = _ask_str("Dev model tier2 (escalation)", str(defaults.get("dev_model_tier2", "gpt-5.2-codex")))
+    dev_auto_escalate = _ask_bool("Dev auto-escalate on failures", bool(defaults.get("dev_auto_escalate", True)))
+    dev_max_escalations = _ask_int("Dev max escalations per task", int(defaults.get("dev_max_escalations", 2)))
+    reporter_model = _ask_str("Reporter model (shutdown report)", str(defaults.get("reporter_model", "gpt-5-nano")))
+    report_max_turns = _ask_int("Reporter max turns", int(defaults.get("report_max_turns", 8)))
+    qa_model = _ask_str("QA model", str(defaults.get("qa_model", "gpt-5-mini")))
+
     # prompts_dir is python-side; allow empty
     prompts_dir = _ask_str(
         "Prompts directory (absolute or relative to AgentCLI home; empty=default)",
@@ -84,6 +95,16 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
         "loop_idle_exit_after": loop_idle_exit_after,
         "no_build": no_build,
         "run_tests": run_tests,
+        "pm_model": pm_model,
+        "dev_model": dev_model,
+        "dev_model_tier1": dev_model_tier1,
+        "dev_model_tier2": dev_model_tier2,
+        "dev_auto_escalate": dev_auto_escalate,
+        "dev_max_escalations": dev_max_escalations,
+        "dev_escalate_on": ["no_diff", "build_failed", "test_failed"],
+        "reporter_model": reporter_model,
+        "report_max_turns": report_max_turns,
+        "qa_model": qa_model,
         "prompts_dir": prompts_dir,
     }
 

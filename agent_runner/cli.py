@@ -58,9 +58,20 @@ DEFAULTS: Dict[str, Any] = {
 
     # Models
     "pm_model": "gpt-5-mini",
-    "dev_model": "gpt-5.2-codex",
+    "dev_model": "gpt-5.1-codex-mini",
     "qa_model": "gpt-5-mini",
     "qa_always": False,
+
+    # Reporter / shutdown report
+    "reporter_model": "gpt-5-nano",
+    "report_max_turns": 8,
+
+    # Dev cost controls
+    "dev_auto_escalate": True,
+    "dev_max_escalations": 2,
+    "dev_model_tier1": "gpt-5.1-codex",
+    "dev_model_tier2": "gpt-5.2-codex",
+    "dev_escalate_on": ["no_diff", "build_failed", "test_failed"],
 
     # Timeouts (seconds) - referenced by cycle.py
     "pm_timeout_seconds": 900,
@@ -205,6 +216,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pm-model", default=None)
     p.add_argument("--dev-model", default=None)
     p.add_argument("--qa-model", default=None)
+    p.add_argument("--reporter-model", default=None)
+    p.add_argument("--report-max-turns", type=int, default=None)
+
+    p.add_argument("--dev-auto-escalate", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--dev-max-escalations", type=int, default=None)
+    p.add_argument("--dev-model-tier1", default=None)
+    p.add_argument("--dev-model-tier2", default=None)
+    p.add_argument("--dev-escalate-on", action="append", default=None, help="Escalate conditions (repeatable): no_diff, build_failed, test_failed")
     p.add_argument("--qa-always", action=argparse.BooleanOptionalAction, default=None)
 
     p.add_argument("--mcp-mode", default=None, choices=["npx", "codex", "disabled"])
@@ -296,6 +315,14 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         eff["policy_rule"] = []
     elif isinstance(pr, str):
         eff["policy_rule"] = [pr]
+
+
+    # normalize dev_escalate_on (repeatable CLI flag)
+    de = eff.get("dev_escalate_on")
+    if de is None:
+        eff["dev_escalate_on"] = list(defaults.get("dev_escalate_on", []))
+    elif isinstance(de, str):
+        eff["dev_escalate_on"] = [de]
 
     return eff
 

@@ -229,13 +229,16 @@ async def main_async(args: argparse.Namespace) -> int:
             **_agent_kwargs(),
         )
 
-        dev = Agent(
-            name="MAUI_Developer",
-            model=args.dev_model,
-            mcp_servers=[codex_mcp_server],
-            instructions=f"{RECOMMENDED_PROMPT_PREFIX}\n{dev_instructions}".strip(),
-            **_agent_kwargs(),
-        )
+        def make_dev_agent(model_name: str):
+            return Agent(
+                name="MAUI_Developer",
+                model=model_name,
+                mcp_servers=[codex_mcp_server],
+                instructions=f"{RECOMMENDED_PROMPT_PREFIX}\n{dev_instructions}".strip(),
+                **_agent_kwargs(),
+            )
+
+        dev = make_dev_agent(args.dev_model)
 
         qa = Agent(
             name="QA",
@@ -248,7 +251,7 @@ async def main_async(args: argparse.Namespace) -> int:
         reporter_instructions = store.get("reporter_instructions", REPORTER_INSTRUCTIONS_DEFAULT)
         reporter = Agent(
             name="PM_Reporter",
-            model=args.pm_model,
+            model=getattr(args, "reporter_model", None) or args.pm_model,
             instructions=f"{RECOMMENDED_PROMPT_PREFIX}\n{reporter_instructions}".strip(),
             **_agent_kwargs(),
         )
@@ -331,6 +334,27 @@ async def main_async(args: argparse.Namespace) -> int:
                 or "codex/settings/usage" in s
                 or ("usage limit" in s and "try again at" in s)
             )
+
+        def is_model_invalid_exception(ex: Exception) -> bool:
+            """Detect invalid/unknown model errors and allow escalation fallback."""
+            needles = (
+                "model_not_found",
+                "model not found",
+                "does not exist",
+                "unknown model",
+                "invalid model",
+                "is not available",
+            )
+            for e in _iter_exc_chain(ex):
+                try:
+                    msg = (str(e) or "").lower()
+                except Exception:
+                    msg = ""
+                rep = (repr(e) or "").lower()
+                if ("model" in msg or "model" in rep) and (any(n in msg for n in needles) or any(n in rep for n in needles)):
+                    return True
+            return False
+
 
         async def write_shutdown_report(stop_reason: str, *, cycle: int, step: int, last_task_id: Optional[str] = None) -> None:
             """Best-effort shutdown report.
@@ -1037,172 +1061,245 @@ async def main_async(args: argparse.Namespace) -> int:
                 before = git_porcelain(repo)
 
                 analysis_hint_out = dev_hints_dir / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}.md"
+                # Dev model tiering (cost saver): base -> tier1 -> tier2 (best-effort)
+                dev_auto_escalate = bool(getattr(args, "dev_auto_escalate", False))
+                dev_max_escalations = int(getattr(args, "dev_max_escalations", 0) or 0)
+                dev_escalate_on = set(getattr(args, "dev_escalate_on", []) or [])
 
-                files_hint = "\n".join([f"- {f}" for f in (next_task.files or [])]) or "- (unspecified)"
-                ctx = {
-                    "repo": str(repo),
-                    "run_dir": str(run_dir),
-                    "task_id": next_task.id,
-                    "task_title": next_task.title,
-                    "task_prompt": next_task.prompt,
-                    "files_hint": files_hint,
-                    "done_when": next_task.done_when or "(unspecified)",
-                    "docs_read_mode": str(args.docs_read_mode),
-                    "digest_rel": str(digest_rel),
-                    "analysis_hint_out": str(analysis_hint_out),
-                    "codex_call_hint": codex_call_hint(autopilot),
-                }
-                dev_prompt = store.render("dev_task_prompt", DEV_TASK_TEMPLATE_DEFAULT, ctx)
-                dev_exc: Optional[Exception] = None
-                dev_is_max_turns = False
-                dev_quota_exhausted = False
-                dev_final = ""
+                tiers: list[str] = [str(args.dev_model)]
+                t1 = str(getattr(args, "dev_model_tier1", "") or "").strip()
+                t2 = str(getattr(args, "dev_model_tier2", "") or "").strip()
+                if t1 and t1 not in tiers:
+                    tiers.append(t1)
+                if t2 and t2 not in tiers:
+                    tiers.append(t2)
 
-                try:
-                    dev_result = await _run_with_continuations(
-                        dev,
-                        dev_prompt,
-                        max_turns=args.max_turns_per_task,
-                        label="dev",
-                        timeout_sec=int(getattr(args, "dev_timeout_seconds", 0)) or 0,
-                        max_continuations=int(getattr(args, "dev_max_turns_continuations", 0)) or 0,
-                    )
-                    dev_final = (dev_result.final_output or "")
-                except Exception as ex:
-                    dev_exc = ex
+                # Clamp attempts: base + max escalations, and never exceed tier list.
+                max_attempts = 1
+                if dev_auto_escalate and dev_max_escalations > 0:
+                    max_attempts = min(1 + dev_max_escalations, len(tiers))
+
+                # Ensure a rollback point when we may retry/escalate.
+                # (Even if isolate_task is false, retries need a clean baseline.)
+                if dev_auto_escalate and not cp:
+                    metrics.event("checkpoint_start", cycle=cycle_idx, step=step, task_id=next_task.id, reason="retry_escalation")
+                    cp = create_checkpoint(repo, task_dir / "checkpoint")
+                    metrics.event("checkpoint_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0, reason="retry_escalation")
+
+                task_completed = False
+
+                for attempt in range(max_attempts):
+                    if stop_path.exists():
+                        break
+
+                    # Restore baseline before retries
+                    if attempt > 0 and cp:
+                        restore_checkpoint(repo, cp)
+
+                    model_name = tiers[attempt]
+                    dev_agent = dev if attempt == 0 else make_dev_agent(model_name)
+
+                    attempt_dir = task_dir / f"attempt_{attempt:02d}"
+                    attempt_dir.mkdir(parents=True, exist_ok=True)
+
+                    before = git_porcelain(repo)
+
+                    analysis_hint_out = dev_hints_dir / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}_a{attempt:02d}.md"
+
+                    files_hint = "\n".join([f"- {f}" for f in (next_task.files or [])]) or "- (unspecified)"
+                    ctx = {
+                        "repo": str(repo),
+                        "run_dir": str(run_dir),
+                        "task_id": next_task.id,
+                        "task_title": next_task.title,
+                        "task_prompt": next_task.prompt,
+                        "files_hint": files_hint,
+                        "done_when": next_task.done_when or "(unspecified)",
+                        "docs_read_mode": str(args.docs_read_mode),
+                        "digest_rel": str(digest_rel),
+                        "analysis_hint_out": str(analysis_hint_out),
+                        "codex_call_hint": codex_call_hint(autopilot),
+                    }
+                    dev_prompt = store.render("dev_task_prompt", DEV_TASK_TEMPLATE_DEFAULT, ctx)
+
+                    metrics.event("dev_attempt_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, model=model_name)
+
+                    dev_exc: Optional[Exception] = None
+                    dev_is_max_turns = False
+                    dev_quota_exhausted = False
                     dev_final = ""
-                    dev_is_max_turns = is_max_turns_exception(ex)
-                    dev_quota_exhausted = is_quota_exception(ex)
-                    eprint(f"[DEV ERROR] {ex}")
-                    if bool(getattr(args, "debug", False)):
-                        eprint(traceback.format_exc())
 
-                # Always persist whatever we have (even on exceptions)
-                dev_log = (dev_final or "")
-                if dev_exc:
-                    dev_log += "\n[EXCEPTION]\n" + str(dev_exc) + "\n"
-
-                (task_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
-                (run_dir / "dev_logs").mkdir(parents=True, exist_ok=True)
-                (run_dir / "dev_logs" / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}.txt").write_text(
-                    dev_log + "\n", encoding="utf-8", errors="replace"
-                )
-
-                # Quota/credits exhausted: graceful stop with artifacts preserved.
-                dev_quota_exhausted = dev_quota_exhausted or is_quota_text(dev_log)
-                if dev_quota_exhausted:
-                    state.setdefault("warnings", []).append(
-                        {"task": next_task.id, "reason": "quota_exhausted", "detail": str(dev_exc) if dev_exc else "usage limit"}
-                    )
-                    save_state(state_path, state)
-                    metrics.event("runner_stop", cycle=cycle_idx, step=step, task_id=next_task.id, reason="quota_exhausted")
                     try:
-                        stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
-                    except Exception:
-                        pass
-                    try:
-                        await write_shutdown_report("quota_exhausted", cycle=cycle_idx, step=step, last_task_id=next_task.id)
-                    except Exception:
-                        pass
-                    return 0, "quota_exhausted", 0
+                        dev_result = await _run_with_continuations(
+                            dev_agent,
+                            dev_prompt,
+                            max_turns=args.max_turns_per_task,
+                            label="dev",
+                            timeout_sec=int(getattr(args, "dev_timeout_seconds", 0)) or 0,
+                            max_continuations=int(getattr(args, "dev_max_turns_continuations", 0)) or 0,
+                        )
+                        dev_final = (dev_result.final_output or "")
+                    except Exception as ex:
+                        dev_exc = ex
+                        dev_final = ""
+                        dev_is_max_turns = is_max_turns_exception(ex)
+                        dev_quota_exhausted = is_quota_exception(ex)
+                        eprint(f"[DEV ERROR] {ex}")
+                        if bool(getattr(args, "debug", False)):
+                            eprint(traceback.format_exc())
 
-                # Non-max-turn exceptions are treated as fatal (rollback + stop)
-                if dev_exc and not dev_is_max_turns:
-                    state.setdefault("failed", []).append({"task": next_task.id, "reason": "exception", "detail": str(dev_exc)})
-                    save_state(state_path, state)
-                    metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="exception")
-                    if cp:
-                        restore_checkpoint(repo, cp)
-                        metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="exception")
-                    return 1, "dev_exception", 0
+                    # Always persist whatever we have (even on exceptions)
+                    dev_log = (dev_final or "")
+                    if dev_exc:
+                        dev_log += "\n[EXCEPTION]\n" + str(dev_exc) + "\n"
 
-                # Max-turns exceptions are recoverable: continue to diff/build gates.
-                if dev_exc and dev_is_max_turns:
-                    state.setdefault("warnings", []).append({"task": next_task.id, "reason": "max_turns_exceeded", "detail": str(dev_exc)})
-                    save_state(state_path, state)
-                    metrics.event("task_warn", cycle=cycle_idx, step=step, task_id=next_task.id, reason="max_turns_exceeded")
-
-                after = git_porcelain(repo)
-                changed = (before != after)
-
-                if stop_on_no_diff and (not changed):
-                    state.setdefault("failed", []).append({"task": next_task.id, "reason": "no_diff"})
-                    save_state(state_path, state)
-                    metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="no_diff")
-                    eprint(f"[STOP] No diff produced for {next_task.id}.")
-                    if cp:
-                        restore_checkpoint(repo, cp)
-                        metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="no_diff")
-                    return 1, "no_diff", 0
-
-                if build_enabled:
-                    metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id)
-                    ok = dotnet_build(repo=repo, build_target=args.dotnet_build_target, log_path=task_dir / "dotnet_build.txt")
-                    metrics.event("build_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0 if ok else 1)
-                    if not ok:
-                        state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
-                        save_state(state_path, state)
-                        eprint(f"[STOP] Build failed after {next_task.id}. See {task_dir / 'dotnet_build.txt'}")
-                        if cp:
-                            restore_checkpoint(repo, cp)
-                            metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="build_failed")
-                        return 1, "build_failed", 0
-
-                if run_tests:
-                    metrics.event("test_start", cycle=cycle_idx, step=step, task_id=next_task.id)
-                    ok = dotnet_test(
-                        repo=repo,
-                        test_target=args.dotnet_test_target,
-                        test_filter=args.dotnet_test_filter,
-                        log_path=task_dir / "dotnet_test.txt",
-                        timeout_sec=int(args.test_timeout_seconds),
+                    (attempt_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
+                    (run_dir / "dev_logs").mkdir(parents=True, exist_ok=True)
+                    (run_dir / "dev_logs" / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}_a{attempt:02d}.txt").write_text(
+                        dev_log + "\n", encoding="utf-8", errors="replace"
                     )
-                    metrics.event("test_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0 if ok else 1)
-                    if not ok:
-                        state.setdefault("failed", []).append({"task": next_task.id, "reason": "test_failed"})
-                        save_state(state_path, state)
-                        eprint(f"[STOP] Tests failed after {next_task.id}. See {task_dir / 'dotnet_test.txt'}")
-                        if cp:
-                            restore_checkpoint(repo, cp)
-                            metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="test_failed")
-                        return 1, "test_failed", 0
 
-                if policy_scan_enabled:
-                    code, diff_text = run_cmd(["git", "diff"], cwd=repo, timeout_sec=120)
-                    scan_payload = diff_text if code == 0 else ""
-                    for rel in list_untracked(repo)[:50]:
-                        pth = repo / rel
+                    # Quota/credits exhausted: graceful stop with artifacts preserved.
+                    dev_quota_exhausted = dev_quota_exhausted or is_quota_text(dev_log)
+                    if dev_quota_exhausted:
+                        state.setdefault("warnings", []).append(
+                            {"task": next_task.id, "reason": "quota_exhausted", "detail": str(dev_exc) if dev_exc else "usage limit"}
+                        )
+                        save_state(state_path, state)
+                        metrics.event("runner_stop", cycle=cycle_idx, step=step, task_id=next_task.id, reason="quota_exhausted")
                         try:
-                            if pth.exists() and pth.is_file() and pth.stat().st_size < 2_000_000:
-                                txt, _enc = read_text_robust(pth)
-                                scan_payload += "\n\n# FILE: " + rel + "\n" + txt[:200_000]
+                            stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
+                        except Exception:
+                            pass
+                        try:
+                            await write_shutdown_report("quota_exhausted", cycle=cycle_idx, step=step, last_task_id=next_task.id)
+                        except Exception:
+                            pass
+                        return 0, "quota_exhausted", 0
+
+                    # Invalid/unknown model: allow escalation fallback when available.
+                    if dev_exc and is_model_invalid_exception(dev_exc):
+                        if (attempt + 1) < max_attempts:
+                            metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="model_invalid")
+                            continue
+
+                    # Non-max-turn exceptions are treated as fatal (rollback + stop)
+                    if dev_exc and not dev_is_max_turns:
+                        state.setdefault("failed", []).append({"task": next_task.id, "reason": "exception", "detail": str(dev_exc)})
+                        save_state(state_path, state)
+                        metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="exception")
+                        if cp:
+                            restore_checkpoint(repo, cp)
+                            metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="exception")
+                        return 1, "dev_exception", 0
+
+                    # Max-turns exceptions are recoverable: continue to diff/build gates.
+                    if dev_exc and dev_is_max_turns:
+                        state.setdefault("warnings", []).append({"task": next_task.id, "reason": "max_turns_exceeded", "detail": str(dev_exc)})
+                        save_state(state_path, state)
+                        metrics.event("task_warn", cycle=cycle_idx, step=step, task_id=next_task.id, reason="max_turns_exceeded")
+
+                    after = git_porcelain(repo)
+                    changed = (before != after)
+
+                    # Escalate conditions: retry same task with a higher tier model.
+                    if stop_on_no_diff and (not changed):
+                        if dev_auto_escalate and (attempt + 1) < max_attempts and "no_diff" in dev_escalate_on:
+                            metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="no_diff")
+                            continue
+                        state.setdefault("failed", []).append({"task": next_task.id, "reason": "no_diff"})
+                        save_state(state_path, state)
+                        metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="no_diff")
+                        eprint(f"[STOP] No diff produced for {next_task.id}.")
+                        if cp:
+                            restore_checkpoint(repo, cp)
+                            metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="no_diff")
+                        return 1, "no_diff", 0
+
+                    if build_enabled:
+                        metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
+                        ok = dotnet_build(repo=repo, build_target=args.dotnet_build_target, log_path=attempt_dir / "dotnet_build.txt")
+                        metrics.event("build_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
+                        if not ok:
+                            if dev_auto_escalate and (attempt + 1) < max_attempts and "build_failed" in dev_escalate_on:
+                                metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="build_failed")
+                                continue
+                            state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
+                            save_state(state_path, state)
+                            eprint(f"[STOP] Build failed after {next_task.id}. See {attempt_dir / 'dotnet_build.txt'}")
+                            if cp:
+                                restore_checkpoint(repo, cp)
+                                metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="build_failed")
+                            return 1, "build_failed", 0
+
+                    if run_tests:
+                        metrics.event("test_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
+                        ok = dotnet_test(
+                            repo=repo,
+                            test_target=args.dotnet_test_target,
+                            test_filter=args.dotnet_test_filter,
+                            log_path=attempt_dir / "dotnet_test.txt",
+                            timeout_sec=int(args.test_timeout_seconds),
+                        )
+                        metrics.event("test_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
+                        if not ok:
+                            if dev_auto_escalate and (attempt + 1) < max_attempts and "test_failed" in dev_escalate_on:
+                                metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="test_failed")
+                                continue
+                            state.setdefault("failed", []).append({"task": next_task.id, "reason": "test_failed"})
+                            save_state(state_path, state)
+                            eprint(f"[STOP] Tests failed after {next_task.id}. See {attempt_dir / 'dotnet_test.txt'}")
+                            if cp:
+                                restore_checkpoint(repo, cp)
+                                metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="test_failed")
+                            return 1, "test_failed", 0
+
+                    if policy_scan_enabled:
+                        code, diff_text = run_cmd(["git", "diff"], cwd=repo, timeout_sec=120)
+                        scan_payload = diff_text if code == 0 else ""
+                        for rel in list_untracked(repo)[:50]:
+                            pth = repo / rel
+                            try:
+                                if pth.exists() and pth.is_file() and pth.stat().st_size < 2_000_000:
+                                    txt, _enc = read_text_robust(pth)
+                                    scan_payload += "\n\n# FILE: " + rel + "\n" + txt[:200_000]
+                            except Exception:
+                                pass
+
+                        scan_result = policy_scan_text(scan_payload, policy_rules)
+                        (attempt_dir / "policy_scan.json").write_text(json.dumps(scan_result, ensure_ascii=False, indent=2),
+                                                                 encoding="utf-8", errors="replace")
+                        (run_dir / "policy_scan.json").write_text(
+                            json.dumps({"cycle": cycle_idx, "step": step, "task_id": next_task.id, **scan_result}, ensure_ascii=False, indent=2),
+                            encoding="utf-8", errors="replace"
+                        )
+                        try:
+                            with (run_dir / "policy_scan_history.jsonl").open("a", encoding="utf-8", errors="replace") as f:
+                                f.write(json.dumps({"ts": now_iso(), "cycle": cycle_idx, "step": step, "task_id": next_task.id, **scan_result}, ensure_ascii=False) + "\n")
                         except Exception:
                             pass
 
-                    scan_result = policy_scan_text(scan_payload, policy_rules)
-                    (task_dir / "policy_scan.json").write_text(json.dumps(scan_result, ensure_ascii=False, indent=2),
-                                                             encoding="utf-8", errors="replace")
-                    (run_dir / "policy_scan.json").write_text(
-                        json.dumps({"cycle": cycle_idx, "step": step, "task_id": next_task.id, **scan_result}, ensure_ascii=False, indent=2),
-                        encoding="utf-8", errors="replace"
-                    )
-                    try:
-                        with (run_dir / "policy_scan_history.jsonl").open("a", encoding="utf-8", errors="replace") as f:
-                            f.write(json.dumps({"ts": now_iso(), "cycle": cycle_idx, "step": step, "task_id": next_task.id, **scan_result}, ensure_ascii=False) + "\n")
-                    except Exception:
-                        pass
+                        if not scan_result.get("ok", True):
+                            state.setdefault("failed", []).append({"task": next_task.id, "reason": "policy_violation"})
+                            save_state(state_path, state)
+                            eprint(f"[STOP] Policy scan failed after {next_task.id}. See {attempt_dir / 'policy_scan.json'}")
+                            metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="policy_violation",
+                                          violations=len(scan_result.get("violations", [])))
+                            if cp:
+                                restore_checkpoint(repo, cp)
+                                metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="policy_violation")
+                            return 1, "policy_violation", 0
 
-                    if not scan_result.get("ok", True):
-                        state.setdefault("failed", []).append({"task": next_task.id, "reason": "policy_violation"})
-                        save_state(state_path, state)
-                        eprint(f"[STOP] Policy scan failed after {next_task.id}. See {task_dir / 'policy_scan.json'}")
-                        metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="policy_violation",
-                                      violations=len(scan_result.get("violations", [])))
-                        if cp:
-                            restore_checkpoint(repo, cp)
-                            metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="policy_violation")
-                        return 1, "policy_violation", 0
+                    # Success: exit attempt loop
+                    metrics.event("dev_attempt_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0)
+                    task_completed = True
+                    break
 
+                if not task_completed:
+                    # No success after attempts and not otherwise returned: treat as failure.
+                    state.setdefault("failed", []).append({"task": next_task.id, "reason": "exhausted_attempts"})
+                    save_state(state_path, state)
+                    return 1, "exhausted_attempts", 0
                 # Mark done only after gates
                 done_set.add(next_task.id)
                 state["done"] = sorted(list(done_set))
