@@ -13,6 +13,8 @@ from .config import load_config, save_config, resolve_config_path, default_confi
 from .docs import load_dotenv_best_effort
 from .cycle import run as run_cycle
 from .run_dir import make_run_dir
+from .run_dir import find_latest_run_dir
+from .todo import ensure_todo_file, read_current_todo, set_current_todo, open_path
 
 # prompt_toolkit is an optional dependency at import time (for nicer UX).
 # If it's missing, we fall back to basic input().
@@ -223,9 +225,66 @@ class RunnerShell:
         if rd:
             self.run_dir = Path(rd).expanduser().resolve()
             return self.run_dir
-        self.run_dir = make_run_dir(self.repo)
+        # For unattended overnight ops, prefer resuming the latest run_dir
+        # (prevents backlog/state duplication when the shell restarts).
+        prefer_resume = bool(eff.get("loop") or eff.get("continuous") or eff.get("autopilot"))
+        latest = find_latest_run_dir(self.repo) if prefer_resume else None
+        self.run_dir = latest if latest is not None else make_run_dir(self.repo)
         self.overrides["run_dir"] = str(self.run_dir)
         return self.run_dir
+
+    def todo(self, args: list[str]) -> None:
+        """/todo UX
+
+        - /todo --save  : create today's todo if missing, select it, and open
+        - /todo --load <path|latest> : select an existing todo and open
+        """
+        if not self.repo:
+            print("[ERR] repo is not set. Use /repo <path>.")
+            return
+
+        if not args:
+            p, txt = read_current_todo(self.repo)
+            if not p:
+                print("[INFO] No todo selected. Use: /todo --save or /todo --load <path|latest>")
+                return
+            print(f"[TODO] {p}")
+            if txt:
+                preview = "\n".join(txt.splitlines()[:40])
+                print(preview)
+            return
+
+        if args[0] == "--save":
+            p = ensure_todo_file(self.repo)
+            print(f"[OK] Todo saved/selected: {p}")
+            if not open_path(p):
+                print("[WARN] Failed to auto-open. Open it manually.")
+            return
+
+        if args[0] == "--load":
+            if len(args) < 2:
+                print("[ERR] Usage: /todo --load <path|latest>")
+                return
+            target = args[1].strip()
+            if target.lower() == "latest":
+                p, _txt = read_current_todo(self.repo)
+                if not p:
+                    print("[ERR] No todo files found. Use /todo --save first.")
+                    return
+                set_current_todo(self.repo, p)
+            else:
+                pp = Path(target).expanduser()
+                p = (self.repo / pp).resolve() if not pp.is_absolute() else pp.resolve()
+                if not p.exists() or not p.is_file():
+                    print(f"[ERR] Todo not found: {p}")
+                    return
+                set_current_todo(self.repo, p)
+            print(f"[OK] Todo selected: {p}")
+            if not open_path(p):
+                print("[WARN] Failed to auto-open. Open it manually.")
+            return
+
+        print("[ERR] Usage: /todo --save | /todo --load <path|latest>")
 
     def start(self, extra_tokens: list[str]) -> None:
         if self._runner_is_alive():
@@ -393,6 +452,7 @@ class RunnerShell:
                     "  /start [--flags...]        Start runner in background (ex: /start --autopilot --loop)",
                     "  /stop [--wait]             Request graceful stop (creates run_dir/STOP)",
                     "  /status                    Show runner status",
+                    "  /todo [--save|--load ...]   Create/select and open a repo-local TODO file (.doc/todo)",
                     "  /exit                      Quit",
                     "",
                     "Tips:",
@@ -450,6 +510,7 @@ def _build_completer() -> Any:
             "/start": start_flags,
             "/stop": WordCompleter(["--wait"], ignore_case=True),
             "/status": None,
+            "/todo": WordCompleter(["--save", "--load", "latest"], ignore_case=True),
             "/exit": None,
             "/quit": None,
         }
@@ -568,6 +629,10 @@ def _dispatch(sh: RunnerShell, line: str) -> bool:
         return False
     if cmd == "/status":
         sh.status()
+        return False
+
+    if cmd == "/todo":
+        sh.todo(args)
         return False
 
     print("[ERR] Unknown command. Type /help.")

@@ -148,12 +148,18 @@ python agent_cli.py --repo "C:/Dev/BudgetBook"
 
   * 기본 경로: `REPO/.doc/agent_config.json`
 * `/start [--flags...]` : 러너를 **백그라운드 스레드로 실행**
+* `/todo --save` : `REPO/.doc/todo/Today_<hash>.md` 생성 후 선택 + 열기
+* `/todo --load latest|<path>` : 기존 TODO 선택 + 열기 (PM은 TODO를 최우선 반영하여 BACKLOG 생성)
 * `/stop [--wait]` : `run_dir/<STOP_FILE>` 생성으로 graceful stop 요청
 * `/status` : 러너 상태
 * `/exit` : 종료
 
 > 주의: interactive 모드에서 러너는 **현재 터미널 프로세스에 종속**됩니다.
 > 터미널을 닫으면 같이 종료될 수 있으므로 “밤새 무인 운용”은 `--run-now`를 권장합니다.
+
+추가 팁:
+* interactive에서 `run_dir`을 직접 지정하지 않았고, `--loop/--continuous/--autopilot`로 시작하면
+  기본적으로 **가장 최신 run_dir을 이어서(resume) 사용**합니다(백로그/상태 중복 생성 방지).
 
 ---
 

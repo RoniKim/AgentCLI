@@ -26,9 +26,57 @@ class InventoryItem:
 
 
 def build_repo_inventory(repo: Path, max_file_size: int = 2_000_000) -> list[InventoryItem]:
-    """Inventory of ALL git-tracked files (binary/too large still listed as skipped)."""
+    """Inventory of ALL repo files.
+
+    Primary source is *git-tracked* files (via `git ls-files`).
+    However, in the field we sometimes fail to read inventory because:
+    - Git is not installed / not on PATH
+    - repo path is not a Git worktree (or permissions issues)
+
+    In those cases, we fall back to a conservative filesystem walk (excluding common large dirs).
+    """
+
+    def _fallback_walk() -> list[str]:
+        # Keep this conservative to avoid accidentally including huge trees (node_modules, bin/obj, .venv, etc.)
+        IGNORE_DIRS = {
+            ".git",
+            ".doc",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "node_modules",
+            "bin",
+            "obj",
+            ".idea",
+            ".vs",
+            "dist",
+            "build",
+        }
+        MAX_FILES = 5000
+
+        rels: list[str] = []
+        try:
+            for p in repo.rglob("*"):
+                if not p.is_file():
+                    continue
+                if any(part in IGNORE_DIRS for part in p.parts):
+                    continue
+                rels.append(p.relative_to(repo).as_posix())
+                if len(rels) >= MAX_FILES:
+                    rels.append("(truncated: too many files)")
+                    break
+        except Exception:
+            return []
+
+        rels.sort()
+        return rels
+
+    rel_paths = git_ls_files(repo)
+    if not rel_paths:
+        rel_paths = _fallback_walk()
+
     items: list[InventoryItem] = []
-    for rel in git_ls_files(repo):
+    for rel in rel_paths:
         p = repo / rel
         try:
             size = int(p.stat().st_size)
@@ -73,7 +121,7 @@ def write_repo_inventory_files(repo: Path, pm_cache_dir: Path, inventory: list[I
     )
 
     lines: list[str] = []
-    lines.append("# REPO INVENTORY (git-tracked)")
+    lines.append("# REPO INVENTORY (git-tracked; fallback=walk)")
     lines.append("")
     lines.append(f"- generated_at: {now_iso()}")
     lines.append(f"- count: {len(inventory)}")

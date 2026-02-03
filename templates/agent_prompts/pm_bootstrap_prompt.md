@@ -34,6 +34,9 @@ Docs folder: {docs_dir}
 Docs read mode: {docs_read_mode}
 Digest file (preferred): {digest_rel}
 
+TODO (user-authored; HIGHEST PRIORITY for backlog planning):
+{todo_block}
+
 Hard rules:
 ## Scope Guard (Frontend-only)
 

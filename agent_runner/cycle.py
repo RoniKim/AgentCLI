@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import time
 import traceback
 from pathlib import Path
@@ -23,6 +24,7 @@ from .gitops import (
     list_untracked,
 )
 from .inventory import build_repo_inventory, write_repo_inventory_files
+from .todo import read_current_todo, format_todo_block
 from .metrics import MetricsLogger
 from .policy import load_policy_rules, policy_scan_text
 from .prompts import (
@@ -172,6 +174,9 @@ async def main_async(args: argparse.Namespace) -> int:
     pm_fp_obj = _load_json_if_exists(pm_fp_path, default={"fingerprint": "", "updated_at": ""})
     last_pm_fp = str(pm_fp_obj.get("fingerprint") or "")
 
+    # Used to propagate "graceful stop" reasons out of nested helpers.
+    pm_stop_reason: dict[str, str] = {}
+
     # Snapshot (HEAD tracking)
     snapshot_json = pm_cache_dir / "REPO_SNAPSHOT.json"
     snapshot = _load_json_if_exists(snapshot_json, default={"head": "", "updated_at": ""})
@@ -238,6 +243,64 @@ async def main_async(args: argparse.Namespace) -> int:
         )
 
 
+        def _iter_exc_chain(ex: Exception, max_depth: int = 6):
+            """Yield exception + its causes/contexts (best-effort)."""
+            cur = ex
+            seen = set()
+            for _ in range(max_depth):
+                if cur is None or id(cur) in seen:
+                    break
+                seen.add(id(cur))
+                yield cur
+                nxt = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+                if nxt is None or not isinstance(nxt, BaseException):
+                    break
+                cur = nxt  # type: ignore[assignment]
+
+
+        def is_max_turns_exception(ex: Exception) -> bool:
+            for e in _iter_exc_chain(ex):
+                try:
+                    msg = (str(e) or "").lower()
+                except Exception:
+                    msg = ""
+                name = type(e).__name__.lower()
+                rep = (repr(e) or "").lower()
+                if (
+                    "max turns" in msg
+                    or "max_turn" in msg
+                    or "maxturn" in msg
+                    or "maxturn" in name
+                    or "max_turn" in name
+                    or ("turn" in name and "max" in name)
+                    or "maxturnsexceeded" in rep
+                ):
+                    return True
+            return False
+
+
+        def is_quota_exception(ex: Exception) -> bool:
+            """Detect OpenAI/SDK quota/billing exhaustion to exit gracefully."""
+            needles = (
+                "insufficient_quota",
+                "quota exceeded",
+                "exceeded your current quota",
+                "billing hard limit",
+                "hard limit",
+                "plan and billing",
+                "payment required",
+            )
+            for e in _iter_exc_chain(ex):
+                try:
+                    msg = (str(e) or "").lower()
+                except Exception:
+                    msg = ""
+                rep = (repr(e) or "").lower()
+                if any(n in msg for n in needles) or any(n in rep for n in needles):
+                    return True
+            return False
+
+
         async def _run_with_continuations(agent_obj, prompt: str, max_turns: int, *, label: str, timeout_sec: int = 0, max_continuations: int = 0) -> Any:
             """Run an agent, optionally continuing if a max-turns exception occurs.
 
@@ -247,28 +310,13 @@ async def main_async(args: argparse.Namespace) -> int:
             """
             cont_left = int(max_continuations or 0)
 
-            def _is_max_turns(ex: Exception) -> bool:
-                try:
-                    msg = (str(ex) or "").lower()
-                except Exception:
-                    msg = ""
-                name = type(ex).__name__.lower()
-                return (
-                    "max turns" in msg
-                    or "max_turn" in msg
-                    or "maxturn" in msg
-                    or "maxturn" in name
-                    or "max_turn" in name
-                    or ("turn" in name and "max" in name)
-                )
-
             while True:
                 try:
                     if timeout_sec and timeout_sec > 0:
                         return await asyncio.wait_for(Runner.run(agent_obj, prompt, max_turns=max_turns), timeout=timeout_sec)
                     return await Runner.run(agent_obj, prompt, max_turns=max_turns)
                 except Exception as ex:
-                    if cont_left > 0 and _is_max_turns(ex):
+                    if cont_left > 0 and is_max_turns_exception(ex):
                         cont_left -= 1
                         prompt = (
                             prompt
@@ -387,6 +435,107 @@ async def main_async(args: argparse.Namespace) -> int:
             block = "\n".join(lines) if lines else "(no backlog found)"
             return block, tasks, done_ids
 
+        def _normalize_backlog_tasks(raw_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            """Normalize/defend backlog tasks produced by PM.
+
+            Goals:
+            - Prevent PM from delegating PM-only work to Dev (e.g., "create backlog" tasks)
+            - Enforce task IDs >= T3, without breaking existing stable IDs
+            - Keep token usage predictable by keeping tasks atomic and concrete
+            """
+
+            def _looks_like_pm_work(t: dict[str, Any]) -> bool:
+                txt = f"{t.get('title','')}\n{t.get('prompt','')}".lower()
+                forbidden = (
+                    "create backlog",
+                    "generate backlog",
+                    "backlog.json",
+                    "backlog.md",
+                    "project_analysis.md",
+                    "project analysis",
+                    "requirements.md",
+                    "agent_tasks.md",
+                    "notes.md",
+                    "pm_cache",
+                    "pm cache",
+                )
+                if any(k in txt for k in forbidden):
+                    return True
+                files = t.get("files") or []
+                if isinstance(files, list) and files:
+                    fl = [str(x).replace("\\", "/").lower().strip() for x in files if str(x).strip()]
+                    # Allow todo feature (repo-local .doc/todo) but forbid run artifacts & PM cache.
+                    if all(
+                        (p.startswith(".doc/") or "/.doc/" in p)
+                        and (".doc/todo" not in p)
+                        for p in fl
+                    ):
+                        if any("agent_runs" in p or "pm_cache" in p or "pm_cache" in p for p in fl):
+                            return True
+                return False
+
+            # Filter + keep order
+            filtered: list[dict[str, Any]] = []
+            removed: list[dict[str, Any]] = []
+            for t in raw_tasks:
+                if not isinstance(t, dict):
+                    continue
+                if _looks_like_pm_work(t):
+                    removed.append(t)
+                    continue
+                filtered.append(t)
+
+            if removed:
+                try:
+                    notes_path = run_dir / "NOTES_PM.md"
+                    existing = ""
+                    if notes_path.exists():
+                        existing = notes_path.read_text(encoding="utf-8-sig", errors="replace")
+                    extra = ["\n\n## Removed PM-only tasks (auto-filter)", "(These were removed to avoid PM delegating planning artifacts to Dev.)", ""]
+                    for t in removed[:20]:
+                        extra.append(f"- {t.get('id','(no id)')} {t.get('title','')}")
+                    notes_path.write_text((existing.rstrip() + "\n" + "\n".join(extra)).strip() + "\n", encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+
+            # Enforce IDs >= T3 and unique.
+            used: set[str] = set()
+            next_num = 3
+            out: list[dict[str, Any]] = []
+            for t in filtered:
+                tid = str(t.get("id") or "").strip()
+                m = re.match(r"^T(\d+)$", tid)
+                if m:
+                    try:
+                        n = int(m.group(1))
+                    except Exception:
+                        n = 0
+                else:
+                    n = 0
+
+                if n >= 3 and tid not in used:
+                    fixed_id = tid
+                else:
+                    while True:
+                        cand = f"T{next_num}"
+                        next_num += 1
+                        if cand not in used:
+                            fixed_id = cand
+                            break
+
+                used.add(fixed_id)
+                # Normalize keys
+                out.append(
+                    {
+                        "id": fixed_id,
+                        "title": str(t.get("title") or fixed_id).strip() or fixed_id,
+                        "prompt": str(t.get("prompt") or "").strip() or f"Implement {fixed_id}.",
+                        "files": t.get("files") if isinstance(t.get("files"), list) else [],
+                        "done_when": str(t.get("done_when") or "Git diff exists and build passes.").strip(),
+                    }
+                )
+            return out
+
         async def run_pm_if_needed(cycle_idx: int, curr_head: str, changed_files: list[str], repo_fp: str, force_refresh_backlog: bool = False) -> bool:
             """Returns True if PM is OK (ran successfully or skipped safely)."""
             nonlocal last_pm_fp, prev_head
@@ -412,8 +561,26 @@ async def main_async(args: argparse.Namespace) -> int:
             pm_output_path = run_dir / f"pm_final_output_cycle_{cycle_idx:03d}.txt"
 
             # Keep repo inventory up-to-date (local, no tokens)
-            inventory = build_repo_inventory(repo)
-            _, inv_md = write_repo_inventory_files(repo, pm_cache_dir, inventory)
+            try:
+                inventory = build_repo_inventory(repo)
+                _, inv_md = write_repo_inventory_files(repo, pm_cache_dir, inventory)
+            except Exception as inv_ex:
+                metrics.event("inventory_error", cycle=cycle_idx, error=str(inv_ex))
+                # Last-resort fallback: create a minimal placeholder file so PM can proceed.
+                inv_md = (pm_cache_dir / "REPO_INVENTORY.md")
+                try:
+                    pm_cache_dir.mkdir(parents=True, exist_ok=True)
+                    inv_md.write_text("# REPO_INVENTORY\n\n- (inventory generation failed)\n", encoding="utf-8", errors="replace")
+                except Exception:
+                    inv_md = (run_dir / "REPO_INVENTORY.md")
+                    try:
+                        inv_md.write_text("# REPO_INVENTORY\n\n- (inventory generation failed)\n", encoding="utf-8", errors="replace")
+                    except Exception:
+                        pass
+
+            # Optional TODO context (user-authored; drives backlog priority)
+            todo_path, todo_text = read_current_todo(repo)
+            todo_block = format_todo_block(todo_path, todo_text)
 
             try:
                 if need_bootstrap:
@@ -423,6 +590,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "inv_md": str(inv_md),
                         "repo": str(repo),
                         "run_dir": str(run_dir),
+                        "todo_block": todo_block,
                         "docs_dir": str(docs_dir) if docs_dir else "(none)",
                         "docs_read_mode": str(args.docs_read_mode),
                         "digest_rel": str(digest_rel),
@@ -467,7 +635,9 @@ async def main_async(args: argparse.Namespace) -> int:
                             )
 
                     if merged_tasks:
-                        write_backlog_files(run_dir, merged_tasks)
+                        merged_tasks = _normalize_backlog_tasks(merged_tasks)
+                        if merged_tasks:
+                            write_backlog_files(run_dir, merged_tasks)
 
                     last_pm_fp = repo_fp or last_pm_fp
                     pm_fp_path.write_text(
@@ -501,6 +671,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "inv_md": str(inv_md),
                         "repo": str(repo),
                         "run_dir": str(run_dir),
+                        "todo_block": todo_block,
                         "docs_dir": str(docs_dir) if docs_dir else "(none)",
                         "docs_read_mode": str(args.docs_read_mode),
                         "digest_rel": str(digest_rel),
@@ -555,7 +726,9 @@ async def main_async(args: argparse.Namespace) -> int:
                             )
 
                     if merged_tasks:
-                        write_backlog_files(run_dir, merged_tasks)
+                        merged_tasks = _normalize_backlog_tasks(merged_tasks)
+                        if merged_tasks:
+                            write_backlog_files(run_dir, merged_tasks)
 
                     last_pm_fp = repo_fp or last_pm_fp
                     pm_fp_path.write_text(
@@ -575,6 +748,13 @@ async def main_async(args: argparse.Namespace) -> int:
                 return True
             except Exception as ex:
                 eprint(f"[PM ERROR] {ex}")
+                if is_quota_exception(ex):
+                    pm_stop_reason["reason"] = "quota_exhausted"
+                    try:
+                        stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
+                    except Exception:
+                        pass
+                    metrics.event("runner_stop", cycle=cycle_idx, reason="quota_exhausted")
                 metrics.event("pm_end", cycle=cycle_idx, rc=1, error=str(ex))
                 return False
 
@@ -648,6 +828,8 @@ async def main_async(args: argparse.Namespace) -> int:
             # PM phase
             pm_ok = await run_pm_if_needed(cycle_idx, curr_head, changed_files, repo_fp, force_refresh_backlog=False)
             if not pm_ok:
+                if pm_stop_reason.get("reason") == "quota_exhausted" or stop_path.exists():
+                    return 0, "quota_exhausted", 0
                 return 1, "pm_failed", 0
 
             # Update snapshot head only when HEAD changes
@@ -683,6 +865,8 @@ async def main_async(args: argparse.Namespace) -> int:
             if args.pm_refresh_backlog and (before_done >= len(task_ids)):
                 pm_ok2 = await run_pm_if_needed(cycle_idx, curr_head, changed_files, repo_fp, force_refresh_backlog=True)
                 if not pm_ok2:
+                    if pm_stop_reason.get("reason") == "quota_exhausted" or stop_path.exists():
+                        return 0, "quota_exhausted", 0
                     return 1, "pm_failed", 0
                 ensure_backlog()
                 tasks = load_tasks()
@@ -736,6 +920,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 dev_prompt = store.render("dev_task_prompt", DEV_TASK_TEMPLATE_DEFAULT, ctx)
                 dev_exc: Optional[Exception] = None
                 dev_is_max_turns = False
+                dev_quota_exhausted = False
                 dev_final = ""
 
                 try:
@@ -751,16 +936,8 @@ async def main_async(args: argparse.Namespace) -> int:
                 except Exception as ex:
                     dev_exc = ex
                     dev_final = ""
-                    msg = (str(ex) or "").lower()
-                    name = type(ex).__name__.lower()
-                    dev_is_max_turns = (
-                        "max turns" in msg
-                        or "max_turn" in msg
-                        or "maxturn" in msg
-                        or "maxturn" in name
-                        or "max_turn" in name
-                        or ("turn" in name and "max" in name)
-                    )
+                    dev_is_max_turns = is_max_turns_exception(ex)
+                    dev_quota_exhausted = is_quota_exception(ex)
                     eprint(f"[DEV ERROR] {ex}")
                     if bool(getattr(args, "debug", False)):
                         eprint(traceback.format_exc())
@@ -775,6 +952,19 @@ async def main_async(args: argparse.Namespace) -> int:
                 (run_dir / "dev_logs" / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}.txt").write_text(
                     dev_log + "\n", encoding="utf-8", errors="replace"
                 )
+
+                # Quota/credits exhausted: graceful stop with artifacts preserved.
+                if dev_exc and dev_quota_exhausted:
+                    state.setdefault("warnings", []).append(
+                        {"task": next_task.id, "reason": "quota_exhausted", "detail": str(dev_exc)}
+                    )
+                    save_state(state_path, state)
+                    metrics.event("runner_stop", cycle=cycle_idx, step=step, task_id=next_task.id, reason="quota_exhausted")
+                    try:
+                        stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
+                    except Exception:
+                        pass
+                    return 0, "quota_exhausted", 0
 
                 # Non-max-turn exceptions are treated as fatal (rollback + stop)
                 if dev_exc and not dev_is_max_turns:

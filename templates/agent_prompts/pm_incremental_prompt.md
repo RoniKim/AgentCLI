@@ -18,6 +18,9 @@ Git:
 Dev change-hints (optional, run-local; use as clues, not source-of-truth):
 {hint_block}
 
+TODO (user-authored; HIGHEST PRIORITY for backlog planning):
+{todo_block}
+
 Deliverables into run folder:
 - {run_dir}/BACKLOG.md
 - {run_dir}/BACKLOG.json

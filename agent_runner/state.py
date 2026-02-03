@@ -151,21 +151,21 @@ def write_default_p0_backlog(run_dir: Path) -> None:
         "generated_at": now_iso(),
         "tasks": [
             {
-                "id": "T01",
+                "id": "T3",
                 "title": "Startup minimum supported version gate",
                 "prompt": "Implement startup flow: call rpc/get_current_app_version once, compare with current app version, and route to UpdateRequired page when below minimum. No secrets. Add safe error UI.",
                 "files": ["MauiProgram.cs", "Components/Pages/UpdateRequired.razor", "Components/Pages/Home.razor", "Services/ApiService.cs"],
                 "done_when": "Below-min app version shows UpdateRequired UX; normal path continues; build passes.",
             },
             {
-                "id": "T02",
+                "id": "T4",
                 "title": "Supabase API client wrapper (RPC/Views policy)",
                 "prompt": "Create/adjust ApiService/Supabase wrapper enforcing: RPC for writes, Views/RPC for reads, retries/backoff for 429/5xx. Do not embed service-role/cron secrets.",
                 "files": ["Services/ApiService.cs"],
                 "done_when": "Reusable wrapper exists; no forbidden endpoints/keys; build passes.",
             },
             {
-                "id": "T03",
+                "id": "T5",
                 "title": "Auth-aware boot (session restore + token handling)",
                 "prompt": "Implement session restore via SecureStorage. Handle access token expiry and refresh flow (if applicable), with safe retry/backoff. Route to sign-in when needed. Ensure no secrets stored in repo.",
                 "files": ["Services/AuthService.cs", "Services/SecureStorageAdapter.cs"],

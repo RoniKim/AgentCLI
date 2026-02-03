@@ -11,3 +11,8 @@ Backlog Guard:
 - Never include PM deliverable work (PROJECT_ANALYSIS.md, REQUIREMENTS/AGENT_TASKS/BACKLOG/NOTES) as backlog tasks.
 - If blocked or missing backend contract, write it in {run_dir}/NOTES.md and exclude from backlog.
 - Task IDs must start at T3; do not output T1/T2.
+
+TODO Priority:
+- If a TODO block is provided in the prompt, treat it as the user's primary intent.
+- Convert TODO items into concrete Dev tasks FIRST, then add other improvements only if budget remains.
+- Do NOT add a "create backlog" / "update analysis" / "write notes" task; those are PM duties.

@@ -79,9 +79,19 @@ def create_checkpoint(repo: Path, checkpoint_dir: Path) -> RepoCheckpoint:
     patch_path = checkpoint_dir / "tracked.patch"
     untracked_dir = checkpoint_dir / "untracked"
 
-    # Tracked changes patch (includes staged/unstaged). Untracked handled separately.
-    _, out = run_cmd(["git", "diff", "--binary"], cwd=repo, timeout_sec=600)
-    patch_path.write_text(out + "\n", encoding="utf-8", errors="replace")
+    # Tracked changes patch.
+    # IMPORTANT: `git diff` (without a commit-ish) only captures *unstaged* changes.
+    # If a user has already staged changes (`git add`), they would be LOST on rollback.
+    #
+    # Preferred: diff working tree vs HEAD => includes both staged + unstaged.
+    # Fallback: on repos without a valid HEAD (e.g., before first commit), merge staged + unstaged diffs.
+    code, out = run_cmd(["git", "diff", "--binary", "HEAD"], cwd=repo, timeout_sec=600)
+    if code != 0:
+        _, out_staged = run_cmd(["git", "diff", "--binary", "--cached"], cwd=repo, timeout_sec=600)
+        _, out_unstaged = run_cmd(["git", "diff", "--binary"], cwd=repo, timeout_sec=600)
+        out = (out_staged or "") + "\n" + (out_unstaged or "")
+
+    patch_path.write_text((out or "") + "\n", encoding="utf-8", errors="replace")
 
     untracked = list_untracked(repo)
     if untracked:
