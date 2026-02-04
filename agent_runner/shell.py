@@ -26,6 +26,7 @@ from .runner_entry import run as run_runner
 from .run_dir import make_run_dir
 from .run_dir import find_latest_run_dir
 from .todo import ensure_todo_file, read_current_todo, set_current_todo, open_path
+from .preflight import run_preflight
 
 # prompt_toolkit is an optional dependency at import time (for nicer UX).
 # If it's missing, we fall back to basic input().
@@ -218,6 +219,10 @@ class RunnerShell:
         print(f"no_policy_scan: {bool(eff.get('no_policy_scan'))}")
         print(f"no_build:   {bool(eff.get('no_build'))} / run_tests: {bool(eff.get('run_tests'))}")
         print(f"dangerous_git_rollback: {bool(eff.get('dangerous_git_rollback'))}")
+        print(f"failover_enabled: {bool(eff.get('failover_enabled'))}")
+        print(f"failover_backends: {eff.get('failover_backends')}")
+        print(f"failover_on: {eff.get('failover_on')}")
+        print(f"failover_max_switches: {eff.get('failover_max_switches')}")
         print(f"pm_model:   {eff.get('pm_model')}")
         print(f"dev_model:  {eff.get('dev_model')}")
         print(f"qa_model:   {eff.get('qa_model')}")
@@ -565,6 +570,14 @@ class RunnerShell:
         report_lines.append(f"- OPENAI_API_KEY set: {bool(os.getenv('OPENAI_API_KEY', '').strip())}")
         report_lines.append(f"- ANTHROPIC_API_KEY set: {bool(os.getenv('ANTHROPIC_API_KEY', '').strip())}")
 
+        # Backend preflight
+        backends = eff.get("failover_backends") or [eff.get("execution_backend") or "codex"]
+        report_lines.append("- backend preflight:")
+        for result in run_preflight(argparse.Namespace(**eff), backends):
+            status = "OK" if result.ok else "FAIL"
+            detail = f" ({'; '.join(result.issues)})" if result.issues else ""
+            report_lines.append(f"  - {result.backend}: {status}{detail}")
+
         def _first_cmd(cmd_val: Any, fallback: str) -> str:
             if isinstance(cmd_val, list) and cmd_val:
                 return str(cmd_val[0])
@@ -614,6 +627,10 @@ def _build_completer() -> Any:
                 "--qa-model",
                 "--execution-backend",
                 "--roles",
+                "--failover",
+                "--failover-backends",
+                "--failover-on",
+                "--failover-max-switches",
                 "--dangerous-git-rollback",
                 "--plugins-enabled",
                 "--plugins-allowlist",

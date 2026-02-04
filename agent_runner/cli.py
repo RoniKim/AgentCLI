@@ -169,6 +169,12 @@ DEFAULTS: Dict[str, Any] = {
     # Git rollback safety
     "dangerous_git_rollback": False,
 
+    # Failover (backend chain)
+    "failover_enabled": False,
+    "failover_backends": ["codex"],
+    "failover_on": ["quota_exhausted"],
+    "failover_max_switches": 1,
+
     # Plugin stages
     "plugins_enabled": False,
     "plugins_allowlist": [],
@@ -292,6 +298,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--require-build", action=argparse.BooleanOptionalAction, default=None, help="Force build gate even if no_build is true")
     p.add_argument("--run-tests", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--dangerous-git-rollback", action=argparse.BooleanOptionalAction, default=None, help="Allow destructive git rollback")
+
+    # Failover
+    p.add_argument("--failover", dest="failover_enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable backend failover")
+    p.add_argument("--failover-backends", default=None, help="Backend chain for failover (comma-separated)")
+    p.add_argument("--failover-on", action="append", default=None, help="Failover triggers (repeatable)")
+    p.add_argument("--failover-max-switches", type=int, default=None, help="Max backend switches per run")
 
     # Plugin stages
     p.add_argument("--plugins-enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable plugin stage loading")
@@ -439,6 +451,24 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
 
     # normalize execution_backend
     eff["execution_backend"] = _normalize_execution_backend(eff.get("execution_backend", defaults.get("execution_backend", "codex")))
+
+    # normalize failover lists
+    fb = eff.get("failover_backends")
+    if fb is None:
+        eff["failover_backends"] = list(defaults.get("failover_backends", ["codex"]))
+    elif isinstance(fb, str):
+        eff["failover_backends"] = [p.strip() for p in fb.split(",") if p.strip()]
+
+    fo = eff.get("failover_on")
+    if fo is None:
+        eff["failover_on"] = list(defaults.get("failover_on", ["quota_exhausted"]))
+    elif isinstance(fo, str):
+        eff["failover_on"] = [fo]
+
+    try:
+        eff["failover_max_switches"] = int(eff.get("failover_max_switches") or defaults.get("failover_max_switches", 1))
+    except Exception:
+        eff["failover_max_switches"] = int(defaults.get("failover_max_switches", 1))
 
 
     # normalize dev_escalate_on (repeatable CLI flag)

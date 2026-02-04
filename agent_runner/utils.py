@@ -194,3 +194,39 @@ def atomic_write_json(path: Path, payload: Any) -> None:
 def safe_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8", errors="replace")
+
+
+def _has_quota_text(text: str) -> bool:
+    s = (text or "").lower()
+    if not s:
+        return False
+    needles = (
+        "insufficient_quota",
+        "quota exceeded",
+        "exceeded your current quota",
+        "billing hard limit",
+        "hard limit",
+        "payment required",
+        "you've hit your usage limit",
+        "purchase more credits",
+        "upgrade to pro",
+        "codex/settings/usage",
+        "usage limit",
+        "quota exhausted",
+    )
+    return any(n in s for n in needles)
+
+
+def detect_stop_reason(stop_paths: Sequence[Path]) -> str:
+    """Detect stop reason from one of the provided stop files."""
+    for path in stop_paths:
+        try:
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if _has_quota_text(text):
+                return "quota_exhausted"
+            return "stop_file"
+        except Exception:
+            continue
+    return ""
