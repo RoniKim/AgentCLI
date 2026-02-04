@@ -35,6 +35,53 @@ def git_porcelain(repo: Path) -> str:
     return out if code == 0 else ""
 
 
+def git_worktree_changed_files(repo: Path) -> list[str]:
+    """Best-effort list of files changed in the working tree (incl. untracked).
+
+    This complements `git_changed_files(prev_head, curr_head)` which only captures
+    committed HEAD-to-HEAD changes. When users run the runner in a dirty worktree
+    (common during iterative agent edits), PM incremental should see those paths.
+
+    We parse `git status --porcelain` and extract the *current* path. For renames,
+    we use the destination path after `->`.
+    """
+
+    s = git_porcelain(repo)
+    if not s.strip():
+        return []
+
+    out: list[str] = []
+    for line in s.splitlines():
+        ln = line.rstrip("\n")
+        if len(ln) < 4:
+            continue
+
+        # Porcelain: XY <path> (or XY <src> -> <dst> for renames)
+        path_part = ln[3:].strip()
+        if not path_part:
+            continue
+
+        if "->" in path_part:
+            # rename/copy
+            path_part = path_part.split("->", 1)[1].strip()
+
+        # strip quotes if present
+        if path_part.startswith('"') and path_part.endswith('"'):
+            path_part = path_part[1:-1]
+
+        if path_part:
+            out.append(path_part.replace("\\", "/"))
+
+    # de-dupe
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for p in out:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+
 def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8", errors="replace")).hexdigest()
 

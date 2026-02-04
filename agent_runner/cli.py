@@ -60,7 +60,8 @@ DEFAULTS: Dict[str, Any] = {
     "claudecode_enable_file_checkpointing": False,
 
     # Tool allow/deny lists are comma-separated strings (or JSON arrays when saved via wizard).
-    "claudecode_pm_allowed_tools": "Read,Grep,Glob",
+    # PM may need to update .doc/PM_CACHE/PROJECT_ANALYSIS.md to keep parity with Codex backend.
+    "claudecode_pm_allowed_tools": "Read,Grep,Glob,Write,Edit",
     "claudecode_pm_disallowed_tools": "",
     "claudecode_dev_allowed_tools": "Read,Write,Edit,Grep,Glob,Bash",
     "claudecode_dev_disallowed_tools": "",

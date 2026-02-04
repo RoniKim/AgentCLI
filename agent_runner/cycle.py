@@ -16,6 +16,7 @@ from .gates import run_build_gate, run_test_gate
 from .gitops import (
     git_head,
     git_changed_files,
+    git_worktree_changed_files,
     git_porcelain,
     repo_fingerprint,
     create_checkpoint,
