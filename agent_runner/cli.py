@@ -49,6 +49,24 @@ DEFAULTS: Dict[str, Any] = {
     # Execution backend engine (default: codex)
     "execution_backend": "codex",
 
+    # Claude Code backend (claude-agent-sdk) options
+    "claudecode_model": "sonnet",
+    "claudecode_permission_mode": "acceptEdits",
+    "claudecode_max_turns": 32,
+    "claudecode_setting_sources": "project",
+    "claudecode_system_prompt_append": "",
+    "claudecode_continue_conversation": False,
+    "claudecode_resume": "",
+    "claudecode_enable_file_checkpointing": False,
+
+    # Tool allow/deny lists are comma-separated strings (or JSON arrays when saved via wizard).
+    "claudecode_pm_allowed_tools": "Read,Grep,Glob",
+    "claudecode_pm_disallowed_tools": "",
+    "claudecode_dev_allowed_tools": "Read,Write,Edit,Grep,Glob,Bash",
+    "claudecode_dev_disallowed_tools": "",
+    "claudecode_qa_allowed_tools": "Read,Grep,Glob,Bash",
+    "claudecode_qa_disallowed_tools": "",
+
     # Pipeline roles (comma-separated). Default keeps legacy order.
     # Example: "PM,Dev,QA" or "PM,Dev".
     "roles": "PM,Dev,QA",
@@ -274,6 +292,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--qa-model", default=None)
     p.add_argument("--reporter-model", default=None)
     p.add_argument("--report-max-turns", type=int, default=None)
+
+    # Claude Code backend
+    p.add_argument("--claudecode-model", default=None, help="Claude model (e.g., sonnet/opus/haiku)")
+    p.add_argument("--claudecode-permission-mode", default=None, help="Claude tool permission mode (default/acceptEdits/bypassPermissions/plan)")
+    p.add_argument("--claudecode-max-turns", type=int, default=None, help="Max turns per Claude query")
+    p.add_argument("--claudecode-setting-sources", default=None, help="Settings sources: comma-separated user,project,local")
+    p.add_argument("--claudecode-system-prompt-append", default=None, help="Append instructions to Claude Code system prompt preset")
+    p.add_argument("--claudecode-continue-conversation", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--claudecode-resume", default=None, help="Resume session id")
+    p.add_argument("--claudecode-enable-file-checkpointing", action=argparse.BooleanOptionalAction, default=None)
+
+    p.add_argument("--claudecode-pm-allowed-tools", default=None, help="PM stage allowed tools (comma-separated)")
+    p.add_argument("--claudecode-pm-disallowed-tools", default=None, help="PM stage disallowed tools (comma-separated)")
+    p.add_argument("--claudecode-dev-allowed-tools", default=None, help="Dev stage allowed tools (comma-separated)")
+    p.add_argument("--claudecode-dev-disallowed-tools", default=None, help="Dev stage disallowed tools (comma-separated)")
+    p.add_argument("--claudecode-qa-allowed-tools", default=None, help="QA stage allowed tools (comma-separated)")
+    p.add_argument("--claudecode-qa-disallowed-tools", default=None, help="QA stage disallowed tools (comma-separated)")
 
     p.add_argument("--dev-auto-escalate", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--dev-max-escalations", type=int, default=None)

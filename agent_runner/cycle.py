@@ -1196,7 +1196,8 @@ async def main_async(args: argparse.Namespace) -> int:
                         return 1, "no_diff", 0, (len(done_set) > before_done)
                     if build_enabled:
                         metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
-                        ok = run_build_gate(
+                        ok = await asyncio.to_thread(
+                            run_build_gate,
                             repo=repo,
                             build_cmd=getattr(args, "build_cmd", []),
                             build_timeout_sec=int(getattr(args, "build_timeout_seconds", 1800)),
@@ -1217,7 +1218,8 @@ async def main_async(args: argparse.Namespace) -> int:
                             return 1, "build_failed", 0, (len(done_set) > before_done)
                     if run_tests:
                         metrics.event("test_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
-                        ok = run_test_gate(
+                        ok = await asyncio.to_thread(
+                            run_test_gate,
                             repo=repo,
                             test_cmd=getattr(args, "test_cmd", []),
                             test_timeout_sec=int(getattr(args, "test_timeout_seconds", 3600)),

@@ -213,6 +213,14 @@ class RunnerShell:
         print(f"mcp_mode:   {eff.get('mcp_mode')} (package={eff.get('codex_package')})")
         print(f"docs_read_mode: {eff.get('docs_read_mode')} (docs_dir={eff.get('docs_dir')})")
         print(f"execution_backend: {eff.get('execution_backend')}")
+        if str(eff.get('execution_backend') or '') == 'claudecode':
+            print(f"claudecode_model: {eff.get('claudecode_model')}")
+            print(f"claudecode_permission_mode: {eff.get('claudecode_permission_mode')}")
+            print(f"claudecode_max_turns: {eff.get('claudecode_max_turns')}")
+            print(f"claudecode_setting_sources: {eff.get('claudecode_setting_sources')}")
+            print(f"claudecode_pm_allowed_tools: {eff.get('claudecode_pm_allowed_tools')}")
+            print(f"claudecode_dev_allowed_tools: {eff.get('claudecode_dev_allowed_tools')}")
+            print(f"claudecode_qa_allowed_tools: {eff.get('claudecode_qa_allowed_tools')}")
         print(f"roles:      {eff.get('roles')}")
         print(f"debug:      {bool(eff.get('debug', False))}")
         print(f"OPENAI_API_KEY set: {_yesno(bool(os.getenv('OPENAI_API_KEY', '').strip()))}")
@@ -443,32 +451,28 @@ class RunnerShell:
             print(f"[ERR] Failed to load config: {ex}")
 
     def help(self) -> None:
-        print(
-            "\n".join(
-                [
-                    "Commands:",
-                    "  /help                     Show this help",
-                    "  /repo <path>               Set repo root",
-                    "  /config                    Show effective settings + env sanity",
-                    "  /set <key> <value>         Override a setting (types inferred from defaults)",
-                    "  (예: /set execution_backend codex|claudecode)",
-                    "  (예: /set roles PM,Dev,QA  |  /set roles PM,Dev)",
-                    "  /add <key> <value>         Append to a list setting (e.g., policy_rule)",
-                    "  /load [path]               Load config JSON (default: AgentCLI-side configs/<repo-hash>.json)",
-                    "  /save [path]               Save effective config JSON",
-                    "  /start [--flags...]        Start runner in background (ex: /start --autopilot --loop)",
-                    "  /stop [--wait]             Request graceful stop (creates run_dir/STOP)",
-                    "  /status                    Show runner status",
-                    "  /todo [--save|--load ...]   Create/select and open a repo-local TODO file (.doc/todo)",
-                    "  /exit                      Quit",
-                    "",
-                    "Tips:",
-                    "  - You can pass --repo/--config to prefill: python agent_cli.py --repo ...",
-                    "  - Use /config before /start to confirm settings.",
-                ]
-            )
-        )
-
+        lines = [
+            "Commands (명령어):",
+            "  /help                     도움말 표시",
+            "  /repo <path>               레포지토리 루트 설정",
+            "  /config                    현재 적용 설정/환경 변수 요약 출력",
+            "  /set <key> <value>         설정 값을 덮어쓰기(타입은 기본값 기준)",
+            "    예) /set execution_backend codex|claudecode",
+            "    예) /set roles PM,Dev,QA   (단계 선택)",
+            "  /add <key> <value>         리스트 설정에 항목 추가 (예: policy_rule)",
+            "  /load [path]               config JSON 로드",
+            "  /save [path]               현재 설정을 config JSON으로 저장",
+            "  /start [--flags...]        러너 백그라운드 시작 (예: /start --autopilot --loop)",
+            "  /stop [--wait]             중지 요청(STOP 파일 생성). --wait로 종료 대기",
+            "  /status                    러너 상태 확인",
+            "  /todo [--save|--load ...]   TODO 파일 생성/선택(.doc/todo)",
+            "  /exit                      종료",
+            "",
+            "Tips:",
+            "  - 시작 전 /config로 설정을 확인하세요.",
+            "  - backend=claudecode 사용 시 ANTHROPIC_API_KEY와 'claude' CLI가 필요합니다.",
+        ]
+        print("\n".join(lines))
 
 def _build_completer() -> Any:
     """
@@ -502,6 +506,9 @@ def _build_completer() -> Any:
                 "--qa-model",
                 "--execution-backend",
                 "--roles",
+                "--claudecode-model",
+                "--claudecode-permission-mode",
+                "--claudecode-setting-sources",
             }
         ),
         ignore_case=True,
