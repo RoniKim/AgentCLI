@@ -283,6 +283,9 @@ def remove_worktree(repo: Path, worktree_dir: Path) -> None:
 
 def export_worktree_patch(worktree_dir: Path, patch_path: Path) -> None:
     patch_path.parent.mkdir(parents=True, exist_ok=True)
+    code, _ = run_cmd(["git", "add", "-N", "."], cwd=worktree_dir, timeout_sec=120)
+    if code != 0:
+        raise RuntimeError("git add -N failed in worktree")
     code, out = run_cmd(["git", "diff", "--binary", "HEAD"], cwd=worktree_dir, timeout_sec=120)
     if code != 0:
         raise RuntimeError(f"git diff failed in worktree: rc={code}\n{out}")
