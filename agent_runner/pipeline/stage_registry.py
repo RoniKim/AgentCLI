@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import re
+from fnmatch import fnmatch
 from typing import List, Type
 
 from .stages.base import Stage
@@ -58,6 +59,22 @@ def parse_roles(raw: str | None) -> List[str]:
     return deduped
 
 
+def _is_allowed(spec: str, allowlist: list[str]) -> bool:
+    if not allowlist:
+        return False
+    mod, _cls = spec.split(":", 1)
+    for pat in allowlist:
+        pat = pat.strip()
+        if not pat:
+            continue
+        if ":" in pat:
+            if fnmatch(spec, pat):
+                return True
+        elif fnmatch(mod, pat):
+            return True
+    return False
+
+
 def _load_plugin(spec: str) -> Type[Stage]:
     mod, cls = spec.split(":", 1)
     m = importlib.import_module(mod)
@@ -67,16 +84,26 @@ def _load_plugin(spec: str) -> Type[Stage]:
     return c
 
 
-def make_stages(raw_roles: str | None) -> List[Stage]:
+def make_stages(
+    raw_roles: str | None,
+    *,
+    plugins_enabled: bool,
+    plugins_allowlist: list[str],
+    plugins_strict: bool,
+) -> List[Stage]:
     roles = parse_roles(raw_roles)
     stages: List[Stage] = []
     for r in roles:
         if ":" in r:
+            if not plugins_enabled:
+                raise ValueError(f"Plugin stages are disabled: {r}")
+            if not _is_allowed(r, plugins_allowlist):
+                raise ValueError(f"Plugin stage not allowed by allowlist: {r}")
             try:
                 stages.append(_load_plugin(r)())
             except Exception:
-                # keep robust: plugin load failure should not crash the runner
-                continue
+                if plugins_strict:
+                    raise
             continue
         cls = _BUILTIN.get(r)
         if cls is not None:

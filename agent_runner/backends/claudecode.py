@@ -12,7 +12,7 @@ import inspect
 
 from ..analysis_cache import merge_dev_hints_to_global_changelog
 from ..docs import load_dotenv_best_effort, resolve_docs_dir, generate_docs_digest
-from ..gates import run_build_gate, run_test_gate
+from ..gates import run_build_gate_async, run_test_gate_async
 from ..gitops import (
     git_head,
     git_changed_files,
@@ -22,6 +22,10 @@ from ..gitops import (
     create_checkpoint,
     restore_checkpoint,
     RepoCheckpoint,
+    create_worktree,
+    remove_worktree,
+    export_worktree_patch,
+    apply_patch_to_repo,
 )
 from ..inventory import build_repo_inventory, write_repo_inventory_files
 from ..metrics import MetricsLogger
@@ -41,7 +45,7 @@ from ..state import (
     TaskItem,
 )
 from ..structured import parse_pm_output, dump_pretty, describe_parse_failure
-from ..utils import force_utf8_stdio, eprint, now_iso
+from ..utils import force_utf8_stdio, eprint, now_iso, safe_write_text
 
 
 class StopRequested(Exception):
@@ -451,6 +455,34 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     run_dir = _pick_run_dir(repo, args)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    def _is_unsafe_path(raw: str) -> bool:
+        try:
+            return ".." in Path(raw).parts
+        except Exception:
+            return True
+
+    for _name, _value in (("env_file", getattr(args, "env_file", "") or ""), ("prompts_dir", getattr(args, "prompts_dir", "") or "")):
+        if str(_value).strip() and _is_unsafe_path(str(_value)):
+            msg = (
+                "# Validation failure\n\n"
+                f"Blocked unsafe path for `{_name}`: `{_value}`\n\n"
+                "Path traversal patterns like `..` are not allowed. Use an absolute path or a safe relative path.\n"
+            )
+            safe_write_text(run_dir / "VALIDATION_FAILURE.md", msg)
+            eprint(f"[STOP] Validation failure for {_name}: {_value}")
+            return 2
+
+    source_repo = repo
+    worktree_dir: Optional[Path] = None
+    if bool(getattr(args, "worktree_isolation", False)):
+        worktree_dir = run_dir / "worktree"
+        try:
+            create_worktree(source_repo, worktree_dir)
+        except Exception as ex:
+            eprint(f"[STOP] Failed to create worktree: {ex}")
+            return 2
+        repo = worktree_dir
+
     # Ensure we operate within repo root
     try:
         os.chdir(repo)
@@ -508,7 +540,26 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     continuous = bool(getattr(args, "continuous", False) or getattr(args, "loop", False))
 
     roles_raw = str(getattr(args, "roles", "PM,Dev,QA") or "PM,Dev,QA")
-    stages = make_stages(roles_raw)
+    plugins_allowlist = getattr(args, "plugins_allowlist", []) or []
+    if isinstance(plugins_allowlist, str):
+        plugins_allowlist = [p.strip() for p in plugins_allowlist.split(",") if p.strip()]
+
+    try:
+        stages = make_stages(
+            roles_raw,
+            plugins_enabled=bool(getattr(args, "plugins_enabled", False)),
+            plugins_allowlist=list(plugins_allowlist),
+            plugins_strict=bool(getattr(args, "plugins_strict", True)),
+        )
+    except Exception as ex:
+        safe_write_text(run_dir / "PLUGIN_LOAD_FAILURE.md", f"# Plugin load failure\n\n{ex}\n")
+        eprint(f"[STOP] Plugin load failure: {ex}")
+        if worktree_dir is not None:
+            try:
+                remove_worktree(source_repo, worktree_dir)
+            except Exception as rm_ex:
+                eprint(f"[WARN] Failed to remove worktree: {rm_ex}")
+        return 1
     pipeline_mgr = PipelineManager(stages)
 
     # --- Sync helpers required by PipelineSession ---
@@ -736,6 +787,29 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             except Exception:
                 cp = None
 
+            def _restore_or_stop(reason: str) -> tuple[bool, str]:
+                if not cp:
+                    return True, ""
+                try:
+                    restore_checkpoint(
+                        repo,
+                        cp,
+                        dangerous=bool(getattr(args, "dangerous_git_rollback", False)),
+                        run_dir=run_dir,
+                        stop_path=stop_path,
+                    )
+                    metrics.event("rollback", task=task.id, reason=reason)
+                    return True, ""
+                except Exception as ex:
+                    detail = str(ex)
+                    blocked = "blocked" in detail.lower()
+                    fail_reason = "rollback_blocked" if blocked else "rollback_failed"
+                    state.setdefault("failed", []).append({"task": task.id, "reason": fail_reason, "detail": detail})
+                    save_state(state_path, state)
+                    metrics.event("rollback_failed", task=task.id, reason=reason, detail=detail)
+                    eprint(f"[STOP] Rollback {fail_reason}: {detail}")
+                    return False, fail_reason
+
             before = git_porcelain(repo)
 
             # Run the agent
@@ -745,14 +819,18 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     _text, _structured = await _collect_messages(client, stop_path=stop_path, debug=bool(getattr(args, "debug", False)))
             except StopRequested:
                 if cp:
-                    restore_checkpoint(repo, cp)
+                    ok, fail_reason = _restore_or_stop("stop_requested")
+                    if not ok:
+                        return StageOutcome.fail(fail_reason, rc=1)
                 return StageOutcome.stop("stop_requested", rc=130)
             except Exception as ex:
                 eprint(f"[DEV] Claude error: {ex}")
                 if bool(getattr(args, "debug", False)):
                     eprint(traceback.format_exc())
                 if cp:
-                    restore_checkpoint(repo, cp)
+                    ok, fail_reason = _restore_or_stop("exception")
+                    if not ok:
+                        return StageOutcome.fail(fail_reason, rc=1)
                 state.setdefault("failed", []).append({"task": task.id, "reason": "exception", "detail": str(ex)})
                 save_state(state_path, state)
                 return StageOutcome.fail("dev_exception", rc=1, detail=str(ex))
@@ -763,43 +841,49 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             if stop_on_no_diff and (not changed):
                 eprint(f"[STOP] No diff produced for {task.id}.")
                 if cp:
-                    restore_checkpoint(repo, cp)
+                    ok, fail_reason = _restore_or_stop("no_diff")
+                    if not ok:
+                        return StageOutcome.fail(fail_reason, rc=1)
                 state.setdefault("failed", []).append({"task": task.id, "reason": "no_diff"})
                 save_state(state_path, state)
                 return StageOutcome.fail("no_diff", rc=1)
 
             # Gates (run in thread so event loop stays responsive)
             if build_enabled:
-                ok = await asyncio.to_thread(
-                    run_build_gate,
+                ok = await run_build_gate_async(
                     repo=repo,
                     build_cmd=build_cmd,
                     build_timeout_sec=int(getattr(args, "build_timeout_seconds", 1800) or 1800),
                     legacy_build_target=str(getattr(args, "dotnet_build_target", "") or ""),
                     log_path=(run_dir / "attempts" / task.id / "build.txt"),
+                    stop_path=stop_path,
                 )
                 if not ok:
                     eprint(f"[STOP] Build failed after {task.id}.")
                     if cp:
-                        restore_checkpoint(repo, cp)
+                        ok_restore, fail_reason = _restore_or_stop("build_failed")
+                        if not ok_restore:
+                            return StageOutcome.fail(fail_reason, rc=1)
                     state.setdefault("failed", []).append({"task": task.id, "reason": "build_failed"})
                     save_state(state_path, state)
                     return StageOutcome.fail("build_failed", rc=1)
 
             if run_tests:
-                ok = await asyncio.to_thread(
-                    run_test_gate,
+                ok = await run_test_gate_async(
                     repo=repo,
                     test_cmd=test_cmd,
                     test_timeout_sec=int(getattr(args, "test_timeout_seconds", 3600) or 3600),
                     legacy_test_target=str(getattr(args, "dotnet_test_target", "") or ""),
                     legacy_test_filter=str(getattr(args, "dotnet_test_filter", "") or ""),
                     log_path=(run_dir / "attempts" / task.id / "test.txt"),
+                    stop_path=stop_path,
                 )
                 if not ok:
                     eprint(f"[STOP] Tests failed after {task.id}.")
                     if cp:
-                        restore_checkpoint(repo, cp)
+                        ok_restore, fail_reason = _restore_or_stop("test_failed")
+                        if not ok_restore:
+                            return StageOutcome.fail(fail_reason, rc=1)
                     state.setdefault("failed", []).append({"task": task.id, "reason": "test_failed"})
                     save_state(state_path, state)
                     return StageOutcome.fail("test_failed", rc=1)
@@ -885,10 +969,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
     cycle_idx = 0
 
+    exit_code = 0
     while True:
         if stop_path.exists():
             metrics.event("stop_file")
-            return 0
+            exit_code = 0
+            break
 
         metrics.event("cycle_start", cycle=cycle_idx)
 
@@ -898,25 +984,43 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             eprint(f"[ERR] pipeline cycle exception: {ex}")
             if bool(getattr(args, "debug", False)):
                 eprint(traceback.format_exc())
-            return 1
+            exit_code = 1
+            break
 
         metrics.event("cycle_end", cycle=cycle_idx, rc=res.rc, reason=res.reason, done_delta=res.done_delta)
 
         if not loop and not continuous:
-            # prepared-only mode
-            return 0
+            exit_code = 0
+            break
 
         if res.rc != 0:
-            return int(res.rc)
+            exit_code = int(res.rc)
+            break
 
         cycle_idx += 1
 
         if (max_cycles > 0) and (cycle_idx >= max_cycles):
-            return 0
+            exit_code = 0
+            break
 
         if not (loop or continuous):
             break
 
         await asyncio.sleep(max(1, sleep_s))
 
-    return 0
+    if worktree_dir is not None:
+        if exit_code == 0:
+            try:
+                patch_path = run_dir / "worktree.patch"
+                export_worktree_patch(repo, patch_path)
+                if patch_path.read_text(encoding="utf-8", errors="replace").strip():
+                    apply_patch_to_repo(source_repo, patch_path)
+            except Exception as ex:
+                safe_write_text(run_dir / "WORKTREE_APPLY_FAILURE.md", f"# Worktree apply failure\n\n{ex}\n")
+                exit_code = 1
+        try:
+            remove_worktree(source_repo, worktree_dir)
+        except Exception as ex:
+            eprint(f"[WARN] Failed to remove worktree: {ex}")
+
+    return exit_code

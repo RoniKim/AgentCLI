@@ -69,7 +69,7 @@ python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --aut
 │  ├─ structured.py          # JSON 파싱/리페어/검증 유틸
 │  ├─ state.py               # BACKLOG/STATE 저장·로드, 완료 처리
 │  ├─ gates.py               # (옵션) dotnet build/test 게이트
-│  ├─ gitops.py              # 변경 감지/체크포인트(옵션: isolate_task)
+│  ├─ gitops.py              # 변경 감지/체크포인트/워크트리(옵션: isolate_task/worktree_isolation)
 │  ├─ policy.py              # 시크릿/키 유출 스캔(옵션)
 │  ├─ docs.py                # .env 로딩 + docs digest 생성/읽기 유틸
 │  ├─ run_dir.py             # run_dir 생성/최근 run 탐색
@@ -155,6 +155,24 @@ python agent_cli.py --repo "C:/Dev/BudgetBook"
 > /stop --wait
 > /exit
 ```
+
+### 안전 옵션 (rollback/worktree)
+
+기본값은 **안전 모드**입니다. 자동 롤백이 필요하면 명시적으로 허용해야 합니다.
+
+```bash
+# 파괴적 롤백 허용 (git reset/clean + patch apply)
+python agent_cli.py --run-now --repo <path> --dangerous-git-rollback
+
+# 안전한 격리 실행 (git worktree에서 작업 후 성공 시 patch 적용)
+python agent_cli.py --run-now --repo <path> --worktree-isolation
+```
+
+> worktree 모드는 실패/중단 시 원 repo를 보존하고 worktree만 삭제합니다.
+
+### /doctor (환경/설정 점검)
+
+셸에서 `/doctor`를 실행하면 환경 진단 보고서가 `DOCTOR.md`로 저장됩니다.
 
 #### Interactive 명령어 치트시트
 

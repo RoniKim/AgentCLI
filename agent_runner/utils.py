@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence, Tuple, Any
+from typing import Sequence, Tuple, Any, Optional
 
 
 def force_utf8_stdio() -> None:
@@ -51,6 +55,93 @@ def run_cmd(cmd: Sequence[str], cwd: Path, timeout_sec: int = 600) -> Tuple[int,
         return 124, f"TIMEOUT: {' '.join(cmd)}"
 
 
+async def run_cmd_async(
+    cmd: Sequence[str],
+    cwd: Path,
+    log_path: Path,
+    *,
+    timeout_sec: int = 600,
+    stop_path: Optional[Path] = None,
+    max_output_bytes: int = 10_000_000,
+) -> tuple[int, str]:
+    """Run a subprocess asynchronously, streaming output to log_path.
+
+    Returns (returncode, summary). Output is streamed to disk with a hard cap; excess output is discarded
+    and a TRUNCATED marker is appended once.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    start = time.monotonic()
+    proc = await asyncio.create_subprocess_exec(
+        *list(cmd),
+        cwd=str(cwd),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    truncated = False
+    written = 0
+
+    async def _reader(stream: asyncio.StreamReader, label: str) -> None:
+        nonlocal written, truncated
+        if stream is None:
+            return
+        while True:
+            chunk = await stream.read(8192)
+            if not chunk:
+                break
+            if written >= max_output_bytes:
+                if not truncated:
+                    with log_path.open("ab") as f:
+                        f.write(b"\n[TRUNCATED OUTPUT]\n")
+                    truncated = True
+                continue
+            remaining = max_output_bytes - written
+            data = chunk[:remaining]
+            with log_path.open("ab") as f:
+                f.write(data)
+            written += len(data)
+            if len(chunk) > remaining and not truncated:
+                with log_path.open("ab") as f:
+                    f.write(b"\n[TRUNCATED OUTPUT]\n")
+                truncated = True
+
+    reader_tasks = [
+        asyncio.create_task(_reader(proc.stdout, "stdout")),
+        asyncio.create_task(_reader(proc.stderr, "stderr")),
+    ]
+
+    summary = ""
+    try:
+        while True:
+            if stop_path is not None and stop_path.exists():
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                summary = "stopped"
+                break
+            if timeout_sec and (time.monotonic() - start) > timeout_sec:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                summary = "timeout"
+                break
+            if proc.returncode is not None:
+                break
+            await asyncio.sleep(0.2)
+        rc = await proc.wait()
+    finally:
+        await asyncio.gather(*reader_tasks, return_exceptions=True)
+
+    if truncated:
+        summary = (summary + " " if summary else "") + "truncated"
+    if not summary:
+        summary = "ok"
+    return rc, summary
+
+
 def read_text_robust(path: Path) -> tuple[str, str]:
     """Return (text, status). status is ok|binary|missing|error."""
     if not path.exists():
@@ -77,7 +168,27 @@ def load_json_if_exists(path: Path, default: Any) -> Any:
 
 def ensure_relative_to_repo(repo: Path, maybe_rel: str) -> Path:
     p = Path(maybe_rel)
-    return p.resolve() if p.is_absolute() else (repo / p).resolve()
+    resolved = p.resolve() if p.is_absolute() else (repo / p).resolve()
+    try:
+        resolved.relative_to(repo.resolve())
+    except Exception as ex:
+        raise ValueError(f"Path escapes repo: {maybe_rel}") from ex
+    return resolved
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", errors="replace", delete=False, dir=str(path.parent)) as tmp:
+        tmp.write(content)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = Path(tmp.name)
+    os.replace(tmp_path, path)
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    data = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    atomic_write_text(path, data)
 
 
 def safe_write_text(path: Path, content: str) -> None:

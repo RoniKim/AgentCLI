@@ -89,6 +89,7 @@ DEFAULTS: Dict[str, Any] = {
     "iterations": 30,
     "max_turns_per_task": 12,
     "isolate_task": False,
+    "worktree_isolation": False,
 
     # Safety / gates
     "no_policy_scan": False,
@@ -164,6 +165,14 @@ DEFAULTS: Dict[str, Any] = {
     "stop_file": "STOP",
     "allow_no_diff": False,
     "stop_if_no_diff": False,
+
+    # Git rollback safety
+    "dangerous_git_rollback": False,
+
+    # Plugin stages
+    "plugins_enabled": False,
+    "plugins_allowlist": [],
+    "plugins_strict": True,
 }
 
 
@@ -267,6 +276,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--iterations", type=int, default=None)
     p.add_argument("--max-turns-per-task", type=int, default=None)
     p.add_argument("--isolate-task", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--worktree-isolation", action=argparse.BooleanOptionalAction, default=None, help="Run in a git worktree")
 
     # Safety / gates
     # NOTE: argparse.BooleanOptionalAction cannot be used with option strings starting with "--no-" (Python 3.14+).
@@ -281,6 +291,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--build", dest="no_build", action="store_false", default=None, help="Enable build gate")
     p.add_argument("--require-build", action=argparse.BooleanOptionalAction, default=None, help="Force build gate even if no_build is true")
     p.add_argument("--run-tests", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--dangerous-git-rollback", action=argparse.BooleanOptionalAction, default=None, help="Allow destructive git rollback")
+
+    # Plugin stages
+    p.add_argument("--plugins-enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable plugin stage loading")
+    p.add_argument("--plugins-allowlist", default=None, help="Allowlist patterns for plugin stages (comma-separated)")
+    p.add_argument("--plugins-strict", action=argparse.BooleanOptionalAction, default=None, help="Fail if plugin load is blocked or fails")
 
     p.add_argument("--dotnet-build-target", default=None, help="dotnet build target (e.g., path to .sln or project)")
     p.add_argument("--dotnet-test-target", default=None, help="dotnet test target (e.g., path to .sln or project)")
