@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
-from .utils import run_cmd, now_iso
+from .utils import run_cmd, now_iso, safe_write_text
 
 
 def git_head(repo: Path) -> str:
@@ -147,28 +148,150 @@ def create_checkpoint(repo: Path, checkpoint_dir: Path) -> RepoCheckpoint:
     return RepoCheckpoint(patch_path=patch_path, untracked_dir=untracked_dir, created_at=now_iso())
 
 
-def restore_checkpoint(repo: Path, cp: RepoCheckpoint) -> None:
-    # Clean working tree
-    run_cmd(["git", "reset", "--hard"], cwd=repo, timeout_sec=120)
-    run_cmd(["git", "clean", "-fd"], cwd=repo, timeout_sec=120)
+def _safe_ts() -> str:
+    return now_iso().replace(":", "-")
 
-    # Restore tracked patch
+
+def _write_report(path: Path, content: str) -> None:
     try:
-        patch_text = cp.patch_path.read_text(encoding="utf-8", errors="replace")
-        if patch_text.strip():
-            run_cmd(["git", "apply", "--binary", "--whitespace=nowarn", str(cp.patch_path)], cwd=repo, timeout_sec=120)
+        safe_write_text(path, content)
     except Exception:
         pass
 
-    # Restore untracked files
+
+def restore_checkpoint(
+    repo: Path,
+    cp: RepoCheckpoint,
+    *,
+    dangerous: bool,
+    run_dir: Path | None,
+    stop_path: Path | None,
+) -> None:
+    report_dir = run_dir if run_dir is not None else cp.patch_path.parent
+    blocked_path = report_dir / "ROLLBACK_BLOCKED.md"
+    failure_path = report_dir / "ROLLBACK_FAILURE.md"
+
+    if not dangerous:
+        msg = (
+            "# Rollback blocked\n\n"
+            "Destructive git rollback is disabled (dangerous=False).\n"
+            "No `git reset --hard` or `git clean -fd` has been executed.\n\n"
+            "To allow rollback, re-run with `--dangerous-git-rollback` (or set in shell).\n"
+        )
+        _write_report(blocked_path, msg)
+        raise RuntimeError("Rollback blocked: dangerous_git_rollback is disabled.")
+
+    rescue_dir = (run_dir or cp.patch_path.parent.parent) / f"checkpoint_rescue_{_safe_ts()}"
+    rescue_cp: RepoCheckpoint | None = None
+    try:
+        rescue_cp = create_checkpoint(repo, rescue_dir)
+    except Exception as ex:
+        _write_report(failure_path, f"# Rollback failure\n\nFailed to create rescue checkpoint: {ex}\n")
+        raise
+
+    def fail(reason: str) -> None:
+        rescue_note = f"\n\nRescue checkpoint: {rescue_dir}\n" if rescue_cp else "\n\nRescue checkpoint: (none)\n"
+        _write_report(failure_path, f"# Rollback failure\n\n{reason}{rescue_note}")
+        raise RuntimeError(reason)
+
+    code, out = run_cmd(["git", "rev-parse", "--is-inside-work-tree"], cwd=repo, timeout_sec=60)
+    if code != 0 or "true" not in out.lower():
+        fail(f"Not a git repository (rev-parse failed): rc={code}\n{out}")
+
+    if not cp.patch_path.exists():
+        fail(f"Missing checkpoint patch: {cp.patch_path}")
+
+    patch_text = cp.patch_path.read_text(encoding="utf-8", errors="replace")
+    if not patch_text.strip():
+        fail(f"Checkpoint patch is empty: {cp.patch_path}")
+
+    temp_patch = Path(tempfile.mkstemp(prefix="rollback_patch_", suffix=".patch")[1])
+    temp_patch.write_text(patch_text + "\n", encoding="utf-8", errors="replace")
+
+    temp_untracked_dir: Path | None = None
     if cp.untracked_dir.exists():
-        for src in cp.untracked_dir.rglob("*"):
+        temp_untracked_dir = Path(tempfile.mkdtemp(prefix="rollback_untracked_"))
+        shutil.copytree(cp.untracked_dir, temp_untracked_dir, dirs_exist_ok=True)
+
+    code, out = run_cmd(["git", "apply", "--check", "--binary", str(temp_patch)], cwd=repo, timeout_sec=120)
+    if code != 0:
+        fail(f"Patch pre-check failed (git apply --check): rc={code}\n{out}")
+
+    code, out = run_cmd(["git", "reset", "--hard"], cwd=repo, timeout_sec=120)
+    if code != 0:
+        fail(f"git reset --hard failed: rc={code}\n{out}")
+
+    clean_cmd = ["git", "clean", "-fd"]
+    for path in (run_dir, rescue_dir):
+        if path is None:
+            continue
+        try:
+            rel = path.resolve().relative_to(repo.resolve()).as_posix()
+            clean_cmd.extend(["-e", rel])
+        except Exception:
+            continue
+    code, out = run_cmd(clean_cmd, cwd=repo, timeout_sec=120)
+    if code != 0:
+        fail(f"git clean -fd failed: rc={code}\n{out}")
+
+    code, out = run_cmd(["git", "apply", "--binary", "--whitespace=nowarn", str(temp_patch)], cwd=repo, timeout_sec=120)
+    if code != 0:
+        fail(f"git apply failed: rc={code}\n{out}")
+
+    # Restore untracked files
+    untracked_warnings: list[str] = []
+    if temp_untracked_dir and temp_untracked_dir.exists():
+        for src in temp_untracked_dir.rglob("*"):
             if src.is_dir():
                 continue
-            rel = src.relative_to(cp.untracked_dir)
+            rel = src.relative_to(temp_untracked_dir)
             dst = repo / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             try:
                 shutil.copy2(src, dst)
-            except Exception:
-                pass
+            except Exception as ex:
+                untracked_warnings.append(f"{rel}: {ex}")
+
+    if untracked_warnings and run_dir is not None:
+        warn_path = report_dir / "ROLLBACK_UNTRACKED_WARNING.md"
+        _write_report(
+            warn_path,
+            "# Untracked restore warning\n\n" + "\n".join(f"- {w}" for w in untracked_warnings) + "\n",
+        )
+
+    porcelain = git_porcelain(repo)
+    if not porcelain.strip():
+        fail("Rollback applied but working tree is clean; expected changes after restore.")
+
+
+def create_worktree(repo: Path, worktree_dir: Path) -> None:
+    if worktree_dir.exists():
+        return
+    worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+    code, out = run_cmd(["git", "worktree", "add", "--detach", str(worktree_dir), "HEAD"], cwd=repo, timeout_sec=120)
+    if code != 0:
+        raise RuntimeError(f"git worktree add failed: rc={code}\n{out}")
+
+
+def remove_worktree(repo: Path, worktree_dir: Path) -> None:
+    if not worktree_dir.exists():
+        return
+    code, out = run_cmd(["git", "worktree", "remove", "--force", str(worktree_dir)], cwd=repo, timeout_sec=120)
+    if code != 0:
+        raise RuntimeError(f"git worktree remove failed: rc={code}\n{out}")
+
+
+def export_worktree_patch(worktree_dir: Path, patch_path: Path) -> None:
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    code, out = run_cmd(["git", "diff", "--binary", "HEAD"], cwd=worktree_dir, timeout_sec=120)
+    if code != 0:
+        raise RuntimeError(f"git diff failed in worktree: rc={code}\n{out}")
+    patch_path.write_text(out + "\n", encoding="utf-8", errors="replace")
+
+
+def apply_patch_to_repo(repo: Path, patch_path: Path) -> None:
+    if not patch_path.exists():
+        raise RuntimeError(f"Patch not found: {patch_path}")
+    code, out = run_cmd(["git", "apply", "--binary", "--whitespace=nowarn", str(patch_path)], cwd=repo, timeout_sec=120)
+    if code != 0:
+        raise RuntimeError(f"git apply failed: rc={code}\n{out}")

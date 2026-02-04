@@ -12,7 +12,7 @@ from typing import Optional, Any
 
 from .analysis_cache import merge_dev_hints_to_global_changelog
 from .docs import load_dotenv_best_effort, resolve_docs_dir, generate_docs_digest, read_text_robust
-from .gates import run_build_gate, run_test_gate
+from .gates import run_build_gate_async, run_test_gate_async
 from .gitops import (
     git_head,
     git_changed_files,
@@ -23,6 +23,10 @@ from .gitops import (
     restore_checkpoint,
     RepoCheckpoint,
     list_untracked,
+    create_worktree,
+    remove_worktree,
+    export_worktree_patch,
+    apply_patch_to_repo,
 )
 from .inventory import build_repo_inventory, write_repo_inventory_files
 from .todo import read_current_todo, format_todo_block
@@ -55,7 +59,7 @@ from .state import (
     write_default_p0_backlog,
     write_backlog_files,
 )
-from .utils import force_utf8_stdio, eprint, now_iso, run_cmd
+from .utils import force_utf8_stdio, eprint, now_iso, run_cmd, safe_write_text
 from .schemas import PMOutputV2
 from .structured import parse_pm_output, dump_pretty, describe_parse_failure
 from .tracing import TraceCtx, new_trace_id
@@ -125,9 +129,6 @@ async def main_async(args: argparse.Namespace) -> int:
         eprint("Missing dependency: openai-agents. Install: pip install -U openai-agents openai")
         return 2
 
-    # Ensure tools run inside repo
-    os.chdir(repo)
-
     # Run dir (resume or new). In --loop mode, run_dir must be reused for the whole session.
     if getattr(args, "run_dir", ""):
         run_dir = Path(args.run_dir).expanduser().resolve()
@@ -140,6 +141,40 @@ async def main_async(args: argparse.Namespace) -> int:
             eprint(f"[WARN] No --run-dir specified. A previous run exists: {latest}. Use --resume-latest or --run-dir to resume.")
         run_dir = make_run_dir(repo)
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    def _is_unsafe_path(raw: str) -> bool:
+        try:
+            return ".." in Path(raw).parts
+        except Exception:
+            return True
+
+    def _fail_validation(name: str, value: str) -> None:
+        msg = (
+            "# Validation failure\n\n"
+            f"Blocked unsafe path for `{name}`: `{value}`\n\n"
+            "Path traversal patterns like `..` are not allowed. Use an absolute path or a safe relative path.\n"
+        )
+        safe_write_text(run_dir / "VALIDATION_FAILURE.md", msg)
+
+    for _name, _value in (("env_file", getattr(args, "env_file", "") or ""), ("prompts_dir", getattr(args, "prompts_dir", "") or "")):
+        if str(_value).strip() and _is_unsafe_path(str(_value)):
+            _fail_validation(_name, str(_value))
+            eprint(f"[STOP] Validation failure for {_name}: {_value}")
+            return 2
+
+    source_repo = repo
+    worktree_dir: Optional[Path] = None
+    if bool(getattr(args, "worktree_isolation", False)):
+        worktree_dir = run_dir / "worktree"
+        try:
+            create_worktree(source_repo, worktree_dir)
+        except Exception as ex:
+            eprint(f"[STOP] Failed to create worktree: {ex}")
+            return 2
+        repo = worktree_dir
+
+    # Ensure tools run inside repo
+    os.chdir(repo)
 
     # Observability
     metrics = MetricsLogger(run_dir / "metrics.jsonl")
@@ -207,8 +242,34 @@ async def main_async(args: argparse.Namespace) -> int:
     # Current implementation supports coarse on/off for PM/Dev/QA.
     roles_raw = str(getattr(args, "roles", "PM,Dev,QA") or "PM,Dev,QA")
 
+    plugins_allowlist = getattr(args, "plugins_allowlist", []) or []
+    if isinstance(plugins_allowlist, str):
+        plugins_allowlist = [p.strip() for p in plugins_allowlist.split(",") if p.strip()]
+
     # Stage pipeline (ordered, pluggable).
-    stages = make_stages(roles_raw)
+    stages: list = []
+    plugin_failure: Optional[Exception] = None
+    try:
+        stages = make_stages(
+            roles_raw,
+            plugins_enabled=bool(getattr(args, "plugins_enabled", False)),
+            plugins_allowlist=list(plugins_allowlist),
+            plugins_strict=bool(getattr(args, "plugins_strict", True)),
+        )
+    except Exception as ex:
+        plugin_failure = ex
+        msg = f"# Plugin load failure\n\n{ex}\n"
+        safe_write_text(run_dir / "PLUGIN_LOAD_FAILURE.md", msg)
+        eprint(f"[STOP] Plugin load failure: {ex}")
+
+    if plugin_failure is not None:
+        if worktree_dir is not None:
+            try:
+                remove_worktree(source_repo, worktree_dir)
+            except Exception as ex:
+                eprint(f"[WARN] Failed to remove worktree: {ex}")
+        return 1
+
     pipeline_mgr = PipelineManager(stages)
     pm_stage_enabled = any((getattr(s, 'name', '') or '').strip().lower() == 'pm' for s in stages)
 
@@ -1070,13 +1131,38 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 task_completed = False
 
+                def _restore_or_stop(reason: str) -> tuple[bool, str]:
+                    if not cp:
+                        return True, ""
+                    try:
+                        restore_checkpoint(
+                            repo,
+                            cp,
+                            dangerous=bool(getattr(args, "dangerous_git_rollback", False)),
+                            run_dir=run_dir,
+                            stop_path=stop_path,
+                        )
+                        metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason=reason)
+                        return True, ""
+                    except Exception as ex:
+                        detail = str(ex)
+                        blocked = "blocked" in detail.lower()
+                        fail_reason = "rollback_blocked" if blocked else "rollback_failed"
+                        state.setdefault("failed", []).append({"task": next_task.id, "reason": fail_reason, "detail": detail})
+                        save_state(state_path, state)
+                        metrics.event("rollback_failed", cycle=cycle_idx, step=step, task_id=next_task.id, reason=reason, detail=detail)
+                        eprint(f"[STOP] Rollback {fail_reason}: {detail}")
+                        return False, fail_reason
+
                 for attempt in range(max_attempts):
                     if stop_path.exists():
                         break
 
                     # Restore baseline before retries
                     if attempt > 0 and cp:
-                        restore_checkpoint(repo, cp)
+                        ok, fail_reason = _restore_or_stop("retry")
+                        if not ok:
+                            return 1, fail_reason, 0, (len(done_set) > before_done)
 
                     model_name = tiers[attempt]
                     dev_agent = dev if attempt == 0 else make_dev_agent(model_name)
@@ -1170,8 +1256,9 @@ async def main_async(args: argparse.Namespace) -> int:
                         save_state(state_path, state)
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="exception")
                         if cp:
-                            restore_checkpoint(repo, cp)
-                            metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="exception")
+                            ok, fail_reason = _restore_or_stop("exception")
+                            if not ok:
+                                return 1, fail_reason, 0, (len(done_set) > before_done)
                         return 1, "dev_exception", 0, (len(done_set) > before_done)
                     # Max-turns exceptions are recoverable: continue to diff/build gates.
                     if dev_exc and dev_is_max_turns:
@@ -1192,18 +1279,19 @@ async def main_async(args: argparse.Namespace) -> int:
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="no_diff")
                         eprint(f"[STOP] No diff produced for {next_task.id}.")
                         if cp:
-                            restore_checkpoint(repo, cp)
-                            metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="no_diff")
+                            ok, fail_reason = _restore_or_stop("no_diff")
+                            if not ok:
+                                return 1, fail_reason, 0, (len(done_set) > before_done)
                         return 1, "no_diff", 0, (len(done_set) > before_done)
                     if build_enabled:
                         metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
-                        ok = await asyncio.to_thread(
-                            run_build_gate,
+                        ok = await run_build_gate_async(
                             repo=repo,
                             build_cmd=getattr(args, "build_cmd", []),
                             build_timeout_sec=int(getattr(args, "build_timeout_seconds", 1800)),
                             legacy_build_target=str(getattr(args, "dotnet_build_target", "") or ""),
                             log_path=attempt_dir / "build.txt",
+                            stop_path=stop_path,
                         )
                         metrics.event("build_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
                         if not ok:
@@ -1214,19 +1302,20 @@ async def main_async(args: argparse.Namespace) -> int:
                             save_state(state_path, state)
                             eprint(f"[STOP] Build failed after {next_task.id}. See {attempt_dir / 'build.txt'}")
                             if cp:
-                                restore_checkpoint(repo, cp)
-                                metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="build_failed")
+                                ok_restore, fail_reason = _restore_or_stop("build_failed")
+                                if not ok_restore:
+                                    return 1, fail_reason, 0, (len(done_set) > before_done)
                             return 1, "build_failed", 0, (len(done_set) > before_done)
                     if run_tests:
                         metrics.event("test_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
-                        ok = await asyncio.to_thread(
-                            run_test_gate,
+                        ok = await run_test_gate_async(
                             repo=repo,
                             test_cmd=getattr(args, "test_cmd", []),
                             test_timeout_sec=int(getattr(args, "test_timeout_seconds", 3600)),
                             legacy_test_target=str(getattr(args, "dotnet_test_target", "") or ""),
                             legacy_test_filter=str(getattr(args, "dotnet_test_filter", "") or ""),
                             log_path=attempt_dir / "test.txt",
+                            stop_path=stop_path,
                         )
                         metrics.event("test_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
                         if not ok:
@@ -1237,8 +1326,9 @@ async def main_async(args: argparse.Namespace) -> int:
                             save_state(state_path, state)
                             eprint(f"[STOP] Tests failed after {next_task.id}. See {attempt_dir / 'test.txt'}")
                             if cp:
-                                restore_checkpoint(repo, cp)
-                                metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="test_failed")
+                                ok_restore, fail_reason = _restore_or_stop("test_failed")
+                                if not ok_restore:
+                                    return 1, fail_reason, 0, (len(done_set) > before_done)
                             return 1, "test_failed", 0, (len(done_set) > before_done)
                     if policy_scan_enabled:
                         code, diff_text = run_cmd(["git", "diff"], cwd=repo, timeout_sec=120)
@@ -1272,8 +1362,9 @@ async def main_async(args: argparse.Namespace) -> int:
                             metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="policy_violation",
                                           violations=len(scan_result.get("violations", [])))
                             if cp:
-                                restore_checkpoint(repo, cp)
-                                metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="policy_violation")
+                                ok_restore, fail_reason = _restore_or_stop("policy_violation")
+                                if not ok_restore:
+                                    return 1, fail_reason, 0, (len(done_set) > before_done)
                             return 1, "policy_violation", 0, (len(done_set) > before_done)
                     # Success: exit attempt loop
                     metrics.event("dev_attempt_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0)
@@ -1458,6 +1549,8 @@ async def main_async(args: argparse.Namespace) -> int:
             return res.rc, res.reason, res.done_delta
 
         idle_accum = 0
+        last_rc = 0
+        last_reason = ""
         cycles = 1 if not args.loop else (args.loop_max_cycles if args.loop_max_cycles and args.loop_max_cycles > 0 else 10**9)
 
         for cycle_idx in range(int(cycles)):
@@ -1466,6 +1559,8 @@ async def main_async(args: argparse.Namespace) -> int:
                 break
 
             rc, reason, delta = await run_cycle(cycle_idx)
+            last_rc = rc
+            last_reason = reason
             # 1-line per-cycle summary for unattended ops
             print(f"[CYCLE] {now_iso()} idx={cycle_idx} rc={rc} reason={reason} progress_delta={delta}")
 
@@ -1488,8 +1583,22 @@ async def main_async(args: argparse.Namespace) -> int:
                 await asyncio.sleep(max(0, int(args.loop_sleep_seconds)))
             else:
                 break
+        if worktree_dir is not None:
+            if last_rc == 0 and last_reason not in {"stop_file", "quota_exhausted"}:
+                try:
+                    patch_path = run_dir / "worktree.patch"
+                    export_worktree_patch(repo, patch_path)
+                    if patch_path.read_text(encoding="utf-8", errors="replace").strip():
+                        apply_patch_to_repo(source_repo, patch_path)
+                except Exception as ex:
+                    safe_write_text(run_dir / "WORKTREE_APPLY_FAILURE.md", f"# Worktree apply failure\n\n{ex}\n")
+                    last_rc = 1
+            try:
+                remove_worktree(source_repo, worktree_dir)
+            except Exception as ex:
+                eprint(f"[WARN] Failed to remove worktree: {ex}")
 
-    return 0
+    return last_rc
 
 
 

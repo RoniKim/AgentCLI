@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .utils import atomic_write_json, eprint
 
 def app_home() -> Path:
     """
@@ -74,7 +75,11 @@ def load_config(path: Path) -> Dict[str, Any]:
 
 def save_config(path: Path, cfg: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+    try:
+        atomic_write_json(path, cfg)
+    except Exception as ex:
+        eprint(f"[WARN] Failed to write config atomically: {ex}")
+        path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
 
 
 # ---- path resolution ----

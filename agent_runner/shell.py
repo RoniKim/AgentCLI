@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import shutil
+import subprocess
 import threading
 import time
 import json
@@ -212,8 +214,10 @@ class RunnerShell:
         print(f"autopilot:  {bool(eff.get('autopilot'))}")
         print(f"loop:       {bool(eff.get('loop'))} (sleep={eff.get('loop_sleep_seconds')}s, max_cycles={eff.get('loop_max_cycles')})")
         print(f"continuous: {bool(eff.get('continuous'))} (iterations={eff.get('iterations')}, max_turns_per_task={eff.get('max_turns_per_task')})")
+        print(f"isolate_task: {bool(eff.get('isolate_task'))} / worktree_isolation: {bool(eff.get('worktree_isolation'))}")
         print(f"no_policy_scan: {bool(eff.get('no_policy_scan'))}")
         print(f"no_build:   {bool(eff.get('no_build'))} / run_tests: {bool(eff.get('run_tests'))}")
+        print(f"dangerous_git_rollback: {bool(eff.get('dangerous_git_rollback'))}")
         print(f"pm_model:   {eff.get('pm_model')}")
         print(f"dev_model:  {eff.get('dev_model')}")
         print(f"qa_model:   {eff.get('qa_model')}")
@@ -236,6 +240,7 @@ class RunnerShell:
             print(f"claudecode_dev_allowed_tools: {eff.get('claudecode_dev_allowed_tools')}")
             print(f"claudecode_qa_allowed_tools: {eff.get('claudecode_qa_allowed_tools')}")
         print(f"roles:      {eff.get('roles')}")
+        print(f"plugins_enabled: {bool(eff.get('plugins_enabled'))} (allowlist={eff.get('plugins_allowlist')}, strict={bool(eff.get('plugins_strict'))})")
         print(f"debug:      {bool(eff.get('debug', False))}")
         print(f"OPENAI_API_KEY set: {_yesno(bool(os.getenv('OPENAI_API_KEY', '').strip()))}")
         print(f"ANTHROPIC_API_KEY set: {_yesno(bool(os.getenv('ANTHROPIC_API_KEY', '').strip()))}")
@@ -489,6 +494,7 @@ class RunnerShell:
         lines = [
             "Commands (명령어):",
             "  /help                     도움말 표시",
+            "  /doctor                   환경/설정 진단 보고서 생성",
             "  /repo <path>               레포지토리 루트 설정",
             "  /config [--all]            현재 적용 설정 요약 출력 (--all: 전체 JSON 출력)",
             "  /set <key> <value>         설정 값을 덮어쓰기(타입은 기본값 기준)",
@@ -508,6 +514,73 @@ class RunnerShell:
             "  - backend=claudecode 사용 시 ANTHROPIC_API_KEY와 'claude' CLI가 필요합니다.",
         ]
         print("\n".join(lines))
+
+    def doctor(self) -> None:
+        if not self.repo:
+            print("[ERR] repo is not set; use /repo <path>")
+            return
+
+        eff = self.effective()
+        run_dir = self.run_dir or make_run_dir(self.repo)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        report_lines: list[str] = ["# Doctor report", ""]
+
+        # Git checks
+        try:
+            r = subprocess.run(["git", "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+            report_lines.append(f"- git version: {r.stdout.strip() or r.stderr.strip()}")
+        except Exception as ex:
+            report_lines.append(f"- git version: ERROR ({ex})")
+        try:
+            r = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=str(self.repo),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            report_lines.append(f"- repo is git: {r.stdout.strip() == 'true'}")
+        except Exception as ex:
+            report_lines.append(f"- repo is git: ERROR ({ex})")
+
+        # Config load check
+        cfg_path = self.config_path or default_config_path(self.repo)
+        try:
+            _ = load_config(cfg_path) if cfg_path.exists() else {}
+            report_lines.append(f"- config load: OK ({cfg_path})")
+        except Exception as ex:
+            report_lines.append(f"- config load: ERROR ({cfg_path}) ({ex})")
+
+        # Run dir write check
+        try:
+            test_path = run_dir / "DOCTOR_WRITE_TEST.tmp"
+            test_path.write_text("ok\n", encoding="utf-8", errors="replace")
+            test_path.unlink(missing_ok=True)
+            report_lines.append(f"- run_dir writable: OK ({run_dir})")
+        except Exception as ex:
+            report_lines.append(f"- run_dir writable: ERROR ({run_dir}) ({ex})")
+
+        # API keys
+        report_lines.append(f"- OPENAI_API_KEY set: {bool(os.getenv('OPENAI_API_KEY', '').strip())}")
+        report_lines.append(f"- ANTHROPIC_API_KEY set: {bool(os.getenv('ANTHROPIC_API_KEY', '').strip())}")
+
+        def _first_cmd(cmd_val: Any, fallback: str) -> str:
+            if isinstance(cmd_val, list) and cmd_val:
+                return str(cmd_val[0])
+            if isinstance(cmd_val, str) and cmd_val.strip():
+                return cmd_val.strip().split()[0]
+            return fallback
+
+        build_exe = _first_cmd(eff.get("build_cmd"), "dotnet")
+        test_exe = _first_cmd(eff.get("test_cmd"), "dotnet")
+
+        report_lines.append(f"- build command executable: {build_exe} -> {shutil.which(build_exe) is not None}")
+        report_lines.append(f"- test command executable: {test_exe} -> {shutil.which(test_exe) is not None}")
+
+        report = "\n".join(report_lines) + "\n"
+        (run_dir / "DOCTOR.md").write_text(report, encoding="utf-8", errors="replace")
+        print(report)
 
 def _build_completer() -> Any:
     """
@@ -541,6 +614,11 @@ def _build_completer() -> Any:
                 "--qa-model",
                 "--execution-backend",
                 "--roles",
+                "--dangerous-git-rollback",
+                "--plugins-enabled",
+                "--plugins-allowlist",
+                "--plugins-strict",
+                "--worktree-isolation",
                 "--claudecode-model",
                 "--claudecode-permission-mode",
                 "--claudecode-setting-sources",
@@ -552,6 +630,7 @@ def _build_completer() -> Any:
     return NestedCompleter.from_nested_dict(
         {
             "/help": None,
+            "/doctor": None,
             "/repo": None,
             "/config": None,
             "/set": set_keys,
@@ -642,6 +721,9 @@ def _dispatch(sh: RunnerShell, line: str) -> bool:
         return True
     if cmd == "/help":
         sh.help()
+        return False
+    if cmd == "/doctor":
+        sh.doctor()
         return False
     if cmd == "/repo":
         if not args:
