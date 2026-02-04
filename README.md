@@ -196,6 +196,22 @@ python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --autopilot --continuou
 
 ---
 
+## 안전 실행: worktree isolation
+
+개인 개발 환경에서 destructive rollback을 피하고 싶다면 `--worktree-isolation`을 사용하세요.
+
+* 러너는 `run_dir/worktree`에 임시 worktree를 만들고 그 안에서 작업/빌드/테스트를 수행합니다.
+* 실행이 정상 완료되면 변경분을 원본 repo에 patch로 적용합니다.
+* 실패/중단 시 worktree만 삭제되고 원본 repo는 그대로 유지됩니다.
+
+예시:
+
+```bash
+python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --autopilot --continuous --worktree-isolation
+```
+
+---
+
 ## 추천 실행 프리셋 (예시)
 
 ### 비용 절감 모델 프리셋

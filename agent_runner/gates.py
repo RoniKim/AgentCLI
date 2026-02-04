@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .utils import run_cmd
+from .utils import run_cmd, run_cmd_async
 
 
 def _norm_cmd(v: object) -> list[str]:
@@ -43,6 +43,31 @@ def run_build_gate(repo: Path, build_cmd: object, build_timeout_sec: int, legacy
     return code == 0
 
 
+async def run_build_gate_async(
+    repo: Path,
+    build_cmd: object,
+    build_timeout_sec: int,
+    legacy_build_target: str,
+    log_path: Path,
+    *,
+    stop_path: Path | None = None,
+    max_output_bytes: int = 10_000_000,
+) -> bool:
+    cmd = _norm_cmd(build_cmd)
+    if not cmd:
+        cmd = find_build_cmd(repo, legacy_build_target)
+    timeout = int(build_timeout_sec or 1800)
+    code, _log = await run_cmd_async(
+        cmd,
+        cwd=repo,
+        log_path=log_path,
+        timeout_sec=timeout,
+        stop_path=stop_path,
+        max_output_bytes=max_output_bytes,
+    )
+    return code == 0
+
+
 def run_test_gate(
     repo: Path,
     test_cmd: object,
@@ -64,6 +89,32 @@ def run_test_gate(
     code, out = run_cmd(cmd, cwd=repo, timeout_sec=timeout)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(out + "\n", encoding="utf-8", errors="replace")
+    return code == 0
+
+
+async def run_test_gate_async(
+    repo: Path,
+    test_cmd: object,
+    test_timeout_sec: int,
+    legacy_test_target: str,
+    legacy_test_filter: str,
+    log_path: Path,
+    *,
+    stop_path: Path | None = None,
+    max_output_bytes: int = 10_000_000,
+) -> bool:
+    cmd = _norm_cmd(test_cmd)
+    if not cmd:
+        cmd = find_test_cmd(repo, legacy_test_target, legacy_test_filter)
+    timeout = int(test_timeout_sec or 3600)
+    code, _log = await run_cmd_async(
+        cmd,
+        cwd=repo,
+        log_path=log_path,
+        timeout_sec=timeout,
+        stop_path=stop_path,
+        max_output_bytes=max_output_bytes,
+    )
     return code == 0
 
 

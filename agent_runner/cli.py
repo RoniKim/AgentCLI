@@ -78,6 +78,9 @@ DEFAULTS: Dict[str, Any] = {
     # Pipeline roles (comma-separated). Default keeps legacy order.
     # Example: "PM,Dev,QA" or "PM,Dev".
     "roles": "PM,Dev,QA",
+    "plugins_enabled": False,
+    "plugins_allowlist": [],
+    "plugins_strict": True,
 
     # Runner behavior
     "autopilot": False,
@@ -89,6 +92,8 @@ DEFAULTS: Dict[str, Any] = {
     "iterations": 30,
     "max_turns_per_task": 12,
     "isolate_task": False,
+    "worktree_isolation": False,
+    "dangerous_git_rollback": False,
 
     # Safety / gates
     "no_policy_scan": False,
@@ -255,6 +260,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "Forward-compatible with plugin stages."
         ),
     )
+    p.add_argument("--plugins-enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable plugin stages (default: false)")
+    p.add_argument(
+        "--plugins-allowlist",
+        default=None,
+        help="Comma-separated allowlist for plugin modules (fnmatch patterns)",
+    )
+    p.add_argument("--plugins-strict", action=argparse.BooleanOptionalAction, default=None, help="Fail on plugin load errors (default: true)")
 
     # Behavior
     p.add_argument("--autopilot", action=argparse.BooleanOptionalAction, default=None)
@@ -267,6 +279,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--iterations", type=int, default=None)
     p.add_argument("--max-turns-per-task", type=int, default=None)
     p.add_argument("--isolate-task", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--worktree-isolation", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--dangerous-git-rollback", action=argparse.BooleanOptionalAction, default=None)
 
     # Safety / gates
     # NOTE: argparse.BooleanOptionalAction cannot be used with option strings starting with "--no-" (Python 3.14+).

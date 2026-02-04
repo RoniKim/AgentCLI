@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .utils import atomic_write_json, has_path_traversal
+
 
 def app_home() -> Path:
     """
@@ -73,8 +75,7 @@ def load_config(path: Path) -> Dict[str, Any]:
 
 
 def save_config(path: Path, cfg: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+    atomic_write_json(path, cfg)
 
 
 # ---- path resolution ----
@@ -87,6 +88,8 @@ def resolve_config_path(repo: Path, explicit: Optional[str]) -> Path:
     """
     if explicit and str(explicit).strip():
         p = Path(str(explicit)).expanduser()
+        if not p.is_absolute() and has_path_traversal(str(explicit)):
+            raise ValueError(f"Unsafe config path: {explicit}")
         return p.resolve() if p.is_absolute() else (app_home() / p).resolve()
     return default_config_path(repo)
 
@@ -104,6 +107,8 @@ def resolve_prompts_dir(repo: Path, explicit: Optional[str]) -> Path:
         if s.replace("\\", "/") == ".doc/agent_prompts":
             return default_prompts_dir(repo)
         p = Path(s).expanduser()
+        if not p.is_absolute() and has_path_traversal(s):
+            raise ValueError(f"Unsafe prompts dir: {explicit}")
         return p.resolve() if p.is_absolute() else (app_home() / p).resolve()
     return default_prompts_dir(repo)
 
@@ -117,5 +122,7 @@ def resolve_env_file(explicit: Optional[str]) -> Optional[Path]:
     """
     if explicit and str(explicit).strip():
         p = Path(str(explicit)).expanduser()
+        if not p.is_absolute() and has_path_traversal(str(explicit)):
+            raise ValueError(f"Unsafe env file path: {explicit}")
         return p.resolve() if p.is_absolute() else (app_home() / p).resolve()
     return None

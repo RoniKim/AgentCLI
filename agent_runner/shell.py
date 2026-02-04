@@ -6,6 +6,8 @@ import shlex
 import threading
 import time
 import json
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -177,7 +179,11 @@ class RunnerShell:
             p = Path(path_str).expanduser()
             self.config_path = p.resolve()
         else:
-            self.config_path = resolve_config_path(self.repo, path_str)
+            try:
+                self.config_path = resolve_config_path(self.repo, path_str)
+            except Exception as ex:
+                print(f"[ERR] Invalid config path: {ex}")
+                return
         self._ensure_config_loaded()
 
     def effective(self) -> Dict[str, Any]:
@@ -236,7 +242,10 @@ class RunnerShell:
             print(f"claudecode_dev_allowed_tools: {eff.get('claudecode_dev_allowed_tools')}")
             print(f"claudecode_qa_allowed_tools: {eff.get('claudecode_qa_allowed_tools')}")
         print(f"roles:      {eff.get('roles')}")
+        print(f"plugins_enabled: {bool(eff.get('plugins_enabled'))} (allowlist={eff.get('plugins_allowlist')}, strict={bool(eff.get('plugins_strict'))})")
         print(f"debug:      {bool(eff.get('debug', False))}")
+        print(f"dangerous_git_rollback: {bool(eff.get('dangerous_git_rollback', False))}")
+        print(f"worktree_isolation: {bool(eff.get('worktree_isolation', False))}")
         print(f"OPENAI_API_KEY set: {_yesno(bool(os.getenv('OPENAI_API_KEY', '').strip()))}")
         print(f"ANTHROPIC_API_KEY set: {_yesno(bool(os.getenv('ANTHROPIC_API_KEY', '').strip()))}")
         print("======================================\n")
@@ -416,6 +425,82 @@ class RunnerShell:
         print(f"exit:    {self._runner_exit_code if (not alive) else '(running)'}")
         print("=====================\n")
 
+    def doctor(self) -> None:
+        if not self.repo:
+            print("[ERR] repo is not set; use /repo first.")
+            return
+        eff = self.effective()
+        run_dir = self.run_dir or (
+            Path(eff.get("run_dir")).expanduser().resolve() if eff.get("run_dir") else make_run_dir(self.repo)
+        )
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        lines: list[str] = ["# DOCTOR", ""]
+
+        git_path = shutil.which("git") or ""
+        if git_path:
+            try:
+                r = subprocess.run(["git", "--version"], capture_output=True, text=True, check=False)
+                git_version = (r.stdout or r.stderr or "").strip()
+                lines.append(f"- git: {git_version}")
+            except Exception as ex:
+                lines.append(f"- git: error ({ex})")
+        else:
+            lines.append("- git: NOT FOUND")
+
+        repo_ok = False
+        try:
+            r = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=str(self.repo),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            repo_ok = r.returncode == 0 and (r.stdout or "").strip().lower() == "true"
+        except Exception:
+            repo_ok = False
+        lines.append(f"- repo is git: {repo_ok}")
+
+        cfgp = self.config_path or default_config_path(self.repo)
+        try:
+            _ = load_config(cfgp) if cfgp.exists() else {}
+            lines.append(f"- config load: ok ({cfgp})")
+        except Exception as ex:
+            lines.append(f"- config load: error ({cfgp}) {ex}")
+
+        try:
+            test_path = run_dir / ".doctor_write_test"
+            test_path.write_text("ok\n", encoding="utf-8", errors="replace")
+            test_path.unlink(missing_ok=True)
+            lines.append(f"- run_dir writable: ok ({run_dir})")
+        except Exception as ex:
+            lines.append(f"- run_dir writable: error ({run_dir}) {ex}")
+
+        lines.append(f"- OPENAI_API_KEY set: {_yesno(bool(os.getenv('OPENAI_API_KEY', '').strip()))}")
+        lines.append(f"- ANTHROPIC_API_KEY set: {_yesno(bool(os.getenv('ANTHROPIC_API_KEY', '').strip()))}")
+
+        build_cmd = eff.get("build_cmd") or []
+        test_cmd = eff.get("test_cmd") or []
+        build_bin = ""
+        test_bin = ""
+        if isinstance(build_cmd, list) and build_cmd:
+            build_bin = str(build_cmd[0])
+        if isinstance(test_cmd, list) and test_cmd:
+            test_bin = str(test_cmd[0])
+        if not build_bin and eff.get("dotnet_build_target") is not None:
+            build_bin = "dotnet"
+        if not test_bin and eff.get("dotnet_test_target") is not None:
+            test_bin = "dotnet"
+        if build_bin:
+            lines.append(f"- build command '{build_bin}' in PATH: {_yesno(bool(shutil.which(build_bin)))}")
+        if test_bin:
+            lines.append(f"- test command '{test_bin}' in PATH: {_yesno(bool(shutil.which(test_bin)))}")
+
+        content = "\n".join(lines) + "\n"
+        (run_dir / "DOCTOR.md").write_text(content, encoding="utf-8", errors="replace")
+        print(content)
+
     def cmd_set(self, key: str, raw_value: str) -> None:
         key = key.replace("-", "_").strip()
         if key not in DEFAULTS:
@@ -446,7 +531,11 @@ class RunnerShell:
             print("[ERR] repo is not set; provide a path: /save <path>")
             return
         if self.repo:
-            out_path = resolve_config_path(self.repo, path_str)
+            try:
+                out_path = resolve_config_path(self.repo, path_str)
+            except Exception as ex:
+                print(f"[ERR] Invalid config path: {ex}")
+                return
         else:
             p = Path(path_str).expanduser()  # type: ignore[arg-type]
             out_path = p.resolve() if p.is_absolute() else (app_home() / p).resolve()
@@ -470,7 +559,11 @@ class RunnerShell:
             print("[ERR] repo is not set; provide a path: /load <path>")
             return
         if self.repo:
-            p = resolve_config_path(self.repo, path_str)
+            try:
+                p = resolve_config_path(self.repo, path_str)
+            except Exception as ex:
+                print(f"[ERR] Invalid config path: {ex}")
+                return
         else:
             pp = Path(path_str).expanduser()  # type: ignore[arg-type]
             p = pp.resolve() if pp.is_absolute() else (app_home() / pp).resolve()
@@ -500,6 +593,7 @@ class RunnerShell:
             "  /start [--flags...]        러너 백그라운드 시작 (예: /start --autopilot --loop)",
             "  /stop [--wait]             중지 요청(STOP 파일 생성). --wait로 종료 대기",
             "  /status                    러너 상태 확인",
+            "  /doctor                    환경/설정 진단 보고서 생성",
             "  /todo [--save|--load ...]   TODO 파일 생성/선택(.doc/todo)",
             "  /exit                      종료",
             "",
@@ -541,9 +635,14 @@ def _build_completer() -> Any:
                 "--qa-model",
                 "--execution-backend",
                 "--roles",
+                "--plugins-enabled",
+                "--plugins-allowlist",
+                "--plugins-strict",
                 "--claudecode-model",
                 "--claudecode-permission-mode",
                 "--claudecode-setting-sources",
+                "--dangerous-git-rollback",
+                "--worktree-isolation",
             }
         ),
         ignore_case=True,
@@ -561,6 +660,7 @@ def _build_completer() -> Any:
             "/start": start_flags,
             "/stop": WordCompleter(["--wait"], ignore_case=True),
             "/status": None,
+            "/doctor": None,
             "/todo": WordCompleter(["--save", "--load", "latest"], ignore_case=True),
             "/exit": None,
             "/quit": None,
@@ -681,6 +781,9 @@ def _dispatch(sh: RunnerShell, line: str) -> bool:
         return False
     if cmd == "/status":
         sh.status()
+        return False
+    if cmd == "/doctor":
+        sh.doctor()
         return False
 
     if cmd == "/todo":

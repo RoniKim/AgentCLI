@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import importlib
 import re
-from typing import List, Type
+from fnmatch import fnmatch
+from typing import List, Type, Sequence
 
 from .stages.base import Stage
 from .stages.pm_stage import PMStage
@@ -67,15 +68,34 @@ def _load_plugin(spec: str) -> Type[Stage]:
     return c
 
 
-def make_stages(raw_roles: str | None) -> List[Stage]:
+def _is_allowed_plugin(module_path: str, allowlist: Sequence[str]) -> bool:
+    for pattern in allowlist:
+        if fnmatch(module_path, pattern):
+            return True
+    return False
+
+
+def make_stages(
+    raw_roles: str | None,
+    *,
+    plugins_enabled: bool,
+    plugins_allowlist: Sequence[str],
+    plugins_strict: bool,
+) -> List[Stage]:
     roles = parse_roles(raw_roles)
     stages: List[Stage] = []
     for r in roles:
         if ":" in r:
+            mod, _cls = r.split(":", 1)
+            if not plugins_enabled:
+                raise ValueError(f"Plugin stages are disabled: {r}")
+            if not plugins_allowlist or not _is_allowed_plugin(mod, plugins_allowlist):
+                raise ValueError(f"Plugin not in allowlist: {r}")
             try:
                 stages.append(_load_plugin(r)())
             except Exception:
-                # keep robust: plugin load failure should not crash the runner
+                if plugins_strict:
+                    raise
                 continue
             continue
         cls = _BUILTIN.get(r)

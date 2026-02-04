@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List
 
-from .utils import now_iso
+from .utils import now_iso, atomic_write_json
 
 
 @dataclass
@@ -85,7 +85,7 @@ def write_backlog_files(run_dir: Path, tasks: List[dict[str, Any]]) -> tuple[Pat
     backlog = {"generated_at": now_iso(), "tasks": tasks}
     run_dir.mkdir(parents=True, exist_ok=True)
     bj = run_dir / "BACKLOG.json"
-    bj.write_text(json.dumps(backlog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+    atomic_write_json(bj, backlog)
 
     md_lines = ["# BACKLOG", ""]
     for t in tasks:
@@ -125,8 +125,7 @@ def load_state(path: Path) -> dict[str, Any]:
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+    atomic_write_json(path, state)
 
 
 def mark_backlog_done(backlog_md: Path, task_id: str) -> None:
@@ -171,7 +170,7 @@ def write_default_p0_backlog(run_dir: Path) -> None:
     }
 
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "BACKLOG.json").write_text(json.dumps(backlog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+    atomic_write_json(run_dir / "BACKLOG.json", backlog)
 
     md_lines = ["# BACKLOG", ""]
     for t in backlog["tasks"]:
