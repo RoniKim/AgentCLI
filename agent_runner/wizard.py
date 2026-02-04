@@ -53,7 +53,51 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
     print(f"repo: {repo}")
     print("")
 
-    execution_backend = _ask_choice("Execution backend (runner)", str(defaults.get("execution_backend", "codex")).lower(), ["codex", "claudecode"])
+    execution_backend = _ask_choice(
+        "Execution backend (runner)",
+        str(defaults.get("execution_backend", "codex")).lower(),
+        ["codex", "claudecode"],
+    )
+
+    # Claude Code backend settings (only asked when selected)
+    claudecode_cfg: Dict[str, Any] = {}
+    if execution_backend == "claudecode":
+        print("\n--- Claude Code backend options ---")
+        claudecode_cfg = {
+            "claudecode_model": _ask_str("Claude model", str(defaults.get("claudecode_model", "sonnet"))),
+            "claudecode_permission_mode": _ask_choice(
+                "Permission mode",
+                str(defaults.get("claudecode_permission_mode", "acceptEdits")),
+                ["default", "acceptEdits", "bypassPermissions", "plan"],
+            ),
+            "claudecode_max_turns": _ask_int("Max turns per query", int(defaults.get("claudecode_max_turns", 32))),
+            "claudecode_setting_sources": _ask_str(
+                "Setting sources (comma-separated: user,project,local)",
+                str(defaults.get("claudecode_setting_sources", "project")),
+            ),
+            "claudecode_system_prompt_append": _ask_str(
+                "System prompt append (optional)",
+                str(defaults.get("claudecode_system_prompt_append", "")),
+            ),
+            "claudecode_user": _ask_str("User identifier (optional)", str(defaults.get("claudecode_user", ""))),
+            "claudecode_include_partial_messages": _ask_bool(
+                "Include partial/streaming messages",
+                bool(defaults.get("claudecode_include_partial_messages", False)),
+            ),
+            "claudecode_fork_session": _ask_bool("Fork session when resuming", bool(defaults.get("claudecode_fork_session", False))),
+            "claudecode_max_thinking_tokens": _ask_int(
+                "Max thinking tokens (0 = SDK default)",
+                int(defaults.get("claudecode_max_thinking_tokens", 0)),
+            ),
+            "claudecode_continue_conversation": _ask_bool(
+                "Continue conversation (keep session)",
+                bool(defaults.get("claudecode_continue_conversation", False)),
+            ),
+            "claudecode_enable_file_checkpointing": _ask_bool(
+                "Enable file checkpointing",
+                bool(defaults.get("claudecode_enable_file_checkpointing", False)),
+            ),
+        }
 
     autopilot = _ask_bool("Enable autopilot", bool(defaults.get("autopilot", False)))
     continuous = _ask_bool("Enable continuous (execute tasks after backlog)", bool(defaults.get("continuous", False)))
@@ -138,6 +182,9 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
         "qa_model": qa_model,
         "prompts_dir": prompts_dir,
     }
+
+    # Merge backend-specific options
+    cfg.update(claudecode_cfg)
 
     # Ensure prompts exist (never overwrites)
     pd = resolve_prompts_dir(repo, prompts_dir)

@@ -107,9 +107,19 @@ pip install -U -r requirements.txt
 
 ## 환경변수 / .env
 
-필수:
+### Execution Backend (codex / claudecode)
 
-* `OPENAI_API_KEY`
+AgentCLI는 설정(`execution_backend`)에 따라 실행 엔진을 교체할 수 있습니다.
+
+* `codex` (기본): OpenAI Agents + Codex MCP 기반
+* `claudecode`: Claude Agent SDK 기반(Claude Code CLI 포함)
+
+> Interactive Shell에서 `/set execution_backend claudecode` 후 `/save` 하면 config에 저장됩니다.
+
+필수(backend에 따라):
+
+* `codex`: `OPENAI_API_KEY`
+* `claudecode`: `ANTHROPIC_API_KEY` (+ `pip install claude-agent-sdk` 필요)
 
 `.env` 로딩은 “베스트-에포트”로 동작합니다.
 

@@ -8,6 +8,7 @@ import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Tuple
+import inspect
 
 from ..analysis_cache import merge_dev_hints_to_global_changelog
 from ..docs import load_dotenv_best_effort, resolve_docs_dir, generate_docs_digest
@@ -102,6 +103,12 @@ class ClaudeCodeConfig:
     resume: str
     enable_file_checkpointing: bool
 
+    # Advanced SDK toggles (best-effort: ignored when SDK doesn't support)
+    user: str
+    include_partial_messages: bool
+    fork_session: bool
+    max_thinking_tokens: Optional[int]
+
     pm_allowed_tools: list[str]
     pm_disallowed_tools: list[str]
     dev_allowed_tools: list[str]
@@ -120,6 +127,15 @@ def _load_claudecode_cfg(args: argparse.Namespace) -> ClaudeCodeConfig:
         continue_conversation=bool(getattr(args, "claudecode_continue_conversation", False)),
         resume=str(getattr(args, "claudecode_resume", "") or ""),
         enable_file_checkpointing=bool(getattr(args, "claudecode_enable_file_checkpointing", False)),
+
+        user=str(getattr(args, "claudecode_user", "") or ""),
+        include_partial_messages=bool(getattr(args, "claudecode_include_partial_messages", False)),
+        fork_session=bool(getattr(args, "claudecode_fork_session", False)),
+        max_thinking_tokens=(
+            int(getattr(args, "claudecode_max_thinking_tokens", 0) or 0)
+            if int(getattr(args, "claudecode_max_thinking_tokens", 0) or 0) > 0
+            else None
+        ),
         pm_allowed_tools=_as_str_list(getattr(args, "claudecode_pm_allowed_tools", "Read,Grep,Glob,Write,Edit")),
         pm_disallowed_tools=_as_str_list(getattr(args, "claudecode_pm_disallowed_tools", "")),
         dev_allowed_tools=_as_str_list(getattr(args, "claudecode_dev_allowed_tools", "Read,Write,Edit,Grep,Glob,Bash")),
@@ -127,6 +143,23 @@ def _load_claudecode_cfg(args: argparse.Namespace) -> ClaudeCodeConfig:
         qa_allowed_tools=_as_str_list(getattr(args, "claudecode_qa_allowed_tools", "Read,Grep,Glob,Bash")),
         qa_disallowed_tools=_as_str_list(getattr(args, "claudecode_qa_disallowed_tools", "")),
     )
+
+
+def _filter_kwargs_for_ctor(cls: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Filter kwargs to parameters actually supported by cls.__init__.
+
+    The Claude Agent SDK evolves quickly; this keeps us compatible with
+    older/newer versions by ignoring unknown constructor args.
+    """
+    try:
+        sig = inspect.signature(cls)
+        allowed = set(sig.parameters.keys())
+        # dataclass-like constructors often include **kwargs; if so, keep all.
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            return kwargs
+        return {k: v for k, v in kwargs.items() if k in allowed}
+    except Exception:
+        return kwargs
 
 
 def _pick_run_dir(repo: Path, args: argparse.Namespace) -> Path:
@@ -367,20 +400,27 @@ def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str) -> Any:
     )
 
     # NOTE: permission_mode default is 'acceptEdits' (safe for PM analysis edits and Dev code edits).
-    return ClaudeAgentOptions(
-        model=cfg.model,
-        permission_mode=cfg.permission_mode,
-        max_turns=int(cfg.max_turns),
-        setting_sources=cfg.setting_sources,
-        allowed_tools=allowed,
-        disallowed_tools=disallowed,
-        output_format=output_format,
-        system_prompt=system_prompt,
-        continue_conversation=cfg.continue_conversation,
-        resume=cfg.resume or None,
-        enable_file_checkpointing=cfg.enable_file_checkpointing,
-        # sandbox is intentionally managed by the agent SDK; extend here later.
-    )
+    kwargs: dict[str, Any] = {
+        "model": cfg.model,
+        "permission_mode": cfg.permission_mode,
+        "max_turns": int(cfg.max_turns),
+        "setting_sources": cfg.setting_sources,
+        "allowed_tools": allowed,
+        "disallowed_tools": disallowed,
+        "output_format": output_format,
+        "system_prompt": system_prompt,
+        "continue_conversation": cfg.continue_conversation,
+        "resume": cfg.resume or None,
+        "enable_file_checkpointing": cfg.enable_file_checkpointing,
+
+        # advanced toggles (best-effort)
+        "user": cfg.user or None,
+        "include_partial_messages": bool(cfg.include_partial_messages),
+        "fork_session": bool(cfg.fork_session),
+        "max_thinking_tokens": cfg.max_thinking_tokens,
+    }
+    kwargs = _filter_kwargs_for_ctor(ClaudeAgentOptions, kwargs)
+    return ClaudeAgentOptions(**kwargs)
 
 
 async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:

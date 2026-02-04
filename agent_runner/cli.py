@@ -59,6 +59,13 @@ DEFAULTS: Dict[str, Any] = {
     "claudecode_resume": "",
     "claudecode_enable_file_checkpointing": False,
 
+    # Claude Agent SDK advanced toggles (best-effort; ignored if SDK doesn't support)
+    "claudecode_user": "",
+    "claudecode_include_partial_messages": False,
+    "claudecode_fork_session": False,
+    # 0 => SDK default (None)
+    "claudecode_max_thinking_tokens": 0,
+
     # Tool allow/deny lists are comma-separated strings (or JSON arrays when saved via wizard).
     # PM may need to update .doc/PM_CACHE/PROJECT_ANALYSIS.md to keep parity with Codex backend.
     "claudecode_pm_allowed_tools": "Read,Grep,Glob,Write,Edit",
@@ -303,6 +310,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--claudecode-continue-conversation", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--claudecode-resume", default=None, help="Resume session id")
     p.add_argument("--claudecode-enable-file-checkpointing", action=argparse.BooleanOptionalAction, default=None)
+
+    # Claude Agent SDK advanced toggles (best-effort)
+    p.add_argument("--claudecode-user", default=None, help="User identifier (optional)")
+    p.add_argument("--claudecode-include-partial-messages", action=argparse.BooleanOptionalAction, default=None, help="Enable partial/streaming message events")
+    p.add_argument("--claudecode-fork-session", action=argparse.BooleanOptionalAction, default=None, help="When resuming, fork into a new session id")
+    p.add_argument("--claudecode-max-thinking-tokens", type=int, default=None, help="Max thinking tokens (0 or omitted = SDK default)")
 
     p.add_argument("--claudecode-pm-allowed-tools", default=None, help="PM stage allowed tools (comma-separated)")
     p.add_argument("--claudecode-pm-disallowed-tools", default=None, help="PM stage disallowed tools (comma-separated)")

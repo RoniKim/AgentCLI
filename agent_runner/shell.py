@@ -5,13 +5,22 @@ import os
 import shlex
 import threading
 import time
+import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .cli import DEFAULTS
-from .config import load_config, save_config, resolve_config_path, default_config_path, legacy_config_path, resolve_prompts_dir
+from .config import (
+    app_home,
+    load_config,
+    save_config,
+    resolve_config_path,
+    default_config_path,
+    legacy_config_path,
+    resolve_prompts_dir,
+)
 from .docs import load_dotenv_best_effort
-from .cycle import run as run_cycle
+from .runner_entry import run as run_runner
 from .run_dir import make_run_dir
 from .run_dir import find_latest_run_dir
 from .todo import ensure_todo_file, read_current_todo, set_current_todo, open_path
@@ -173,7 +182,7 @@ class RunnerShell:
 
     def effective(self) -> Dict[str, Any]:
         eff: Dict[str, Any] = dict(DEFAULTS)
-        # Only keep known keys from config
+        # Apply known keys from config (forward-compat: keep unknown keys in self.config for /save)
         if self.config:
             for k in DEFAULTS.keys():
                 if k in self.config:
@@ -184,7 +193,7 @@ class RunnerShell:
             eff["repo"] = str(self.repo)
         return eff
 
-    def print_config(self) -> None:
+    def print_config(self, show_all: bool = False) -> None:
         eff = self.effective()
         repo = self.repo
         cfgp = self.config_path or (default_config_path(repo) if repo else None)
@@ -212,11 +221,16 @@ class RunnerShell:
         print(f"dev_auto_escalate: {bool(eff.get('dev_auto_escalate'))} (max={eff.get('dev_max_escalations')}, on={eff.get('dev_escalate_on')})")
         print(f"mcp_mode:   {eff.get('mcp_mode')} (package={eff.get('codex_package')})")
         print(f"docs_read_mode: {eff.get('docs_read_mode')} (docs_dir={eff.get('docs_dir')})")
+        print(f"prompts_dir: {eff.get('prompts_dir')}")
         print(f"execution_backend: {eff.get('execution_backend')}")
         if str(eff.get('execution_backend') or '') == 'claudecode':
             print(f"claudecode_model: {eff.get('claudecode_model')}")
             print(f"claudecode_permission_mode: {eff.get('claudecode_permission_mode')}")
             print(f"claudecode_max_turns: {eff.get('claudecode_max_turns')}")
+            print(f"claudecode_user: {eff.get('claudecode_user')}")
+            print(f"claudecode_include_partial_messages: {bool(eff.get('claudecode_include_partial_messages'))}")
+            print(f"claudecode_fork_session: {bool(eff.get('claudecode_fork_session'))}")
+            print(f"claudecode_max_thinking_tokens: {eff.get('claudecode_max_thinking_tokens')}")
             print(f"claudecode_setting_sources: {eff.get('claudecode_setting_sources')}")
             print(f"claudecode_pm_allowed_tools: {eff.get('claudecode_pm_allowed_tools')}")
             print(f"claudecode_dev_allowed_tools: {eff.get('claudecode_dev_allowed_tools')}")
@@ -226,6 +240,20 @@ class RunnerShell:
         print(f"OPENAI_API_KEY set: {_yesno(bool(os.getenv('OPENAI_API_KEY', '').strip()))}")
         print(f"ANTHROPIC_API_KEY set: {_yesno(bool(os.getenv('ANTHROPIC_API_KEY', '').strip()))}")
         print("======================================\n")
+
+        if show_all:
+            raw_cfg = self.config if isinstance(self.config, dict) else {}
+            unknown_keys = sorted([k for k in raw_cfg.keys() if k not in DEFAULTS])
+            print("--- Raw config (loaded) ---")
+            print(json.dumps(raw_cfg, ensure_ascii=False, indent=2))
+            print("\n--- Overrides (session) ---")
+            print(json.dumps(self.overrides or {}, ensure_ascii=False, indent=2))
+            print("\n--- Effective config (merged) ---")
+            print(json.dumps(eff, ensure_ascii=False, indent=2))
+            if unknown_keys:
+                print("\n--- Unknown keys preserved (forward-compat) ---")
+                print(", ".join(unknown_keys))
+            print()
 
     def _runner_is_alive(self) -> bool:
         return bool(self._runner_thread and self._runner_thread.is_alive())
@@ -341,7 +369,7 @@ class RunnerShell:
             self._runner_exit_code = None
             self._runner_started_at = time.time()
             try:
-                rc = run_cycle(args)
+                rc = run_runner(args)
             except Exception:
                 rc = 1
             self._runner_exit_code = int(rc)
@@ -417,12 +445,17 @@ class RunnerShell:
         if not self.repo and not path_str:
             print("[ERR] repo is not set; provide a path: /save <path>")
             return
-        out_path = Path(path_str).expanduser() if path_str else default_config_path(self.repo)  # type: ignore[arg-type]
-        if not out_path.is_absolute() and self.repo:
-            out_path = (self.repo / out_path).resolve()
+        if self.repo:
+            out_path = resolve_config_path(self.repo, path_str)
+        else:
+            p = Path(path_str).expanduser()  # type: ignore[arg-type]
+            out_path = p.resolve() if p.is_absolute() else (app_home() / p).resolve()
 
         eff = self.effective()
-        cfg_out = {k: eff.get(k) for k in DEFAULTS.keys()}
+        # Preserve unknown keys from the currently loaded config (forward compatibility).
+        cfg_out: Dict[str, Any] = dict(self.config or {})
+        for k in DEFAULTS.keys():
+            cfg_out[k] = eff.get(k)
 
         try:
             save_config(out_path, cfg_out)
@@ -436,9 +469,11 @@ class RunnerShell:
         if not self.repo and not path_str:
             print("[ERR] repo is not set; provide a path: /load <path>")
             return
-        p = Path(path_str).expanduser() if path_str else default_config_path(self.repo)  # type: ignore[arg-type]
-        if not p.is_absolute() and self.repo:
-            p = (self.repo / p).resolve()
+        if self.repo:
+            p = resolve_config_path(self.repo, path_str)
+        else:
+            pp = Path(path_str).expanduser()  # type: ignore[arg-type]
+            p = pp.resolve() if pp.is_absolute() else (app_home() / pp).resolve()
         if not p.exists():
             print(f"[ERR] Config not found: {p}")
             return
@@ -455,13 +490,13 @@ class RunnerShell:
             "Commands (명령어):",
             "  /help                     도움말 표시",
             "  /repo <path>               레포지토리 루트 설정",
-            "  /config                    현재 적용 설정/환경 변수 요약 출력",
+            "  /config [--all]            현재 적용 설정 요약 출력 (--all: 전체 JSON 출력)",
             "  /set <key> <value>         설정 값을 덮어쓰기(타입은 기본값 기준)",
             "    예) /set execution_backend codex|claudecode",
             "    예) /set roles PM,Dev,QA   (단계 선택)",
             "  /add <key> <value>         리스트 설정에 항목 추가 (예: policy_rule)",
             "  /load [path]               config JSON 로드",
-            "  /save [path]               현재 설정을 config JSON으로 저장",
+            "  /save [path]               현재 설정을 config JSON으로 저장 (알 수 없는 키도 보존)",
             "  /start [--flags...]        러너 백그라운드 시작 (예: /start --autopilot --loop)",
             "  /stop [--wait]             중지 요청(STOP 파일 생성). --wait로 종료 대기",
             "  /status                    러너 상태 확인",
@@ -616,7 +651,8 @@ def _dispatch(sh: RunnerShell, line: str) -> bool:
         print(f"[OK] repo = {sh.repo}")
         return False
     if cmd == "/config":
-        sh.print_config()
+        show_all = bool(args and args[0] == "--all")
+        sh.print_config(show_all=show_all)
         return False
     if cmd == "/set":
         if len(args) < 2:
