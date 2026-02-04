@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 
 from .cli import parse_args
-from .cycle import run
+from .runner_entry import run
 
 
 def main(argv: list[str] | None = None) -> int:

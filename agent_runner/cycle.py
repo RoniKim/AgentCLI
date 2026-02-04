@@ -59,6 +59,10 @@ from .schemas import PMOutputV2
 from .structured import parse_pm_output, dump_pretty, describe_parse_failure
 from .tracing import TraceCtx, new_trace_id
 
+from .pipeline import PipelineManager, make_stages
+from .pipeline.session import PipelineSession
+from .pipeline.stages.base import StageOutcome
+
 
 def _load_json_if_exists(path: Path, default: Any) -> Any:
     if path.exists():
@@ -201,11 +205,11 @@ async def main_async(args: argparse.Namespace) -> int:
     # Roles/stages selection (forward-compatible with pluggable stages).
     # Current implementation supports coarse on/off for PM/Dev/QA.
     roles_raw = str(getattr(args, "roles", "PM,Dev,QA") or "PM,Dev,QA")
-    roles_set = {
-        t.strip().lower()
-        for t in re.split(r"[\s,;]+", roles_raw)
-        if t and t.strip()
-    } or {"pm", "dev", "qa"}
+
+    # Stage pipeline (ordered, pluggable).
+    stages = make_stages(roles_raw)
+    pipeline_mgr = PipelineManager(stages)
+    pm_stage_enabled = any((getattr(s, 'name', '') or '').strip().lower() == 'pm' for s in stages)
 
     def append_cycle_summary(line: str) -> None:
         try:
@@ -932,17 +936,19 @@ async def main_async(args: argparse.Namespace) -> int:
                 metrics.event("pm_end", cycle=cycle_idx, rc=1, error=str(ex))
                 return False
 
-        def ensure_backlog() -> None:
+        def ensure_backlog() -> bool:
             backlog_json = run_dir / "BACKLOG.json"
             backlog_md = run_dir / "BACKLOG.md"
-            if not backlog_json.exists() and not backlog_md.exists():
-                # Avoid generating misleading hardcoded tasks.
-                eprint("[PM ERROR] BACKLOG not created by PM. Stopping to avoid running irrelevant tasks.")
-                try:
-                    stop_path.write_text("BACKLOG missing\n", encoding="utf-8", errors="replace")
-                except Exception:
-                    pass
-                metrics.event("pm_backlog_missing", cycle=-1)
+            if backlog_json.exists() or backlog_md.exists():
+                return True
+            # Avoid generating misleading hardcoded tasks.
+            eprint("[PM ERROR] BACKLOG not created by PM. Stopping to avoid running irrelevant tasks.")
+            try:
+                stop_path.write_text("BACKLOG missing\n", encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+            metrics.event("pm_backlog_missing", cycle=-1)
+            return False
 
         def load_tasks() -> list[TaskItem]:
             backlog_json = run_dir / "BACKLOG.json"
@@ -975,77 +981,18 @@ async def main_async(args: argparse.Namespace) -> int:
             except Exception as ex:
                 metrics.event("qa_end", cycle=cycle_idx, rc=1, error=str(ex))
 
-        async def run_cycle(cycle_idx: int) -> tuple[int, str, int]:
-            """Returns (rc, reason, done_count_delta)."""
-            nonlocal prev_head
+        async def run_dev_loop(
+            cycle_idx: int,
+            tasks: list[TaskItem],
+            curr_head: str,
+            changed_files: list[str],
+            repo_fp: str,
+            cycle_t0: float,
+        ) -> tuple[int, str, int, bool]:
+            """Run the legacy Dev loop and return (rc, reason, done_delta, ran_tasks).
 
-            if stop_path.exists():
-                return 0, "stop_file", 0
-
-            cycle_t0 = time.time()
-            metrics.event("cycle_start", cycle=cycle_idx)
-
-            curr_head = git_head(repo).strip()
-            head_changed_files = git_changed_files(repo, prev_head, curr_head)
-            wt_changed_files: list[str] = []
-            if args.pm_include_working_tree:
-                for ln in git_porcelain(repo).splitlines():
-                    ln = ln.strip()
-                    if not ln:
-                        continue
-                    if ln.startswith("?? "):
-                        wt_changed_files.append(ln[3:].strip())
-                    elif " -> " in ln:
-                        wt_changed_files.append(ln.split("->", 1)[1].strip())
-                    else:
-                        wt_changed_files.append(ln[3:].strip())
-                wt_changed_files = [p for p in wt_changed_files if p]
-
-            changed_files = sorted(set([*head_changed_files, *wt_changed_files]))
-            repo_fp = repo_fingerprint(repo)
-
-            # PM phase
-            if "pm" in roles_set:
-                pm_ok = await run_pm_if_needed(cycle_idx, curr_head, changed_files, repo_fp, force_refresh_backlog=False)
-                if not pm_ok:
-                    if pm_stop_reason.get("reason") == "quota_exhausted" or stop_path.exists():
-                        return 0, "quota_exhausted", 0
-                    return 1, "pm_failed", 0
-            else:
-                metrics.event("pm_skip", cycle=cycle_idx, reason="roles_disabled")
-                # If PM is disabled, we require an existing BACKLOG artifact.
-                if not (run_dir / "BACKLOG.json").exists() and not (run_dir / "BACKLOG.md").exists():
-                    eprint("[ERR] roles excludes PM but no BACKLOG exists. Run with PM enabled at least once.")
-                    return 1, "pm_disabled_no_backlog", 0
-
-            # Update snapshot head only when HEAD changes
-            if curr_head:
-                snapshot_json.write_text(
-                    json.dumps({"head": curr_head, "updated_at": now_iso()}, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                    errors="replace",
-                )
-                prev_head = curr_head
-
-            ensure_backlog()
-            tasks = load_tasks()
-            if not tasks:
-                eprint("No tasks parsed from backlog. Stopping.")
-                return 1, "no_tasks", 0
-
-            if not continuous and not args.loop:
-                print(f"[OK] Run artifacts: {run_dir}")
-                print("PM/backlog prepared. Re-run with --continuous to execute tasks automatically.")
-                metrics.event("cycle_end", cycle=cycle_idx, rc=0, reason="prepared_only")
-                return 0, "prepared_only", 0
-
-            # Dev phase can be disabled (forward-compatible with stage plugins)
-            if "dev" not in roles_set:
-                metrics.event("dev_skip", cycle=cycle_idx, reason="roles_disabled")
-                if "qa" in roles_set:
-                    await run_qa_if_needed(cycle_idx, ran_tasks=False)
-                return 0, "dev_disabled", 0
-
+            NOTE: QA is handled by a separate stage.
+            """
             # Dev loop
             state_path = run_dir / "STATE.json"
             backlog_md = run_dir / "BACKLOG.md"
@@ -1055,12 +1002,12 @@ async def main_async(args: argparse.Namespace) -> int:
             task_ids = {t.id for t in tasks}
             before_done = len(done_set.intersection(task_ids))
 
-            if args.pm_refresh_backlog and (before_done >= len(task_ids)):
+            if pm_stage_enabled and args.pm_refresh_backlog and (before_done >= len(task_ids)):
                 pm_ok2 = await run_pm_if_needed(cycle_idx, curr_head, changed_files, repo_fp, force_refresh_backlog=True)
                 if not pm_ok2:
                     if pm_stop_reason.get("reason") == "quota_exhausted" or stop_path.exists():
-                        return 0, "quota_exhausted", 0
-                    return 1, "pm_failed", 0
+                        return 0, "quota_exhausted", 0, (len(done_set) > before_done)
+                    return 1, "pm_failed", 0, (len(done_set) > before_done)
                 ensure_backlog()
                 tasks = load_tasks()
                 task_ids = {t.id for t in tasks}
@@ -1209,8 +1156,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             await write_shutdown_report("quota_exhausted", cycle=cycle_idx, step=step, last_task_id=next_task.id)
                         except Exception:
                             pass
-                        return 0, "quota_exhausted", 0
-
+                        return 0, "quota_exhausted", 0, (len(done_set) > before_done)
                     # Invalid/unknown model: allow escalation fallback when available.
                     if dev_exc and is_model_invalid_exception(dev_exc):
                         if (attempt + 1) < max_attempts:
@@ -1225,8 +1171,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         if cp:
                             restore_checkpoint(repo, cp)
                             metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="exception")
-                        return 1, "dev_exception", 0
-
+                        return 1, "dev_exception", 0, (len(done_set) > before_done)
                     # Max-turns exceptions are recoverable: continue to diff/build gates.
                     if dev_exc and dev_is_max_turns:
                         state.setdefault("warnings", []).append({"task": next_task.id, "reason": "max_turns_exceeded", "detail": str(dev_exc)})
@@ -1248,8 +1193,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         if cp:
                             restore_checkpoint(repo, cp)
                             metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="no_diff")
-                        return 1, "no_diff", 0
-
+                        return 1, "no_diff", 0, (len(done_set) > before_done)
                     if build_enabled:
                         metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
                         ok = run_build_gate(
@@ -1270,8 +1214,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             if cp:
                                 restore_checkpoint(repo, cp)
                                 metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="build_failed")
-                            return 1, "build_failed", 0
-
+                            return 1, "build_failed", 0, (len(done_set) > before_done)
                     if run_tests:
                         metrics.event("test_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
                         ok = run_test_gate(
@@ -1293,8 +1236,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             if cp:
                                 restore_checkpoint(repo, cp)
                                 metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="test_failed")
-                            return 1, "test_failed", 0
-
+                            return 1, "test_failed", 0, (len(done_set) > before_done)
                     if policy_scan_enabled:
                         code, diff_text = run_cmd(["git", "diff"], cwd=repo, timeout_sec=120)
                         scan_payload = diff_text if code == 0 else ""
@@ -1329,8 +1271,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             if cp:
                                 restore_checkpoint(repo, cp)
                                 metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason="policy_violation")
-                            return 1, "policy_violation", 0
-
+                            return 1, "policy_violation", 0, (len(done_set) > before_done)
                     # Success: exit attempt loop
                     metrics.event("dev_attempt_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0)
                     task_completed = True
@@ -1340,7 +1281,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     # No success after attempts and not otherwise returned: treat as failure.
                     state.setdefault("failed", []).append({"task": next_task.id, "reason": "exhausted_attempts"})
                     save_state(state_path, state)
-                    return 1, "exhausted_attempts", 0
+                    return 1, "exhausted_attempts", 0, (len(done_set) > before_done)
                 # Mark done only after gates
                 done_set.add(next_task.id)
                 state["done"] = sorted(list(done_set))
@@ -1360,10 +1301,6 @@ async def main_async(args: argparse.Namespace) -> int:
                 pass
 
             ran_tasks = (len(done_set) > before_done)
-            if "qa" in roles_set:
-                await run_qa_if_needed(cycle_idx, ran_tasks=ran_tasks)
-            else:
-                metrics.event("qa_skip", cycle=cycle_idx, reason="roles_disabled")
 
             cycle_dt = time.time() - cycle_t0
             failed_count = len(state.get("failed", []))
@@ -1401,9 +1338,121 @@ async def main_async(args: argparse.Namespace) -> int:
                 pass
 
             if total_count > 0 and done_count >= total_count:
-                return 0, "all_tasks_done", done_delta
+                return 0, "all_tasks_done", done_delta, ran_tasks
 
-            return 0, "ok", done_delta
+            return 0, "ok", done_delta, ran_tasks
+
+
+        async def run_cycle(cycle_idx: int) -> tuple[int, str, int]:
+            nonlocal prev_head
+
+            if stop_path.exists():
+                return 0, "stop_file", 0
+
+            cycle_t0 = time.time()
+            metrics.event("cycle_start", cycle=cycle_idx)
+
+            curr_head = git_head(repo).strip()
+            head_changed_files = git_changed_files(repo, prev_head, curr_head)
+
+            wt_changed_files: list[str] = []
+            if args.pm_include_working_tree:
+                try:
+                    wt_changed_files = git_worktree_changed_files(repo)
+                except Exception as ex:
+                    eprint(f"[WARN] working-tree change detection failed: {ex}")
+                    wt_changed_files = []
+
+            changed_files = sorted(set([*head_changed_files, *wt_changed_files]))
+            repo_fp = repo_fingerprint(repo)
+
+            async def pm_phase(ci: int) -> StageOutcome:
+                if stop_path.exists():
+                    return StageOutcome.stop("stop_file")
+                metrics.event("pm_stage_start", cycle=ci)
+                ok = await run_pm_if_needed(ci, curr_head, changed_files, repo_fp, force_refresh_backlog=False)
+                if not ok:
+                    if pm_stop_reason.get("reason") == "quota_exhausted" or stop_path.exists():
+                        metrics.event("pm_stage_end", cycle=ci, rc=0, reason="quota_exhausted")
+                        return StageOutcome.stop("quota_exhausted", rc=0)
+                    metrics.event("pm_stage_end", cycle=ci, rc=1)
+                    return StageOutcome.fail("pm_failed", rc=1)
+                metrics.event("pm_stage_end", cycle=ci, rc=0)
+                return StageOutcome.ok("pm_ok")
+
+            async def security_phase(ci: int) -> StageOutcome:
+                # Placeholder for optional preflight security checks.
+                # Built-in policy scan runs during Dev gates; this stage is here for extensibility.
+                return StageOutcome.skip("security_not_configured")
+
+            async def dev_phase(ci: int) -> StageOutcome:
+                if stop_path.exists():
+                    return StageOutcome.stop("stop_file")
+                # Dev loop expects tasks loaded by the pipeline manager.
+                if not session.tasks:
+                    return StageOutcome.fail("no_tasks", rc=1)
+
+                rc, reason, done_delta, ran_tasks = await run_dev_loop(
+                    ci,
+                    session.tasks,
+                    curr_head,
+                    changed_files,
+                    repo_fp,
+                    cycle_t0,
+                )
+                session.done_delta = int(done_delta or 0)
+                session.ran_tasks = bool(ran_tasks)
+
+                if reason == "stop_file":
+                    return StageOutcome.stop("stop_file", rc=0)
+                if rc != 0:
+                    return StageOutcome.fail(reason, rc=rc)
+                return StageOutcome.ok(reason)
+
+            async def qa_phase(ci: int) -> StageOutcome:
+                if stop_path.exists():
+                    return StageOutcome.stop("stop_file")
+                await run_qa_if_needed(ci, ran_tasks=session.ran_tasks)
+                return StageOutcome.ok("qa_done")
+
+            session = PipelineSession(
+                args=args,
+                repo=repo,
+                run_dir=run_dir,
+                stop_path=stop_path,
+                ensure_backlog=ensure_backlog,
+                load_tasks=load_tasks,
+                pm_phase=pm_phase,
+                dev_phase=dev_phase,
+                qa_phase=qa_phase,
+                security_phase=security_phase,
+            )
+
+            res = await pipeline_mgr.run_cycle(session, cycle_idx, continuous=continuous)
+
+            # Update snapshot for the next cycle unless we're stopping immediately.
+            if res.reason not in ("stop_file",) and not stop_path.exists():
+                try:
+                    final_head = git_head(repo).strip()
+                    if final_head:
+                        snapshot_json.write_text(
+                            json.dumps(
+                                {
+                                    "prev_head": prev_head,
+                                    "head": final_head,
+                                    "ts": datetime.utcnow().isoformat() + "Z",
+                                },
+                                indent=2,
+                                sort_keys=True,
+                            )
+                            + "\n",
+                            encoding="utf-8",
+                        )
+                        prev_head = final_head
+                except Exception as ex:
+                    eprint(f"[WARN] snapshot update failed: {ex}")
+
+            return res.rc, res.reason, res.done_delta
 
         idle_accum = 0
         cycles = 1 if not args.loop else (args.loop_max_cycles if args.loop_max_cycles and args.loop_max_cycles > 0 else 10**9)
