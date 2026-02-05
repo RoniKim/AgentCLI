@@ -551,8 +551,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     load_dotenv_best_effort(repo, getattr(args, "env_file", ""))
 
     if not (os.getenv("ANTHROPIC_API_KEY") or "").strip():
-        eprint("[ERR] ANTHROPIC_API_KEY is not set.")
-        return 2
+        eprint(
+            "[WARN] ANTHROPIC_API_KEY is not set. "
+            "Claude Agent SDK will use Claude Code authentication if available."
+        )
 
     cfg = _load_claudecode_cfg(args)
 

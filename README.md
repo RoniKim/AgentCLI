@@ -140,7 +140,7 @@ AgentCLI는 설정(`execution_backend`)에 따라 실행 엔진을 교체할 수
 필수(backend에 따라):
 
 * `codex`: `OPENAI_API_KEY`
-* `claudecode`: `ANTHROPIC_API_KEY` (+ `pip install claude-agent-sdk` 필요)
+* `claudecode`: `ANTHROPIC_API_KEY` 또는 Claude Code 인증(+ `pip install claude-agent-sdk` 필요)
 
 `.env` 로딩은 “베스트-에포트”로 동작합니다.
 

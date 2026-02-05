@@ -521,7 +521,7 @@ class RunnerShell:
             "",
             "Tips:",
             "  - 시작 전 /config로 설정을 확인하세요.",
-            "  - backend=claudecode 사용 시 ANTHROPIC_API_KEY와 claude-agent-sdk가 필요합니다(기본 번들 CLI 사용).",
+            "  - backend=claudecode 사용 시 ANTHROPIC_API_KEY 또는 Claude Code 인증이 필요하며, claude-agent-sdk가 필요합니다.",
         ]
         print("\n".join(lines))
 

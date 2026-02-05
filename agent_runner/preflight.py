@@ -57,9 +57,6 @@ def preflight_codex(args: argparse.Namespace) -> PreflightResult:
 
 def preflight_claudecode(args: argparse.Namespace) -> PreflightResult:
     issues: list[str] = []
-    if not (os.getenv("ANTHROPIC_API_KEY") or "").strip():
-        issues.append("missing ANTHROPIC_API_KEY")
-
     _check_import("claude_agent_sdk", "claude-agent-sdk", issues)
 
     return PreflightResult(backend="claudecode", ok=not issues, issues=issues)
