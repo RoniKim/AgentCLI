@@ -318,8 +318,6 @@ async def main_async(args: argparse.Namespace) -> int:
     if not scan_ignore_globs:
         scan_ignore_globs = list(DEFAULT_SCAN_IGNORE_GLOBS)
     scan_ignore_paths = list(getattr(args, "scan_ignore_paths", []) or [])
-    if policy_ignore_paths:
-        scan_ignore_paths = list(dict.fromkeys([*scan_ignore_paths, *policy_ignore_paths]))
     scan_include_untracked_in_full = bool(getattr(args, "scan_include_untracked_in_full", False))
 
     budgets_cfg = getattr(args, "budgets", {}) if isinstance(getattr(args, "budgets", {}), dict) else {}
@@ -1279,11 +1277,11 @@ or "spend limit" in s
                 tasks = parse_backlog_md(backlog_md)
             return tasks
 
-        def _collect_scan(scope: str) -> tuple[list[tuple[str, str]], dict[str, Any]]:
+        def _collect_scan(scope: str, *, ignore_paths: Optional[list[str]] = None) -> tuple[list[tuple[str, str]], dict[str, Any]]:
             return collect_scan_files(
                 repo,
                 scope,
-                ignore_paths=scan_ignore_paths,
+                ignore_paths=scan_ignore_paths if ignore_paths is None else ignore_paths,
                 ignore_globs=scan_ignore_globs,
                 max_files=scan_max_files,
                 max_bytes_per_file=scan_max_bytes_per_file,
@@ -1791,12 +1789,15 @@ or "spend limit" in s
                                     return 1, fail_reason, 0, (len(done_set) > before_done)
                             return 1, "test_failed", 0, (len(done_set) > before_done)
                     if policy_scan_enabled:
-                        scan_files, scan_stats = _collect_scan(policy_scan_scope)
+                        policy_scan_ignore_paths = list(scan_ignore_paths)
+                        if policy_ignore_paths:
+                            policy_scan_ignore_paths = list(dict.fromkeys([*policy_scan_ignore_paths, *policy_ignore_paths]))
+                        scan_files, scan_stats = _collect_scan(policy_scan_scope, ignore_paths=policy_scan_ignore_paths)
                         scan_result = policy_scan_files(
                             scan_files,
                             policy_rules,
                             allow_patterns=policy_allow_patterns,
-                            ignore_paths=scan_ignore_paths,
+                            ignore_paths=policy_scan_ignore_paths,
                         )
                         violations = scan_result.get("violations", [])
                         fail_hits = [v for v in violations if _severity_at_or_above(str(v.get("severity", "")), policy_fail_severity)]
