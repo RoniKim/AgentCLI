@@ -18,30 +18,48 @@ Hard scope constraints:
 
 Backlog policy (critical):
 - Backlog tasks MUST be development work: features, UI/screens, bugfixes, tests, in-repo docs
-- Each task must be atomic and finish within one Dev iteration
+- **Each task must be VERY SMALL and atomic** - completable in 10-15 turns MAX
+- **Break large features into micro-tasks** (e.g., T1a, T1b, T1c for related sub-tasks)
+- Each task should modify 1-3 files maximum
 - Each task must produce a git diff
 - Task IDs start at T1/T2; must be meaningful and unique
 - "UI design" means implement in code (Blazor/XAML/CSS), NOT external mockups
 - If SKILLS_INDEX provided, include: skills: [skill_id...] and skills_rationale
 
+**Task Size Guidelines (CRITICAL):**
+- ❌ TOO LARGE: "Add confirmation dialog before deleting a transaction" (multiple files, many steps)
+- ✅ GOOD SIZE: Break into micro-tasks:
+  - T1a: "Create Shared/ConfirmDialog.razor component with props"
+  - T1b: "Add CSS styling to ConfirmDialog in wwwroot/css/app.css"
+  - T1c: "Wire ConfirmDialog into Transactions.razor delete button"
+  - T1d: "Add test for ConfirmDialog component"
+
 **Task Generation Rules (IMPORTANT):**
-1. If TODO provided → prioritize as P0 tasks
+1. If TODO provided → prioritize as P0 tasks, **but break into micro-tasks**
 2. If no TODO or TODO completed → ALWAYS generate 3-5 new tasks from:
    - UI/UX: loading states, error messages, confirmations, empty states, mobile polish
    - Performance: list virtualization, caching, debouncing, lazy loading
    - Robustness: error handling, edge cases, input validation, retry logic
    - Quality: extract components, add tests, document complex code, reduce complexity
 
-3. **Concrete examples for BudgetBook:**
-   - "Add loading spinner to Dashboard.razor sync button (line 145)"
-   - "Implement error toast when transaction save fails (TransactionEntry.razor)"
-   - "Add confirmation dialog before deleting transaction"
-   - "Virtualize transaction list for 1000+ items (Transactions.razor)"
-   - "Cache dashboard RPC result for 5 minutes to reduce API calls"
-   - "Extract AccountCard component from Dashboard (lines 200-280)"
-   - "Add unit tests for transaction calculation logic (Services/ApiService.cs)"
+3. **Concrete examples for BudgetBook (MICRO-TASKS):**
+   - "Add isLoading state variable to Dashboard.razor"
+   - "Show spinner on sync button when isLoading=true"
+   - "Create Shared/ErrorToast.razor component"
+   - "Wire ErrorToast to TransactionEntry.razor save handler"
+   - "Add @ref and ShowToast method to ErrorToast component"
+   - "Create ConfirmDialog.razor with OnConfirm callback"
+   - "Add confirm dialog state to Transactions.razor"
+   - "Extract AccountCard.razor from Dashboard.razor lines 200-280"
+   - "Update Dashboard.razor to use new AccountCard component"
 
-4. **NEVER return empty task list** - mature projects have endless improvement opportunities!
+4. **Each micro-task should:**
+   - Have specific file paths in the prompt
+   - Require < 50 lines of code changes
+   - Be testable independently
+   - Not require extensive file exploration
+
+5. **NEVER return empty task list** - mature projects have endless improvement opportunities!
 
 Uncertainty:
 - If requirements ambiguous, put 1-3 questions in "open_questions" but still generate tasks
