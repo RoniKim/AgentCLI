@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional, Any
 
 from .analysis_cache import merge_dev_hints_to_global_changelog
-from .docs import load_dotenv_best_effort, resolve_docs_dir, generate_docs_digest, read_text_robust
+from .docs import load_dotenv_best_effort, resolve_docs_dir, generate_docs_digest
 from .gates import run_build_gate_async, run_test_gate_async
 from .gitops import (
     git_head,
@@ -23,7 +23,6 @@ from .gitops import (
     create_checkpoint,
     restore_checkpoint,
     RepoCheckpoint,
-    list_untracked,
     create_worktree,
     remove_worktree,
     handle_worktree_patch,
@@ -33,6 +32,7 @@ from .todo import read_current_todo, format_todo_block
 from .metrics import MetricsLogger
 from .policy import load_policy_rules, policy_scan_files
 from .security import load_security_rules, security_scan_files
+from .scan import collect_scan_files, DEFAULT_SCAN_IGNORE_GLOBS
 from .prompts import (
     PromptStore,
     ensure_pm_instructions_have_output_schema,
@@ -42,6 +42,7 @@ from .prompts import (
     PM_INCREMENTAL_TEMPLATE_DEFAULT,
     DEV_TASK_TEMPLATE_DEFAULT,
     QA_TEMPLATE_DEFAULT,
+    QA_FOLLOWUPS_OUTPUT_CONTRACT,
     PM_INSTRUCTIONS_DEFAULT,
     DEV_INSTRUCTIONS_DEFAULT,
     QA_INSTRUCTIONS_DEFAULT,
@@ -62,7 +63,7 @@ from .state import (
 )
 from .utils import force_utf8_stdio, eprint, now_iso, run_cmd, safe_write_text
 from .schemas import PMOutputV2
-from .structured import parse_pm_output_with_errors, dump_pretty, describe_parse_failure
+from .structured import parse_pm_output_with_errors, dump_pretty, describe_parse_failure, parse_qa_followups
 from .tracing import TraceCtx, new_trace_id
 from .skills import (
     build_skills_index,
@@ -305,6 +306,21 @@ async def main_async(args: argparse.Namespace) -> int:
     security_enabled = bool(security_cfg.get("enabled", False))
     security_fail_severity = str(security_cfg.get("fail_severity") or "high")
     security_rules = load_security_rules(str(security_cfg.get("rules_path") or ""))
+
+    scan_scope = str(getattr(args, "scan_scope", "quick") or "quick").strip().lower()
+    policy_scan_scope = str(getattr(args, "policy_scan_scope", "") or "").strip().lower() or scan_scope
+    security_scan_scope = str(getattr(args, "security_scan_scope", "") or "").strip().lower() or scan_scope
+    scan_max_files = int(getattr(args, "scan_max_files", 500) or 500)
+    scan_max_bytes_per_file = int(getattr(args, "scan_max_bytes_per_file", 200_000) or 200_000)
+    scan_max_total_bytes = int(getattr(args, "scan_max_total_bytes", 20_000_000) or 20_000_000)
+    scan_timeout_seconds = int(getattr(args, "scan_timeout_seconds", 60) or 60)
+    scan_ignore_globs = list(getattr(args, "scan_ignore_globs", []) or [])
+    if not scan_ignore_globs:
+        scan_ignore_globs = list(DEFAULT_SCAN_IGNORE_GLOBS)
+    scan_ignore_paths = list(getattr(args, "scan_ignore_paths", []) or [])
+    if policy_ignore_paths:
+        scan_ignore_paths = list(dict.fromkeys([*scan_ignore_paths, *policy_ignore_paths]))
+    scan_include_untracked_in_full = bool(getattr(args, "scan_include_untracked_in_full", False))
 
     budgets_cfg = getattr(args, "budgets", {}) if isinstance(getattr(args, "budgets", {}), dict) else {}
     budget_state = {
@@ -1263,26 +1279,27 @@ or "spend limit" in s
                 tasks = parse_backlog_md(backlog_md)
             return tasks
 
-        def _collect_scan_files(max_bytes: int = 200_000, max_files: int = 200) -> list[tuple[str, str]]:
-            files: list[tuple[str, str]] = []
-            code, names = run_cmd(["git", "diff", "--name-only"], cwd=repo, timeout_sec=60)
-            changed = [ln.strip() for ln in names.splitlines() if ln.strip()] if code == 0 else []
-            untracked = list_untracked(repo)[: max_files]
-            candidates = list(dict.fromkeys([*changed, *untracked]))[:max_files]
-            for rel in candidates:
-                pth = repo / rel
-                try:
-                    if pth.exists() and pth.is_file():
-                        if pth.stat().st_size > max_bytes:
-                            continue
-                        txt, _enc = read_text_robust(pth)
-                        files.append((rel, txt[:max_bytes]))
-                except Exception:
-                    continue
-            return files
+        def _collect_scan(scope: str) -> tuple[list[tuple[str, str]], dict[str, Any]]:
+            return collect_scan_files(
+                repo,
+                scope,
+                ignore_paths=scan_ignore_paths,
+                ignore_globs=scan_ignore_globs,
+                max_files=scan_max_files,
+                max_bytes_per_file=scan_max_bytes_per_file,
+                max_total_bytes=scan_max_total_bytes,
+                timeout_seconds=scan_timeout_seconds,
+                include_untracked_in_full=scan_include_untracked_in_full,
+            )
 
-        def _hash8(text: str) -> str:
-            return hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:8]
+        def _hash_prompt(text: str) -> str:
+            return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:10]
+
+        def _normalize_followup_prompt(text: str) -> str:
+            s = str(text or "").strip()
+            if len(s) > 1000:
+                s = s[:1000].rstrip()
+            return s
 
         def _extract_qa_followups(text: str, *, max_items: int) -> list[dict[str, Any]]:
             items: list[str] = []
@@ -1299,14 +1316,44 @@ or "spend limit" in s
                     break
             tasks: list[dict[str, Any]] = []
             for s in items:
-                tid = f"QA-FU-{_hash8(s)}"
+                prompt = _normalize_followup_prompt(s)
+                if not prompt:
+                    continue
+                tid = f"QA-FU-{_hash_prompt(prompt)}"
                 title = f"QA Follow-up: {s[:60]}".strip()
                 tasks.append(
                     {
                         "id": tid,
                         "title": title,
-                        "prompt": s,
+                        "prompt": prompt,
                         "files": [],
+                        "done_when": "QA follow-up addressed and relevant tests/builds pass.",
+                        "skills": [],
+                        "skills_rationale": None,
+                    }
+                )
+            return tasks
+
+        def _followups_from_structured(model: Any, *, max_items: int) -> list[dict[str, Any]]:
+            tasks: list[dict[str, Any]] = []
+            if not model or not getattr(model, "followups", None):
+                return tasks
+            for item in list(model.followups)[:max_items]:
+                prompt = _normalize_followup_prompt(getattr(item, "prompt", ""))
+                if not prompt:
+                    continue
+                tid = f"QA-FU-{_hash_prompt(prompt)}"
+                title = str(getattr(item, "title", "") or f"QA Follow-up: {prompt[:60]}").strip()
+                severity = str(getattr(item, "severity", "") or "").strip()
+                if severity:
+                    title = f"[{severity}] {title}"
+                files = list(getattr(item, "files", []) or [])
+                tasks.append(
+                    {
+                        "id": tid,
+                        "title": title,
+                        "prompt": prompt,
+                        "files": files,
                         "done_when": "QA follow-up addressed and relevant tests/builds pass.",
                         "skills": [],
                         "skills_rationale": None,
@@ -1328,12 +1375,12 @@ or "spend limit" in s
                 merged.append(t)
             return merged
 
-        async def run_qa_if_needed(cycle_idx: int, ran_tasks: bool) -> int:
+        async def run_qa_if_needed(cycle_idx: int, ran_tasks: bool) -> dict[str, Any]:
             if stop_path.exists():
-                return 0
+                return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0}
             if not (args.qa_always or ran_tasks):
                 metrics.event("qa_skip", cycle=cycle_idx, reason="no_progress")
-                return 0
+                return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0}
             try:
                 metrics.event("qa_start", cycle=cycle_idx)
                 skills_context = "(skills disabled)"
@@ -1356,16 +1403,32 @@ or "spend limit" in s
 
                 ctx = {"repo": str(repo), "run_dir": str(run_dir), "skills_context": skills_context}
                 qa_prompt = store.render("qa_prompt", QA_TEMPLATE_DEFAULT, ctx)
+                if bool(getattr(args, "qa_to_backlog", False)):
+                    qa_prompt = qa_prompt.rstrip() + "\n\n" + QA_FOLLOWUPS_OUTPUT_CONTRACT + "\n"
                 qa_result = await Runner.run(qa, qa_prompt, max_turns=10)
                 qa_output_path = run_dir / f"qa_final_output_cycle_{cycle_idx:03d}.txt"
                 qa_output_path.write_text(
                     (qa_result.final_output or "") + "\n", encoding="utf-8", errors="replace"
                 )
                 followups_added = 0
+                followups_candidates = 0
+                followups_skipped = 0
+                parse_ok: Optional[bool] = None
                 if bool(getattr(args, "qa_to_backlog", False)):
                     qa_text = qa_output_path.read_text(encoding="utf-8", errors="replace")
-                    followups = _extract_qa_followups(qa_text, max_items=int(getattr(args, "max_qa_followups", 5)) or 5)
+                    max_items = int(getattr(args, "max_qa_followups", 5)) or 5
+                    parsed, parse_err = parse_qa_followups(qa_text)
+                    if parsed is not None:
+                        parse_ok = True
+                        followups = _followups_from_structured(parsed, max_items=max_items)
+                    else:
+                        parse_ok = False
+                        followups = _extract_qa_followups(qa_text, max_items=max_items)
+                        metrics.event("qa_followups_parse", cycle=cycle_idx, parse_ok=False, error=str(parse_err or "parse_failed"))
+                    if parse_ok:
+                        metrics.event("qa_followups_parse", cycle=cycle_idx, parse_ok=True)
                     if followups:
+                        followups_candidates = len(followups)
                         state_path = run_dir / "STATE.json"
                         state_obj = load_state(state_path)
                         done_ids = set(state_obj.get("done", []) or [])
@@ -1383,18 +1446,38 @@ or "spend limit" in s
                             for t in existing
                         ]
                         merged = _merge_qa_followups(base_tasks, followups, done_ids)
+                        followups_added = max(0, len(merged) - len(base_tasks))
+                        followups_skipped = max(0, followups_candidates - followups_added)
                         write_backlog_files(run_dir, merged)
-                        (run_dir / f"qa_followups_cycle_{cycle_idx:03d}.json").write_text(
-                            json.dumps({"cycle": cycle_idx, "tasks": followups}, ensure_ascii=False, indent=2),
-                            encoding="utf-8",
-                            errors="replace",
-                        )
-                        followups_added = len(followups)
+                    (run_dir / f"qa_followups_cycle_{cycle_idx:03d}.json").write_text(
+                        json.dumps(
+                            {
+                                "cycle": cycle_idx,
+                                "parse_ok": parse_ok,
+                                "candidates_count": followups_candidates,
+                                "added_count": followups_added,
+                                "skipped_count": followups_skipped,
+                                "tasks": followups,
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                        errors="replace",
+                    )
                 metrics.event("qa_end", cycle=cycle_idx, rc=0)
-                return followups_added
+                return {
+                    "parse_ok": parse_ok,
+                    "candidates": followups_candidates,
+                    "added": followups_added,
+                    "skipped": followups_skipped,
+                }
             except Exception as ex:
                 metrics.event("qa_end", cycle=cycle_idx, rc=1, error=str(ex))
-                return 0
+                return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0}
+
+        policy_scan_summary: Optional[dict[str, Any]] = None
+        security_scan_summary: Optional[dict[str, Any]] = None
 
         async def run_dev_loop(
             cycle_idx: int,
@@ -1408,6 +1491,7 @@ or "spend limit" in s
 
             NOTE: QA is handled by a separate stage.
             """
+            nonlocal policy_scan_summary
             # Dev loop
             state_path = run_dir / "STATE.json"
             backlog_md = run_dir / "BACKLOG.md"
@@ -1707,18 +1791,38 @@ or "spend limit" in s
                                     return 1, fail_reason, 0, (len(done_set) > before_done)
                             return 1, "test_failed", 0, (len(done_set) > before_done)
                     if policy_scan_enabled:
-                        scan_files = _collect_scan_files()
+                        scan_files, scan_stats = _collect_scan(policy_scan_scope)
                         scan_result = policy_scan_files(
                             scan_files,
                             policy_rules,
                             allow_patterns=policy_allow_patterns,
-                            ignore_paths=policy_ignore_paths,
+                            ignore_paths=scan_ignore_paths,
                         )
                         violations = scan_result.get("violations", [])
                         fail_hits = [v for v in violations if _severity_at_or_above(str(v.get("severity", "")), policy_fail_severity)]
+                        scan_result["stats"] = scan_stats
                         scan_result["ok"] = len(fail_hits) == 0
                         scan_result["fail_severity"] = policy_fail_severity
                         scan_result["fail_violations"] = fail_hits
+                        policy_scan_summary = {
+                            "scope": scan_stats.get("scope", policy_scan_scope),
+                            "files_scanned": scan_stats.get("files_scanned", 0),
+                            "bytes_scanned": scan_stats.get("bytes_scanned", 0),
+                            "files_skipped": scan_stats.get("files_skipped", 0),
+                            "violations_total": len(violations),
+                            "violations_fail": len(fail_hits),
+                        }
+                        metrics.event(
+                            "policy_scan_summary",
+                            cycle=cycle_idx,
+                            step=step,
+                            scope=policy_scan_summary["scope"],
+                            files_scanned=policy_scan_summary["files_scanned"],
+                            bytes_scanned=policy_scan_summary["bytes_scanned"],
+                            files_skipped=policy_scan_summary["files_skipped"],
+                            violations_total=policy_scan_summary["violations_total"],
+                            violations_fail=policy_scan_summary["violations_fail"],
+                        )
                         (attempt_dir / "policy_scan.json").write_text(json.dumps(scan_result, ensure_ascii=False, indent=2),
                                                                  encoding="utf-8", errors="replace")
                         (run_dir / "policy_scan.json").write_text(
@@ -1820,10 +1924,13 @@ or "spend limit" in s
 
         async def run_cycle(cycle_idx: int) -> tuple[int, str, int]:
             nonlocal prev_head
+            nonlocal policy_scan_summary, security_scan_summary
 
             if stop_path.exists():
                 return 0, "stop_file", 0
 
+            policy_scan_summary = None
+            security_scan_summary = None
             cycle_t0 = time.time()
             metrics.event("cycle_start", cycle=cycle_idx)
 
@@ -1856,29 +1963,57 @@ or "spend limit" in s
                 return StageOutcome.ok("pm_ok")
 
             async def security_phase(ci: int) -> StageOutcome:
+                nonlocal security_scan_summary
                 if not security_enabled:
                     return StageOutcome.skip("security_disabled")
                 if stop_path.exists():
                     return StageOutcome.stop("stop_file")
                 metrics.event("security_start", cycle=ci)
-                scan_files = _collect_scan_files()
-                scan_result = security_scan_files(scan_files, security_rules)
+                scan_files, scan_stats = _collect_scan(security_scan_scope)
+                scan_result = security_scan_files(scan_files, security_rules, ignore_paths=scan_ignore_paths)
                 findings = scan_result.get("findings", [])
                 fail_hits = [f for f in findings if _severity_at_or_above(str(f.get("severity", "")), security_fail_severity)]
                 ok = len(fail_hits) == 0
+                security_scan_summary = {
+                    "scope": scan_stats.get("scope", security_scan_scope),
+                    "files_scanned": scan_stats.get("files_scanned", 0),
+                    "bytes_scanned": scan_stats.get("bytes_scanned", 0),
+                    "files_skipped": scan_stats.get("files_skipped", 0),
+                    "findings_total": len(findings),
+                    "findings_fail": len(fail_hits),
+                }
                 out = {
                     "cycle": ci,
                     "ok": ok,
                     "fail_severity": security_fail_severity,
                     "findings": findings,
-                    "stats": scan_result.get("stats", {}),
+                    "stats": scan_stats,
                 }
                 (run_dir / f"security_scan_cycle_{ci:03d}.json").write_text(
                     json.dumps(out, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                     errors="replace",
                 )
-                metrics.event("security_end", cycle=ci, rc=0 if ok else 1, findings=len(fail_hits))
+                metrics.event(
+                    "security_end",
+                    cycle=ci,
+                    rc=0 if ok else 1,
+                    findings=len(fail_hits),
+                    scope=security_scan_summary["scope"],
+                    files_scanned=security_scan_summary["files_scanned"],
+                    bytes_scanned=security_scan_summary["bytes_scanned"],
+                    files_skipped=security_scan_summary["files_skipped"],
+                )
+                metrics.event(
+                    "security_scan_summary",
+                    cycle=ci,
+                    scope=security_scan_summary["scope"],
+                    files_scanned=security_scan_summary["files_scanned"],
+                    bytes_scanned=security_scan_summary["bytes_scanned"],
+                    files_skipped=security_scan_summary["files_skipped"],
+                    findings_total=security_scan_summary["findings_total"],
+                    findings_fail=security_scan_summary["findings_fail"],
+                )
                 if not ok:
                     metrics.event("security_violation", cycle=ci, findings=len(fail_hits))
                     return StageOutcome.fail("security_violation", rc=1)
@@ -1911,8 +2046,9 @@ or "spend limit" in s
             async def qa_phase(ci: int) -> StageOutcome:
                 if stop_path.exists():
                     return StageOutcome.stop("stop_file")
-                followups_added = await run_qa_if_needed(ci, ran_tasks=session.ran_tasks)
-                session.data["qa_followups_added"] = int(followups_added or 0)
+                qa_summary = await run_qa_if_needed(ci, ran_tasks=session.ran_tasks)
+                session.data["qa_followups_summary"] = qa_summary
+                session.data["qa_followups_added"] = int(qa_summary.get("added", 0) or 0)
                 return StageOutcome.ok("qa_done")
 
             session = PipelineSession(
@@ -1937,6 +2073,31 @@ or "spend limit" in s
                     "total_escalations": budget_state["total_escalations"],
                     "total_continuations": budget_state["total_continuations"],
                     "total_repairs": budget_state["total_repairs"],
+                },
+                "policy_scan": policy_scan_summary
+                or {
+                    "scope": policy_scan_scope,
+                    "files_scanned": 0,
+                    "bytes_scanned": 0,
+                    "files_skipped": 0,
+                    "violations_total": 0,
+                    "violations_fail": 0,
+                },
+                "security_scan": security_scan_summary
+                or {
+                    "scope": security_scan_scope,
+                    "files_scanned": 0,
+                    "bytes_scanned": 0,
+                    "files_skipped": 0,
+                    "findings_total": 0,
+                    "findings_fail": 0,
+                },
+                "qa_followups": session.data.get("qa_followups_summary")
+                or {
+                    "parse_ok": None,
+                    "candidates": 0,
+                    "added": 0,
+                    "skipped": 0,
                 },
             }
             for st in res.stages:

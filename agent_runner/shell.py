@@ -217,6 +217,11 @@ class RunnerShell:
         print(f"continuous: {bool(eff.get('continuous'))} (iterations={eff.get('iterations')}, max_turns_per_task={eff.get('max_turns_per_task')})")
         print(f"isolate_task: {bool(eff.get('isolate_task'))} / worktree_isolation: {bool(eff.get('worktree_isolation'))}")
         print(f"no_policy_scan: {bool(eff.get('no_policy_scan'))}")
+        print(
+            "scan_scope: "
+            f"{eff.get('scan_scope')} (policy={eff.get('policy_scan_scope') or 'default'}, "
+            f"security={eff.get('security_scan_scope') or 'default'})"
+        )
         print(f"no_build:   {bool(eff.get('no_build'))} / run_tests: {bool(eff.get('run_tests'))}")
         print(f"dangerous_git_rollback: {bool(eff.get('dangerous_git_rollback'))}")
         print(f"failover_enabled: {bool(eff.get('failover_enabled'))}")
