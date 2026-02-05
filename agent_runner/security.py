@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from .policy import DEFAULT_POLICY_RULES
+from .policy import DEFAULT_POLICY_RULES, _hash_match, _match_preview, _match_location
 
 
 DEFAULT_SECURITY_RULES: list[dict[str, str]] = [
@@ -76,14 +76,9 @@ def security_scan_files(
     def _ignored(path: str) -> bool:
         return any(path.startswith(prefix) for prefix in ignore)
 
-    files_scanned = 0
-    bytes_scanned = 0
-
     for path, text in files:
         if not path or _ignored(path):
             continue
-        files_scanned += 1
-        bytes_scanned += len(text.encode("utf-8", errors="replace"))
         for rule in rules:
             rid = rule.get("id", "rule")
             sev = rule.get("severity", "medium")
@@ -102,7 +97,9 @@ def security_scan_files(
                         "rule_id": rid,
                         "severity": sev,
                         "path": path,
-                        "match": m.group(0)[:80],
+                        "match_sha256": _hash_match(m.group(0)),
+                        "match_preview": _match_preview(m.group(0)),
+                        "location": _match_location(text, m.start(), path),
                         "message": message or "Security rule matched.",
                     }
                 )
@@ -112,5 +109,4 @@ def security_scan_files(
 
     return {
         "findings": findings,
-        "stats": {"files_scanned": files_scanned, "bytes_scanned": bytes_scanned},
     }

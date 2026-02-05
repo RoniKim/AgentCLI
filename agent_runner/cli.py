@@ -103,6 +103,16 @@ DEFAULTS: Dict[str, Any] = {
     "no_policy_scan": False,
     "policy_rules_file": "",
     "policy_rule": [],
+    "scan_scope": "quick",
+    "policy_scan_scope": "",
+    "security_scan_scope": "",
+    "scan_max_files": 500,
+    "scan_max_bytes_per_file": 200_000,
+    "scan_max_total_bytes": 20_000_000,
+    "scan_timeout_seconds": 60,
+    "scan_ignore_globs": [".doc/**", ".doc", ".agent_runs/**", ".agent_runs", "worktree/**", "**/*.log"],
+    "scan_ignore_paths": [],
+    "scan_include_untracked_in_full": False,
 
     # Policy config (new)
     "policy": {
@@ -349,6 +359,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--policy-fail-severity", default=None)
     p.add_argument("--policy-ignore-path", action="append", default=None)
     p.add_argument("--policy-allow-pattern", action="append", default=None)
+    p.add_argument("--scan-scope", default=None, choices=["quick", "staged", "full"])
+    p.add_argument("--policy-scan-scope", default=None, choices=["quick", "staged", "full"])
+    p.add_argument("--security-scan-scope", default=None, choices=["quick", "staged", "full"])
+    p.add_argument("--scan-max-files", type=int, default=None)
+    p.add_argument("--scan-max-bytes-per-file", type=int, default=None)
+    p.add_argument("--scan-max-total-bytes", type=int, default=None)
+    p.add_argument("--scan-timeout-seconds", type=int, default=None)
+    p.add_argument("--scan-ignore-glob", action="append", default=None)
+    p.add_argument("--scan-ignore-path", action="append", default=None)
+    p.add_argument("--scan-include-untracked-in-full", action=argparse.BooleanOptionalAction, default=None)
 
     p.add_argument("--policy-rules-file", default=None, help="Path to policy rules file")
     p.add_argument("--policy-rule", action="append", default=None, help="Inline policy rule (repeatable)")
@@ -570,6 +590,41 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
     eff["policy"] = _normalize_policy(eff.get("policy"))
     eff["security"] = _normalize_security(eff.get("security"))
 
+    def _normalize_scan() -> None:
+        eff["scan_scope"] = str(eff.get("scan_scope") or defaults.get("scan_scope") or "quick").strip().lower()
+        if eff["scan_scope"] not in {"quick", "staged", "full"}:
+            eff["scan_scope"] = "quick"
+        eff["policy_scan_scope"] = str(eff.get("policy_scan_scope") or "").strip().lower()
+        if eff["policy_scan_scope"] and eff["policy_scan_scope"] not in {"quick", "staged", "full"}:
+            eff["policy_scan_scope"] = ""
+        eff["security_scan_scope"] = str(eff.get("security_scan_scope") or "").strip().lower()
+        if eff["security_scan_scope"] and eff["security_scan_scope"] not in {"quick", "staged", "full"}:
+            eff["security_scan_scope"] = ""
+
+        def _norm_int(key: str, fallback: int) -> int:
+            try:
+                return int(eff.get(key) or fallback)
+            except Exception:
+                return int(fallback)
+
+        eff["scan_max_files"] = _norm_int("scan_max_files", int(defaults.get("scan_max_files") or 500))
+        eff["scan_max_bytes_per_file"] = _norm_int("scan_max_bytes_per_file", int(defaults.get("scan_max_bytes_per_file") or 200_000))
+        eff["scan_max_total_bytes"] = _norm_int("scan_max_total_bytes", int(defaults.get("scan_max_total_bytes") or 20_000_000))
+        eff["scan_timeout_seconds"] = _norm_int("scan_timeout_seconds", int(defaults.get("scan_timeout_seconds") or 60))
+        eff["scan_include_untracked_in_full"] = bool(eff.get("scan_include_untracked_in_full", False))
+
+        ignore_globs = eff.get("scan_ignore_globs") or []
+        if isinstance(ignore_globs, str):
+            ignore_globs = [p.strip() for p in ignore_globs.split(",") if p.strip()]
+        eff["scan_ignore_globs"] = [str(p).strip() for p in ignore_globs if str(p).strip()]
+
+        ignore_paths = eff.get("scan_ignore_paths") or []
+        if isinstance(ignore_paths, str):
+            ignore_paths = [p.strip() for p in ignore_paths.split(",") if p.strip()]
+        eff["scan_ignore_paths"] = [str(p).strip() for p in ignore_paths if str(p).strip()]
+
+    _normalize_scan()
+
     if "policy_enabled" in explicit_args:
         eff["policy"]["enabled"] = bool(eff.get("policy_enabled"))
     if "policy_fail_severity" in explicit_args:
@@ -578,6 +633,27 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         eff["policy"]["ignore_paths"] = [str(p).strip() for p in (eff.get("policy_ignore_path") or []) if str(p).strip()]
     if "policy_allow_pattern" in explicit_args and eff.get("policy_allow_pattern") is not None:
         eff["policy"]["allow_patterns"] = [str(p).strip() for p in (eff.get("policy_allow_pattern") or []) if str(p).strip()]
+
+    if "scan_scope" in explicit_args:
+        eff["scan_scope"] = str(eff.get("scan_scope") or eff["scan_scope"]).strip().lower()
+    if "policy_scan_scope" in explicit_args:
+        eff["policy_scan_scope"] = str(eff.get("policy_scan_scope") or "").strip().lower()
+    if "security_scan_scope" in explicit_args:
+        eff["security_scan_scope"] = str(eff.get("security_scan_scope") or "").strip().lower()
+    if "scan_max_files" in explicit_args:
+        eff["scan_max_files"] = int(eff.get("scan_max_files") or eff["scan_max_files"])
+    if "scan_max_bytes_per_file" in explicit_args:
+        eff["scan_max_bytes_per_file"] = int(eff.get("scan_max_bytes_per_file") or eff["scan_max_bytes_per_file"])
+    if "scan_max_total_bytes" in explicit_args:
+        eff["scan_max_total_bytes"] = int(eff.get("scan_max_total_bytes") or eff["scan_max_total_bytes"])
+    if "scan_timeout_seconds" in explicit_args:
+        eff["scan_timeout_seconds"] = int(eff.get("scan_timeout_seconds") or eff["scan_timeout_seconds"])
+    if "scan_ignore_glob" in explicit_args and eff.get("scan_ignore_glob") is not None:
+        eff["scan_ignore_globs"] = [str(p).strip() for p in (eff.get("scan_ignore_glob") or []) if str(p).strip()]
+    if "scan_ignore_path" in explicit_args and eff.get("scan_ignore_path") is not None:
+        eff["scan_ignore_paths"] = [str(p).strip() for p in (eff.get("scan_ignore_path") or []) if str(p).strip()]
+    if "scan_include_untracked_in_full" in explicit_args:
+        eff["scan_include_untracked_in_full"] = bool(eff.get("scan_include_untracked_in_full"))
 
     if "security_enabled" in explicit_args:
         eff["security"]["enabled"] = bool(eff.get("security_enabled"))

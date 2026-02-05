@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -65,6 +66,28 @@ def _is_allowed(match_text: str, allow_patterns: list[re.Pattern[str]]) -> bool:
     return any(p.search(match_text) for p in allow_patterns)
 
 
+def _hash_match(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _match_preview(text: str, keep: int = 3) -> str:
+    if not text:
+        return ""
+    if len(text) <= keep * 2:
+        if len(text) <= 2:
+            return f"{text[:1]}..." if len(text) == 1 else f"{text[:1]}...{text[-1:]}"
+        return f"{text[:1]}...{text[-1:]}"
+    return f"{text[:keep]}...{text[-keep:]}"
+
+
+def _match_location(text: str, start: int, path: str | None = None) -> dict[str, Any]:
+    line = text.count("\n", 0, start) + 1
+    location: dict[str, Any] = {"line": line, "byte_offset": start}
+    if path:
+        location["path"] = path
+    return location
+
+
 def policy_scan_text(
     text: str,
     rules: list[dict[str, str]],
@@ -86,12 +109,12 @@ def policy_scan_text(
         for m in pat.finditer(text):
             if allow_pats and _is_allowed(m.group(0), allow_pats):
                 continue
-            snippet = text[max(0, m.start() - 30): min(len(text), m.end() + 30)]
             violations.append({
                 "rule_id": rid,
                 "severity": sev,
-                "match": m.group(0)[:80],
-                "snippet": snippet.replace("\n", "\\n")[:160],
+                "match_sha256": _hash_match(m.group(0)),
+                "match_preview": _match_preview(m.group(0)),
+                "location": _match_location(text, m.start()),
             })
             hits += 1
             if hits >= max_hits_per_rule:
@@ -134,13 +157,13 @@ def policy_scan_files(
             for m in pat.finditer(text):
                 if allow_pats and _is_allowed(m.group(0), allow_pats):
                     continue
-                snippet = text[max(0, m.start() - 30): min(len(text), m.end() + 30)]
                 violations.append({
                     "rule_id": rid,
                     "severity": sev,
                     "path": path,
-                    "match": m.group(0)[:80],
-                    "snippet": snippet.replace("\n", "\\n")[:160],
+                    "match_sha256": _hash_match(m.group(0)),
+                    "match_preview": _match_preview(m.group(0)),
+                    "location": _match_location(text, m.start(), path),
                 })
                 hits += 1
                 if hits >= max_hits_per_rule:

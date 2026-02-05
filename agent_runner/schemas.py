@@ -57,6 +57,20 @@ class PMOutputV2(BaseModel):
     )
 
 
+class QAFollowupItem(BaseModel):
+    title: str = Field(..., description="Short title for the QA follow-up")
+    prompt: str = Field(..., max_length=1000, description="Executable QA follow-up prompt (<=1000 chars)")
+    files: List[str] = Field(default_factory=list, description="Optional files to inspect/update")
+    severity: Optional[str] = Field(default=None, description="Optional severity (low/medium/high)")
+
+
+class QAFollowupsV1(BaseModel):
+    kind: Literal["qa_followups_v1"] = Field("qa_followups_v1", description="QA followups schema version")
+    cycle: Optional[int] = Field(default=None, description="Cycle index (optional)")
+    followups: List[QAFollowupItem] = Field(default_factory=list, description="QA follow-up candidates")
+    notes: Optional[str] = Field(default=None, description="Optional notes")
+
+
 def pm_output_json_schema() -> dict:
     """Return a JSON Schema dict for OpenAI Structured Outputs (compatible shape).
 

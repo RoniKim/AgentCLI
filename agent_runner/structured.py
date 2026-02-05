@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Optional, Type, TypeVar, Tuple
+from typing import Any, Optional, Type, TypeVar
 
 from .utils import eprint
 
@@ -92,6 +92,19 @@ def dump_pretty(obj: Any) -> str:
 def describe_parse_failure(label: str, text: str, max_preview: int = 1200) -> None:
     prev = (text or "")[:max_preview]
     eprint(f"[{label}] Failed to parse/validate JSON. Preview:\n{prev}\n")
+
+
+def parse_qa_followups(text: str) -> tuple[Optional["QAFollowupsV1"], Optional[str]]:
+    """Parse QA followups JSON into schema, returning (model, error)."""
+    from .schemas import QAFollowupsV1
+
+    data = loads_json_object(text)
+    if data is None:
+        return None, "qa_followups_json_missing"
+    try:
+        return QAFollowupsV1.model_validate(data), None  # type: ignore[attr-defined]
+    except Exception as ex:
+        return None, str(ex)
 
 # --- PM output normalization (robust against prompt drift) ---
 

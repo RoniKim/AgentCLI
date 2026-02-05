@@ -272,6 +272,26 @@ Repo: {repo}
 """
 
 
+QA_FOLLOWUPS_OUTPUT_CONTRACT = (
+    "When qa_to_backlog is enabled, your FINAL response MUST be ONLY a single JSON object "
+    "(no markdown, no prose) with the following schema:\n"
+    "{\n"
+    '  "kind": "qa_followups_v1",\n'
+    '  "cycle": number|null,\n'
+    '  "followups": [\n'
+    "    {\n"
+    '      "title": string,\n'
+    '      "prompt": string (<=1000 chars),\n'
+    '      "files": string[],\n'
+    '      "severity": string|null\n'
+    "    }\n"
+    "  ],\n"
+    '  "notes": string|null\n'
+    "}\n"
+    "Do NOT include extra keys.\n"
+)
+
+
 REPORTER_INSTRUCTIONS_DEFAULT = (
     "You are the PM/Reporter producing an end-of-run shutdown report.\n"
     "You MUST NOT call tools. Use only the provided context.\n"
