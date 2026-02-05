@@ -657,6 +657,14 @@ async def main_async(args: argparse.Namespace) -> int:
             task_key = task_id or label
             per_task.setdefault(task_key, 0)
 
+            continuation_msg = (
+                f"\n\n[CONTINUE] You hit a turn limit previously while running '{label}'. Continue EXACTLY from where you left off.\n"
+                "- Do NOT restate a plan.\n"
+                "- Do NOT summarize.\n"
+                "- Apply changes now (call tools / edit files).\n"
+                "- End with only the required output."
+            )
+
             while True:
                 try:
                     if timeout_sec and timeout_sec > 0:
@@ -678,14 +686,11 @@ async def main_async(args: argparse.Namespace) -> int:
                         per_task[task_key] += 1
                         metrics.event("continuation_attempt", stage=label, task_id=task_id, count=budget_state["total_continuations"])
                         cont_left -= 1
-                        prompt = (
-                            prompt
-                            + f"\n\n[CONTINUE] You hit a turn limit previously while running '{label}'. Continue EXACTLY from where you left off.\n"
-                              "- Do NOT restate a plan.\n"
-                              "- Do NOT summarize.\n"
-                              "- Apply changes now (call tools / edit files).\n"
-                              "- End with only the required output."
-                        )
+                        # Replace continuation message instead of appending to avoid prompt bloat
+                        if "[CONTINUE]" in prompt:
+                            prompt = prompt.split("[CONTINUE]")[0] + continuation_msg
+                        else:
+                            prompt = prompt + continuation_msg
                         continue
                     raise
         async def _run_pm_structured(pm_prompt: str, *, max_turns: int, cycle_idx: int, kind: str, output_path: Path) -> PMOutputV2 | None:
@@ -1737,6 +1742,12 @@ async def main_async(args: argparse.Namespace) -> int:
 
                     # Escalate conditions: retry same task with a higher tier model.
                     if stop_on_no_diff and (not changed):
+                        # Special case: if max_turns was hit and no diff, auto-retry instead of immediate failure
+                        # This prevents wasting 30+ minutes on incomplete work
+                        if dev_is_max_turns and dev_auto_escalate and (attempt + 1) < max_attempts:
+                            eprint(f"[INFO] Max turns exceeded with no diff for {next_task.id}. Auto-retrying with escalation...")
+                            metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="max_turns_no_diff")
+                            continue
                         if dev_auto_escalate and (attempt + 1) < max_attempts and "no_diff" in dev_escalate_on:
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="no_diff")
                             continue
