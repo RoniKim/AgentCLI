@@ -371,6 +371,19 @@ def _write_worktree_not_applied(run_dir: Path, patch_path: Path, last_rc: int) -
     safe_write_text(run_dir / "WORKTREE_PATCH_NOT_APPLIED.md", msg)
 
 
+def _write_recovery_md(run_dir: Path, patch_path: Path) -> None:
+    msg = (
+        "# Recovery Guide\n\n"
+        "A worktree patch was exported for recovery.\n\n"
+        "Apply patch manually:\n"
+        f"- git apply --binary --whitespace=nowarn {patch_path}\n"
+        "- If conflicts occur: git apply --reject --whitespace=nowarn <patch>\n"
+        "\n"
+        "If untracked files were included via intent-to-add, ensure they are restored after applying.\n"
+    )
+    safe_write_text(run_dir / "RECOVERY.md", msg)
+
+
 def handle_worktree_patch(
     worktree_dir: Path,
     source_repo: Path,
@@ -388,6 +401,7 @@ def handle_worktree_patch(
                 apply_patch_to_repo(source_repo, patch_path)
             else:
                 _write_worktree_not_applied(run_dir, patch_path, last_rc)
+                _write_recovery_md(run_dir, patch_path)
     except Exception as ex:
         msg = (
             "# Worktree apply failure\n\n"
@@ -397,5 +411,6 @@ def handle_worktree_patch(
             "- If conflicts occur, try: git apply --reject --whitespace=nowarn <patch>\n"
         )
         safe_write_text(run_dir / "WORKTREE_APPLY_FAILURE.md", msg)
+        _write_recovery_md(run_dir, patch_path)
         return last_rc if last_rc != 0 else 1
     return last_rc

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import hashlib
 import os
 import re
 import time
@@ -30,7 +31,8 @@ from .gitops import (
 from .inventory import build_repo_inventory, write_repo_inventory_files
 from .todo import read_current_todo, format_todo_block
 from .metrics import MetricsLogger
-from .policy import load_policy_rules, policy_scan_text
+from .policy import load_policy_rules, policy_scan_files
+from .security import load_security_rules, security_scan_files
 from .prompts import (
     PromptStore,
     ensure_pm_instructions_have_output_schema,
@@ -60,7 +62,7 @@ from .state import (
 )
 from .utils import force_utf8_stdio, eprint, now_iso, run_cmd, safe_write_text
 from .schemas import PMOutputV2
-from .structured import parse_pm_output, dump_pretty, describe_parse_failure
+from .structured import parse_pm_output_with_errors, dump_pretty, describe_parse_failure
 from .tracing import TraceCtx, new_trace_id
 from .skills import (
     build_skills_index,
@@ -183,6 +185,23 @@ async def main_async(args: argparse.Namespace) -> int:
         run_dir = make_run_dir(repo)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    run_summary: dict[str, Any] = {
+        "run_id": run_dir.name,
+        "repo": str(repo),
+        "profile": str(getattr(args, "profile", "personal") or "personal"),
+        "cycles": [],
+    }
+
+    def _write_run_summary() -> None:
+        try:
+            (run_dir / "run_summary.json").write_text(
+                json.dumps(run_summary, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+                errors="replace",
+            )
+        except Exception:
+            pass
+
     def _is_unsafe_path(raw: str) -> bool:
         try:
             return ".." in Path(raw).parts
@@ -273,8 +292,40 @@ async def main_async(args: argparse.Namespace) -> int:
     build_enabled = (not bool(getattr(args, "no_build", False))) or bool(getattr(args, "require_build", False))
     stop_on_no_diff = (not bool(getattr(args, "allow_no_diff", False))) or bool(getattr(args, "stop_if_no_diff", False))
     run_tests = bool(getattr(args, "run_tests", False))
-    policy_scan_enabled = not bool(getattr(args, "no_policy_scan", False))
+
+    policy_cfg = getattr(args, "policy", {}) if isinstance(getattr(args, "policy", {}), dict) else {}
+    policy_scan_enabled = bool(policy_cfg.get("enabled", not bool(getattr(args, "no_policy_scan", False))))
+    policy_fail_severity = str(policy_cfg.get("fail_severity") or "high")
     policy_rules = load_policy_rules(getattr(args, "policy_rules_file", ""), list(getattr(args, "policy_rule", []) or []))
+    policy_rules.extend(list(policy_cfg.get("rules", []) or []))
+    policy_ignore_paths = list(policy_cfg.get("ignore_paths", []) or [])
+    policy_allow_patterns = list(policy_cfg.get("allow_patterns", []) or [])
+
+    security_cfg = getattr(args, "security", {}) if isinstance(getattr(args, "security", {}), dict) else {}
+    security_enabled = bool(security_cfg.get("enabled", False))
+    security_fail_severity = str(security_cfg.get("fail_severity") or "high")
+    security_rules = load_security_rules(str(security_cfg.get("rules_path") or ""))
+
+    budgets_cfg = getattr(args, "budgets", {}) if isinstance(getattr(args, "budgets", {}), dict) else {}
+    budget_state = {
+        "total_escalations": 0,
+        "total_continuations": 0,
+        "total_repairs": 0,
+        "per_task_escalations": {},
+        "per_task_continuations": {},
+    }
+
+    def _severity_at_or_above(found: str, threshold: str) -> bool:
+        order = {"low": 0, "medium": 1, "high": 2}
+        return order.get(found, 1) >= order.get(threshold, 1)
+
+    def _budget_exceeded(key: str, current: int, limit: int) -> bool:
+        if limit <= 0:
+            return False
+        return current >= limit
+
+    class BudgetExceeded(Exception):
+        pass
 
     # Drift guard for PM incremental
     pm_fp_path = pm_cache_dir / "PM_LAST_FINGERPRINT.json"
@@ -569,7 +620,16 @@ or "spend limit" in s
                 metrics.event("shutdown_report", cycle=cycle, step=step, reason=stop_reason, ok=False, error=str(ex))
 
 
-        async def _run_with_continuations(agent_obj, prompt: str, max_turns: int, *, label: str, timeout_sec: int = 0, max_continuations: int = 0) -> Any:
+        async def _run_with_continuations(
+            agent_obj,
+            prompt: str,
+            max_turns: int,
+            *,
+            label: str,
+            timeout_sec: int = 0,
+            max_continuations: int = 0,
+            task_id: str = "",
+        ) -> Any:
             """Run an agent, optionally continuing if a max-turns exception occurs.
 
             Notes:
@@ -577,6 +637,9 @@ or "spend limit" in s
             - We detect turn-caps both by exception message and by exception class name (for SDK variations).
             """
             cont_left = int(max_continuations or 0)
+            per_task = budget_state["per_task_continuations"]
+            task_key = task_id or label
+            per_task.setdefault(task_key, 0)
 
             while True:
                 try:
@@ -585,6 +648,19 @@ or "spend limit" in s
                     return await Runner.run(agent_obj, prompt, max_turns=max_turns)
                 except Exception as ex:
                     if cont_left > 0 and is_max_turns_exception(ex):
+                        if _budget_exceeded("total_continuations", budget_state["total_continuations"], int(budgets_cfg.get("max_total_continuations_per_run") or 0)):
+                            metrics.event("budget_exceeded", cycle=-1, reason="total_continuations")
+                            raise BudgetExceeded("total_continuations")
+                        if _budget_exceeded(
+                            "dev_continuations_per_task",
+                            per_task[task_key],
+                            int(budgets_cfg.get("max_dev_continuations_per_task") or 0),
+                        ):
+                            metrics.event("budget_exceeded", cycle=-1, reason="dev_continuations_per_task", task_id=task_id)
+                            raise BudgetExceeded("dev_continuations_per_task")
+                        budget_state["total_continuations"] += 1
+                        per_task[task_key] += 1
+                        metrics.event("continuation_attempt", stage=label, task_id=task_id, count=budget_state["total_continuations"])
                         cont_left -= 1
                         prompt = (
                             prompt
@@ -599,33 +675,50 @@ or "spend limit" in s
         async def _run_pm_structured(pm_prompt: str, *, max_turns: int, cycle_idx: int, kind: str, output_path: Path) -> PMOutputV2 | None:
             """Run PM and validate its final output against PMOutputV2 schema."""
             retries = int(getattr(args, "pm_structured_retries", 2))
+            max_budget_retries = int(budgets_cfg.get("max_pm_structured_retries") or retries)
+            retries = min(retries, max_budget_retries) if max_budget_retries > 0 else retries
             max_cont = int(getattr(args, "pm_max_turns_continuations", 0))
             last_raw = ""
             repair_prompt = ""
             for attempt in range(retries + 1):
                 prompt = pm_prompt if attempt == 0 else repair_prompt
-                res = await _run_with_continuations(
-                    pm,
-                    prompt,
-                    max_turns=max_turns,
-                    label=f"pm_{kind}",
-                    timeout_sec=int(getattr(args, "pm_timeout_seconds", 0)) or 0,
-                    max_continuations=max_cont,
-                )
+                try:
+                    res = await _run_with_continuations(
+                        pm,
+                        prompt,
+                        max_turns=max_turns,
+                        label=f"pm_{kind}",
+                        timeout_sec=int(getattr(args, "pm_timeout_seconds", 0)) or 0,
+                        max_continuations=max_cont,
+                        task_id="",
+                    )
+                except BudgetExceeded as ex:
+                    metrics.event("budget_exceeded", cycle=cycle_idx, reason=str(ex))
+                    return None
                 last_raw = (getattr(res, "final_output", "") or "").strip()
                 try:
                     output_path.write_text(last_raw + "\n", encoding="utf-8", errors="replace")
                 except Exception:
                     pass
 
-                parsed = parse_pm_output(last_raw, kind_hint=kind)
+                parsed, missing, type_errors = parse_pm_output_with_errors(last_raw, kind_hint=kind)
                 if parsed is not None:
+                    metrics.event("pm_structured_parse", cycle=cycle_idx, attempt=attempt, ok=True)
                     return parsed
+                metrics.event("pm_structured_parse", cycle=cycle_idx, attempt=attempt, ok=False)
+                if attempt < retries:
+                    repair_limit = int(budgets_cfg.get("max_total_repair_attempts_per_run") or 0)
+                    if _budget_exceeded("total_repairs", budget_state["total_repairs"], repair_limit):
+                        metrics.event("budget_exceeded", cycle=cycle_idx, reason="total_repairs")
+                        break
+                    budget_state["total_repairs"] += 1
 
                 repair_prompt = (
                     "Your previous response was invalid or did not match the required JSON schema. "
                     "Return ONLY a single JSON object with keys: kind, summary, tasks, notes_md, warnings, open_questions, analysis_updated, analysis_path. "
                     "No markdown, no prose outside JSON.\n\n"
+                    f"Validation errors:\n- Missing fields: {', '.join(missing) if missing else '(none)'}\n"
+                    f"- Type errors: {', '.join(type_errors) if type_errors else '(none)'}\n\n"
                     "Previous response (for repair):\n"
                     + last_raw[:8000]
                 )
@@ -993,6 +1086,27 @@ or "spend limit" in s
                         merged_tasks = _normalize_backlog_tasks(merged_tasks)
                         merged_tasks = _validate_skill_ids(merged_tasks)
                         if merged_tasks:
+                            try:
+                                existing_tasks = load_tasks()
+                                state_obj = load_state(run_dir / "STATE.json")
+                                done_ids = set(state_obj.get("done", []) or [])
+                                qa_followups = [
+                                    {
+                                        "id": t.id,
+                                        "title": t.title,
+                                        "prompt": t.prompt,
+                                        "files": t.files,
+                                        "done_when": t.done_when,
+                                        "skills": t.skills,
+                                        "skills_rationale": t.skills_rationale,
+                                    }
+                                    for t in existing_tasks
+                                    if t.id.startswith("QA-FU-") and t.id not in done_ids
+                                ]
+                                if qa_followups:
+                                    merged_tasks = _merge_qa_followups(merged_tasks, qa_followups, done_ids)
+                            except Exception:
+                                pass
                             write_backlog_files(run_dir, merged_tasks)
 
                     last_pm_fp = repo_fp or last_pm_fp
@@ -1149,12 +1263,77 @@ or "spend limit" in s
                 tasks = parse_backlog_md(backlog_md)
             return tasks
 
-        async def run_qa_if_needed(cycle_idx: int, ran_tasks: bool) -> None:
+        def _collect_scan_files(max_bytes: int = 200_000, max_files: int = 200) -> list[tuple[str, str]]:
+            files: list[tuple[str, str]] = []
+            code, names = run_cmd(["git", "diff", "--name-only"], cwd=repo, timeout_sec=60)
+            changed = [ln.strip() for ln in names.splitlines() if ln.strip()] if code == 0 else []
+            untracked = list_untracked(repo)[: max_files]
+            candidates = list(dict.fromkeys([*changed, *untracked]))[:max_files]
+            for rel in candidates:
+                pth = repo / rel
+                try:
+                    if pth.exists() and pth.is_file():
+                        if pth.stat().st_size > max_bytes:
+                            continue
+                        txt, _enc = read_text_robust(pth)
+                        files.append((rel, txt[:max_bytes]))
+                except Exception:
+                    continue
+            return files
+
+        def _hash8(text: str) -> str:
+            return hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:8]
+
+        def _extract_qa_followups(text: str, *, max_items: int) -> list[dict[str, Any]]:
+            items: list[str] = []
+            for line in (text or "").splitlines():
+                s = line.strip()
+                if not s:
+                    continue
+                if re.match(r"^[-*•]\s+", s) or re.match(r"^\d+[\.\)]\s+", s):
+                    s = re.sub(r"^[-*•]\s+", "", s)
+                    s = re.sub(r"^\d+[\.\)]\s+", "", s)
+                    if len(s) >= 10:
+                        items.append(s)
+                if len(items) >= max_items:
+                    break
+            tasks: list[dict[str, Any]] = []
+            for s in items:
+                tid = f"QA-FU-{_hash8(s)}"
+                title = f"QA Follow-up: {s[:60]}".strip()
+                tasks.append(
+                    {
+                        "id": tid,
+                        "title": title,
+                        "prompt": s,
+                        "files": [],
+                        "done_when": "QA follow-up addressed and relevant tests/builds pass.",
+                        "skills": [],
+                        "skills_rationale": None,
+                    }
+                )
+            return tasks
+
+        def _merge_qa_followups(
+            base_tasks: list[dict[str, Any]],
+            followups: list[dict[str, Any]],
+            done_ids: set[str],
+        ) -> list[dict[str, Any]]:
+            existing_ids = {str(t.get("id") or "") for t in base_tasks if str(t.get("id") or "")}
+            merged = list(base_tasks)
+            for t in followups:
+                tid = str(t.get("id") or "")
+                if not tid or tid in existing_ids or tid in done_ids:
+                    continue
+                merged.append(t)
+            return merged
+
+        async def run_qa_if_needed(cycle_idx: int, ran_tasks: bool) -> int:
             if stop_path.exists():
-                return
+                return 0
             if not (args.qa_always or ran_tasks):
                 metrics.event("qa_skip", cycle=cycle_idx, reason="no_progress")
-                return
+                return 0
             try:
                 metrics.event("qa_start", cycle=cycle_idx)
                 skills_context = "(skills disabled)"
@@ -1178,12 +1357,44 @@ or "spend limit" in s
                 ctx = {"repo": str(repo), "run_dir": str(run_dir), "skills_context": skills_context}
                 qa_prompt = store.render("qa_prompt", QA_TEMPLATE_DEFAULT, ctx)
                 qa_result = await Runner.run(qa, qa_prompt, max_turns=10)
-                (run_dir / f"qa_final_output_cycle_{cycle_idx:03d}.txt").write_text(
+                qa_output_path = run_dir / f"qa_final_output_cycle_{cycle_idx:03d}.txt"
+                qa_output_path.write_text(
                     (qa_result.final_output or "") + "\n", encoding="utf-8", errors="replace"
                 )
+                followups_added = 0
+                if bool(getattr(args, "qa_to_backlog", False)):
+                    qa_text = qa_output_path.read_text(encoding="utf-8", errors="replace")
+                    followups = _extract_qa_followups(qa_text, max_items=int(getattr(args, "max_qa_followups", 5)) or 5)
+                    if followups:
+                        state_path = run_dir / "STATE.json"
+                        state_obj = load_state(state_path)
+                        done_ids = set(state_obj.get("done", []) or [])
+                        existing = load_tasks()
+                        base_tasks = [
+                            {
+                                "id": t.id,
+                                "title": t.title,
+                                "prompt": t.prompt,
+                                "files": t.files,
+                                "done_when": t.done_when,
+                                "skills": t.skills,
+                                "skills_rationale": t.skills_rationale,
+                            }
+                            for t in existing
+                        ]
+                        merged = _merge_qa_followups(base_tasks, followups, done_ids)
+                        write_backlog_files(run_dir, merged)
+                        (run_dir / f"qa_followups_cycle_{cycle_idx:03d}.json").write_text(
+                            json.dumps({"cycle": cycle_idx, "tasks": followups}, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                            errors="replace",
+                        )
+                        followups_added = len(followups)
                 metrics.event("qa_end", cycle=cycle_idx, rc=0)
+                return followups_added
             except Exception as ex:
                 metrics.event("qa_end", cycle=cycle_idx, rc=1, error=str(ex))
+                return 0
 
         async def run_dev_loop(
             cycle_idx: int,
@@ -1250,6 +1461,11 @@ or "spend limit" in s
                 dev_auto_escalate = bool(getattr(args, "dev_auto_escalate", False))
                 dev_max_escalations = int(getattr(args, "dev_max_escalations", 0) or 0)
                 dev_escalate_on = set(getattr(args, "dev_escalate_on", []) or [])
+                per_task_escalations = budget_state["per_task_escalations"]
+                per_task_escalations.setdefault(next_task.id, 0)
+                max_escalations_per_task_budget = int(budgets_cfg.get("max_dev_escalations_per_task") or 0)
+                if max_escalations_per_task_budget > 0:
+                    dev_max_escalations = min(dev_max_escalations, max_escalations_per_task_budget)
 
                 tiers: list[str] = [str(args.dev_model)]
                 t1 = str(getattr(args, "dev_model_tier1", "") or "").strip()
@@ -1300,6 +1516,18 @@ or "spend limit" in s
                     if stop_path.exists():
                         break
 
+                    if attempt > 0 and dev_auto_escalate:
+                        if _budget_exceeded(
+                            "total_escalations",
+                            budget_state["total_escalations"],
+                            int(budgets_cfg.get("max_total_escalations_per_run") or 0),
+                        ):
+                            metrics.event("budget_exceeded", cycle=cycle_idx, step=step, task_id=next_task.id, reason="total_escalations")
+                            return 1, "budget_exceeded", 0, (len(done_set) > before_done)
+                        budget_state["total_escalations"] += 1
+                        per_task_escalations[next_task.id] += 1
+                        metrics.event("escalate_attempt", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
+
                     # Restore baseline before retries
                     if attempt > 0 and cp:
                         ok, fail_reason = _restore_or_stop("retry")
@@ -1349,6 +1577,7 @@ or "spend limit" in s
                             label="dev",
                             timeout_sec=int(getattr(args, "dev_timeout_seconds", 0)) or 0,
                             max_continuations=int(getattr(args, "dev_max_turns_continuations", 0)) or 0,
+                            task_id=next_task.id,
                         )
                         dev_final = (dev_result.final_output or "")
                     except Exception as ex:
@@ -1373,6 +1602,9 @@ or "spend limit" in s
 
                     # Quota/credits exhausted: graceful stop with artifacts preserved.
                     dev_quota_exhausted = dev_quota_exhausted or is_quota_text(dev_log)
+                    if isinstance(dev_exc, BudgetExceeded):
+                        metrics.event("budget_exceeded", cycle=cycle_idx, step=step, task_id=next_task.id, reason=str(dev_exc))
+                        return 1, "budget_exceeded", 0, (len(done_set) > before_done)
                     if dev_quota_exhausted:
                         state.setdefault("warnings", []).append(
                             {"task": next_task.id, "reason": "quota_exhausted", "detail": str(dev_exc) if dev_exc else "usage limit"}
@@ -1475,23 +1707,28 @@ or "spend limit" in s
                                     return 1, fail_reason, 0, (len(done_set) > before_done)
                             return 1, "test_failed", 0, (len(done_set) > before_done)
                     if policy_scan_enabled:
-                        code, diff_text = run_cmd(["git", "diff"], cwd=repo, timeout_sec=120)
-                        scan_payload = diff_text if code == 0 else ""
-                        for rel in list_untracked(repo)[:50]:
-                            pth = repo / rel
-                            try:
-                                if pth.exists() and pth.is_file() and pth.stat().st_size < 2_000_000:
-                                    txt, _enc = read_text_robust(pth)
-                                    scan_payload += "\n\n# FILE: " + rel + "\n" + txt[:200_000]
-                            except Exception:
-                                pass
-
-                        scan_result = policy_scan_text(scan_payload, policy_rules)
+                        scan_files = _collect_scan_files()
+                        scan_result = policy_scan_files(
+                            scan_files,
+                            policy_rules,
+                            allow_patterns=policy_allow_patterns,
+                            ignore_paths=policy_ignore_paths,
+                        )
+                        violations = scan_result.get("violations", [])
+                        fail_hits = [v for v in violations if _severity_at_or_above(str(v.get("severity", "")), policy_fail_severity)]
+                        scan_result["ok"] = len(fail_hits) == 0
+                        scan_result["fail_severity"] = policy_fail_severity
+                        scan_result["fail_violations"] = fail_hits
                         (attempt_dir / "policy_scan.json").write_text(json.dumps(scan_result, ensure_ascii=False, indent=2),
                                                                  encoding="utf-8", errors="replace")
                         (run_dir / "policy_scan.json").write_text(
                             json.dumps({"cycle": cycle_idx, "step": step, "task_id": next_task.id, **scan_result}, ensure_ascii=False, indent=2),
                             encoding="utf-8", errors="replace"
+                        )
+                        (run_dir / f"policy_scan_cycle_{cycle_idx:03d}.json").write_text(
+                            json.dumps({"cycle": cycle_idx, "step": step, "task_id": next_task.id, **scan_result}, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                            errors="replace",
                         )
                         try:
                             with (run_dir / "policy_scan_history.jsonl").open("a", encoding="utf-8", errors="replace") as f:
@@ -1504,7 +1741,7 @@ or "spend limit" in s
                             save_state(state_path, state)
                             eprint(f"[STOP] Policy scan failed after {next_task.id}. See {attempt_dir / 'policy_scan.json'}")
                             metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="policy_violation",
-                                          violations=len(scan_result.get("violations", [])))
+                                          violations=len(scan_result.get("fail_violations", [])))
                             if cp:
                                 ok_restore, fail_reason = _restore_or_stop("policy_violation")
                                 if not ok_restore:
@@ -1619,9 +1856,33 @@ or "spend limit" in s
                 return StageOutcome.ok("pm_ok")
 
             async def security_phase(ci: int) -> StageOutcome:
-                # Placeholder for optional preflight security checks.
-                # Built-in policy scan runs during Dev gates; this stage is here for extensibility.
-                return StageOutcome.skip("security_not_configured")
+                if not security_enabled:
+                    return StageOutcome.skip("security_disabled")
+                if stop_path.exists():
+                    return StageOutcome.stop("stop_file")
+                metrics.event("security_start", cycle=ci)
+                scan_files = _collect_scan_files()
+                scan_result = security_scan_files(scan_files, security_rules)
+                findings = scan_result.get("findings", [])
+                fail_hits = [f for f in findings if _severity_at_or_above(str(f.get("severity", "")), security_fail_severity)]
+                ok = len(fail_hits) == 0
+                out = {
+                    "cycle": ci,
+                    "ok": ok,
+                    "fail_severity": security_fail_severity,
+                    "findings": findings,
+                    "stats": scan_result.get("stats", {}),
+                }
+                (run_dir / f"security_scan_cycle_{ci:03d}.json").write_text(
+                    json.dumps(out, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                metrics.event("security_end", cycle=ci, rc=0 if ok else 1, findings=len(fail_hits))
+                if not ok:
+                    metrics.event("security_violation", cycle=ci, findings=len(fail_hits))
+                    return StageOutcome.fail("security_violation", rc=1)
+                return StageOutcome.ok("security_ok")
 
             async def dev_phase(ci: int) -> StageOutcome:
                 if stop_path.exists():
@@ -1650,7 +1911,8 @@ or "spend limit" in s
             async def qa_phase(ci: int) -> StageOutcome:
                 if stop_path.exists():
                     return StageOutcome.stop("stop_file")
-                await run_qa_if_needed(ci, ran_tasks=session.ran_tasks)
+                followups_added = await run_qa_if_needed(ci, ran_tasks=session.ran_tasks)
+                session.data["qa_followups_added"] = int(followups_added or 0)
                 return StageOutcome.ok("qa_done")
 
             session = PipelineSession(
@@ -1667,6 +1929,31 @@ or "spend limit" in s
             )
 
             res = await pipeline_mgr.run_cycle(session, cycle_idx, continuous=continuous)
+
+            cycle_entry = {
+                "cycle": cycle_idx,
+                "stages": [],
+                "budget": {
+                    "total_escalations": budget_state["total_escalations"],
+                    "total_continuations": budget_state["total_continuations"],
+                    "total_repairs": budget_state["total_repairs"],
+                },
+            }
+            for st in res.stages:
+                entry = dict(st)
+                if str(entry.get("name", "")).lower() == "qa":
+                    entry["followups_added"] = int(session.data.get("qa_followups_added", 0) or 0)
+                cycle_entry["stages"].append(entry)
+            run_summary["cycles"].append(cycle_entry)
+            try:
+                (run_dir / f"run_summary_cycle_{cycle_idx:03d}.json").write_text(
+                    json.dumps(cycle_entry, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except Exception:
+                pass
+            _write_run_summary()
 
             # Update snapshot for the next cycle unless we're stopping immediately.
             if res.reason not in ("stop_file",) and not stop_path.exists():
@@ -1697,50 +1984,54 @@ or "spend limit" in s
         last_reason = ""
         cycles = 1 if not args.loop else (args.loop_max_cycles if args.loop_max_cycles and args.loop_max_cycles > 0 else 10**9)
 
-        for cycle_idx in range(int(cycles)):
-            if stop_path.exists():
-                append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=stop_file")
-                break
-
-            rc, reason, delta = await run_cycle(cycle_idx)
-            last_rc = rc
-            last_reason = reason
-            # 1-line per-cycle summary for unattended ops
-            print(f"[CYCLE] {now_iso()} idx={cycle_idx} rc={rc} reason={reason} progress_delta={delta}")
-
-            if rc != 0:
-                break
-
-            if reason == "quota_exhausted":
-                break
-
-            if args.loop:
-                if delta <= 0:
-                    idle_accum += int(args.loop_sleep_seconds)
-                else:
-                    idle_accum = 0
-
-                if args.loop_idle_exit_after and args.loop_idle_exit_after > 0 and idle_accum >= args.loop_idle_exit_after:
-                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=idle_exit idle_accum={idle_accum}")
+        try:
+            for cycle_idx in range(int(cycles)):
+                if stop_path.exists():
+                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=stop_file")
                     break
 
-                await asyncio.sleep(max(0, int(args.loop_sleep_seconds)))
-            else:
-                break
-        if worktree_dir is not None:
-            gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
-            exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []
-            last_rc = handle_worktree_patch(
-                repo,
-                source_repo,
-                run_dir,
-                last_rc,
-                exclude_globs=exclude_globs,
-            )
-            try:
-                remove_worktree(source_repo, worktree_dir)
-            except Exception as ex:
-                eprint(f"[WARN] Failed to remove worktree: {ex}")
+                rc, reason, delta = await run_cycle(cycle_idx)
+                last_rc = rc
+                last_reason = reason
+                # 1-line per-cycle summary for unattended ops
+                print(f"[CYCLE] {now_iso()} idx={cycle_idx} rc={rc} reason={reason} progress_delta={delta}")
+
+                if rc != 0:
+                    break
+
+                if reason == "quota_exhausted":
+                    break
+
+                if args.loop:
+                    if delta <= 0:
+                        idle_accum += int(args.loop_sleep_seconds)
+                    else:
+                        idle_accum = 0
+
+                    if args.loop_idle_exit_after and args.loop_idle_exit_after > 0 and idle_accum >= args.loop_idle_exit_after:
+                        append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=idle_exit idle_accum={idle_accum}")
+                        break
+
+                    await asyncio.sleep(max(0, int(args.loop_sleep_seconds)))
+                else:
+                    break
+        finally:
+            run_summary["final"] = {"rc": last_rc, "reason": last_reason or ""}
+            _write_run_summary()
+            if worktree_dir is not None:
+                gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
+                exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []
+                last_rc = handle_worktree_patch(
+                    repo,
+                    source_repo,
+                    run_dir,
+                    last_rc,
+                    exclude_globs=exclude_globs,
+                )
+                try:
+                    remove_worktree(source_repo, worktree_dir)
+                except Exception as ex:
+                    eprint(f"[WARN] Failed to remove worktree: {ex}")
 
     return last_rc
 
