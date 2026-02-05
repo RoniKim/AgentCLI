@@ -9,7 +9,39 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence, Tuple, Any, Optional
+from typing import Sequence, Tuple, Any, Optional, Iterable
+
+
+STOP_REASON_QUOTA = "quota_exhausted"
+STOP_REASON_STOP_FILE = "stop_file"
+STOP_REASON_ALL_TASKS_DONE = "all_tasks_done"
+STOP_REASON_PREPARED_ONLY = "prepared_only"
+STOP_REASON_IDLE_EXIT = "idle_exit"
+STOP_REASON_OK = "ok"
+
+STOP_REASON_PRIORITY: list[str] = [
+    STOP_REASON_QUOTA,
+    STOP_REASON_STOP_FILE,
+    STOP_REASON_ALL_TASKS_DONE,
+    STOP_REASON_PREPARED_ONLY,
+    STOP_REASON_IDLE_EXIT,
+    STOP_REASON_OK,
+]
+
+
+def choose_stop_reason(reasons: Iterable[str]) -> str:
+    candidates = [str(r).strip() for r in reasons if str(r).strip()]
+    if not candidates:
+        return ""
+    priority = {reason: idx for idx, reason in enumerate(STOP_REASON_PRIORITY)}
+    best = candidates[0]
+    best_rank = priority.get(best, len(priority))
+    for r in candidates[1:]:
+        rank = priority.get(r, len(priority))
+        if rank < best_rank:
+            best = r
+            best_rank = rank
+    return best
 
 
 def force_utf8_stdio() -> None:
@@ -216,6 +248,7 @@ def _has_quota_text(text: str) -> bool:
         "user limit",
         "user_limit",
         "credit balance is too low",
+        "insufficient credits",
         "plans & billing",
         "purchase credits",
         "spend limit",
@@ -236,8 +269,8 @@ def detect_stop_reason(stop_paths: Sequence[Path]) -> str:
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
             if _has_quota_text(text):
-                return "quota_exhausted"
-            return "stop_file"
+                return STOP_REASON_QUOTA
+            return STOP_REASON_STOP_FILE
         except Exception:
             continue
     return ""

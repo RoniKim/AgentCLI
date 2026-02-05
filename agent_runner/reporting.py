@@ -196,6 +196,40 @@ def collect_shutdown_context(repo: Path, run_dir: Path) -> dict[str, Any]:
     else:
         ctx["last_run_summary"] = {}
 
+    policy_scan_path = run_dir / "policy_scan.json"
+    policy_summary: dict[str, Any] = {}
+    if policy_scan_path.exists():
+        try:
+            scan = json.loads(policy_scan_path.read_text(encoding="utf-8", errors="replace"))
+            violations = scan.get("violations") or []
+            sev_counts = {"high": 0, "medium": 0, "low": 0, "other": 0}
+            items: list[dict[str, Any]] = []
+            for v in violations:
+                sev = str(v.get("severity") or "").lower()
+                if sev in sev_counts:
+                    sev_counts[sev] += 1
+                else:
+                    sev_counts["other"] += 1
+                if len(items) < 10:
+                    items.append(
+                        {
+                            "path": v.get("path") or v.get("location", {}).get("path"),
+                            "rule_id": v.get("rule_id"),
+                            "severity": sev or "unknown",
+                            "match_preview": v.get("match_preview"),
+                        }
+                    )
+            policy_summary = {
+                "counts": sev_counts,
+                "total": len(violations),
+                "fail_total": len(scan.get("fail_violations") or []),
+                "items": items,
+                "fail_severity": scan.get("fail_severity"),
+            }
+        except Exception:
+            policy_summary = {}
+    ctx["policy_scan_summary"] = policy_summary
+
     return ctx
 
 
@@ -290,6 +324,42 @@ def build_local_shutdown_report(
     except Exception:
         lines.append("- (state parse failed)")
     lines.append("")
+
+    policy_summary = ctx.get("policy_scan_summary") or {}
+    if policy_summary:
+        counts = policy_summary.get("counts") or {}
+        items = policy_summary.get("items") or []
+        lines.append("## Policy scan summary")
+        lines.append("")
+        lines.append(
+            "- counts: "
+            f"high={counts.get('high', 0)} "
+            f"medium={counts.get('medium', 0)} "
+            f"low={counts.get('low', 0)} "
+            f"other={counts.get('other', 0)} "
+            f"total={policy_summary.get('total', 0)} "
+            f"fail_total={policy_summary.get('fail_total', 0)}"
+        )
+        fail_severity = policy_summary.get("fail_severity")
+        if fail_severity:
+            lines.append(f"- fail_severity: {fail_severity}")
+        if items:
+            lines.append("")
+            lines.append("### Top policy violations (sample)")
+            for v in items:
+                path = v.get("path") or "(unknown)"
+                rule = v.get("rule_id") or "(rule)"
+                sev = v.get("severity") or "unknown"
+                preview = v.get("match_preview") or ""
+                lines.append(f"- [{sev}] {path} :: {rule} :: {preview}")
+        lines.append("")
+        lines.append("### False positive guidance")
+        lines.append(
+            "- Consider adding a safe allow pattern to `policy.allow_patterns` in config "
+            "or via `/add policy_allow_pattern <regex>` in the shell if this is a known false positive."
+        )
+        lines.append("- Review `policy.fail_severity` to control which severities stop the run.")
+        lines.append("")
 
     lines.append("## Git status (porcelain)")
     lines.append("")

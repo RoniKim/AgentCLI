@@ -61,7 +61,19 @@ from .state import (
     write_default_p0_backlog,
     write_backlog_files,
 )
-from .utils import force_utf8_stdio, eprint, now_iso, run_cmd, safe_write_text
+from .utils import (
+    force_utf8_stdio,
+    eprint,
+    now_iso,
+    run_cmd,
+    safe_write_text,
+    has_quota_text,
+    choose_stop_reason,
+    detect_stop_reason,
+    STOP_REASON_QUOTA,
+    STOP_REASON_STOP_FILE,
+    STOP_REASON_ALL_TASKS_DONE,
+)
 from .schemas import PMOutputV2
 from .structured import parse_pm_output_with_errors, dump_pretty, describe_parse_failure, parse_qa_followups
 from .tracing import TraceCtx, new_trace_id
@@ -519,6 +531,9 @@ async def main_async(args: argparse.Namespace) -> int:
                 "plans & billing",
                 "purchase credits",
                 "spend limit",
+                "insufficient credits",
+                "usage limit",
+                "budgetexceeded",
             )
             for e in _iter_exc_chain(ex):
                 try:
@@ -528,29 +543,15 @@ async def main_async(args: argparse.Namespace) -> int:
                 rep = (repr(e) or "").lower()
                 if any(n in msg for n in needles) or any(n in rep for n in needles):
                     return True
+                if has_quota_text(msg) or has_quota_text(rep):
+                    return True
             return False
 
 
 
 
         def is_quota_text(text: str) -> bool:
-            s = (text or "").lower()
-            if not s:
-                return False
-            return (
-"you've hit your usage limit" in s
-or "purchase more credits" in s
-or "upgrade to pro" in s
-or "codex/settings/usage" in s
-or "usage limit" in s
-or "user limit" in s
-or "user_limit" in s
-or "quota exhausted" in s
-or "credit balance is too low" in s
-or "plans & billing" in s
-or "purchase credits" in s
-or "spend limit" in s
-            )
+            return has_quota_text(text)
 
         def is_model_invalid_exception(ex: Exception) -> bool:
             """Detect invalid/unknown model errors and allow escalation fallback."""
@@ -1237,14 +1238,14 @@ or "spend limit" in s
             except Exception as ex:
                 eprint(f"[PM ERROR] {ex}")
                 if is_quota_exception(ex):
-                    pm_stop_reason["reason"] = "quota_exhausted"
+                    pm_stop_reason["reason"] = STOP_REASON_QUOTA
                     try:
                         stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
                     except Exception:
                         pass
-                    metrics.event("runner_stop", cycle=cycle_idx, reason="quota_exhausted")
+                    metrics.event("runner_stop", cycle=cycle_idx, reason=STOP_REASON_QUOTA)
                     try:
-                        await write_shutdown_report("quota_exhausted", cycle=cycle_idx, step=-1)
+                        await write_shutdown_report(STOP_REASON_QUOTA, cycle=cycle_idx, step=-1)
                     except Exception:
                         pass
                 metrics.event("pm_end", cycle=cycle_idx, rc=1, error=str(ex))
@@ -1502,8 +1503,8 @@ or "spend limit" in s
             if pm_stage_enabled and args.pm_refresh_backlog and (before_done >= len(task_ids)):
                 pm_ok2 = await run_pm_if_needed(cycle_idx, curr_head, changed_files, repo_fp, force_refresh_backlog=True)
                 if not pm_ok2:
-                    if pm_stop_reason.get("reason") == "quota_exhausted" or stop_path.exists():
-                        return 0, "quota_exhausted", 0, (len(done_set) > before_done)
+                    if pm_stop_reason.get("reason") == STOP_REASON_QUOTA or stop_path.exists():
+                        return 0, STOP_REASON_QUOTA, 0, (len(done_set) > before_done)
                     return 1, "pm_failed", 0, (len(done_set) > before_done)
                 ensure_backlog()
                 tasks = load_tasks()
@@ -1689,19 +1690,19 @@ or "spend limit" in s
                         return 1, "budget_exceeded", 0, (len(done_set) > before_done)
                     if dev_quota_exhausted:
                         state.setdefault("warnings", []).append(
-                            {"task": next_task.id, "reason": "quota_exhausted", "detail": str(dev_exc) if dev_exc else "usage limit"}
+                            {"task": next_task.id, "reason": STOP_REASON_QUOTA, "detail": str(dev_exc) if dev_exc else "usage limit"}
                         )
                         save_state(state_path, state)
-                        metrics.event("runner_stop", cycle=cycle_idx, step=step, task_id=next_task.id, reason="quota_exhausted")
+                        metrics.event("runner_stop", cycle=cycle_idx, step=step, task_id=next_task.id, reason=STOP_REASON_QUOTA)
                         try:
                             stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
                         except Exception:
                             pass
                         try:
-                            await write_shutdown_report("quota_exhausted", cycle=cycle_idx, step=step, last_task_id=next_task.id)
+                            await write_shutdown_report(STOP_REASON_QUOTA, cycle=cycle_idx, step=step, last_task_id=next_task.id)
                         except Exception:
                             pass
-                        return 0, "quota_exhausted", 0, (len(done_set) > before_done)
+                        return 0, STOP_REASON_QUOTA, 0, (len(done_set) > before_done)
                     # Invalid/unknown model: allow escalation fallback when available.
                     if dev_exc and is_model_invalid_exception(dev_exc):
                         if (attempt + 1) < max_attempts:
@@ -1918,7 +1919,7 @@ or "spend limit" in s
                 pass
 
             if total_count > 0 and done_count >= total_count:
-                return 0, "all_tasks_done", done_delta, ran_tasks
+                return 0, STOP_REASON_ALL_TASKS_DONE, done_delta, ran_tasks
 
             return 0, "ok", done_delta, ran_tasks
 
@@ -1928,7 +1929,7 @@ or "spend limit" in s
             nonlocal policy_scan_summary, security_scan_summary
 
             if stop_path.exists():
-                return 0, "stop_file", 0
+                return 0, STOP_REASON_STOP_FILE, 0
 
             policy_scan_summary = None
             security_scan_summary = None
@@ -1955,9 +1956,9 @@ or "spend limit" in s
                 metrics.event("pm_stage_start", cycle=ci)
                 ok = await run_pm_if_needed(ci, curr_head, changed_files, repo_fp, force_refresh_backlog=False)
                 if not ok:
-                    if pm_stop_reason.get("reason") == "quota_exhausted" or stop_path.exists():
-                        metrics.event("pm_stage_end", cycle=ci, rc=0, reason="quota_exhausted")
-                        return StageOutcome.stop("quota_exhausted", rc=0)
+                    if pm_stop_reason.get("reason") == STOP_REASON_QUOTA or stop_path.exists():
+                        metrics.event("pm_stage_end", cycle=ci, rc=0, reason=STOP_REASON_QUOTA)
+                        return StageOutcome.stop(STOP_REASON_QUOTA, rc=0)
                     metrics.event("pm_stage_end", cycle=ci, rc=1)
                     return StageOutcome.fail("pm_failed", rc=1)
                 metrics.event("pm_stage_end", cycle=ci, rc=0)
@@ -2038,8 +2039,12 @@ or "spend limit" in s
                 session.done_delta = int(done_delta or 0)
                 session.ran_tasks = bool(ran_tasks)
 
-                if reason == "stop_file":
-                    return StageOutcome.stop("stop_file", rc=0)
+                if reason == STOP_REASON_QUOTA:
+                    return StageOutcome.stop(STOP_REASON_QUOTA, rc=0)
+                if reason == STOP_REASON_ALL_TASKS_DONE:
+                    return StageOutcome.stop(STOP_REASON_ALL_TASKS_DONE, rc=0)
+                if reason == STOP_REASON_STOP_FILE:
+                    return StageOutcome.stop(STOP_REASON_STOP_FILE, rc=0)
                 if rc != 0:
                     return StageOutcome.fail(reason, rc=rc)
                 return StageOutcome.ok(reason)
@@ -2161,7 +2166,10 @@ or "spend limit" in s
                 if rc != 0:
                     break
 
-                if reason == "quota_exhausted":
+                if reason == STOP_REASON_QUOTA:
+                    break
+                if reason == STOP_REASON_ALL_TASKS_DONE:
+                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
                     break
 
                 if args.loop:
@@ -2178,6 +2186,18 @@ or "spend limit" in s
                 else:
                     break
         finally:
+            detected_reason = ""
+            try:
+                detected_reason = detect_stop_reason([stop_path])
+            except Exception:
+                detected_reason = ""
+            final_reason = choose_stop_reason([last_reason, detected_reason]) or last_reason
+            report_path = run_dir / "SHUTDOWN_REPORT.md"
+            if not report_path.exists():
+                try:
+                    await write_shutdown_report(final_reason or "ok", cycle=cycle_idx if "cycle_idx" in locals() else -1, step=-1)
+                except Exception:
+                    pass
             if worktree_dir is not None:
                 gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
                 exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []
@@ -2192,8 +2212,23 @@ or "spend limit" in s
                     remove_worktree(source_repo, worktree_dir)
                 except Exception as ex:
                     eprint(f"[WARN] Failed to remove worktree: {ex}")
-            run_summary["final"] = {"rc": last_rc, "reason": last_reason or ""}
+            run_summary["final"] = {"rc": last_rc, "reason": final_reason or ""}
             _write_run_summary()
+            try:
+                ctx = collect_shutdown_context(repo, run_dir)
+                tasks_done = int(ctx.get("tasks_done") or 0)
+                tasks_total = int(ctx.get("tasks_total") or 0)
+                porcelain = (ctx.get("git_porcelain") or "").strip()
+                change_count = len([ln for ln in porcelain.splitlines() if ln.strip()])
+                policy_summary = ctx.get("policy_scan_summary") or {}
+                policy_fail = policy_summary.get("fail_total")
+                policy_part = f" policy_fail={policy_fail}" if policy_fail is not None else ""
+                print(
+                    f"[SHUTDOWN] reason={final_reason or 'ok'} cycles={len(run_summary['cycles'])} "
+                    f"tasks={tasks_done}/{tasks_total} changes={change_count} run_dir={run_dir}{policy_part}"
+                )
+            except Exception:
+                print(f"[SHUTDOWN] reason={final_reason or last_reason or 'ok'} run_dir={run_dir}")
 
     return last_rc
 
