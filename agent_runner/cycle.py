@@ -707,14 +707,11 @@ or "spend limit" in s
                     return parsed
                 metrics.event("pm_structured_parse", cycle=cycle_idx, attempt=attempt, ok=False)
                 if attempt < retries:
-                    budget_state["total_repairs"] += 1
-                    if _budget_exceeded(
-                        "total_repairs",
-                        budget_state["total_repairs"],
-                        int(budgets_cfg.get("max_total_repair_attempts_per_run") or 0),
-                    ):
+                    repair_limit = int(budgets_cfg.get("max_total_repair_attempts_per_run") or 0)
+                    if _budget_exceeded("total_repairs", budget_state["total_repairs"], repair_limit):
                         metrics.event("budget_exceeded", cycle=cycle_idx, reason="total_repairs")
                         break
+                    budget_state["total_repairs"] += 1
 
                 repair_prompt = (
                     "Your previous response was invalid or did not match the required JSON schema. "
