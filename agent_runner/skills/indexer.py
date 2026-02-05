@@ -48,6 +48,7 @@ def resolve_skills_roots(repo: Path, roots: Iterable[str]) -> list[Path]:
             continue
         if "{repo}" in s:
             s = s.replace("{repo}", str(repo))
+        s = os.path.expandvars(s)
         p = Path(s).expanduser()
         p = p if p.is_absolute() else (repo / p)
         try:
@@ -72,11 +73,17 @@ def _iter_skill_files(root: Path) -> Iterable[Path]:
     for dirpath, _, filenames in os.walk(root):
         if "SKILL.md" in filenames:
             skill_files.append(Path(dirpath) / "SKILL.md")
+        else:
+            for name in filenames:
+                if name.lower() == "skill.md":
+                    eprint(f"[SKILLS] Warning: found {name} without SKILL.md in {dirpath}")
+                    break
     return skill_files
 
 
 def build_skills_index(roots: Iterable[Path], *, max_file_bytes: int = MAX_SKILL_FILE_BYTES) -> list[SkillRecord]:
     records: list[SkillRecord] = []
+    seen_keys: set[tuple[str, str]] = set()
     for root in roots:
         if not root.exists():
             continue
@@ -96,6 +103,11 @@ def build_skills_index(roots: Iterable[Path], *, max_file_bytes: int = MAX_SKILL
             skill_id = _skill_id(root, rel_path)
             last_modified = datetime.fromtimestamp(skill_path.stat().st_mtime).isoformat(timespec="seconds")
             content_hash = _hash_bytes(text.encode("utf-8", errors="replace"))
+            dedupe_key = (content_hash, rel_path)
+            if dedupe_key in seen_keys:
+                eprint(f"[SKILLS] Duplicate skill skipped (content_hash+relative_path): {skill_path}")
+                continue
+            seen_keys.add(dedupe_key)
             records.append(
                 SkillRecord(
                     skill_id=skill_id,
