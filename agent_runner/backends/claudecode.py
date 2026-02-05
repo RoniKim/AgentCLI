@@ -338,8 +338,16 @@ def _pm_prompt(
 """
 
 
-def _dev_prompt(repo: Path, run_dir: Path, task: TaskItem, skills_context: str) -> str:
+def _dev_prompt(repo: Path, run_dir: Path, task: TaskItem, skills_context: str, digest_rel: str, docs_read_mode: str) -> str:
     files_hint = "\n".join([f"- {f}" for f in (task.files or [])[:50]]) if task.files else "(not specified)"
+
+    # Docs hint for token saving (same as Codex)
+    docs_hint = ""
+    if docs_read_mode == "digest" and digest_rel:
+        docs_hint = f"\n[DOCS - TOKEN SAVING]\n- Docs digest (preferred): `{digest_rel}`\n- Use digest for high-level context; avoid reading full docs unless necessary.\n"
+    elif docs_read_mode == "full":
+        docs_hint = f"\n[DOCS]\n- You may read full documentation files if needed.\n"
+
     return f"""You are the Dev agent.
 
 [ONE TASK ONLY]
@@ -353,7 +361,7 @@ def _dev_prompt(repo: Path, run_dir: Path, task: TaskItem, skills_context: str) 
 
 [SELECTED SKILLS]
 {skills_context}
-
+{docs_hint}
 [ACCEPTANCE]
 - done_when: {task.done_when}
 - You MUST produce a meaningful git diff for the repository (unless the task explicitly says no code changes).
@@ -364,6 +372,7 @@ def _dev_prompt(repo: Path, run_dir: Path, task: TaskItem, skills_context: str) 
 - Run dir: `{_rel(repo, run_dir)}` (you may write logs/reports here)
 
 [IMPORTANT]
+- TOKEN SAVING: Use digest instead of reading full docs. Avoid broad repo scans.
 - If you need to create an operational note for PM, write a short markdown hint into:
   `{_rel(repo, run_dir / 'analysis_hints' / (task.id + '.md'))}`
 """
@@ -856,6 +865,27 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             write_default_p0_backlog(run_dir)
             return StageOutcome.ok("pm_parse_failed_fallback_backlog")
 
+        # Persist parsed JSON for debugging (Codex-style)
+        try:
+            (run_dir / f"PM_OUTPUT_cycle_{cycle_idx:03d}.json").write_text(
+                dump_pretty(pm_out.model_dump()) + "\n",
+                encoding="utf-8",
+                errors="replace",
+            )
+        except Exception:
+            pass
+
+        # Save PM notes if provided (Codex-style)
+        if pm_out.notes_md:
+            try:
+                (run_dir / "NOTES_PM.md").write_text(
+                    pm_out.notes_md.strip() + "\n",
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except Exception:
+                pass
+
         # Write backlog files
         try:
             tasks_dicts = [t.model_dump() for t in (pm_out.tasks or [])]  # pydantic v2
@@ -959,7 +989,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
             executed += 1
             skills_context = _format_skill_selection(task.skills or [], skills_by_id)
-            prompt = _dev_prompt(repo, run_dir, task, skills_context)
+            prompt = _dev_prompt(repo, run_dir, task, skills_context, digest_rel, docs_read_mode)
 
             # checkpoint before edits
             cp: Optional[RepoCheckpoint] = None
