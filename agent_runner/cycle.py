@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime
 import json
 import hashlib
 import os
@@ -1678,7 +1679,10 @@ async def main_async(args: argparse.Namespace) -> int:
                     # Always persist whatever we have (even on exceptions)
                     dev_log = (dev_final or "")
                     if dev_exc:
-                        dev_log += "\n[EXCEPTION]\n" + str(dev_exc) + "\n"
+                        # Include exception type, message, and full traceback for debugging
+                        exc_header = f"{type(dev_exc).__name__}: {str(dev_exc)}" if str(dev_exc) else type(dev_exc).__name__
+                        exc_traceback = traceback.format_exc()
+                        dev_log += f"\n[EXCEPTION]\n{exc_header}\n\nTraceback:\n{exc_traceback}\n"
 
                     (attempt_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
                     (run_dir / "dev_logs").mkdir(parents=True, exist_ok=True)
