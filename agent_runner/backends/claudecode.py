@@ -400,7 +400,17 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
     structured: Any = None
 
     # We avoid importing message classes eagerly; the SDK package may not exist.
-    async for msg in stream:
+    if hasattr(stream, "__aiter__"):
+        iterator = stream
+    elif hasattr(stream, "__iter__"):
+        async def _sync_iter():
+            for msg in stream:
+                yield msg
+        iterator = _sync_iter()
+    else:
+        raise RuntimeError("ClaudeSDKClient did not return a message stream")
+
+    async for msg in iterator:
         if stop_path.exists():
             raise StopRequested()
 
@@ -438,35 +448,51 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
 
 
 async def _start_query(client: Any, prompt: str) -> Any:
-    """Start a Claude SDK query and return an async message stream."""
+    """Start a Claude SDK query and return a message stream."""
+
+    def _coerce_stream(candidate: Any) -> Any | None:
+        if hasattr(candidate, "__aiter__") or hasattr(candidate, "__iter__"):
+            return candidate
+        for attr_name in ("stream", "messages", "iter_messages"):
+            if hasattr(candidate, attr_name):
+                obj = getattr(candidate, attr_name)
+                try:
+                    stream = obj() if callable(obj) else obj
+                except TypeError:
+                    continue
+                if hasattr(stream, "__aiter__") or hasattr(stream, "__iter__"):
+                    return stream
+        return None
 
     try:
         result = client.query(prompt)
     except TypeError:
         result = client.query(prompt=prompt)
 
-    if hasattr(result, "__aiter__"):
-        return result
+    stream = _coerce_stream(result)
+    if stream is not None:
+        return stream
 
     if inspect.isawaitable(result):
         awaited = await result
-        if hasattr(awaited, "__aiter__"):
-            return awaited
+        stream = _coerce_stream(awaited)
+        if stream is not None:
+            return stream
 
-    for attr in ("stream", "messages", "iter_messages"):
-        if hasattr(client, attr):
-            obj = getattr(client, attr)
-            try:
-                stream = obj() if callable(obj) else obj
-            except TypeError:
-                continue
-            if hasattr(stream, "__aiter__"):
-                return stream
+    stream = _coerce_stream(client)
+    if stream is not None:
+        return stream
 
-    if hasattr(client, "__aiter__"):
-        return client
+    try:
+        import claude_agent_sdk
+    except Exception:
+        claude_agent_sdk = None
+    if claude_agent_sdk is not None:
+        version = getattr(claude_agent_sdk, "__version__", None)
+        if version:
+            eprint(f"Claude Agent SDK version detected: {version}")
 
-    raise RuntimeError("ClaudeSDKClient does not provide an async message stream")
+    raise RuntimeError("ClaudeSDKClient does not provide a message stream")
 
 
 def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str) -> Any:
