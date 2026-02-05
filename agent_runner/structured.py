@@ -165,6 +165,13 @@ def normalize_pm_output_dict(data: Any, *, kind_hint: str = "") -> Optional[dict
             ).strip()
             if not done_when:
                 done_when = "Git diff exists and build/tests gates pass; task acceptance criteria in prompt satisfied."
+            skills = _as_str_list(t.get("skills") or t.get("skill_ids") or t.get("skills_used") or t.get("skill"))
+            skills_rationale = (
+                t.get("skills_rationale")
+                or t.get("skill_rationale")
+                or t.get("skills_reason")
+                or t.get("skill_reason")
+            )
             tasks.append(
                 {
                     "id": tid,
@@ -172,6 +179,8 @@ def normalize_pm_output_dict(data: Any, *, kind_hint: str = "") -> Optional[dict
                     "prompt": prompt or f"Implement: {title or tid}",
                     "files": _as_str_list(files),
                     "done_when": done_when,
+                    "skills": skills,
+                    "skills_rationale": None if skills_rationale is None else str(skills_rationale),
                 }
             )
     out["tasks"] = tasks

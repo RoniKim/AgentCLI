@@ -21,6 +21,9 @@ Current backlog (from run_dir; [x]=done, [ ]=pending):
 Dev change-hints (optional, run-local; use as clues):
 {hint_block}
 
+SKILLS_INDEX summary (select skill_id per task; do NOT inline full skill text):
+{skills_index_summary}
+
 Backlog generation (v2.0):
 - Return tasks in your final JSON response (schema in pm_instructions).
 - The runner will write BACKLOG.json and BACKLOG.md from your JSON.

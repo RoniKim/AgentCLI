@@ -63,6 +63,14 @@ from .utils import force_utf8_stdio, eprint, now_iso, run_cmd, safe_write_text
 from .schemas import PMOutputV2
 from .structured import parse_pm_output, dump_pretty, describe_parse_failure
 from .tracing import TraceCtx, new_trace_id
+from .skills import (
+    build_skills_index,
+    resolve_skills_roots,
+    resolve_snapshot_dir,
+    summarize_skills_index,
+    write_skills_snapshot,
+    build_skills_context,
+)
 
 from .pipeline import PipelineManager, make_stages
 from .pipeline.session import PipelineSession
@@ -76,6 +84,28 @@ def _load_json_if_exists(path: Path, default: Any) -> Any:
         except Exception:
             return default
     return default
+
+
+def _inline_skills_for(role: str, inline_mode: str) -> bool:
+    mode = str(inline_mode or "").strip().lower()
+    if mode in ("none", ""):
+        return False
+    if mode == "both":
+        return True
+    return mode == role.lower()
+
+
+def _format_skill_selection(skill_ids: list[str], skills_by_id: dict[str, Any]) -> str:
+    if not skill_ids:
+        return "(none)"
+    lines: list[str] = []
+    for sid in skill_ids:
+        rec = skills_by_id.get(sid)
+        if rec is not None:
+            lines.append(f"- {rec.name} ({sid})")
+        else:
+            lines.append(f"- {sid} (missing)")
+    return "\n".join(lines)
 
 
 async def main_async(args: argparse.Namespace) -> int:
@@ -198,6 +228,19 @@ async def main_async(args: argparse.Namespace) -> int:
             generate_docs_digest(repo, docs_dir, digest_path)
         elif not digest_path.exists() and docs_dir:
             generate_docs_digest(repo, docs_dir, digest_path)
+
+    skills_cfg = getattr(args, "skills", {}) if isinstance(getattr(args, "skills", {}), dict) else {}
+    skills_enabled = bool(skills_cfg.get("enabled", False))
+    skills_records = []
+    skills_index_summary = "(skills disabled)"
+    skills_by_id: dict[str, Any] = {}
+    if skills_enabled:
+        roots = resolve_skills_roots(repo, skills_cfg.get("roots", []))
+        skills_records = build_skills_index(roots)
+        skills_by_id = {r.skill_id: r for r in skills_records}
+        snapshot_dir = resolve_snapshot_dir(run_dir, skills_cfg.get("snapshot_dir", ""))
+        write_skills_snapshot(skills_records, snapshot_dir)
+        skills_index_summary = summarize_skills_index(skills_records)
 
     autopilot = bool(args.autopilot)
 
@@ -774,6 +817,14 @@ or "spend limit" in s
 
                 used.add(fixed_id)
                 # Normalize keys
+                skills_val = t.get("skills") or []
+                if isinstance(skills_val, list):
+                    skills = [str(s).strip() for s in skills_val if str(s).strip()]
+                elif isinstance(skills_val, str):
+                    skills = [s.strip() for s in skills_val.split(",") if s.strip()]
+                else:
+                    skills = []
+
                 out.append(
                     {
                         "id": fixed_id,
@@ -781,6 +832,10 @@ or "spend limit" in s
                         "prompt": str(t.get("prompt") or "").strip() or f"Implement {fixed_id}.",
                         "files": t.get("files") if isinstance(t.get("files"), list) else [],
                         "done_when": str(t.get("done_when") or "Git diff exists and build passes.").strip(),
+                        "skills": skills,
+                        "skills_rationale": (
+                            None if t.get("skills_rationale") is None else str(t.get("skills_rationale"))
+                        ),
                     }
                 )
             return out
@@ -843,6 +898,7 @@ or "spend limit" in s
                         "docs_dir": str(docs_dir) if docs_dir else "(none)",
                         "docs_read_mode": str(args.docs_read_mode),
                         "digest_rel": str(digest_rel),
+                        "skills_index_summary": skills_index_summary,
                         "codex_call_hint": codex_call_hint(autopilot),
                     }
                     pm_prompt = append_pm_output_contract(store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx))
@@ -880,6 +936,8 @@ or "spend limit" in s
                                     "prompt": t.prompt,
                                     "files": t.files or [],
                                     "done_when": t.done_when,
+                                    "skills": t.skills or [],
+                                    "skills_rationale": t.skills_rationale,
                                 }
                             )
 
@@ -924,6 +982,7 @@ or "spend limit" in s
                         "docs_dir": str(docs_dir) if docs_dir else "(none)",
                         "docs_read_mode": str(args.docs_read_mode),
                         "digest_rel": str(digest_rel),
+                        "skills_index_summary": skills_index_summary,
                         "codex_call_hint": codex_call_hint(autopilot),
                         "prev_head": prev_head or curr_head,
                         "curr_head": curr_head,
@@ -971,6 +1030,8 @@ or "spend limit" in s
                                     "prompt": t.prompt,
                                     "files": t.files or [],
                                     "done_when": t.done_when,
+                                    "skills": t.skills or [],
+                                    "skills_rationale": t.skills_rationale,
                                 }
                             )
 
@@ -1046,7 +1107,24 @@ or "spend limit" in s
                 return
             try:
                 metrics.event("qa_start", cycle=cycle_idx)
-                ctx = {"repo": str(repo), "run_dir": str(run_dir)}
+                skills_context = "(skills disabled)"
+                if skills_enabled:
+                    skill_ids: list[str] = []
+                    for t in load_tasks():
+                        skill_ids.extend(t.skills or [])
+                    deduped = list(dict.fromkeys([s for s in skill_ids if s]))
+                    selected_records = [skills_by_id[sid] for sid in deduped if sid in skills_by_id]
+                    include_excerpts = _inline_skills_for("qa", skills_cfg.get("inline_mode", ""))
+                    skills_context = build_skills_context(
+                        selected_records,
+                        max_excerpt_lines=int(skills_cfg.get("max_excerpt_lines", 0) or 0),
+                        include_excerpts=include_excerpts,
+                    )
+                    missing = [sid for sid in deduped if sid not in skills_by_id]
+                    if missing:
+                        skills_context += "\nMissing skills: " + ", ".join(missing)
+
+                ctx = {"repo": str(repo), "run_dir": str(run_dir), "skills_context": skills_context}
                 qa_prompt = store.render("qa_prompt", QA_TEMPLATE_DEFAULT, ctx)
                 qa_result = await Runner.run(qa, qa_prompt, max_turns=10)
                 (run_dir / f"qa_final_output_cycle_{cycle_idx:03d}.txt").write_text(
@@ -1188,6 +1266,7 @@ or "spend limit" in s
                     analysis_hint_out = dev_hints_dir / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}_a{attempt:02d}.md"
 
                     files_hint = "\n".join([f"- {f}" for f in (next_task.files or [])]) or "- (unspecified)"
+                    skills_context = _format_skill_selection(next_task.skills or [], skills_by_id)
                     ctx = {
                         "repo": str(repo),
                         "run_dir": str(run_dir),
@@ -1195,6 +1274,7 @@ or "spend limit" in s
                         "task_title": next_task.title,
                         "task_prompt": next_task.prompt,
                         "files_hint": files_hint,
+                        "skills_context": skills_context,
                         "done_when": next_task.done_when or "(unspecified)",
                         "docs_read_mode": str(args.docs_read_mode),
                         "digest_rel": str(digest_rel),

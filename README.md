@@ -134,6 +134,39 @@ OPENAI_API_KEY=xxxxx
 
 ---
 
+## Skills 시스템 (Codex/Claude)
+
+AgentCLI는 유저 전역 또는 프로젝트별 스킬 폴더를 스캔해 **SKILLS_INDEX** 스냅샷을 생성합니다.
+기본값은 **유저 전역 루트만 스캔**하며, 프로젝트 전용 루트는 config에서 추가할 수 있습니다.
+
+### config 예시
+
+```json
+{
+  "skills": {
+    "enabled": true,
+    "roots": [
+      "~/.agents/skills",
+      "~/.claude/skills",
+      "{repo}/Skills",
+      "{repo}/Skills/Codex",
+      "{repo}/Skills/Claude"
+    ],
+    "snapshot_dir": ".doc/skills",
+    "inline_mode": "qa",
+    "max_excerpt_lines": 12
+  }
+}
+```
+
+설명:
+- `roots`: 스캔할 스킬 루트 목록. `{repo}` 플레이스홀더는 현재 repo 경로로 치환됩니다.
+- `snapshot_dir`: run_dir 기준 상대경로(또는 절대경로). 기본은 `run_dir/.doc/skills`.
+- `inline_mode`: `qa|pm|both|none` (Dev에는 스킬 본문을 절대 인라인하지 않습니다).
+- `max_excerpt_lines`: QA/PM에 인라인되는 발췌 줄 수 제한.
+
+---
+
 ## 실행 방법
 
 ### 1) Interactive Shell (기본)

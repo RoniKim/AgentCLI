@@ -34,6 +34,8 @@ Context:
 - Docs folder: {docs_dir}
 - Docs read mode: {docs_read_mode}
 - Docs digest (preferred): {digest_rel}
+- SKILLS_INDEX summary (select skill_id per task; do NOT inline full skill text):
+{skills_index_summary}
 
 Hard rules:
 - TOKEN SAVING: Prefer digest. Avoid broad repo scans; use REPO_INVENTORY.md.

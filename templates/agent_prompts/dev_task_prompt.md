@@ -12,6 +12,9 @@ Implementation instructions:
 Files to touch (keep minimal):
 {files_hint}
 
+Selected skills (use Codex skills system; do NOT inline skill text):
+{skills_context}
+
 Constraints (non-negotiable):
 - HARD FORBIDDEN: Any SQL, migrations, *.sql edits, and any Supabase schema/view/rpc/policy changes.
 - If the task would require backend/SQL changes, STOP:
