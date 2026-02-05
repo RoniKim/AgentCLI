@@ -86,6 +86,27 @@ python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --aut
 
 ---
 
+## 현재 시스템 분석 요약
+
+### 실행 진입점
+
+* `agent_cli.py`가 `--run-now` 또는 원샷 플래그(`--wizard`, `--init-prompts`, `-h/--help`)를 감지하면 즉시 실행 경로로 진입하고, 그 외에는 기본적으로 Interactive Shell로 진입합니다.【F:agent_cli.py†L1-L40】
+* 즉시 실행 경로는 `agent_runner.main` → `agent_runner.runner_entry.run` 순으로 이어지며, 실제 실행 로직은 backend 러너에서 처리됩니다.【F:agent_runner/main.py†L1-L13】【F:agent_runner/runner_entry.py†L1-L100】
+
+### 설정/환경 로딩 흐름
+
+* CLI 파싱 후 `--env-file` 유무에 따라 파이썬 쪽 `.env` 로더가 먼저 실행됩니다.【F:agent_runner/cli.py†L604-L639】
+* config 경로는 **python-side 기준**으로 해석되며, 명시 경로가 없으면 `AgentCLI/configs/<repo-slug>.json`이 기본값입니다.【F:agent_runner/config.py†L12-L83】
+* config 로딩은 **새 경로 우선 → 레거시(repo/.doc/agent_config.json) 폴백** 순서입니다.【F:agent_runner/cli.py†L647-L672】【F:agent_runner/config.py†L40-L58】
+* 최종 설정은 **DEFAULTS → config → CLI args** 순으로 병합되고, prompts/env_file 경로가 정규화됩니다.【F:agent_runner/cli.py†L674-L712】
+
+### 실행 디렉토리/백엔드 선택
+
+* `run_dir`은 명시된 경로가 있으면 그대로 사용하고, `--resume-latest`면 최근 run_dir을 재사용하며, 그렇지 않으면 새 디렉토리를 생성합니다.【F:agent_runner/runner_entry.py†L20-L43】
+* failover가 꺼져 있으면 단일 backend로 실행하며, 켜져 있으면 preflight 결과를 기반으로 backend를 순차 시도합니다.【F:agent_runner/runner_entry.py†L45-L125】
+
+---
+
 ## 요구사항
 
 * **Python 3.10+** 권장
