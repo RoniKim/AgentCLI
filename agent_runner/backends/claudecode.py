@@ -145,13 +145,15 @@ def _load_json_if_exists(path: Path, default: Any) -> Any:
 
 
 def _parse_setting_sources(v: object) -> list[str]:
-    # Claude Agent SDK expects a list like ["project", "global"]
+    # Claude Agent SDK expects a list like ["user", "project", "local"].
     out: list[str] = []
     for s in _as_str_list(v):
         low = s.strip().lower()
         if not low:
             continue
-        if low in {"project", "global", "local"}:
+        if low == "global":
+            low = "user"
+        if low in {"user", "project", "local"}:
             out.append(low)
     if not out:
         out = ["project"]
@@ -408,15 +410,16 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
                 yield msg
         iterator = _sync_iter()
     else:
-        raise RuntimeError("ClaudeSDKClient did not return a message stream")
+        raise RuntimeError("ClaudeSDKClient did not provide a message stream")
 
     async for msg in iterator:
         if stop_path.exists():
             raise StopRequested()
 
-        mtype = getattr(msg, "type", None)
+        msg_name = msg.__class__.__name__
+        msg_type = getattr(msg, "type", None)
 
-        if mtype == "assistant":
+        if msg_name in {"AssistantMessage", "TextMessage"} or msg_type == "assistant":
             content = getattr(msg, "content", None)
             if isinstance(content, list):
                 for blk in content:
@@ -424,11 +427,15 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
                     if isinstance(t, str) and t.strip():
                         text_parts.append(t)
 
-        if mtype == "result":
+        if msg_name in {"ResultMessage", "ResponseMessage"} or msg_type == "result":
+            result = getattr(msg, "result", None)
+            if isinstance(result, dict):
+                structured = result
+            elif isinstance(result, str) and result.strip():
+                text_parts.append(result)
             so = getattr(msg, "structured_output", None)
             if so is not None:
                 structured = so
-            # Some SDK versions also include a plain text summary in `content`
             content = getattr(msg, "content", None)
             if isinstance(content, list):
                 for blk in content:
@@ -437,9 +444,8 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
                         text_parts.append(t)
 
         if debug:
-            # minimal debug echo
             try:
-                if mtype in {"assistant", "result"}:
+                if msg_name in {"AssistantMessage", "ResultMessage", "ResponseMessage"}:
                     pass
             except Exception:
                 pass
@@ -447,8 +453,32 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
     return ("\n".join(text_parts).strip(), structured)
 
 
-async def _start_query(client: Any, prompt: str) -> Any:
-    """Start a Claude SDK query and return a message stream."""
+async def _start_query(client: Any, prompt: str) -> None:
+    """Start a Claude SDK query. Message retrieval is handled separately."""
+
+    try:
+        result = client.query(prompt)
+    except TypeError:
+        result = client.query(prompt=prompt)
+
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _receive_messages(client: Any, *, stop_path: Path, debug: bool) -> Tuple[str, Optional[Any]]:
+    """Receive messages from the Claude SDK client."""
+
+    if hasattr(client, "receive_response"):
+        stream = client.receive_response()
+        if inspect.isawaitable(stream):
+            stream = await stream
+        return await _collect_messages(stream, stop_path=stop_path, debug=debug)
+
+    if hasattr(client, "receive_messages"):
+        stream = client.receive_messages()
+        if inspect.isawaitable(stream):
+            stream = await stream
+        return await _collect_messages(stream, stop_path=stop_path, debug=debug)
 
     def _coerce_stream(candidate: Any) -> Any | None:
         if hasattr(candidate, "__aiter__") or hasattr(candidate, "__iter__"):
@@ -464,24 +494,9 @@ async def _start_query(client: Any, prompt: str) -> Any:
                     return stream
         return None
 
-    try:
-        result = client.query(prompt)
-    except TypeError:
-        result = client.query(prompt=prompt)
-
-    stream = _coerce_stream(result)
-    if stream is not None:
-        return stream
-
-    if inspect.isawaitable(result):
-        awaited = await result
-        stream = _coerce_stream(awaited)
-        if stream is not None:
-            return stream
-
     stream = _coerce_stream(client)
     if stream is not None:
-        return stream
+        return await _collect_messages(stream, stop_path=stop_path, debug=debug)
 
     try:
         import claude_agent_sdk
@@ -520,11 +535,11 @@ def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str) -> Any:
     elif stage_low == "dev":
         allowed = cfg.dev_allowed_tools
         disallowed = cfg.dev_disallowed_tools
-        output_format = "text"
+        output_format = None
     else:
         allowed = cfg.qa_allowed_tools
         disallowed = cfg.qa_disallowed_tools
-        output_format = "text"
+        output_format = None
 
     system_prompt = "".join(
         [
@@ -800,8 +815,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
         try:
             async with ClaudeSDKClient(options=options) as client:
-                stream = await _start_query(client, prompt)
-                text, structured = await _collect_messages(stream, stop_path=stop_path, debug=bool(getattr(args, "debug", False)))
+                await _start_query(client, prompt)
+                text, structured = await _receive_messages(
+                    client,
+                    stop_path=stop_path,
+                    debug=bool(getattr(args, "debug", False)),
+                )
         except StopRequested:
             return StageOutcome.stop("stop_requested", rc=130)
         except Exception as ex:
@@ -949,8 +968,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             except Exception:
                 cp = None
 
-            def _restore_or_stop(reason: str) -> tuple[bool, str]:
+            def _restore_or_stop(reason: str, before_porcelain: str) -> tuple[bool, str]:
                 if not cp:
+                    return True, ""
+                current_porcelain = git_porcelain(repo)
+                if before_porcelain == current_porcelain:
                     return True, ""
                 try:
                     restore_checkpoint(
@@ -977,11 +999,15 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             # Run the agent
             try:
                 async with ClaudeSDKClient(options=options) as client:
-                    stream = await _start_query(client, prompt)
-                    _text, _structured = await _collect_messages(stream, stop_path=stop_path, debug=bool(getattr(args, "debug", False)))
+                    await _start_query(client, prompt)
+                    _text, _structured = await _receive_messages(
+                        client,
+                        stop_path=stop_path,
+                        debug=bool(getattr(args, "debug", False)),
+                    )
             except StopRequested:
                 if cp:
-                    ok, fail_reason = _restore_or_stop("stop_requested")
+                    ok, fail_reason = _restore_or_stop("stop_requested", before)
                     if not ok:
                         return StageOutcome.fail(fail_reason, rc=1)
                 return StageOutcome.stop("stop_requested", rc=130)
@@ -989,7 +1015,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 if _is_quota_error(ex):
                     # Quota/credits exhausted: rollback and stop gracefully.
                     if cp:
-                        ok, fail_reason = _restore_or_stop("quota_exhausted")
+                        ok, fail_reason = _restore_or_stop("quota_exhausted", before)
                         if not ok:
                             return StageOutcome.fail(fail_reason, rc=1)
                     state.setdefault("warnings", []).append({"task": task.id, "reason": "quota_exhausted", "detail": str(ex)})
@@ -1005,7 +1031,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 if bool(getattr(args, "debug", False)):
                     eprint(traceback.format_exc())
                 if cp:
-                    ok, fail_reason = _restore_or_stop("exception")
+                    ok, fail_reason = _restore_or_stop("exception", before)
                     if not ok:
                         return StageOutcome.fail(fail_reason, rc=1)
                 state.setdefault("failed", []).append({"task": task.id, "reason": "exception", "detail": str(ex)})
@@ -1018,7 +1044,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             if stop_on_no_diff and (not changed):
                 eprint(f"[STOP] No diff produced for {task.id}.")
                 if cp:
-                    ok, fail_reason = _restore_or_stop("no_diff")
+                    ok, fail_reason = _restore_or_stop("no_diff", before)
                     if not ok:
                         return StageOutcome.fail(fail_reason, rc=1)
                 state.setdefault("failed", []).append({"task": task.id, "reason": "no_diff"})
@@ -1130,8 +1156,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
         try:
             async with ClaudeSDKClient(options=options) as client:
-                stream = await _start_query(client, prompt)
-                md, _structured = await _collect_messages(stream, stop_path=stop_path, debug=bool(getattr(args, "debug", False)))
+                await _start_query(client, prompt)
+                md, _structured = await _receive_messages(
+                    client,
+                    stop_path=stop_path,
+                    debug=bool(getattr(args, "debug", False)),
+                )
         except StopRequested:
             return StageOutcome.stop("stop_requested", rc=130)
         except Exception as ex:

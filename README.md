@@ -153,6 +153,29 @@ AgentCLI는 설정(`execution_backend`)에 따라 실행 엔진을 교체할 수
 OPENAI_API_KEY=xxxxx
 ```
 
+### Claude 모드 빠른 시작
+
+Claude backend(`execution_backend=claudecode`)를 사용하려면 아래 조건을 충족해야 합니다.
+
+1) SDK 설치:
+
+```bash
+pip install -U claude-agent-sdk
+```
+
+2) 인증:
+
+- **Claude Code 인증**: `claude auth login` (Claude Code CLI 사용 시)
+- **API 키**: `ANTHROPIC_API_KEY` 환경변수 설정
+
+3) 스모크 테스트(선택):
+
+```bash
+python -m agent_runner.backends.claude_smoke_test --prompt "hi"
+```
+
+문제 발생 시 `.doc/Docs/claude.md`의 트러블슈팅 섹션을 참고하세요.
+
 ---
 
 ## Skills 시스템 (Codex/Claude)
