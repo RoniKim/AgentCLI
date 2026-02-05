@@ -50,7 +50,7 @@ from ..skills import (
     build_skills_index,
     resolve_skills_roots,
     resolve_snapshot_dir,
-    summarize_skills_index,
+    summarize_skills_index_capped,
     write_skills_snapshot,
 )
 from ..utils import force_utf8_stdio, eprint, now_iso, safe_write_text, has_quota_text
@@ -116,12 +116,23 @@ def _format_skill_selection(skill_ids: list[str], skills_by_id: dict[str, Any]) 
     if not skill_ids:
         return "(none)"
     lines: list[str] = []
+    missing: list[str] = []
     for sid in skill_ids:
         rec = skills_by_id.get(sid)
         if rec is not None:
+            try:
+                resolved_path = rec.skill_path.resolve()
+            except Exception:
+                resolved_path = rec.skill_path
             lines.append(f"- {rec.name} ({sid})")
+            lines.append(f"  - root: {rec.source_root}")
+            lines.append(f"  - relative_path: {rec.relative_path}")
+            lines.append(f"  - resolved_path: {resolved_path}")
         else:
             lines.append(f"- {sid} (missing)")
+            missing.append(sid)
+    if missing:
+        lines.append("Missing skills: " + ", ".join(missing))
     return "\n".join(lines)
 
 
@@ -594,7 +605,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         skills_by_id = {r.skill_id: r for r in skills_records}
         snapshot_dir = resolve_snapshot_dir(run_dir, skills_cfg.get("snapshot_dir", ""))
         write_skills_snapshot(skills_records, snapshot_dir)
-        skills_index_summary = summarize_skills_index(skills_records)
+        skills_index_summary = summarize_skills_index_capped(
+            skills_records,
+            max_items=int(skills_cfg.get("pm_summary_max_items", 0) or 0),
+            max_chars=int(skills_cfg.get("pm_summary_max_chars", 0) or 0),
+        )
 
     # Run-local state
     backlog_json_path = run_dir / "BACKLOG.json"
@@ -1039,6 +1054,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             skills_context = build_skills_context(
                 selected_records,
                 max_excerpt_lines=int(skills_cfg.get("max_excerpt_lines", 0) or 0),
+                total_char_cap=int(skills_cfg.get("qa_max_total_chars", 0) or 0),
                 include_excerpts=include_excerpts,
             )
             missing = [sid for sid in deduped if sid not in skills_by_id]

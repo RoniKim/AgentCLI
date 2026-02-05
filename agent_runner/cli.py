@@ -164,12 +164,18 @@ DEFAULTS: Dict[str, Any] = {
     "skills": {
         "enabled": False,
         "roots": [
+            str(Path.home() / ".codex" / "skills"),
             str(Path.home() / ".agents" / "skills"),
             str(Path.home() / ".claude" / "skills"),
         ],
         "snapshot_dir": "",
         "inline_mode": "qa",
         "max_excerpt_lines": 12,
+        "pm_summary_max_items": 120,
+        "pm_summary_max_chars": 8000,
+        "qa_max_total_chars": 8000,
+        "skill_match_autofix": False,
+        "skill_match_autofix_threshold": 0.9,
     },
 
     # Misc / debug
@@ -542,6 +548,27 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
             out["max_excerpt_lines"] = max(0, int(out.get("max_excerpt_lines") or 0))
         except Exception:
             out["max_excerpt_lines"] = int(defaults_skills.get("max_excerpt_lines", 12))
+
+        try:
+            out["pm_summary_max_items"] = max(0, int(out.get("pm_summary_max_items") or 0))
+        except Exception:
+            out["pm_summary_max_items"] = int(defaults_skills.get("pm_summary_max_items", 120))
+
+        try:
+            out["pm_summary_max_chars"] = max(0, int(out.get("pm_summary_max_chars") or 0))
+        except Exception:
+            out["pm_summary_max_chars"] = int(defaults_skills.get("pm_summary_max_chars", 8000))
+
+        try:
+            out["qa_max_total_chars"] = max(0, int(out.get("qa_max_total_chars") or 0))
+        except Exception:
+            out["qa_max_total_chars"] = int(defaults_skills.get("qa_max_total_chars", 8000))
+
+        out["skill_match_autofix"] = bool(out.get("skill_match_autofix", False))
+        try:
+            out["skill_match_autofix_threshold"] = float(out.get("skill_match_autofix_threshold") or 0)
+        except Exception:
+            out["skill_match_autofix_threshold"] = float(defaults_skills.get("skill_match_autofix_threshold", 0.9))
 
         out["snapshot_dir"] = str(out.get("snapshot_dir", "") or "")
         return out

@@ -67,10 +67,11 @@ from .skills import (
     build_skills_index,
     resolve_skills_roots,
     resolve_snapshot_dir,
-    summarize_skills_index,
     write_skills_snapshot,
     build_skills_context,
+    summarize_skills_index_capped,
 )
+from .skills.match import suggest_skills
 
 from .pipeline import PipelineManager, make_stages
 from .pipeline.session import PipelineSession
@@ -99,12 +100,23 @@ def _format_skill_selection(skill_ids: list[str], skills_by_id: dict[str, Any]) 
     if not skill_ids:
         return "(none)"
     lines: list[str] = []
+    missing: list[str] = []
     for sid in skill_ids:
         rec = skills_by_id.get(sid)
         if rec is not None:
+            try:
+                resolved_path = rec.skill_path.resolve()
+            except Exception:
+                resolved_path = rec.skill_path
             lines.append(f"- {rec.name} ({sid})")
+            lines.append(f"  - root: {rec.source_root}")
+            lines.append(f"  - relative_path: {rec.relative_path}")
+            lines.append(f"  - resolved_path: {resolved_path}")
         else:
             lines.append(f"- {sid} (missing)")
+            missing.append(sid)
+    if missing:
+        lines.append("Missing skills: " + ", ".join(missing))
     return "\n".join(lines)
 
 
@@ -240,7 +252,11 @@ async def main_async(args: argparse.Namespace) -> int:
         skills_by_id = {r.skill_id: r for r in skills_records}
         snapshot_dir = resolve_snapshot_dir(run_dir, skills_cfg.get("snapshot_dir", ""))
         write_skills_snapshot(skills_records, snapshot_dir)
-        skills_index_summary = summarize_skills_index(skills_records)
+        skills_index_summary = summarize_skills_index_capped(
+            skills_records,
+            max_items=int(skills_cfg.get("pm_summary_max_items", 0) or 0),
+            max_chars=int(skills_cfg.get("pm_summary_max_chars", 0) or 0),
+        )
 
     autopilot = bool(args.autopilot)
 
@@ -840,6 +856,39 @@ or "spend limit" in s
                 )
             return out
 
+        def _validate_skill_ids(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            if not skills_enabled or not tasks:
+                return tasks
+            autofix = bool(skills_cfg.get("skill_match_autofix", False))
+            threshold = float(skills_cfg.get("skill_match_autofix_threshold") or 0)
+            updated: list[dict[str, Any]] = []
+            for task in tasks:
+                skills_list = [str(s).strip() for s in (task.get("skills") or []) if str(s).strip()]
+                new_skills: list[str] = []
+                for sid in skills_list:
+                    if sid in skills_by_id:
+                        new_skills.append(sid)
+                        continue
+                    suggestions = suggest_skills(sid, skills_records, max_results=3)
+                    if suggestions:
+                        top = suggestions[0]
+                        suggestion_msg = ", ".join(
+                            [f"{s.skill_id}({s.name}, {s.score:.2f})" for s in suggestions]
+                        )
+                        eprint(f"[SKILLS] Unknown skill_id '{sid}'. Suggestions: {suggestion_msg}")
+                        if autofix and top.score >= threshold:
+                            eprint(f"[SKILLS] Auto-fix: '{sid}' -> '{top.skill_id}' (score {top.score:.2f})")
+                            new_skills.append(top.skill_id)
+                        else:
+                            new_skills.append(sid)
+                    else:
+                        eprint(f"[SKILLS] Unknown skill_id '{sid}' (no suggestions)")
+                        new_skills.append(sid)
+                new_task = dict(task)
+                new_task["skills"] = new_skills
+                updated.append(new_task)
+            return updated
+
         async def run_pm_if_needed(cycle_idx: int, curr_head: str, changed_files: list[str], repo_fp: str, force_refresh_backlog: bool = False) -> bool:
             """Returns True if PM is OK (ran successfully or skipped safely)."""
             nonlocal last_pm_fp, prev_head
@@ -943,6 +992,7 @@ or "spend limit" in s
 
                     if merged_tasks:
                         merged_tasks = _normalize_backlog_tasks(merged_tasks)
+                        merged_tasks = _validate_skill_ids(merged_tasks)
                         if merged_tasks:
                             write_backlog_files(run_dir, merged_tasks)
 
@@ -1037,6 +1087,7 @@ or "spend limit" in s
 
                     if merged_tasks:
                         merged_tasks = _normalize_backlog_tasks(merged_tasks)
+                        merged_tasks = _validate_skill_ids(merged_tasks)
                         if merged_tasks:
                             write_backlog_files(run_dir, merged_tasks)
 
@@ -1118,6 +1169,7 @@ or "spend limit" in s
                     skills_context = build_skills_context(
                         selected_records,
                         max_excerpt_lines=int(skills_cfg.get("max_excerpt_lines", 0) or 0),
+                        total_char_cap=int(skills_cfg.get("qa_max_total_chars", 0) or 0),
                         include_excerpts=include_excerpts,
                     )
                     missing = [sid for sid in deduped if sid not in skills_by_id]

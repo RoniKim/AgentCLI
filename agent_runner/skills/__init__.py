@@ -9,6 +9,7 @@ from .indexer import (
     write_skills_snapshot,
 )
 from .excerpt import build_skills_context
+from .summary import summarize_skills_index_capped
 
 __all__ = [
     "SkillRecord",
@@ -18,4 +19,5 @@ __all__ = [
     "summarize_skills_index",
     "write_skills_snapshot",
     "build_skills_context",
+    "summarize_skills_index_capped",
 ]
