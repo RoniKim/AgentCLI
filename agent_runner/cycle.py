@@ -2016,8 +2016,6 @@ or "spend limit" in s
                 else:
                     break
         finally:
-            run_summary["final"] = {"rc": last_rc, "reason": last_reason or ""}
-            _write_run_summary()
             if worktree_dir is not None:
                 gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
                 exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []
@@ -2032,6 +2030,8 @@ or "spend limit" in s
                     remove_worktree(source_repo, worktree_dir)
                 except Exception as ex:
                     eprint(f"[WARN] Failed to remove worktree: {ex}")
+            run_summary["final"] = {"rc": last_rc, "reason": last_reason or ""}
+            _write_run_summary()
 
     return last_rc
 
