@@ -45,11 +45,33 @@ from ..state import (
     TaskItem,
 )
 from ..structured import parse_pm_output, dump_pretty, describe_parse_failure
-from ..utils import force_utf8_stdio, eprint, now_iso, safe_write_text
+from ..utils import force_utf8_stdio, eprint, now_iso, safe_write_text, has_quota_text
 
 
 class StopRequested(Exception):
     pass
+
+def _iter_exc_chain_quota(ex: BaseException):
+    """Best-effort walk of exception cause/context chain."""
+    seen: set[int] = set()
+    cur: BaseException | None = ex
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        yield cur
+        nxt = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+        cur = nxt if isinstance(nxt, BaseException) else None
+
+
+def _is_quota_error(ex: BaseException) -> bool:
+    for e in _iter_exc_chain_quota(ex):
+        try:
+            msg = str(e)
+        except Exception:
+            msg = ""
+        if has_quota_text(msg) or has_quota_text(repr(e)):
+            return True
+    return False
+
 
 
 def _as_str_list(v: object) -> list[str]:
@@ -655,6 +677,15 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         except StopRequested:
             return StageOutcome.stop("stop_requested", rc=130)
         except Exception as ex:
+            if _is_quota_error(ex):
+                # Quota/credits exhausted: stop gracefully so failover (if enabled) can take over.
+                try:
+                    stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+                metrics.event("runner_stop", stage="pm", reason="quota_exhausted")
+                return StageOutcome.stop("quota_exhausted", rc=0)
+
             eprint(f"[PM] Claude error: {ex}")
             if bool(getattr(args, "debug", False)):
                 eprint(traceback.format_exc())
@@ -824,6 +855,21 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         return StageOutcome.fail(fail_reason, rc=1)
                 return StageOutcome.stop("stop_requested", rc=130)
             except Exception as ex:
+                if _is_quota_error(ex):
+                    # Quota/credits exhausted: rollback and stop gracefully.
+                    if cp:
+                        ok, fail_reason = _restore_or_stop("quota_exhausted")
+                        if not ok:
+                            return StageOutcome.fail(fail_reason, rc=1)
+                    state.setdefault("warnings", []).append({"task": task.id, "reason": "quota_exhausted", "detail": str(ex)})
+                    save_state(state_path, state)
+                    try:
+                        stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
+                    except Exception:
+                        pass
+                    metrics.event("runner_stop", stage="dev", task=task.id, reason="quota_exhausted")
+                    return StageOutcome.stop("quota_exhausted", rc=0)
+
                 eprint(f"[DEV] Claude error: {ex}")
                 if bool(getattr(args, "debug", False)):
                     eprint(traceback.format_exc())
@@ -940,6 +986,14 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         except StopRequested:
             return StageOutcome.stop("stop_requested", rc=130)
         except Exception as ex:
+            if _is_quota_error(ex):
+                try:
+                    stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+                metrics.event("runner_stop", stage="qa", reason="quota_exhausted")
+                return StageOutcome.stop("quota_exhausted", rc=0)
+
             eprint(f"[QA] Claude error: {ex}")
             if bool(getattr(args, "debug", False)):
                 eprint(traceback.format_exc())

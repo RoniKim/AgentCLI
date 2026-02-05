@@ -213,10 +213,21 @@ def _has_quota_text(text: str) -> bool:
         "codex/settings/usage",
         "usage limit",
         "quota exhausted",
+        "user limit",
+        "user_limit",
+        "credit balance is too low",
+        "plans & billing",
+        "purchase credits",
+        "spend limit",
+        "monthly spend limit",
     )
     return any(n in s for n in needles)
 
 
+
+
+# Public alias (used by backends) for quota/credits text detection
+has_quota_text = _has_quota_text
 def detect_stop_reason(stop_paths: Sequence[Path]) -> str:
     """Detect stop reason from one of the provided stop files."""
     for path in stop_paths:

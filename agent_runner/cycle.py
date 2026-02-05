@@ -390,6 +390,12 @@ async def main_async(args: argparse.Namespace) -> int:
                 "purchase more credits",
                 "upgrade to pro",
                 "codex/settings/usage",
+                "user limit",
+                "user_limit",
+                "credit balance is too low",
+                "plans & billing",
+                "purchase credits",
+                "spend limit",
             )
             for e in _iter_exc_chain(ex):
                 try:
@@ -409,11 +415,18 @@ async def main_async(args: argparse.Namespace) -> int:
             if not s:
                 return False
             return (
-                "you've hit your usage limit" in s
-                or "purchase more credits" in s
-                or "upgrade to pro" in s
-                or "codex/settings/usage" in s
-                or ("usage limit" in s and "try again at" in s)
+"you've hit your usage limit" in s
+or "purchase more credits" in s
+or "upgrade to pro" in s
+or "codex/settings/usage" in s
+or "usage limit" in s
+or "user limit" in s
+or "user_limit" in s
+or "quota exhausted" in s
+or "credit balance is too low" in s
+or "plans & billing" in s
+or "purchase credits" in s
+or "spend limit" in s
             )
 
         def is_model_invalid_exception(ex: Exception) -> bool:

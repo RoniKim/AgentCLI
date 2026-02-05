@@ -99,6 +99,40 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
             ),
         }
 
+    # Failover (optional): continue with another backend if the current one stops due to quota/limits.
+    print("\n--- Failover options (optional) ---")
+    failover_enabled = _ask_bool(
+        "Enable backend failover (e.g., codex -> claudecode when quota is exhausted)",
+        bool(defaults.get("failover_enabled", False)),
+    )
+
+    def _default_csv_list(key: str, fallback: list[str]) -> str:
+        v = defaults.get(key, fallback)
+        if isinstance(v, list):
+            return ",".join(str(x).strip() for x in v if str(x).strip())
+        return str(v or "")
+
+    if failover_enabled:
+        chain_default = _default_csv_list("failover_backends", [execution_backend]) or execution_backend
+        chain_raw = _ask_str("Failover backend chain (comma-separated)", chain_default).strip()
+        failover_backends = [p.strip().lower() for p in chain_raw.split(",") if p.strip()] or [execution_backend]
+        # Ensure the selected primary backend is present and first.
+        if execution_backend not in failover_backends:
+            failover_backends.insert(0, execution_backend)
+        else:
+            failover_backends = [execution_backend] + [b for b in failover_backends if b != execution_backend]
+
+        triggers_default = _default_csv_list("failover_on", ["quota_exhausted"]) or "quota_exhausted"
+        triggers_raw = _ask_str("Failover triggers (comma-separated)", triggers_default).strip()
+        failover_on = [p.strip().lower() for p in triggers_raw.split(",") if p.strip()] or ["quota_exhausted"]
+        failover_max_switches = _ask_int(
+            "Failover max switches per run",
+            int(defaults.get("failover_max_switches", 1) or 1),
+        )
+    else:
+        failover_backends = [execution_backend]
+        failover_on = ["quota_exhausted"]
+        failover_max_switches = int(defaults.get("failover_max_switches", 1) or 1)
     autopilot = _ask_bool("Enable autopilot", bool(defaults.get("autopilot", False)))
     continuous = _ask_bool("Enable continuous (execute tasks after backlog)", bool(defaults.get("continuous", False)))
     iterations = _ask_int("Iterations per run", int(defaults.get("iterations", 30)))
@@ -154,6 +188,10 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
     cfg: Dict[str, Any] = {
         "config_version": 2,
         "execution_backend": execution_backend,
+        "failover_enabled": failover_enabled,
+        "failover_backends": failover_backends,
+        "failover_on": failover_on,
+        "failover_max_switches": failover_max_switches,
         "autopilot": autopilot,
         "continuous": continuous,
         "iterations": iterations,
