@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Sequence
 
-from .utils import run_cmd, now_iso, safe_write_text
+from .utils import run_cmd, now_iso, safe_write_text, eprint
 
 
 def git_head(repo: Path) -> str:
@@ -99,6 +100,48 @@ def list_untracked(repo: Path) -> list[str]:
     if code != 0:
         return []
     return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+
+def normalize_glob_patterns(patterns: Sequence[str] | None) -> list[str]:
+    if not patterns:
+        return []
+    out: list[str] = []
+    for raw in patterns:
+        if raw is None:
+            continue
+        s = str(raw).strip()
+        if not s:
+            continue
+        s = s.replace("\\", "/")
+        if s.startswith("./"):
+            s = s[2:]
+        out.append(s)
+    return out
+
+
+def filter_untracked_paths(paths: Sequence[str], exclude_globs: Sequence[str] | None) -> list[str]:
+    if not paths:
+        return []
+    patterns = normalize_glob_patterns(exclude_globs)
+    if not patterns:
+        return [p for p in paths if p]
+    out: list[str] = []
+    for raw in paths:
+        if not raw:
+            continue
+        path = raw.replace("\\", "/")
+        if path.startswith("./"):
+            path = path[2:]
+        if any(fnmatch.fnmatch(path, pat) for pat in patterns):
+            continue
+        out.append(raw)
+    return out
+
+
+def _chunked(items: Sequence[str], size: int) -> list[list[str]]:
+    if size <= 0:
+        return [list(items)]
+    return [list(items[i : i + size]) for i in range(0, len(items), size)]
 
 
 def copy_untracked(repo: Path, files: list[str], dest_dir: Path) -> None:
@@ -281,11 +324,31 @@ def remove_worktree(repo: Path, worktree_dir: Path) -> None:
         raise RuntimeError(f"git worktree remove failed: rc={code}\n{out}")
 
 
-def export_worktree_patch(worktree_dir: Path, patch_path: Path) -> None:
+def export_worktree_patch(
+    worktree_dir: Path,
+    patch_path: Path,
+    *,
+    exclude_globs: Sequence[str] | None = None,
+    chunk_size: int = 50,
+) -> None:
     patch_path.parent.mkdir(parents=True, exist_ok=True)
-    code, out = run_cmd(["git", "diff", "--binary", "HEAD"], cwd=worktree_dir, timeout_sec=120)
-    if code != 0:
-        raise RuntimeError(f"git diff failed in worktree: rc={code}\n{out}")
+    untracked = filter_untracked_paths(list_untracked(worktree_dir), exclude_globs)
+    if untracked:
+        for chunk in _chunked(untracked, chunk_size):
+            code, out = run_cmd(["git", "add", "-N", "--", *chunk], cwd=worktree_dir, timeout_sec=120)
+            if code != 0:
+                eprint(f"[WARN] git add -N failed in worktree: rc={code}\n{out}")
+    out = ""
+    try:
+        code, out = run_cmd(["git", "diff", "--binary", "HEAD"], cwd=worktree_dir, timeout_sec=120)
+        if code != 0:
+            raise RuntimeError(f"git diff failed in worktree: rc={code}\n{out}")
+    finally:
+        if untracked:
+            for chunk in _chunked(untracked, chunk_size):
+                code, out_reset = run_cmd(["git", "reset", "--", *chunk], cwd=worktree_dir, timeout_sec=120)
+                if code != 0:
+                    eprint(f"[WARN] git reset failed in worktree: rc={code}\n{out_reset}")
     patch_path.write_text(out + "\n", encoding="utf-8", errors="replace")
 
 
@@ -295,3 +358,44 @@ def apply_patch_to_repo(repo: Path, patch_path: Path) -> None:
     code, out = run_cmd(["git", "apply", "--binary", "--whitespace=nowarn", str(patch_path)], cwd=repo, timeout_sec=120)
     if code != 0:
         raise RuntimeError(f"git apply failed: rc={code}\n{out}")
+
+
+def _write_worktree_not_applied(run_dir: Path, patch_path: Path, last_rc: int) -> None:
+    msg = (
+        "# Worktree patch not applied\n\n"
+        f"Patch export completed, but auto-apply was skipped because rc={last_rc}.\n\n"
+        "Manual apply:\n"
+        f"- git apply --binary --whitespace=nowarn {patch_path}\n"
+        "- If conflicts occur, try: git apply --reject --whitespace=nowarn <patch>\n"
+    )
+    safe_write_text(run_dir / "WORKTREE_PATCH_NOT_APPLIED.md", msg)
+
+
+def handle_worktree_patch(
+    worktree_dir: Path,
+    source_repo: Path,
+    run_dir: Path,
+    last_rc: int,
+    *,
+    exclude_globs: Sequence[str] | None = None,
+) -> int:
+    patch_path = run_dir / "worktree.patch"
+    try:
+        export_worktree_patch(worktree_dir, patch_path, exclude_globs=exclude_globs)
+        patch_text = patch_path.read_text(encoding="utf-8", errors="replace").strip()
+        if patch_text:
+            if last_rc == 0:
+                apply_patch_to_repo(source_repo, patch_path)
+            else:
+                _write_worktree_not_applied(run_dir, patch_path, last_rc)
+    except Exception as ex:
+        msg = (
+            "# Worktree apply failure\n\n"
+            f"{ex}\n\n"
+            "Manual recovery:\n"
+            f"- git apply --binary --whitespace=nowarn {patch_path}\n"
+            "- If conflicts occur, try: git apply --reject --whitespace=nowarn <patch>\n"
+        )
+        safe_write_text(run_dir / "WORKTREE_APPLY_FAILURE.md", msg)
+        return last_rc if last_rc != 0 else 1
+    return last_rc

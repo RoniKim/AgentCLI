@@ -24,8 +24,7 @@ from ..gitops import (
     RepoCheckpoint,
     create_worktree,
     remove_worktree,
-    export_worktree_patch,
-    apply_patch_to_repo,
+    handle_worktree_patch,
 )
 from ..inventory import build_repo_inventory, write_repo_inventory_files
 from ..metrics import MetricsLogger
@@ -1153,15 +1152,15 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         await asyncio.sleep(max(1, sleep_s))
 
     if worktree_dir is not None:
-        if exit_code == 0:
-            try:
-                patch_path = run_dir / "worktree.patch"
-                export_worktree_patch(repo, patch_path)
-                if patch_path.read_text(encoding="utf-8", errors="replace").strip():
-                    apply_patch_to_repo(source_repo, patch_path)
-            except Exception as ex:
-                safe_write_text(run_dir / "WORKTREE_APPLY_FAILURE.md", f"# Worktree apply failure\n\n{ex}\n")
-                exit_code = 1
+        gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
+        exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []
+        exit_code = handle_worktree_patch(
+            repo,
+            source_repo,
+            run_dir,
+            exit_code,
+            exclude_globs=exclude_globs,
+        )
         try:
             remove_worktree(source_repo, worktree_dir)
         except Exception as ex:

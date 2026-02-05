@@ -224,6 +224,22 @@ python agent_cli.py --run-now --repo <path> --worktree-isolation
 
 > worktree 모드는 실패/중단 시 원 repo를 보존하고 worktree만 삭제합니다.
 
+#### Worktree patch 수동 복구
+
+worktree 격리 모드에서 자동 적용이 실패하거나(rc != 0) 중단된 경우, run_dir에 다음 파일이 생성됩니다.
+
+* `worktree.patch`: worktree 변경사항 패치(항상 생성)
+* `WORKTREE_PATCH_NOT_APPLIED.md`: 자동 적용이 스킵된 경우 안내
+* `WORKTREE_APPLY_FAILURE.md`: export/apply 중 오류가 난 경우 안내
+
+수동 복구:
+
+```bash
+git apply --binary --whitespace=nowarn <run_dir>/worktree.patch
+# 충돌 시:
+git apply --reject --whitespace=nowarn <run_dir>/worktree.patch
+```
+
 ### /doctor (환경/설정 점검)
 
 셸에서 `/doctor`를 실행하면 환경 진단 보고서가 `DOCTOR.md`로 저장됩니다.

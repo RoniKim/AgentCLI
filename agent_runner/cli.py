@@ -91,6 +91,11 @@ DEFAULTS: Dict[str, Any] = {
     "isolate_task": False,
     "worktree_isolation": False,
 
+    # Gitops defaults
+    "gitops": {
+        "untracked_exclude_globs": [".doc/**", ".doc", ".agent_runs/**", ".agent_runs", "*.log"],
+    },
+
     # Safety / gates
     "no_policy_scan": False,
     "policy_rules_file": "",
@@ -574,6 +579,24 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         return out
 
     eff["skills"] = _normalize_skills(eff.get("skills"))
+
+    # ---- normalize gitops config ----
+    def _normalize_gitops(raw: Any) -> dict[str, Any]:
+        defaults_gitops = defaults.get("gitops", {}) if isinstance(defaults.get("gitops", {}), dict) else {}
+        out: dict[str, Any] = dict(defaults_gitops)
+        if isinstance(raw, dict):
+            out.update(raw)
+        globs = out.get("untracked_exclude_globs") or []
+        if isinstance(globs, str):
+            globs_list = [p.strip() for p in globs.split(",") if p.strip()]
+        elif isinstance(globs, list):
+            globs_list = [str(p).strip() for p in globs if str(p).strip()]
+        else:
+            globs_list = []
+        out["untracked_exclude_globs"] = globs_list
+        return out
+
+    eff["gitops"] = _normalize_gitops(eff.get("gitops"))
 
     # Migration: if generic commands are empty but legacy dotnet targets are set,
     # keep behavior by synthesizing build_cmd/test_cmd. (This does NOT delete dotnet_* keys.)

@@ -25,8 +25,7 @@ from .gitops import (
     list_untracked,
     create_worktree,
     remove_worktree,
-    export_worktree_patch,
-    apply_patch_to_repo,
+    handle_worktree_patch,
 )
 from .inventory import build_repo_inventory, write_repo_inventory_files
 from .todo import read_current_todo, format_todo_block
@@ -1729,15 +1728,15 @@ or "spend limit" in s
             else:
                 break
         if worktree_dir is not None:
-            if last_rc == 0 and last_reason not in {"stop_file", "quota_exhausted"}:
-                try:
-                    patch_path = run_dir / "worktree.patch"
-                    export_worktree_patch(repo, patch_path)
-                    if patch_path.read_text(encoding="utf-8", errors="replace").strip():
-                        apply_patch_to_repo(source_repo, patch_path)
-                except Exception as ex:
-                    safe_write_text(run_dir / "WORKTREE_APPLY_FAILURE.md", f"# Worktree apply failure\n\n{ex}\n")
-                    last_rc = 1
+            gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
+            exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []
+            last_rc = handle_worktree_patch(
+                repo,
+                source_repo,
+                run_dir,
+                last_rc,
+                exclude_globs=exclude_globs,
+            )
             try:
                 remove_worktree(source_repo, worktree_dir)
             except Exception as ex:
