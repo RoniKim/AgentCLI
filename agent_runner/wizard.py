@@ -185,6 +185,30 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
         str(defaults.get("prompts_dir", "")) or "",
     ).strip()
 
+    # Skills config
+    skills_defaults = defaults.get("skills", {}) if isinstance(defaults.get("skills", {}), dict) else {}
+    print("\n--- Skills options ---")
+    skills_enabled = _ask_bool("Enable skills scanning", bool(skills_defaults.get("enabled", False)))
+    roots_default = skills_defaults.get("roots", [])
+    if isinstance(roots_default, list):
+        roots_default_str = ",".join(str(x) for x in roots_default if str(x))
+    else:
+        roots_default_str = str(roots_default or "")
+    roots_raw = _ask_str("Skills roots (comma-separated)", roots_default_str)
+    inline_mode = _ask_choice(
+        "Skills inline mode (qa/pm/both/none)",
+        str(skills_defaults.get("inline_mode", "qa") or "qa"),
+        ["qa", "pm", "both", "none"],
+    )
+    max_excerpt_lines = _ask_int(
+        "Max excerpt lines per skill (QA/PM only)",
+        int(skills_defaults.get("max_excerpt_lines", 12)),
+    )
+    snapshot_dir = _ask_str(
+        "Skills snapshot dir (relative to run_dir; empty=default)",
+        str(skills_defaults.get("snapshot_dir", "")),
+    )
+
     cfg: Dict[str, Any] = {
         "config_version": 2,
         "execution_backend": execution_backend,
@@ -219,6 +243,13 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
         "report_max_turns": report_max_turns,
         "qa_model": qa_model,
         "prompts_dir": prompts_dir,
+        "skills": {
+            "enabled": skills_enabled,
+            "roots": [p.strip() for p in roots_raw.split(",") if p.strip()],
+            "snapshot_dir": snapshot_dir,
+            "inline_mode": inline_mode,
+            "max_excerpt_lines": max_excerpt_lines,
+        },
     }
 
     # Merge backend-specific options

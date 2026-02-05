@@ -45,6 +45,14 @@ from ..state import (
     TaskItem,
 )
 from ..structured import parse_pm_output, dump_pretty, describe_parse_failure
+from ..skills import (
+    build_skills_context,
+    build_skills_index,
+    resolve_skills_roots,
+    resolve_snapshot_dir,
+    summarize_skills_index,
+    write_skills_snapshot,
+)
 from ..utils import force_utf8_stdio, eprint, now_iso, safe_write_text, has_quota_text
 
 
@@ -93,6 +101,28 @@ def _as_str_list(v: object) -> list[str]:
             return [p.strip() for p in s.split(",") if p.strip()]
         return [p for p in s.split() if p]
     return [str(v).strip()] if str(v).strip() else []
+
+
+def _inline_skills_for(role: str, inline_mode: str) -> bool:
+    mode = str(inline_mode or "").strip().lower()
+    if mode in ("none", ""):
+        return False
+    if mode == "both":
+        return True
+    return mode == role.lower()
+
+
+def _format_skill_selection(skill_ids: list[str], skills_by_id: dict[str, Any]) -> str:
+    if not skill_ids:
+        return "(none)"
+    lines: list[str] = []
+    for sid in skill_ids:
+        rec = skills_by_id.get(sid)
+        if rec is not None:
+            lines.append(f"- {rec.name} ({sid})")
+        else:
+            lines.append(f"- {sid} (missing)")
+    return "\n".join(lines)
 
 
 def _load_json_if_exists(path: Path, default: Any) -> Any:
@@ -219,6 +249,7 @@ def _pm_prompt(
     changed_files: list[str],
     digest_rel: str,
     docs_read_mode: str,
+    skills_index_summary: str,
 ) -> str:
     changed_block = "\n".join([f"- {p}" for p in changed_files[:200]]) if changed_files else "(none)"
 
@@ -252,7 +283,7 @@ def _pm_prompt(
             "{",
             "  \"kind\": \"bootstrap|incremental|refresh|skip\",",
             "  \"summary\": \"...\",",
-            "  \"tasks\": [ { \"id\": \"T01\", \"title\": \"...\", \"prompt\": \"...\", \"files\": [\"...\"], \"done_when\": \"...\" } ],",
+            "  \"tasks\": [ { \"id\": \"T01\", \"title\": \"...\", \"prompt\": \"...\", \"files\": [\"...\"], \"done_when\": \"...\", \"skills\": [\"...\"], \"skills_rationale\": \"...\" } ],",
             "  \"notes_md\": \"(optional markdown)\",",
             "  \"warnings\": [\"...\"],",
             "  \"open_questions\": [\"...\"],",
@@ -275,6 +306,8 @@ def _pm_prompt(
 - Repo inventory (all files, with size/binary hints): `{inventory_md}`
 - Recently changed files (HEAD/worktree):
 {changed_block}
+ - SKILLS_INDEX summary (select skill_id per task; do NOT inline full skill text):
+{skills_index_summary}
 {docs_hint}
 {mode_hint}
 [IMPORTANT RULES]
@@ -282,6 +315,7 @@ def _pm_prompt(
 - Avoid re-reading huge files unless necessary.
 - DO NOT modify product/source code in PM stage.
 - You MAY edit/create `{analysis_md}` only.
+- If a SKILLS_INDEX summary is provided, include skills and skills_rationale per task.
 
 [OUTPUT CONTRACT]
 - Your FINAL message MUST be valid JSON that matches this schema:
@@ -292,7 +326,7 @@ def _pm_prompt(
 """
 
 
-def _dev_prompt(repo: Path, run_dir: Path, task: TaskItem) -> str:
+def _dev_prompt(repo: Path, run_dir: Path, task: TaskItem, skills_context: str) -> str:
     files_hint = "\n".join([f"- {f}" for f in (task.files or [])[:50]]) if task.files else "(not specified)"
     return f"""You are the Dev agent.
 
@@ -304,6 +338,9 @@ def _dev_prompt(repo: Path, run_dir: Path, task: TaskItem) -> str:
 
 [FILES HINT]
 {files_hint}
+
+[SELECTED SKILLS]
+{skills_context}
 
 [ACCEPTANCE]
 - done_when: {task.done_when}
@@ -320,7 +357,7 @@ def _dev_prompt(repo: Path, run_dir: Path, task: TaskItem) -> str:
 """
 
 
-def _qa_prompt(repo: Path, run_dir: Path, recent_done_ids: list[str]) -> str:
+def _qa_prompt(repo: Path, run_dir: Path, recent_done_ids: list[str], skills_context: str) -> str:
     done_block = "\n".join([f"- {x}" for x in recent_done_ids]) if recent_done_ids else "(none)"
     return f"""You are the QA agent.
 
@@ -330,6 +367,9 @@ def _qa_prompt(repo: Path, run_dir: Path, recent_done_ids: list[str]) -> str:
 
 [RECENT COMPLETED TASKS]
 {done_block}
+
+[SKILLS CONTEXT]
+{skills_context}
 
 [GOAL]
 - Review recent changes. Look for obvious bugs, missing edge cases, and regression risks.
@@ -543,6 +583,19 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         except Exception as ex:
             eprint(f"[WARN] docs digest generation failed: {ex}")
 
+    skills_cfg = getattr(args, "skills", {}) if isinstance(getattr(args, "skills", {}), dict) else {}
+    skills_enabled = bool(skills_cfg.get("enabled", False))
+    skills_records = []
+    skills_index_summary = "(skills disabled)"
+    skills_by_id: dict[str, Any] = {}
+    if skills_enabled:
+        roots = resolve_skills_roots(repo, skills_cfg.get("roots", []))
+        skills_records = build_skills_index(roots)
+        skills_by_id = {r.skill_id: r for r in skills_records}
+        snapshot_dir = resolve_snapshot_dir(run_dir, skills_cfg.get("snapshot_dir", ""))
+        write_skills_snapshot(skills_records, snapshot_dir)
+        skills_index_summary = summarize_skills_index(skills_records)
+
     # Run-local state
     backlog_json_path = run_dir / "BACKLOG.json"
     backlog_md_path = run_dir / "BACKLOG.md"
@@ -661,6 +714,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             changed_files=changed_files,
             digest_rel=digest_rel,
             docs_read_mode=docs_read_mode,
+            skills_index_summary=skills_index_summary,
         )
 
         options = _build_options(cfg, repo=repo, stage="PM")
@@ -722,6 +776,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         "prompt": getattr(t, "prompt", ""),
                         "files": getattr(t, "files", []) or [],
                         "done_when": getattr(t, "done_when", ""),
+                        "skills": getattr(t, "skills", []) or [],
+                        "skills_rationale": getattr(t, "skills_rationale", None),
                     })
                 except Exception:
                     continue
@@ -809,7 +865,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 break
 
             executed += 1
-            prompt = _dev_prompt(repo, run_dir, task)
+            skills_context = _format_skill_selection(task.skills or [], skills_by_id)
+            prompt = _dev_prompt(repo, run_dir, task, skills_context)
 
             # checkpoint before edits
             cp: Optional[RepoCheckpoint] = None
@@ -971,7 +1028,24 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         if (not qa_always) and (not getattr(session, "ran_tasks", False)):  # type: ignore[name-defined]
             return StageOutcome.skip("qa_skip_no_tasks")
 
-        prompt = _qa_prompt(repo, run_dir, done_ids[-10:])
+        skills_context = "(skills disabled)"
+        if skills_enabled:
+            skill_ids: list[str] = []
+            for t in load_tasks():
+                skill_ids.extend(t.skills or [])
+            deduped = list(dict.fromkeys([s for s in skill_ids if s]))
+            selected_records = [skills_by_id[sid] for sid in deduped if sid in skills_by_id]
+            include_excerpts = _inline_skills_for("qa", skills_cfg.get("inline_mode", ""))
+            skills_context = build_skills_context(
+                selected_records,
+                max_excerpt_lines=int(skills_cfg.get("max_excerpt_lines", 0) or 0),
+                include_excerpts=include_excerpts,
+            )
+            missing = [sid for sid in deduped if sid not in skills_by_id]
+            if missing:
+                skills_context += "\nMissing skills: " + ", ".join(missing)
+
+        prompt = _qa_prompt(repo, run_dir, done_ids[-10:], skills_context)
         options = _build_options(cfg, repo=repo, stage="QA")
 
         try:

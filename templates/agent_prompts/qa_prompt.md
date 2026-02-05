@@ -6,4 +6,6 @@ You are QA/Tester for a MAUI Blazor Hybrid app (Windows + Android).
   - {run_dir}/qa/TEST_PLAN.md
   - {run_dir}/qa/BUILD_CHECKS.md
 - Keep it short and actionable (Windows + Android).
+Skills context:
+{skills_context}
 Repo: {repo}

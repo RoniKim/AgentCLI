@@ -12,6 +12,8 @@ Backlog policy (critical):
 - Each task must be expected to produce a git diff.
 - Task IDs may start at T1/T2; they MUST be meaningful and unique.
 - "UI design" means implement UI in code (Blazor/XAML/CSS), NOT external mockups.
+- If a SKILLS_INDEX summary is provided, select relevant skills for each task.
+  Each task MUST include: skills: [skill_id...] and skills_rationale.
 
 Uncertainty:
 - If requirements are ambiguous, do NOT guess.

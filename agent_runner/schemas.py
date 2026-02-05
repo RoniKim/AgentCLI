@@ -18,6 +18,10 @@ class BacklogTaskV2(BaseModel):
     prompt: str = Field(..., description="Implementation instructions; must be executable")
     files: List[str] = Field(default_factory=list, description="Suggested files to touch (relative paths)")
     done_when: str = Field(..., description="Objective definition of done")
+    skills: List[str] = Field(default_factory=list, description="Selected skill IDs for this task")
+    skills_rationale: Optional[str] = Field(
+        default=None, description="Why these skills were selected for the task"
+    )
 
 
 class PMOutputV2(BaseModel):

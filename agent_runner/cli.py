@@ -160,6 +160,18 @@ DEFAULTS: Dict[str, Any] = {
     # Prompts (python-side default when empty)
     "prompts_dir": "",
 
+    # Skills system
+    "skills": {
+        "enabled": False,
+        "roots": [
+            str(Path.home() / ".agents" / "skills"),
+            str(Path.home() / ".claude" / "skills"),
+        ],
+        "snapshot_dir": "",
+        "inline_mode": "qa",
+        "max_excerpt_lines": 12,
+    },
+
     # Misc / debug
     "debug": False,
     "stop_file": "STOP",
@@ -501,6 +513,40 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
 
     eff["build_cmd"] = _norm_cmd(eff.get("build_cmd"))
     eff["test_cmd"] = _norm_cmd(eff.get("test_cmd"))
+
+    # ---- normalize skills config ----
+    def _normalize_skills(raw: Any) -> dict[str, Any]:
+        defaults_skills = defaults.get("skills", {}) if isinstance(defaults.get("skills", {}), dict) else {}
+        out: dict[str, Any] = dict(defaults_skills)
+        if isinstance(raw, dict):
+            out.update(raw)
+        out["enabled"] = bool(out.get("enabled", False))
+
+        roots = out.get("roots") or []
+        if isinstance(roots, str):
+            roots_list = [p.strip() for p in roots.split(",") if p.strip()]
+        elif isinstance(roots, list):
+            roots_list = [str(p).strip() for p in roots if str(p).strip()]
+        else:
+            roots_list = []
+        out["roots"] = roots_list
+
+        inline_mode = str(out.get("inline_mode", "qa") or "").strip().lower()
+        if inline_mode == "off":
+            inline_mode = "none"
+        if inline_mode not in {"qa", "pm", "both", "none"}:
+            inline_mode = "qa"
+        out["inline_mode"] = inline_mode
+
+        try:
+            out["max_excerpt_lines"] = max(0, int(out.get("max_excerpt_lines") or 0))
+        except Exception:
+            out["max_excerpt_lines"] = int(defaults_skills.get("max_excerpt_lines", 12))
+
+        out["snapshot_dir"] = str(out.get("snapshot_dir", "") or "")
+        return out
+
+    eff["skills"] = _normalize_skills(eff.get("skills"))
 
     # Migration: if generic commands are empty but legacy dotnet targets are set,
     # keep behavior by synthesizing build_cmd/test_cmd. (This does NOT delete dotnet_* keys.)

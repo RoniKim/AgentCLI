@@ -29,6 +29,8 @@ PM_INSTRUCTIONS_DEFAULT = (
     "- Backlog tasks MUST be development work only: feature implementation, UI/screens, bugfixes, tests, and required in-repo docs for the change.\n"
     "- Do NOT include tasks whose deliverable is planning/analysis/review/triage, inventory generation, prompt changes, backlog/report creation, or run-artifact maintenance.\n"
     "- 'UI design' means implement UI in code (Blazor/XAML/CSS), NOT external mockups (Figma etc.).\n"
+    "- If a SKILLS_INDEX summary is provided, select relevant skills for each task.\n"
+    "  Each task MUST include: skills: [skill_id...] and skills_rationale.\n"
     "</design_and_scope_constraints>\n\n"
     "<uncertainty_and_ambiguity>\n"
     "- If requirements are ambiguous or missing, do NOT guess.\n"
@@ -39,7 +41,8 @@ PM_INSTRUCTIONS_DEFAULT = (
     "Your final response MUST be a single JSON object (no markdown) with keys:\n"
     "- kind: one of ['bootstrap','incremental','refresh','skip']\n"
     "- summary: string (1-3 sentences)\n"
-    "- tasks: array of task objects, each: {id,title,prompt,files,done_when}\n"
+    "- tasks: array of task objects, each: {id,title,prompt,files,done_when,skills,skills_rationale}\n"
+    "- task fields must include: skills (array of skill_id strings) and skills_rationale (string|null)\n"
     "- notes_md: string|null (optional run notes in markdown)\n"
     "- warnings: string[]\n"
     "- open_questions: string[]\n"
@@ -53,7 +56,7 @@ PM_OUTPUT_CONTRACT_SUFFIX = (
     "FINAL RESPONSE MUST be ONLY a single JSON object (no markdown, no prose) that matches:\n"
     "- kind: one of ['bootstrap','incremental','refresh','skip']\n"
     "- summary: string\n"
-    "- tasks: array of {id,title,prompt,files,done_when}\n"
+    "- tasks: array of {id,title,prompt,files,done_when,skills,skills_rationale}\n"
     "- notes_md: string|null\n"
     "- warnings: string[]\n"
     "- open_questions: string[]\n"
@@ -143,6 +146,8 @@ Context:
 - Docs folder: {docs_dir}
 - Docs read mode: {docs_read_mode}
 - Docs digest (preferred): {digest_rel}
+- SKILLS_INDEX summary (select skill_id per task; do NOT inline full skill text):
+{skills_index_summary}
 
 Hard rules:
 - TOKEN SAVING: Prefer digest. Avoid broad repo scans; use REPO_INVENTORY.md.
@@ -178,6 +183,9 @@ Current backlog (from run_dir; [x]=done, [ ]=pending):
 
 Dev change-hints (optional, run-local; use as clues):
 {hint_block}
+
+SKILLS_INDEX summary (select skill_id per task; do NOT inline full skill text):
+{skills_index_summary}
 
 Backlog generation (v2.0):
 - Return tasks in your final JSON response (schema in pm_instructions).
@@ -218,6 +226,9 @@ Implementation instructions:
 Files to touch (keep minimal):
 {files_hint}
 
+Selected skills (use Codex skills system; do NOT inline skill text):
+{skills_context}
+
 Constraints (non-negotiable):
 - No secrets in client. Never embed SERVICE_ROLE_KEY or CRON_SECRET.
 - For PAD: writes MUST use RPC/Edge. Reads use Views/RPC. Do NOT direct-write forbidden tables.
@@ -255,6 +266,8 @@ QA_TEMPLATE_DEFAULT = """You are QA/Tester.
   - {run_dir}/qa/TEST_PLAN.md
   - {run_dir}/qa/BUILD_CHECKS.md
 - Keep it short and actionable (Windows + Android).
+Skills context:
+{skills_context}
 Repo: {repo}
 """
 

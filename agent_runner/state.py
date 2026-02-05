@@ -16,6 +16,8 @@ class TaskItem:
     prompt: str
     files: list[str]
     done_when: str
+    skills: list[str]
+    skills_rationale: str | None
 
 
 def load_backlog_json(path: Path) -> list[TaskItem]:
@@ -73,9 +75,31 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
         if not done_when:
             done_when = "Git diff exists and build passes."
 
+        skills_val = x.get("skills") or []
+        if isinstance(skills_val, str):
+            skills = [p.strip() for p in skills_val.split(",") if p.strip()]
+        elif isinstance(skills_val, list):
+            skills = [str(p).strip() for p in skills_val if str(p).strip()]
+        else:
+            skills = []
+
+        skills_rationale = x.get("skills_rationale")
+        if skills_rationale is not None:
+            skills_rationale = str(skills_rationale)
+
         # drop empty id/title/prompt
         if tid and title and prompt:
-            items.append(TaskItem(id=tid, title=title, prompt=prompt, files=files, done_when=done_when))
+            items.append(
+                TaskItem(
+                    id=tid,
+                    title=title,
+                    prompt=prompt,
+                    files=files,
+                    done_when=done_when,
+                    skills=skills,
+                    skills_rationale=skills_rationale,
+                )
+            )
 
     return items
 
@@ -121,6 +145,8 @@ def parse_backlog_md(path: Path) -> list[TaskItem]:
                 prompt=f"Implement {tid}: {title}",
                 files=[],
                 done_when="Git diff exists and build passes.",
+                skills=[],
+                skills_rationale=None,
             )
         )
     return items
@@ -178,6 +204,8 @@ def write_default_p0_backlog(run_dir: Path) -> None:
                 ),
                 "files": ["(run_dir)/PM_FAILURE.md"],
                 "done_when": "PM_FAILURE.md exists in run_dir and no product/source files were modified.",
+                "skills": [],
+                "skills_rationale": None,
             }
         ],
     }
