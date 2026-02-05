@@ -1503,8 +1503,11 @@ async def main_async(args: argparse.Namespace) -> int:
             if pm_stage_enabled and args.pm_refresh_backlog and (before_done >= len(task_ids)):
                 pm_ok2 = await run_pm_if_needed(cycle_idx, curr_head, changed_files, repo_fp, force_refresh_backlog=True)
                 if not pm_ok2:
-                    if pm_stop_reason.get("reason") == STOP_REASON_QUOTA or stop_path.exists():
+                    if pm_stop_reason.get("reason") == STOP_REASON_QUOTA:
                         return 0, STOP_REASON_QUOTA, 0, (len(done_set) > before_done)
+                    if stop_path.exists():
+                        detected = detect_stop_reason([stop_path])
+                        return 0, (detected or STOP_REASON_STOP_FILE), 0, (len(done_set) > before_done)
                     return 1, "pm_failed", 0, (len(done_set) > before_done)
                 ensure_backlog()
                 tasks = load_tasks()
@@ -1956,9 +1959,13 @@ async def main_async(args: argparse.Namespace) -> int:
                 metrics.event("pm_stage_start", cycle=ci)
                 ok = await run_pm_if_needed(ci, curr_head, changed_files, repo_fp, force_refresh_backlog=False)
                 if not ok:
-                    if pm_stop_reason.get("reason") == STOP_REASON_QUOTA or stop_path.exists():
+                    if pm_stop_reason.get("reason") == STOP_REASON_QUOTA:
                         metrics.event("pm_stage_end", cycle=ci, rc=0, reason=STOP_REASON_QUOTA)
                         return StageOutcome.stop(STOP_REASON_QUOTA, rc=0)
+                    if stop_path.exists():
+                        detected = detect_stop_reason([stop_path]) or STOP_REASON_STOP_FILE
+                        metrics.event("pm_stage_end", cycle=ci, rc=0, reason=detected)
+                        return StageOutcome.stop(detected, rc=0)
                     metrics.event("pm_stage_end", cycle=ci, rc=1)
                     return StageOutcome.fail("pm_failed", rc=1)
                 metrics.event("pm_stage_end", cycle=ci, rc=0)
