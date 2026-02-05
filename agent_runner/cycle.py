@@ -31,6 +31,7 @@ from .gitops import (
 from .inventory import build_repo_inventory, write_repo_inventory_files
 from .todo import read_current_todo, format_todo_block
 from .metrics import MetricsLogger
+from .logger import create_logger
 from .policy import load_policy_rules, policy_scan_files
 from .security import load_security_rules, security_scan_files
 from .scan import collect_scan_files, DEFAULT_SCAN_IGNORE_GLOBS
@@ -252,6 +253,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
     # Observability
     metrics = MetricsLogger(run_dir / "metrics.jsonl")
+    logger = create_logger(run_dir, debug=bool(getattr(args, "debug", False)))
     trace_ctx = TraceCtx(trace_id=new_trace_id(), parent_span_id=None)
     stop_path = run_dir / str(getattr(args, "stop_file", "STOP"))
     cycle_summary_path = run_dir / "cycle_summary.log"
@@ -1656,6 +1658,22 @@ async def main_async(args: argparse.Namespace) -> int:
 
                     metrics.event("dev_attempt_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, model=model_name)
 
+                    # Structured logging: task start with context
+                    logger.set_context(
+                        cycle=cycle_idx,
+                        step=step,
+                        model=model_name,
+                        max_turns=args.max_turns_per_task,
+                        timeout_sec=int(getattr(args, "dev_timeout_seconds", 0)) or 0
+                    )
+                    logger.task_start(
+                        task_id=next_task.id,
+                        task_title=next_task.title,
+                        attempt=attempt,
+                        files=next_task.files or []
+                    )
+
+                    task_start_time = time.time()
                     dev_exc: Optional[Exception] = None
                     dev_is_max_turns = False
                     dev_quota_exhausted = False
@@ -1672,11 +1690,28 @@ async def main_async(args: argparse.Namespace) -> int:
                             task_id=next_task.id,
                         )
                         dev_final = (dev_result.final_output or "")
+                        task_duration = time.time() - task_start_time
+                        logger.timing("dev_task_execution", task_duration, task_id=next_task.id, attempt=attempt)
                     except Exception as ex:
                         dev_exc = ex
                         dev_final = ""
                         dev_is_max_turns = is_max_turns_exception(ex)
                         dev_quota_exhausted = is_quota_exception(ex)
+                        task_duration = time.time() - task_start_time
+
+                        # Structured error logging with full context
+                        logger.error(
+                            f"Dev task execution failed: {next_task.id}",
+                            exc=ex,
+                            include_traceback=True,
+                            task_id=next_task.id,
+                            task_title=next_task.title,
+                            attempt=attempt,
+                            duration_sec=task_duration,
+                            is_max_turns=dev_is_max_turns,
+                            is_quota_exhausted=dev_quota_exhausted
+                        )
+
                         eprint(f"[DEV ERROR] {ex}")
                         if bool(getattr(args, "debug", False)):
                             eprint(traceback.format_exc())
@@ -1726,6 +1761,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": "exception", "detail": str(dev_exc)})
                         save_state(state_path, state)
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="exception")
+                        logger.task_end(task_id=next_task.id, success=False, reason="exception", exception=str(dev_exc))
                         if cp:
                             ok, fail_reason = _restore_or_stop("exception")
                             if not ok:
@@ -1754,6 +1790,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": "no_diff"})
                         save_state(state_path, state)
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="no_diff")
+                        logger.task_end(task_id=next_task.id, success=False, reason="no_diff", was_max_turns=dev_is_max_turns)
                         eprint(f"[STOP] No diff produced for {next_task.id}.")
                         if cp:
                             ok, fail_reason = _restore_or_stop("no_diff")
@@ -1873,6 +1910,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             return 1, "policy_violation", 0, (len(done_set) > before_done)
                     # Success: exit attempt loop
                     metrics.event("dev_attempt_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0)
+                    logger.task_end(task_id=next_task.id, success=True, reason="completed", attempt=attempt)
                     task_completed = True
                     break
 
@@ -1880,6 +1918,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     # No success after attempts and not otherwise returned: treat as failure.
                     state.setdefault("failed", []).append({"task": next_task.id, "reason": "exhausted_attempts"})
                     save_state(state_path, state)
+                    logger.task_end(task_id=next_task.id, success=False, reason="exhausted_attempts", attempts=max_attempts)
                     return 1, "exhausted_attempts", 0, (len(done_set) > before_done)
                 # Mark done only after gates
                 done_set.add(next_task.id)
