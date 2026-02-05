@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Optional, Type, TypeVar
+from typing import Any, Optional, Type, TypeVar, Tuple
 
 from .utils import eprint
 
@@ -226,3 +226,55 @@ def parse_pm_output(text: str, *, kind_hint: str = "") -> Optional["PMOutputV2"]
         return PMOutputV2.model_validate(norm)  # type: ignore[attr-defined]
     except Exception:
         return None
+
+
+def summarize_validation_errors(err: Exception, *, max_items: int = 6) -> tuple[list[str], list[str]]:
+    missing: list[str] = []
+    type_errors: list[str] = []
+    details = []
+    if hasattr(err, "errors"):
+        try:
+            details = err.errors()  # type: ignore[assignment]
+        except Exception:
+            details = []
+    for item in details or []:
+        loc = item.get("loc")
+        if isinstance(loc, (list, tuple)):
+            loc_str = ".".join(str(x) for x in loc if x is not None)
+        else:
+            loc_str = str(loc or "")
+        msg = str(item.get("msg") or "")
+        typ = str(item.get("type") or "")
+        if "missing" in typ or "field required" in msg:
+            if loc_str:
+                missing.append(loc_str)
+        elif msg:
+            type_errors.append(f"{loc_str}: {msg}" if loc_str else msg)
+        if len(missing) + len(type_errors) >= max_items:
+            break
+    return missing[:max_items], type_errors[:max_items]
+
+
+def parse_pm_output_with_errors(text: str, *, kind_hint: str = "") -> Tuple[Optional["PMOutputV2"], list[str], list[str]]:
+    """Parse PM output and return validation error summaries.
+
+    Returns (model, missing_fields, type_errors).
+    """
+    from .schemas import PMOutputV2  # local import to avoid import cycles
+
+    data = loads_json_object(text)
+    if data is None:
+        return None, ["<json_parse_failed>"], []
+    try:
+        return PMOutputV2.model_validate(data), [], []  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    norm = normalize_pm_output_dict(data, kind_hint=kind_hint)
+    if norm is None:
+        return None, ["<normalize_failed>"], []
+    try:
+        return PMOutputV2.model_validate(norm), [], []  # type: ignore[attr-defined]
+    except Exception as ex:
+        missing, type_errors = summarize_validation_errors(ex)
+        return None, missing, type_errors

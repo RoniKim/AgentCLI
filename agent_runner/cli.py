@@ -79,6 +79,9 @@ DEFAULTS: Dict[str, Any] = {
     # Example: "PM,Dev,QA" or "PM,Dev".
     "roles": "PM,Dev,QA",
 
+    # Profile
+    "profile": "personal",
+
     # Runner behavior
     "autopilot": False,
     "loop": False,
@@ -101,6 +104,22 @@ DEFAULTS: Dict[str, Any] = {
     "policy_rules_file": "",
     "policy_rule": [],
 
+    # Policy config (new)
+    "policy": {
+        "enabled": None,
+        "fail_severity": "high",
+        "rules": [],
+        "ignore_paths": [],
+        "allow_patterns": [],
+    },
+
+    # Security stage config
+    "security": {
+        "enabled": False,
+        "fail_severity": "high",
+        "rules_path": "",
+    },
+
     "no_build": False,
     "require_build": False,
     "run_tests": False,
@@ -122,6 +141,8 @@ DEFAULTS: Dict[str, Any] = {
     "dev_model": "gpt-5.1-codex-mini",
     "qa_model": "gpt-5-mini",
     "qa_always": False,
+    "qa_to_backlog": False,
+    "max_qa_followups": 5,
 
     # Reporter / shutdown report
     "reporter_model": "gpt-5-nano",
@@ -151,6 +172,16 @@ DEFAULTS: Dict[str, Any] = {
 
     # Dev tuning knobs
     "dev_max_turns_continuations": 2,
+
+    # Budget guardrails
+    "budgets": {
+        "max_pm_structured_retries": 2,
+        "max_dev_escalations_per_task": 2,
+        "max_dev_continuations_per_task": 2,
+        "max_total_escalations_per_run": 10,
+        "max_total_continuations_per_run": 10,
+        "max_total_repair_attempts_per_run": 5,
+    },
 
     # MCP
     "mcp_mode": "npx",
@@ -293,6 +324,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Forward-compatible with plugin stages."
         ),
     )
+    p.add_argument("--profile", default=None, choices=["personal", "enterprise"])
 
     # Behavior
     p.add_argument("--autopilot", action=argparse.BooleanOptionalAction, default=None)
@@ -312,6 +344,11 @@ def _build_parser() -> argparse.ArgumentParser:
     # Keep backward-compatible flags while supporting an explicit enable flag.
     p.add_argument("--no-policy-scan", dest="no_policy_scan", action="store_true", default=None, help="Disable policy scan")
     p.add_argument("--policy-scan", dest="no_policy_scan", action="store_false", default=None, help="Enable policy scan")
+    p.add_argument("--policy-enabled", dest="policy_enabled", action="store_true", default=None)
+    p.add_argument("--policy-disabled", dest="policy_enabled", action="store_false", default=None)
+    p.add_argument("--policy-fail-severity", default=None)
+    p.add_argument("--policy-ignore-path", action="append", default=None)
+    p.add_argument("--policy-allow-pattern", action="append", default=None)
 
     p.add_argument("--policy-rules-file", default=None, help="Path to policy rules file")
     p.add_argument("--policy-rule", action="append", default=None, help="Inline policy rule (repeatable)")
@@ -321,6 +358,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--require-build", action=argparse.BooleanOptionalAction, default=None, help="Force build gate even if no_build is true")
     p.add_argument("--run-tests", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--dangerous-git-rollback", action=argparse.BooleanOptionalAction, default=None, help="Allow destructive git rollback")
+
+    # Security stage
+    p.add_argument("--security-enabled", dest="security_enabled", action="store_true", default=None)
+    p.add_argument("--security-disabled", dest="security_enabled", action="store_false", default=None)
+    p.add_argument("--security-fail-severity", default=None)
+    p.add_argument("--security-rules-path", default=None)
 
     # Failover
     p.add_argument("--failover", dest="failover_enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable backend failover")
@@ -349,6 +392,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pm-model", default=None)
     p.add_argument("--dev-model", default=None)
     p.add_argument("--qa-model", default=None)
+    p.add_argument("--qa-to-backlog", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--max-qa-followups", type=int, default=None)
     p.add_argument("--reporter-model", default=None)
     p.add_argument("--report-max-turns", type=int, default=None)
 
@@ -421,6 +466,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pm-max-turns-continuations", type=int, default=None)
     p.add_argument("--dev-max-turns-continuations", type=int, default=None)
 
+    # Budget guardrails
+    p.add_argument("--budget-max-pm-structured-retries", type=int, default=None)
+    p.add_argument("--budget-max-dev-escalations-per-task", type=int, default=None)
+    p.add_argument("--budget-max-dev-continuations-per-task", type=int, default=None)
+    p.add_argument("--budget-max-total-escalations-per-run", type=int, default=None)
+    p.add_argument("--budget-max-total-continuations-per-run", type=int, default=None)
+    p.add_argument("--budget-max-total-repair-attempts-per-run", type=int, default=None)
+
     return p
 
 
@@ -435,6 +488,8 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         if v is None:
             continue
         eff[k] = v
+
+    explicit_args = {k for k, v in vars(args_ns).items() if v is not None}
 
 
     # ---- MIGRATIONS (best-effort, for older saved configs) ----
@@ -471,6 +526,127 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         eff["policy_rule"] = []
     elif isinstance(pr, str):
         eff["policy_rule"] = [pr]
+
+    # ---- normalize policy/security config ----
+    def _normalize_policy(raw: Any) -> dict[str, Any]:
+        defaults_policy = defaults.get("policy", {}) if isinstance(defaults.get("policy", {}), dict) else {}
+        out: dict[str, Any] = dict(defaults_policy)
+        if isinstance(raw, dict):
+            out.update(raw)
+
+        if "enabled" in out and out["enabled"] is not None:
+            out["enabled"] = bool(out["enabled"])
+        else:
+            out["enabled"] = None
+
+        out["fail_severity"] = str(out.get("fail_severity") or defaults_policy.get("fail_severity") or "high")
+
+        rules = out.get("rules") or []
+        if isinstance(rules, str):
+            rules = [rules]
+        out["rules"] = rules if isinstance(rules, list) else []
+
+        ignore_paths = out.get("ignore_paths") or []
+        if isinstance(ignore_paths, str):
+            ignore_paths = [p.strip() for p in ignore_paths.split(",") if p.strip()]
+        out["ignore_paths"] = [str(p).strip() for p in ignore_paths if str(p).strip()]
+
+        allow_patterns = out.get("allow_patterns") or []
+        if isinstance(allow_patterns, str):
+            allow_patterns = [p.strip() for p in allow_patterns.split(",") if p.strip()]
+        out["allow_patterns"] = [str(p).strip() for p in allow_patterns if str(p).strip()]
+        return out
+
+    def _normalize_security(raw: Any) -> dict[str, Any]:
+        defaults_sec = defaults.get("security", {}) if isinstance(defaults.get("security", {}), dict) else {}
+        out: dict[str, Any] = dict(defaults_sec)
+        if isinstance(raw, dict):
+            out.update(raw)
+        out["enabled"] = bool(out.get("enabled", False))
+        out["fail_severity"] = str(out.get("fail_severity") or defaults_sec.get("fail_severity") or "high")
+        out["rules_path"] = str(out.get("rules_path") or "")
+        return out
+
+    eff["policy"] = _normalize_policy(eff.get("policy"))
+    eff["security"] = _normalize_security(eff.get("security"))
+
+    if "policy_enabled" in explicit_args:
+        eff["policy"]["enabled"] = bool(eff.get("policy_enabled"))
+    if "policy_fail_severity" in explicit_args:
+        eff["policy"]["fail_severity"] = str(eff.get("policy_fail_severity") or eff["policy"]["fail_severity"])
+    if "policy_ignore_path" in explicit_args and eff.get("policy_ignore_path") is not None:
+        eff["policy"]["ignore_paths"] = [str(p).strip() for p in (eff.get("policy_ignore_path") or []) if str(p).strip()]
+    if "policy_allow_pattern" in explicit_args and eff.get("policy_allow_pattern") is not None:
+        eff["policy"]["allow_patterns"] = [str(p).strip() for p in (eff.get("policy_allow_pattern") or []) if str(p).strip()]
+
+    if "security_enabled" in explicit_args:
+        eff["security"]["enabled"] = bool(eff.get("security_enabled"))
+    if "security_fail_severity" in explicit_args:
+        eff["security"]["fail_severity"] = str(eff.get("security_fail_severity") or eff["security"]["fail_severity"])
+    if "security_rules_path" in explicit_args:
+        eff["security"]["rules_path"] = str(eff.get("security_rules_path") or "")
+
+    if eff["policy"].get("enabled") is None:
+        eff["policy"]["enabled"] = not bool(eff.get("no_policy_scan", False))
+    eff["no_policy_scan"] = not bool(eff["policy"].get("enabled", True))
+
+    # ---- normalize budgets ----
+    def _normalize_budgets(raw: Any) -> dict[str, Any]:
+        defaults_budgets = defaults.get("budgets", {}) if isinstance(defaults.get("budgets", {}), dict) else {}
+        out: dict[str, Any] = dict(defaults_budgets)
+        if isinstance(raw, dict):
+            out.update(raw)
+        for key in list(out.keys()):
+            try:
+                out[key] = int(out.get(key))
+            except Exception:
+                out[key] = int(defaults_budgets.get(key) or 0)
+        return out
+
+    eff["budgets"] = _normalize_budgets(eff.get("budgets"))
+
+    if "budget_max_pm_structured_retries" in explicit_args:
+        eff["budgets"]["max_pm_structured_retries"] = int(eff.get("budget_max_pm_structured_retries") or 0)
+    if "budget_max_dev_escalations_per_task" in explicit_args:
+        eff["budgets"]["max_dev_escalations_per_task"] = int(eff.get("budget_max_dev_escalations_per_task") or 0)
+    if "budget_max_dev_continuations_per_task" in explicit_args:
+        eff["budgets"]["max_dev_continuations_per_task"] = int(eff.get("budget_max_dev_continuations_per_task") or 0)
+    if "budget_max_total_escalations_per_run" in explicit_args:
+        eff["budgets"]["max_total_escalations_per_run"] = int(eff.get("budget_max_total_escalations_per_run") or 0)
+    if "budget_max_total_continuations_per_run" in explicit_args:
+        eff["budgets"]["max_total_continuations_per_run"] = int(eff.get("budget_max_total_continuations_per_run") or 0)
+    if "budget_max_total_repair_attempts_per_run" in explicit_args:
+        eff["budgets"]["max_total_repair_attempts_per_run"] = int(eff.get("budget_max_total_repair_attempts_per_run") or 0)
+
+    # ---- apply profile defaults ----
+    def _apply_profile() -> None:
+        profile = str(eff.get("profile") or "personal").strip().lower()
+        if profile != "enterprise":
+            eff["profile"] = "personal"
+            return
+
+        if "roles" not in explicit_args:
+            eff["roles"] = "PM,Security,Dev,QA"
+        if "qa_always" not in explicit_args:
+            eff["qa_always"] = True
+        if "policy_enabled" not in explicit_args and "no_policy_scan" not in explicit_args:
+            eff["policy"]["enabled"] = True
+        if "security_enabled" not in explicit_args:
+            eff["security"]["enabled"] = True
+
+        budgets = eff.get("budgets", {})
+        if "budget_max_total_escalations_per_run" not in explicit_args:
+            budgets["max_total_escalations_per_run"] = max(int(budgets.get("max_total_escalations_per_run") or 0), 5)
+        if "budget_max_total_continuations_per_run" not in explicit_args:
+            budgets["max_total_continuations_per_run"] = max(int(budgets.get("max_total_continuations_per_run") or 0), 5)
+        if "budget_max_total_repair_attempts_per_run" not in explicit_args:
+            budgets["max_total_repair_attempts_per_run"] = max(int(budgets.get("max_total_repair_attempts_per_run") or 0), 3)
+        eff["budgets"] = budgets
+        eff["profile"] = "enterprise"
+
+    _apply_profile()
+
+    eff["no_policy_scan"] = not bool(eff["policy"].get("enabled", True))
 
     # normalize execution_backend
     eff["execution_backend"] = _normalize_execution_backend(eff.get("execution_backend", defaults.get("execution_backend", "codex")))

@@ -569,6 +569,9 @@ class RunnerShell:
         # API keys
         report_lines.append(f"- OPENAI_API_KEY set: {bool(os.getenv('OPENAI_API_KEY', '').strip())}")
         report_lines.append(f"- ANTHROPIC_API_KEY set: {bool(os.getenv('ANTHROPIC_API_KEY', '').strip())}")
+        report_lines.append(f"- profile: {eff.get('profile', 'personal')}")
+        report_lines.append(f"- policy enabled: {bool((eff.get('policy') or {}).get('enabled', False))}")
+        report_lines.append(f"- security enabled: {bool((eff.get('security') or {}).get('enabled', False))}")
 
         # Backend preflight
         backends = eff.get("failover_backends") or [eff.get("execution_backend") or "codex"]

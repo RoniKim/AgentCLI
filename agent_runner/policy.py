@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 DEFAULT_POLICY_RULES: list[dict[str, str]] = [
@@ -48,8 +48,32 @@ def load_policy_rules(rules_file: str, extra_rules: list[str]) -> list[dict[str,
     return rules
 
 
-def policy_scan_text(text: str, rules: list[dict[str, str]], max_hits_per_rule: int = 10) -> dict[str, Any]:
+def _compile_allow_patterns(allow_patterns: Iterable[str]) -> list[re.Pattern[str]]:
+    patterns: list[re.Pattern[str]] = []
+    for raw in allow_patterns:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        try:
+            patterns.append(re.compile(s))
+        except re.error:
+            continue
+    return patterns
+
+
+def _is_allowed(match_text: str, allow_patterns: list[re.Pattern[str]]) -> bool:
+    return any(p.search(match_text) for p in allow_patterns)
+
+
+def policy_scan_text(
+    text: str,
+    rules: list[dict[str, str]],
+    *,
+    max_hits_per_rule: int = 10,
+    allow_patterns: Iterable[str] = (),
+) -> dict[str, Any]:
     violations: list[dict[str, Any]] = []
+    allow_pats = _compile_allow_patterns(allow_patterns)
     for rule in rules:
         rid = rule.get("id", "rule")
         sev = rule.get("severity", "medium")
@@ -60,6 +84,8 @@ def policy_scan_text(text: str, rules: list[dict[str, str]], max_hits_per_rule: 
             continue
         hits = 0
         for m in pat.finditer(text):
+            if allow_pats and _is_allowed(m.group(0), allow_pats):
+                continue
             snippet = text[max(0, m.start() - 30): min(len(text), m.end() + 30)]
             violations.append({
                 "rule_id": rid,
@@ -75,4 +101,53 @@ def policy_scan_text(text: str, rules: list[dict[str, str]], max_hits_per_rule: 
         "violations": violations,
         "rules_count": len(rules),
         "scanned_bytes": len(text.encode("utf-8", errors="replace")),
+    }
+
+
+def policy_scan_files(
+    files: Iterable[tuple[str, str]],
+    rules: list[dict[str, str]],
+    *,
+    max_hits_per_rule: int = 10,
+    allow_patterns: Iterable[str] = (),
+    ignore_paths: Iterable[str] = (),
+) -> dict[str, Any]:
+    violations: list[dict[str, Any]] = []
+    allow_pats = _compile_allow_patterns(allow_patterns)
+    ignore = {str(p).strip() for p in ignore_paths if str(p).strip()}
+
+    def _ignored(path: str) -> bool:
+        return any(path.startswith(prefix) for prefix in ignore)
+
+    for path, text in files:
+        if not path or _ignored(path):
+            continue
+        for rule in rules:
+            rid = rule.get("id", "rule")
+            sev = rule.get("severity", "medium")
+            regex = rule.get("regex", "")
+            try:
+                pat = re.compile(regex)
+            except re.error:
+                continue
+            hits = 0
+            for m in pat.finditer(text):
+                if allow_pats and _is_allowed(m.group(0), allow_pats):
+                    continue
+                snippet = text[max(0, m.start() - 30): min(len(text), m.end() + 30)]
+                violations.append({
+                    "rule_id": rid,
+                    "severity": sev,
+                    "path": path,
+                    "match": m.group(0)[:80],
+                    "snippet": snippet.replace("\n", "\\n")[:160],
+                })
+                hits += 1
+                if hits >= max_hits_per_rule:
+                    break
+
+    return {
+        "ok": len(violations) == 0,
+        "violations": violations,
+        "rules_count": len(rules),
     }
