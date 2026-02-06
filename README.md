@@ -1,120 +1,50 @@
-# CLI-first Multi-Agent Runner 2.0 (PM → Dev → QA)
+# AgentCLI — CLI-first Multi-Agent Runner (PM → Dev → QA)
 
-이 번들은 **CLI 기반**으로 동작하는 PM→Dev→QA 자동 개발 러너입니다.  
-기본은 **Interactive Shell(명령어 기반)** 이고, 스크립트/CI/무인 운용을 위한 **즉시 실행(--run-now)** 도 지원합니다.
+개인 개발자가 **잠자기 전에 켜두고**, 아침에 **PR 수준의 변경(코드/테스트/문서)** 을 받는 것을 목표로 만든 **CLI 기반 멀티 에이전트 러너**입니다.
 
----
-
-## 핵심 개념
-
-- **PM(Project Manager)**: 레포 분석 → 구조화(JSON) 백로그 생성  
-- **Dev(Developer)**: 백로그 태스크를 순서대로 수행(기본: task 당 max_turns 제한)  
-- **QA**: 옵션/설정에 따라 점검 수행
-
-### PM 백로그 정책(중요)
-
-PM이 생성하는 BACKLOG의 태스크는 **오직 “개발 작업(기능/화면/UI/버그수정/테스트/필수 문서)”** 이어야 합니다.
-
-- ✅ 허용: 기능 구현, 화면/컴포넌트/UI 구현, 버그 수정, 테스트 추가, (해당 변경을 설명하기 위한) README 등 in-repo 문서 업데이트
-- ❌ 금지: 계획/분석/검토/트리아지/우선순위 정하기, REPO_INVENTORY/PROJECT_ANALYSIS/BACKLOG/리포트 생성, 프롬프트/런너 아티팩트(.doc/agent_runs, .doc/PM_CACHE 등) 정리
-
-러너는 위 “금지 작업”을 태스크로 내놓는 경우를 자동 필터링하여 Dev에게 전달하지 않습니다.
-
-2.0에서 바뀐 핵심:
-
-- **PM 최종 응답을 JSON 스키마로 강제**(pydantic 검증 + 자동 리페어)  
-  → 검증된 JSON으로 러너가 `BACKLOG.json|md`를 **직접 생성**
-- Dev는 `apply_patch` 중심으로 작업하도록 프롬프트/런너가 유도 (불필요한 장황 출력/토큰 낭비 감소)
-- (선택) **max turns** 등에 걸리면 **continuation 프롬프트로 이어서** 재시도(베스트-에포트)
+- 기본 파이프라인: **PM(백로그 생성) → Dev(구현) → QA(점검/피드백)**
+- 실행 엔진(backend): **Codex(OpenAI)** 또는 **Claude Code(Anthropic)** 로 전환 가능
+- 기본 UX: **Interactive Shell** (`/start`, `/stop`, `/config` …)  
+  + 무인 운용/스크립트용: `--run-now` (즉시 실행)
 
 ---
 
+## 핵심 기능
 
-### Max turns 초과(Dev/PM) 대응: Continuations
-
-에이전트가 `MaxTurnsExceeded`로 중단될 때, 러너가 **짧은 CONTINUE 프롬프트로 이어서 재시도**할 수 있습니다.
-
-- Dev: `--dev-max-turns-continuations` (기본 2)
-- PM: `--pm-max-turns-continuations` (기본 1)
-
-예시:
-
-```bash
-python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --autopilot --continuous \
-  --max-turns-per-task 10 --dev-max-turns-continuations 3
-```
-
-> 구버전 config가 `dev_max_turns_continuations=0`을 저장하고 있을 수 있습니다.  
-> 이 경우 `/wizard`로 config를 다시 저장하거나, `/set dev_max_turns_continuations 2`로 올리면
-> “밤새 돌다 max turns로 죽는” 케이스를 크게 줄일 수 있습니다.
-
----
-
-## 파일 구조
-
-```text
-.
-├─ agent_cli.py
-├─ requirements.txt
-├─ README.md
-├─ DESIGN.md
-├─ agent_runner/
-│  ├─ cli.py                 # argparse + DEFAULTS + config merge + wizard/초기화 플래그
-│  ├─ main.py                # --run-now(즉시 실행) 진입
-│  ├─ shell.py               # Interactive Shell (/start, /stop, /config, /set, /save, /load ...)
-│  ├─ cycle.py               # 러너 본체: PM→Dev→QA 사이클/루프/종료조건/게이트/산출물
-│  ├─ config.py              # config 로드/저장(기본: AgentCLI/configs/<repo-hash>.json, legacy: REPO/.doc/agent_config.json)
-│  ├─ prompts.py             # 프롬프트 템플릿 로딩/렌더링 + 기본 템플릿 생성
-│  ├─ schemas.py             # PM 구조화 출력(pydantic 모델)
-│  ├─ structured.py          # JSON 파싱/리페어/검증 유틸
-│  ├─ state.py               # BACKLOG/STATE 저장·로드, 완료 처리
-│  ├─ gates.py               # (옵션) dotnet build/test 게이트
-│  ├─ gitops.py              # 변경 감지/체크포인트/워크트리(옵션: isolate_task/worktree_isolation)
-│  ├─ policy.py              # 시크릿/키 유출 스캔(옵션)
-│  ├─ docs.py                # .env 로딩 + docs digest 생성/읽기 유틸
-│  ├─ run_dir.py             # run_dir 생성/최근 run 탐색
-│  ├─ inventory.py           # git-tracked 파일 인벤토리 생성(REPO_INVENTORY.*)
-│  ├─ analysis_cache.py      # PM_CACHE(분석 아티팩트) 유지/누적
-│  ├─ metrics.py             # metrics.jsonl 이벤트 로그
-│  ├─ tracing.py             # trace/span 유틸
-│  ├─ utils.py               # subprocess/IO 등 공용 유틸
-│  ├─ wizard.py              # config 생성/수정 마법사
-│  └─ version.py
-└─ templates/
-   └─ agent_prompts/         # 프롬프트 템플릿 샘플
-````
-
----
-
-## 현재 시스템 분석 요약
-
-### 실행 진입점
-
-* `agent_cli.py`가 `--run-now` 또는 원샷 플래그(`--wizard`, `--init-prompts`, `-h/--help`)를 감지하면 즉시 실행 경로로 진입하고, 그 외에는 기본적으로 Interactive Shell로 진입합니다.【F:agent_cli.py†L1-L40】
-* 즉시 실행 경로는 `agent_runner.main` → `agent_runner.runner_entry.run` 순으로 이어지며, 실제 실행 로직은 backend 러너에서 처리됩니다.【F:agent_runner/main.py†L1-L13】【F:agent_runner/runner_entry.py†L1-L100】
-
-### 설정/환경 로딩 흐름
-
-* CLI 파싱 후 `--env-file` 유무에 따라 파이썬 쪽 `.env` 로더가 먼저 실행됩니다.【F:agent_runner/cli.py†L604-L639】
-* config 경로는 **python-side 기준**으로 해석되며, 명시 경로가 없으면 `AgentCLI/configs/<repo-slug>.json`이 기본값입니다.【F:agent_runner/config.py†L12-L83】
-* config 로딩은 **새 경로 우선 → 레거시(repo/.doc/agent_config.json) 폴백** 순서입니다.【F:agent_runner/cli.py†L647-L672】【F:agent_runner/config.py†L40-L58】
-* 최종 설정은 **DEFAULTS → config → CLI args** 순으로 병합되고, prompts/env_file 경로가 정규화됩니다.【F:agent_runner/cli.py†L674-L712】
-
-### 실행 디렉토리/백엔드 선택
-
-* `run_dir`은 명시된 경로가 있으면 그대로 사용하고, `--resume-latest`면 최근 run_dir을 재사용하며, 그렇지 않으면 새 디렉토리를 생성합니다.【F:agent_runner/runner_entry.py†L20-L43】
-* failover가 꺼져 있으면 단일 backend로 실행하며, 켜져 있으면 preflight 결과를 기반으로 backend를 순차 시도합니다.【F:agent_runner/runner_entry.py†L45-L125】
+- **Interactive Shell**: 실행 전 설정 확인/수정 후 `/start`로 러너 실행
+- **Non-interactive 실행**: `--run-now --non-interactive`로 밤새 무인 운용
+- **백엔드 전환**
+  - `execution_backend=codex` (기본): OpenAI Agents + Codex MCP
+  - `execution_backend=claudecode`: Claude Agent SDK + Claude Code CLI
+- **PM 구조화 출력 강제**: PM 응답을 JSON 스키마로 검증 → 러너가 `BACKLOG.json|md`를 생성
+- **안전한 Git 운용**
+  - 기본은 **안전 모드** (파괴적 롤백 비활성)
+  - 선택: `--worktree-isolation`로 격리 worktree에서 작업 후 패치로 반영
+- **빌드/테스트 게이트(옵션)**: 기본은 .NET(dotnet) 중심, 커스텀 `build_cmd/test_cmd`도 지원
+- **정책/시크릿 스캔(옵션)**: run_dir 산출물/코드에서 키/토큰 유출 방지 스캔
+- **실행 아티팩트 관리**: `run_dir` 단위로 로그/상태/백로그/리포트 보존
+- **파이프라인 커스터마이징**
+  - `roles="PM,Dev,QA,Security"`처럼 역할 순서/구성 변경
+  - 플러그인 Stage(외부 모듈) 로드(Allowlist 기반)
 
 ---
 
 ## 요구사항
 
-* **Python 3.10+** 권장
-* **Node.js + npx** (기본 MCP 모드가 `--mcp-mode npx` 이므로 필요)
-* (선택) **.NET SDK**
+### 공통
+- **Python 3.10+**
+- **Git**
 
-  * 기본 build/test 게이트는 dotnet 기반입니다(레포 루트의 *.csproj 감지 등).
-  * 레포가 .NET이 아니면 `--no-build`를 쓰거나, config에서 `build_cmd`/`test_cmd`로 게이트 명령을 지정하세요.
+### Codex backend 사용 시(기본)
+- **Node.js + npx** (기본 MCP 모드가 `npx`)
+
+### Claude Code backend 사용 시
+- `pip install -U claude-agent-sdk`
+- **Claude Code 인증**(로그인) 또는 `ANTHROPIC_API_KEY`
+
+### (선택) 빌드/테스트 게이트
+- .NET 프로젝트면 **.NET SDK**
+- 비-.NET 프로젝트면 `--no-build` 권장 또는 `build_cmd/test_cmd` 설정
 
 ---
 
@@ -124,67 +54,350 @@ python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --aut
 pip install -U -r requirements.txt
 ```
 
+> `claude-agent-sdk`는 기본 requirements에 포함되어 있지 않습니다(선택 의존성).  
+> Claude backend를 쓸 때만 별도 설치하세요.
+
 ---
 
-## 환경변수 / .env
+## 빠른 시작
 
-### Execution Backend (codex / claudecode)
+### 1) Interactive Shell (권장: 설정 확인 후 시작)
 
-AgentCLI는 설정(`execution_backend`)에 따라 실행 엔진을 교체할 수 있습니다.
+```bash
+python agent_cli.py --repo "C:/Dev/BudgetBook"
+```
 
-* `codex` (기본): OpenAI Agents + Codex MCP 기반
-* `claudecode`: Claude Agent SDK 기반(Claude Code CLI 포함)
+Shell에서:
 
-> Interactive Shell에서 `/set execution_backend claudecode` 후 `/save` 하면 config에 저장됩니다.
+```text
+> /config
+> /start --autopilot --continuous
+> /status
+> /stop --wait
+> /exit
+```
 
-필수(backend에 따라):
+### 2) 무인 운용 / 스크립트 실행 (--run-now)
 
-* `codex`: `OPENAI_API_KEY`
-* `claudecode`: `ANTHROPIC_API_KEY` 또는 Claude Code 인증(+ `pip install claude-agent-sdk` 필요)
+```bash
+python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --autopilot --continuous
+```
 
-`.env` 로딩은 “베스트-에포트”로 동작합니다.
+- `--non-interactive`: 중간 입력 요구를 최대한 방지(무인 운용 필수)
+- `--continuous`: 백로그 생성 후 Dev 태스크 실행까지 자동 진행  
+  (`--continuous`가 없으면 PM/백로그 준비만 하고 종료)
 
-* `--env-file`을 지정하면 그 파일을 우선 로딩합니다.
-* 그 외에도 현재 작업 디렉토리, 패키지 위치, repo 상위/하위에서 `.env`를 탐색합니다.
+---
+
+## 설정(Config) 관리
+
+### config 저장 위치(기본)
+
+기본적으로 config는 **레포 내부가 아니라 AgentCLI 쪽**에 저장됩니다:
+
+- `{AgentCLI_HOME}/configs/<repo-slug>-<hash>.json`
+
+환경변수로 홈 변경 가능:
+
+- `AGENTCLI_HOME=<path>` 를 설정하면 `configs/`, `prompts/`의 기준 디렉토리가 바뀝니다.
+
+> 레거시 호환: 레포에 `REPO/.doc/agent_config.json`이 있으면 **읽기용으로 폴백 로드**할 수 있으며, 이후 `/save`하면 새 경로로 마이그레이션됩니다.
+
+### Shell에서 자주 쓰는 명령
+
+- `/config` : 현재 적용 설정(기본값+config+오버라이드) 출력
+- `/set <key> <value>` : 설정 오버라이드
+- `/add <key> <value>` : 리스트 설정에 추가
+- `/load [path]` / `/save [path]` : config 로드/저장
+- `/repo <path>` : repo 지정
+
+---
+
+## 실행 엔진(backend) 선택
+
+### Codex backend (기본)
+
+필수:
+- `OPENAI_API_KEY`
 
 예시(.env):
-
 ```bash
 OPENAI_API_KEY=xxxxx
 ```
 
-### Claude 모드 빠른 시작
+Codex MCP 모드(기본값):
+- `mcp_mode="npx"`
+- `codex_package="@openai/codex@latest"`
 
-Claude backend(`execution_backend=claudecode`)를 사용하려면 아래 조건을 충족해야 합니다.
+### Claude Code backend
 
-1) SDK 설치:
+필수(둘 중 하나):
+- Claude Code 로그인(예: `claude auth login`) **또는**
+- `ANTHROPIC_API_KEY`
 
+설치:
 ```bash
 pip install -U claude-agent-sdk
 ```
 
-2) 인증:
+Shell에서 전환:
+```text
+> /set execution_backend claudecode
+> /save
+```
 
-- **Claude Code 인증**: `claude auth login` (Claude Code CLI 사용 시)
-- **API 키**: `ANTHROPIC_API_KEY` 환경변수 설정
-
-3) 스모크 테스트(선택):
-
+스모크 테스트(선택):
 ```bash
 python -m agent_runner.backends.claude_smoke_test --prompt "hi"
 ```
 
-문제 발생 시 `.doc/Docs/claude.md`의 트러블슈팅 섹션을 참고하세요.
+#### Claude backend에서 자주 막히는 포인트
+- `ClaudeSDKClient does not provide a message stream` 같은 오류가 나면,
+  보통 `claude-agent-sdk` 버전 불일치/구버전일 가능성이 큽니다.  
+  우선 아래로 업그레이드 후 재시도하세요:
+  ```bash
+  pip install -U claude-agent-sdk
+  ```
 
 ---
 
-## Skills 시스템 (Codex/Claude)
+## 파이프라인(roles) 커스터마이징
 
-AgentCLI는 유저 전역 또는 프로젝트별 스킬 폴더를 스캔해 **SKILLS_INDEX** 스냅샷을 생성합니다.
-기본값은 **유저 전역 루트만 스캔**하며, 프로젝트 전용 루트는 config에서 추가할 수 있습니다.
+기본:
+- `roles="PM,Dev,QA"`
 
-### config 예시
+내장 Stage:
+- `PM`, `Dev`, `QA`, `Security`
 
+예시) QA를 끄고 PM→Dev만:
+```text
+> /set roles PM,Dev
+> /save
+```
+
+예시) Security Stage까지 포함:
+```text
+> /set roles PM,Dev,QA,Security
+> /save
+```
+
+### 플러그인 Stage 로드(고급)
+
+`roles`에 `pkg.module:ClassName` 형태로 Stage를 추가할 수 있습니다.
+
+보안상 기본은 차단이며, 아래 설정이 필요합니다:
+
+- `plugins_enabled=true`
+- `plugins_allowlist`에 허용 패턴 추가
+- `plugins_strict=true`면 allowlist에 없으면 즉시 실패
+
+예시(config 일부):
+```json
+{
+  "plugins_enabled": true,
+  "plugins_allowlist": ["my_pkg.*", "my_pkg.stages:MyStage"],
+  "plugins_strict": true,
+  "roles": "PM,Dev,my_pkg.stages:MyStage,QA"
+}
+```
+
+---
+
+## 안전/운영 옵션 (Git, Stop, No-diff)
+
+### Stop file로 안전 종료
+
+- 기본 stop 파일: `STOP`
+- `run_dir/STOP` 파일이 생기면 graceful stop
+
+Shell:
+```text
+> /stop
+> /stop --wait
+```
+
+### “변경 없음(no diff)” 정책
+
+기본값:
+- 태스크 수행 후 `git diff`가 없으면 실패로 간주하고 중단(토큰 낭비 방지)
+
+계속 진행하려면:
+```bash
+python agent_cli.py --run-now --repo <path> --non-interactive --autopilot --continuous --allow-no-diff
+```
+
+### Worktree 격리 모드 (권장: 안전하게 오래 돌릴 때)
+
+```bash
+python agent_cli.py --run-now --repo <path> --worktree-isolation --non-interactive --autopilot --continuous
+```
+
+- 성공 시: 패치가 원 repo에 적용
+- 실패/중단 시: 원 repo는 보존되고, `run_dir/worktree.patch`로 변경사항 복구 가능
+
+수동 복구:
+```bash
+git apply --binary --whitespace=nowarn <run_dir>/worktree.patch
+# 충돌 시:
+git apply --reject --whitespace=nowarn <run_dir>/worktree.patch
+```
+
+### 파괴적 롤백(비권장, 명시적으로만)
+
+```bash
+python agent_cli.py --run-now --repo <path> --dangerous-git-rollback
+```
+
+---
+
+## 빌드/테스트 게이트
+
+기본은 .NET 기준 게이트를 포함합니다.
+
+- 끄기: `--no-build`
+- 테스트 실행: `--run-tests`
+- 타깃 지정:
+  - `--dotnet-build-target <csproj|sln|path>`
+  - `--dotnet-test-target <csproj|sln|path>`
+  - `--dotnet-test-filter "<expr>"`
+
+비-.NET 프로젝트라면:
+- 우선 `--no-build`로 운용하고,
+- 필요 시 config의 `build_cmd` / `test_cmd`로 커스텀 명령을 지정하세요.
+
+---
+
+## 정책/시크릿 스캔(옵션)
+
+- `scan_scope="quick"` (기본)
+- 상한: `scan_max_files`, `scan_timeout_seconds`, `scan_max_total_bytes`
+- 제외: `scan_ignore_globs`, `scan_ignore_paths`
+
+> 프로젝트가 커질수록 “quick → staged/full”은 신중히 올리는 것을 권장합니다.
+
+---
+
+## 산출물(Artifacts) 구조
+
+### run_dir (실행 단위)
+
+기본:
+- `REPO/.doc/agent_runs/<YYYYMMDD-HHMMSS>/`
+
+대표 파일:
+- `BACKLOG.json`, `BACKLOG.md` : 러너가 생성한 백로그(권위 소스)
+- `STATE.json` : 완료/실패 태스크 기록
+- `PM_OUTPUT_cycle_*.json` : 스키마 검증된 PM 출력
+- `metrics.jsonl` : 이벤트 로그(JSONL)
+- `tasks/` : 태스크별 로그/빌드/테스트 결과
+- `dev_logs/` : Dev 로그 누적
+- `SHUTDOWN_REPORT.md` : 종료 요약(조건에 따라)
+
+### PM_CACHE (지속 분석 아티팩트)
+
+기본:
+- `REPO/.doc/PM_CACHE/`
+
+대표 파일:
+- `PROJECT_ANALYSIS.md`
+- `REPO_INVENTORY.json|md`
+- `REPO_SNAPSHOT.json`
+
+---
+
+## 트러블슈팅
+
+### 1) `OPENAI_API_KEY is not set.`
+- `.env` 위치가 애매하면 `--env-file`로 명시:
+```bash
+python agent_cli.py --run-now --repo <path> --env-file "<path>/.env" --non-interactive --autopilot
+```
+
+### 2) `npx` 를 찾을 수 없음
+- Node.js 설치 후 `npx -v` 확인
+
+### 3) Claude backend 오류(스트림 관련)
+- `claude-agent-sdk` 업그레이드:
+```bash
+pip install -U claude-agent-sdk
+```
+- Claude Code 로그인 상태 확인(또는 `ANTHROPIC_API_KEY` 설정)
+
+### 4) BACKLOG가 비어있어서 중단(`no_tasks`)
+- PM이 빈 태스크 목록을 만든 경우 Dev 단계에서 `no_tasks`로 종료될 수 있습니다.
+- 해결:
+  - 레포 목표/할 일을 더 명확히 주거나
+  - `/todo --save`로 오늘 할 일을 TODO로 만들고, PM이 이를 기준으로 백로그를 만들게 하세요.
+
+### 5) Codex 사용량 제한(usage limit)으로 중단
+- run_dir의 종료 리포트를 확인하고, 필요하면 `failover_enabled`와 `failover_backends`로 백엔드 체인을 구성하세요.
+
+---
+
+## 추천 운용 프리셋
+
+### A) 백로그만 준비(최소 비용 스모크)
+```bash
+python agent_cli.py --run-now --repo "<path>" --non-interactive --autopilot
+```
+
+### B) 태스크 실행(최대 5개)
+```bash
+python agent_cli.py --run-now --repo "<path>" --non-interactive --autopilot --continuous --iterations 5
+```
+
+### C) 밤새 루프(아이들 타임아웃 포함)
+```bash
+python agent_cli.py --run-now --repo "<path>" --non-interactive --autopilot \
+  --loop --loop-sleep-seconds 60 --loop-idle-exit-after 3600 --loop-max-cycles 20
+```
+
+---
+
+## 보안 메모
+
+- 시크릿/토큰은 절대 README/config/prompt에 하드코딩하지 말고 **환경변수 또는 .env**로만 주입하세요.
+- worktree 패치(`worktree.patch`)는 변경 내용을 포함합니다. 외부 공유 전 민감정보 포함 여부를 점검하세요.
+
+
+---
+
+## 프롬프트 템플릿 커스터마이징
+
+기본 프롬프트는 **Python-side prompts_dir**에 저장됩니다(레포 내부가 기본이 아님).
+
+- 기본 prompts_dir: `AGENTCLI_HOME/prompts/<repo-slug>-<hash>/`
+- 레거시(.doc/agent_prompts)는 읽기 폴백용으로만 취급될 수 있습니다.
+
+템플릿 생성(1회):
+```bash
+python agent_cli.py --run-now --repo "<path>" --init-prompts
+```
+
+> 생성 후에는 prompts_dir의 `pm_instructions.md`, `dev_instructions.md` 등을 수정해 튜닝할 수 있습니다.
+
+---
+
+## Docs 읽기(Digest) — 토큰 절약
+
+기본값:
+- `docs_read_mode="digest"`
+- `docs_dir=".doc/Docs"`
+- `docs_digest_file=".doc/DOCS_DIGEST.md"`
+
+Digest 생성/갱신(로컬 작업, 토큰 사용 없음):
+```bash
+python agent_cli.py --run-now --repo "<path>" --generate-digest
+```
+
+---
+
+## Skills 시스템 (Codex/Claude 공통)
+
+AgentCLI는 스킬 폴더를 스캔해 `SKILLS_INDEX` 요약을 만들어 **PM/QA에 인라인(발췌)** 할 수 있습니다.  
+Dev에는 스킬 본문을 길게 인라인하지 않는 방향으로 설계되어 있습니다(토큰 방어).
+
+config 예시(핵심):
 ```json
 {
   "skills": {
@@ -192,9 +405,7 @@ AgentCLI는 유저 전역 또는 프로젝트별 스킬 폴더를 스캔해 **SK
     "roots": [
       "~/.agents/skills",
       "~/.claude/skills",
-      "{repo}/Skills",
-      "{repo}/Skills/Codex",
-      "{repo}/Skills/Claude"
+      "{repo}/Skills"
     ],
     "snapshot_dir": ".doc/skills",
     "inline_mode": "qa",
@@ -203,341 +414,43 @@ AgentCLI는 유저 전역 또는 프로젝트별 스킬 폴더를 스캔해 **SK
 }
 ```
 
-설명:
-- `roots`: 스캔할 스킬 루트 목록. `{repo}` 플레이스홀더는 현재 repo 경로로 치환됩니다.
-- `snapshot_dir`: run_dir 기준 상대경로(또는 절대경로). 기본은 `run_dir/.doc/skills`.
-- `inline_mode`: `qa|pm|both|none` (Dev에는 스킬 본문을 절대 인라인하지 않습니다).
-- `max_excerpt_lines`: QA/PM에 인라인되는 발췌 줄 수 제한.
+- `roots`에서 `{repo}`는 현재 repo 경로로 치환됩니다.
+- `snapshot_dir`는 run_dir 기준 상대경로(또는 절대경로)로 해석됩니다.
 
 ---
 
-## 실행 방법
+## Failover (backend 체인) — 고급
 
-### 1) Interactive Shell (기본)
+Codex 사용량 제한(quota/usage limit) 등 특정 사유로 중단될 때, 다른 backend로 자동 전환할 수 있습니다.
 
-가장 많이 쓰는 흐름입니다.
-`--repo`를 주면 셸에 repo가 미리 세팅됩니다(권장). 안 줘도 `/repo`로 나중에 지정 가능합니다.
+관련 옵션(요약):
+- `failover_enabled=true`
+- `failover_backends=["codex","claudecode"]`
+- `failover_on=["quota_exhausted"]`
+- `failover_max_switches=1`
 
-```bash
-python agent_cli.py --repo "C:/Dev/BudgetBook"
-```
+> 실제로는 환경(키/로그인/설치)까지 만족해야 전환이 성공합니다. `/doctor`로 사전 점검을 권장합니다.
 
-셸에서:
+---
+
+## /doctor (환경 진단)
+
+Shell에서 `/doctor`를 실행하면 run_dir에 진단 보고서(`DOCTOR.md`)가 생성됩니다.
 
 ```text
-> /help
-> /config
-> /start --autopilot --continuous
-> /status
-> /stop --wait
-> /exit
+> /doctor
 ```
 
-### 안전 옵션 (rollback/worktree)
+진단 내용(요약):
+- Python/Node/npx/.NET/환경변수 존재 여부
+- repo/config/prompts_dir/run_dir 경로 정리
+- backend별 필수 조건(OPENAI_API_KEY, ANTHROPIC_API_KEY, SDK 설치 등) 힌트
 
-기본값은 **안전 모드**입니다. 자동 롤백이 필요하면 명시적으로 허용해야 합니다.
+---
 
+## 개발/테스트
+
+단위 테스트(있는 경우):
 ```bash
-# 파괴적 롤백 허용 (git reset/clean + patch apply)
-python agent_cli.py --run-now --repo <path> --dangerous-git-rollback
-
-# 안전한 격리 실행 (git worktree에서 작업 후 성공 시 patch 적용)
-python agent_cli.py --run-now --repo <path> --worktree-isolation
+python -m pytest -q
 ```
-
-> worktree 모드는 실패/중단 시 원 repo를 보존하고 worktree만 삭제합니다.
-
-#### Worktree patch 수동 복구
-
-worktree 격리 모드에서 자동 적용이 실패하거나(rc != 0) 중단된 경우, run_dir에 다음 파일이 생성됩니다.
-
-* `worktree.patch`: worktree 변경사항 패치(항상 생성)
-* `WORKTREE_PATCH_NOT_APPLIED.md`: 자동 적용이 스킵된 경우 안내
-* `WORKTREE_APPLY_FAILURE.md`: export/apply 중 오류가 난 경우 안내
-
-수동 복구:
-
-```bash
-git apply --binary --whitespace=nowarn <run_dir>/worktree.patch
-# 충돌 시:
-git apply --reject --whitespace=nowarn <run_dir>/worktree.patch
-```
-
-### /doctor (환경/설정 점검)
-
-셸에서 `/doctor`를 실행하면 환경 진단 보고서가 `DOCTOR.md`로 저장됩니다.
-
-#### Interactive 명령어 치트시트
-
-* `/help` : 도움말
-* `/repo <path>` : repo 지정
-* `/config` : 현재 적용 설정(기본값+config+오버라이드) + env sanity 출력
-* `/set <key> <value>` : 설정 오버라이드 (타입은 DEFAULTS 기준으로 추론)
-* `/add <key> <value>` : 리스트 설정에 append (예: `policy_rule`)
-* `/load [path]` / `/save [path]` : config JSON 로드/저장
-
-  * 기본 경로: `AgentCLI/configs/<repo-hash>.json`
-  * 레거시 호환: `REPO/.doc/agent_config.json` (존재할 때만 자동 로드)
-* `/start [--flags...]` : 러너를 **백그라운드 스레드로 실행**
-* `/todo --save` : `REPO/.doc/todo/Today_<hash>.md` 생성 후 선택 + 열기
-* `/todo --load latest|<path>` : 기존 TODO 선택 + 열기 (PM은 TODO를 최우선 반영하여 BACKLOG 생성)
-* `/stop [--wait]` : `run_dir/<STOP_FILE>` 생성으로 graceful stop 요청
-* `/status` : 러너 상태
-* `/exit` : 종료
-
-> 주의: interactive 모드에서 러너는 **현재 터미널 프로세스에 종속**됩니다.
-> 터미널을 닫으면 같이 종료될 수 있으므로 “밤새 무인 운용”은 `--run-now`를 권장합니다.
-
-추가 팁:
-* interactive에서 `run_dir`을 직접 지정하지 않았고, `--loop/--continuous/--autopilot`로 시작하면
-  기본적으로 **가장 최신 run_dir을 이어서(resume) 사용**합니다(백로그/상태 중복 생성 방지).
-
----
-
-### 2) 즉시 실행(--run-now) — 스크립트/CI/무인 운용용
-
-```bash
-python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --autopilot --continuous --non-interactive
-```
-
-* `--non-interactive`: 중간에 입력을 요구하는 프롬프트가 뜨는 것을 방지(무인 운용 필수)
-* `--continuous`: 백로그 생성 후 **태스크 실행까지 자동 진행**
-
-  * `--continuous`가 없으면 PM/백로그 준비만 하고 종료합니다.
-
----
-
-## 추천 실행 프리셋 (예시)
-
-### 비용 절감 모델 프리셋
-
-기본값은 비용을 크게 줄이기 위해 아래처럼 설정되어 있습니다.
-
-- PM: `gpt-5-mini`
-- Dev(기본): `gpt-5.1-codex-mini`
-- Dev(상향): `gpt-5.1-codex` → `gpt-5.2-codex` (실패 시 자동 상향 재시도)
-- QA: `gpt-5-mini`
-- Reporter(종료 보고서): `gpt-5-nano`
-
-config 예시(핵심만):
-
-```json
-{
-  "pm_model": "gpt-5-mini",
-  "dev_model": "gpt-5.1-codex-mini",
-  "dev_auto_escalate": true,
-  "dev_max_escalations": 2,
-  "dev_model_tier1": "gpt-5.1-codex",
-  "dev_model_tier2": "gpt-5.2-codex",
-  "dev_escalate_on": ["no_diff", "build_failed", "test_failed"],
-  "qa_model": "gpt-5-mini",
-  "reporter_model": "gpt-5-nano",
-  "report_max_turns": 8
-}
-```
-
-설명:
-- Dev가 `no_diff/build_failed/test_failed`로 멈출 상황이면, 동일 태스크를 상위 모델로 **최대 2번까지** 재시도합니다.
-- base 모델이 존재하지 않거나(예: model not found) 호출이 실패하면, 자동으로 tier1/tier2로 폴백합니다.
-- Codex 사용량 제한(usage limit) 발생 시에는 즉시 중단하고 `SHUTDOWN_REPORT.md`를 남깁니다.
-
-
-### A) 스모크 테스트(백로그만 준비)
-
-토큰 사용을 최소화하고 “환경/산출물”만 확인할 때:
-
-```bash
-python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --autopilot
-```
-
-결과:
-
-* `run_dir/BACKLOG.json|md` 생성(및 PM 산출물 로그)
-
-### B) 태스크 실행(최대 5개만)
-
-```bash
-python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --autopilot --continuous --iterations 5
-```
-
-### C) 밤새 무인(루프)
-
-* `--loop`: PM→Dev→QA 사이클을 반복
-* `--loop-idle-exit-after`: 진행이 없으면 자동 종료(비용 방어)
-* `--loop-max-cycles`: 최대 사이클 상한(비용 방어)
-
-```bash
-python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --autopilot \
-  --loop --loop-sleep-seconds 60 --loop-idle-exit-after 3600 --loop-max-cycles 20
-```
-
----
-
-## 안전 종료(Stop File)
-
-기본 stop 파일명은 `STOP`이며, `run_dir/STOP` 파일이 생기면 러너가 graceful stop 합니다.
-
-* interactive: `/stop` 또는 `/stop --wait`
-* 수동: `run_dir/STOP` 파일 생성
-* 변경: `--stop-file <NAME>`
-
----
-
-## “변경 없음(no diff)” 처리
-
-기본 동작은 **태스크 수행 후 git diff가 없으면 실패로 간주하고 중단**합니다(토큰 낭비 방지).
-계속 진행시키려면:
-
-```bash
-python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --autopilot --continuous --allow-no-diff
-```
-
-`--stop-if-no-diff`는 구버전 호환용(deprecated)입니다.
-
----
-
-## 빌드/테스트 게이트(.NET)
-
-기본: **태스크마다 `dotnet build` 수행**
-
-* 끄기: `--no-build`
-* 빌드 타깃 지정: `--dotnet-build-target <csproj|sln|path>`
-* 테스트 켜기: `--run-tests`
-
-  * 타깃: `--dotnet-test-target <csproj|sln|path>`
-  * 필터: `--dotnet-test-filter "<expr>"`
-  * 타임아웃: `--test-timeout-seconds 3600`
-
-> 레포가 .NET이 아니라면 우선 `--no-build`로 운용하고,
-> 필요한 경우 `agent_runner/gates.py`를 프로젝트에 맞게 수정하세요.
-
----
-
-## PM 구조화 출력(2.0)
-
-PM은 **반드시 JSON만** 출력해야 하며, 러너가 이를 검증합니다.
-
-* 성공: `run_dir/PM_OUTPUT_cycle_XXX.json` 저장 + `BACKLOG.json|md` 재생성
-* 실패: `--pm-structured-retries` 횟수만큼 리페어/재검증
-
-관련 옵션 예시:
-
-```bash
---pm-structured-retries 2
---pm-max-turns-continuations 1
---dev-max-turns-continuations 2
---max-turns-per-task 12
-```
-
----
-
-## 프롬프트 템플릿 커스터마이징
-
-샘플 템플릿은 `templates/agent_prompts/`에 포함되어 있습니다.
-
-레포에 기본 템플릿 생성:
-
-```bash
-python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --init-prompts
-```
-
-기본 경로:
-
-* `REPO/.doc/agent_prompts/`
-
-대표 파일:
-
-* `pm_instructions.md`
-* `dev_instructions.md`
-* `qa_instructions.md`
-* `pm_bootstrap_prompt.md`
-* `pm_incremental_prompt.md`
-* `dev_task_prompt.md`
-* `qa_prompt.md`
-
----
-
-## 문서(Docs) 읽기 / Digest
-
-기본값: `--docs-read-mode digest` (토큰 절약 권장)
-
-* `digest`: 헤딩 인덱스만 읽음
-* `full`: 문서 원문 열람 가능
-* `none`: docs 무시
-
-Digest 생성/갱신(로컬 작업, 토큰 사용 없음):
-
-```bash
-python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --generate-digest
-```
-
----
-
-## 산출물(Artifacts)
-
-### run_dir (실행 단위)
-
-기본: `REPO/.doc/agent_runs/<YYYYMMDD-HHMMSS>/`
-
-* `metrics.jsonl` : 이벤트 로그(JSONL)
-* `STATE.json` : 완료/실패 태스크 기록
-* `PM_OUTPUT_cycle_*.json` : PM 스키마-검증된 JSON
-* `BACKLOG.json|md` : 러너가 생성한 백로그(권위 소스)
-* `dev_logs/` : Dev 출력 로그(누적)
-* `tasks/` : 태스크별 로그/빌드/테스트 결과
-
-### PM_CACHE (지속 분석 아티팩트)
-
-기본: `REPO/.doc/PM_CACHE/`
-
-* `PROJECT_ANALYSIS.md` : 전역 분석(누적)
-* `REPO_INVENTORY.json|md` : git-tracked 파일 인벤토리
-* `REPO_SNAPSHOT.json` : HEAD 추적(증분 분석 보조)
-
----
-
-## Windows 로그 저장 예시(PowerShell)
-
-```powershell
-mkdir logs -Force
-python agent_cli.py --run-now --repo "C:\Dev\BudgetBook" --non-interactive --autopilot --loop `
-  2>&1 | Tee-Object -FilePath ".\logs\night_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-```
-
----
-
-## 트러블슈팅
-
-### 1) `OPENAI_API_KEY is not set.`
-
-* `.env` 위치가 애매하면 `--env-file`로 명시하세요.
-
-```bash
-python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --env-file "C:/Dev/BudgetBook/.env" --non-interactive --autopilot
-```
-
-### 2) `npx` 를 찾을 수 없음
-
-* Node.js 설치 후 `npx -v` 확인
-* 대안: `--mcp-mode codex` (codex CLI가 설치되어 있을 때)
-
-### 3) .NET 빌드가 계속 실패함
-
-* 레포가 .NET이 아니라면 `--no-build`로 끄세요.
-* .NET인데도 실패하면 `--dotnet-build-target`로 타깃을 정확히 지정하세요.
-
-### 4) “아무것도 안 하는 것처럼 보임”
-
-* `--continuous` 없이 실행하면 **백로그 준비만 하고 종료**합니다.
-* 태스크까지 자동 실행하려면 `--continuous` 또는 `--loop`가 필요합니다.
-
-### 5) no diff로 중단됨
-
-* 기본 정책입니다(토큰 방어). 계속 진행시키려면 `--allow-no-diff`.
-
----
-
-## Notes
-
-* 이 툴은 실제 OpenAI 비용이 사용됩니다.
-* 시크릿은 절대 config/prompt에 넣지 마세요. `.env` 또는 환경변수로만 주입하세요.
