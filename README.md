@@ -1,4 +1,4 @@
-# AgentCLI — CLI-first Multi-Agent Runner (PM → Dev → QA)
+# AgentCLI — CLI기반 Multi-Agent Runner (PM → Dev → QA)
 
 개인 개발자가 **켜두고**, 나중에 **PR 수준의 변경(코드/테스트/문서)** 을 받는 것을 목표로 만든 **CLI 기반 멀티 에이전트 러너**입니다.
 
