@@ -1,9 +1,18 @@
+"""Claude Code backend — full feature parity with Codex backend (cycle.py).
+
+This backend uses the Claude Agent SDK (claude_agent_sdk) as the execution engine
+while providing the same artifacts, logging, and orchestration as the Codex backend.
+"""
 from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime
+import hashlib
 import json
 import os
+import re
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,12 +36,34 @@ from ..gitops import (
     handle_worktree_patch,
 )
 from ..inventory import build_repo_inventory, write_repo_inventory_files
+from ..todo import read_current_todo, format_todo_block
 from ..metrics import MetricsLogger
+from ..logger import create_logger
+from ..policy import load_policy_rules, policy_scan_files
+from ..security import load_security_rules, security_scan_files
+from ..scan import collect_scan_files, DEFAULT_SCAN_IGNORE_GLOBS
+from ..prompts import (
+    PromptStore,
+    ensure_pm_instructions_have_output_schema,
+    append_pm_output_contract,
+    codex_call_hint,
+    PM_BOOTSTRAP_TEMPLATE_DEFAULT,
+    PM_INCREMENTAL_TEMPLATE_DEFAULT,
+    DEV_TASK_TEMPLATE_DEFAULT,
+    QA_TEMPLATE_DEFAULT,
+    QA_FOLLOWUPS_OUTPUT_CONTRACT,
+    PM_INSTRUCTIONS_DEFAULT,
+    DEV_INSTRUCTIONS_DEFAULT,
+    QA_INSTRUCTIONS_DEFAULT,
+    REPORTER_INSTRUCTIONS_DEFAULT,
+    PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT,
+)
+from ..reporting import collect_shutdown_context, build_local_shutdown_report
 from ..pipeline import PipelineManager, make_stages
 from ..pipeline.session import PipelineSession
 from ..pipeline.stages.base import StageOutcome
 from ..run_dir import make_run_dir, find_latest_run_dir
-from ..schemas import pm_output_json_schema
+from ..schemas import PMOutputV2, pm_output_json_schema
 from ..state import (
     load_backlog_json,
     parse_backlog_md,
@@ -43,7 +74,7 @@ from ..state import (
     write_default_p0_backlog,
     TaskItem,
 )
-from ..structured import parse_pm_output, dump_pretty, describe_parse_failure
+from ..structured import parse_pm_output_with_errors, dump_pretty, describe_parse_failure, parse_qa_followups
 from ..skills import (
     build_skills_context,
     build_skills_index,
@@ -52,33 +83,34 @@ from ..skills import (
     summarize_skills_index_capped,
     write_skills_snapshot,
 )
-from ..utils import force_utf8_stdio, eprint, now_iso, safe_write_text, has_quota_text
+from ..skills.match import suggest_skills
+from ..shared import load_json_if_exists as _load_json_if_exists, inline_skills_for as _inline_skills_for, format_skill_selection as _format_skill_selection
+from ..tracing import TraceCtx, new_trace_id
+from ..utils import (
+    force_utf8_stdio,
+    eprint,
+    now_iso,
+    run_cmd,
+    safe_write_text,
+    has_quota_text,
+    choose_stop_reason,
+    detect_stop_reason,
+    STOP_REASON_QUOTA,
+    STOP_REASON_STOP_FILE,
+    STOP_REASON_ALL_TASKS_DONE,
+)
 
+
+# ---------------------------------------------------------------------------
+# Claude SDK adapter helpers (SDK-specific, not shared with Codex)
+# ---------------------------------------------------------------------------
 
 class StopRequested(Exception):
     pass
 
-def _iter_exc_chain_quota(ex: BaseException):
-    """Best-effort walk of exception cause/context chain."""
-    seen: set[int] = set()
-    cur: BaseException | None = ex
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        yield cur
-        nxt = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
-        cur = nxt if isinstance(nxt, BaseException) else None
 
-
-def _is_quota_error(ex: BaseException) -> bool:
-    for e in _iter_exc_chain_quota(ex):
-        try:
-            msg = str(e)
-        except Exception:
-            msg = ""
-        if has_quota_text(msg) or has_quota_text(repr(e)):
-            return True
-    return False
-
+class BudgetExceeded(Exception):
+    pass
 
 
 def _as_str_list(v: object) -> list[str]:
@@ -95,57 +127,13 @@ def _as_str_list(v: object) -> list[str]:
         s = v.strip()
         if not s:
             return []
-        # allow comma-separated
         if "," in s:
             return [p.strip() for p in s.split(",") if p.strip()]
         return [p for p in s.split() if p]
     return [str(v).strip()] if str(v).strip() else []
 
 
-def _inline_skills_for(role: str, inline_mode: str) -> bool:
-    mode = str(inline_mode or "").strip().lower()
-    if mode in ("none", ""):
-        return False
-    if mode == "both":
-        return True
-    return mode == role.lower()
-
-
-def _format_skill_selection(skill_ids: list[str], skills_by_id: dict[str, Any]) -> str:
-    if not skill_ids:
-        return "(none)"
-    lines: list[str] = []
-    missing: list[str] = []
-    for sid in skill_ids:
-        rec = skills_by_id.get(sid)
-        if rec is not None:
-            try:
-                resolved_path = rec.skill_path.resolve()
-            except Exception:
-                resolved_path = rec.skill_path
-            lines.append(f"- {rec.name} ({sid})")
-            lines.append(f"  - root: {rec.source_root}")
-            lines.append(f"  - relative_path: {rec.relative_path}")
-            lines.append(f"  - resolved_path: {resolved_path}")
-        else:
-            lines.append(f"- {sid} (missing)")
-            missing.append(sid)
-    if missing:
-        lines.append("Missing skills: " + ", ".join(missing))
-    return "\n".join(lines)
-
-
-def _load_json_if_exists(path: Path, default: Any) -> Any:
-    try:
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
-    except Exception:
-        return default
-    return default
-
-
 def _parse_setting_sources(v: object) -> list[str]:
-    # Claude Agent SDK expects a list like ["user", "project", "local"].
     out: list[str] = []
     for s in _as_str_list(v):
         low = s.strip().lower()
@@ -171,7 +159,6 @@ class ClaudeCodeConfig:
     resume: str
     enable_file_checkpointing: bool
 
-    # Advanced SDK toggles (best-effort: ignored when SDK doesn't support)
     user: str
     include_partial_messages: bool
     fork_session: bool
@@ -195,7 +182,6 @@ def _load_claudecode_cfg(args: argparse.Namespace) -> ClaudeCodeConfig:
         continue_conversation=bool(getattr(args, "claudecode_continue_conversation", False)),
         resume=str(getattr(args, "claudecode_resume", "") or ""),
         enable_file_checkpointing=bool(getattr(args, "claudecode_enable_file_checkpointing", False)),
-
         user=str(getattr(args, "claudecode_user", "") or ""),
         include_partial_messages=bool(getattr(args, "claudecode_include_partial_messages", False)),
         fork_session=bool(getattr(args, "claudecode_fork_session", False)),
@@ -214,15 +200,9 @@ def _load_claudecode_cfg(args: argparse.Namespace) -> ClaudeCodeConfig:
 
 
 def _filter_kwargs_for_ctor(cls: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Filter kwargs to parameters actually supported by cls.__init__.
-
-    The Claude Agent SDK evolves quickly; this keeps us compatible with
-    older/newer versions by ignoring unknown constructor args.
-    """
     try:
         sig = inspect.signature(cls)
         allowed = set(sig.parameters.keys())
-        # dataclass-like constructors often include **kwargs; if so, keep all.
         if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
             return kwargs
         return {k: v for k, v in kwargs.items() if k in allowed}
@@ -230,187 +210,70 @@ def _filter_kwargs_for_ctor(cls: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
         return kwargs
 
 
-def _pick_run_dir(repo: Path, args: argparse.Namespace) -> Path:
-    explicit = str(getattr(args, "run_dir", "") or "").strip()
-    if explicit:
-        return Path(explicit).expanduser().resolve()
-
-    # resume latest
-    if bool(getattr(args, "resume_latest", False)):
-        latest = find_latest_run_dir(repo)
-        if latest:
-            return latest
-
-    return make_run_dir(repo)
-
-
-def _rel(repo: Path, p: Path) -> str:
+def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_override: str = "") -> Any:
+    """Build Claude Agent SDK options for a stage."""
     try:
-        return p.resolve().relative_to(repo.resolve()).as_posix()
-    except Exception:
-        return p.as_posix()
-
-
-def _pm_prompt(
-    *,
-    repo: Path,
-    run_dir: Path,
-    inventory_md: str,
-    analysis_md: str,
-    kind: str,
-    changed_files: list[str],
-    digest_rel: str,
-    docs_read_mode: str,
-    skills_index_summary: str,
-) -> str:
-    changed_block = "\n".join([f"- {p}" for p in changed_files[:200]]) if changed_files else "(none)"
-
-    docs_hint = ""
-    if docs_read_mode == "digest" and digest_rel:
-        docs_hint = (
-            "\n\n[DOCS]\n"
-            f"- You may read the pre-generated docs digest at: `{digest_rel}`\n"
-            "- Use it for high-level architecture/usage context; do not copy large sections verbatim.\n"
+        from claude_agent_sdk import ClaudeAgentOptions
+    except Exception as ex:
+        raise RuntimeError(
+            "claude_agent_sdk is not installed. Install it first "
+            "(see: https://platform.claude.com/docs/ko/agent-sdk/python). "
+            f"Original error: {ex}"
         )
 
-    if kind == "bootstrap":
-        mode_hint = (
-            "You are running in BOOTSTRAP mode.\n"
-            "- Create or update the global analysis markdown at `analysis_md` with a structured overview of the repo.\n"
-            "- Cover key modules, critical flows, risks, and how to run/build/test.\n"
-            "- Keep it concise and stable; prefer headings + bullet points.\n"
-        )
-    elif kind in {"incremental", "refresh"}:
-        mode_hint = (
-            f"You are running in {kind.upper()} mode.\n"
-            "- Update the existing global analysis markdown (do NOT rewrite everything).\n"
-            "- Append a short delta entry under the existing 'ChangeLog (auto-appended)' section if present, else add it.\n"
-            "- Focus primarily on changed files and new/remaining tasks.\n"
-        )
+    stage_low = (stage or "").strip().lower()
+    if stage_low == "pm":
+        allowed = list(cfg.pm_allowed_tools)
+        for t in ("Write", "Edit"):
+            if t not in allowed:
+                allowed.append(t)
+        disallowed = cfg.pm_disallowed_tools
+        output_format = {"type": "json_schema", "schema": pm_output_json_schema()}
+    elif stage_low == "dev":
+        allowed = cfg.dev_allowed_tools
+        disallowed = cfg.dev_disallowed_tools
+        output_format = None
     else:
-        mode_hint = "You may skip if nothing changed, but still ensure BACKLOG exists.\n"
+        allowed = cfg.qa_allowed_tools
+        disallowed = cfg.qa_disallowed_tools
+        output_format = None
 
-    schema_hint = "\n".join(
-        [
-            "{",
-            "  \"kind\": \"bootstrap|incremental|refresh|skip\",",
-            "  \"summary\": \"...\",",
-            "  \"tasks\": [ { \"id\": \"T01\", \"title\": \"...\", \"prompt\": \"...\", \"files\": [\"...\"], \"done_when\": \"...\", \"skills\": [\"...\"], \"skills_rationale\": \"...\" } ],",
-            "  \"notes_md\": \"(optional markdown)\",",
-            "  \"warnings\": [\"...\"],",
-            "  \"open_questions\": [\"...\"],",
-            "  \"analysis_updated\": true,",
-            "  \"analysis_path\": \".doc/PM_CACHE/PROJECT_ANALYSIS.md\"",
-            "}",
-        ]
-    )
+    system_prompt = "".join([
+        "You are running inside AgentCLI. Follow the stage instructions exactly.\n",
+        cfg.system_prompt_append.strip() + "\n" if cfg.system_prompt_append.strip() else "",
+    ])
 
-    return f"""You are the PM (project manager) agent for AgentCLI.
+    model = model_override or cfg.model
 
-[GOALS]
-1) Ensure the global project analysis markdown exists and is up-to-date:
-   - Path: `{analysis_md}`
-2) Generate a practical development backlog (tasks) for the Dev agent.
-
-[CONTEXT]
-- Repo root: `{_rel(repo, repo)}`
-- Run directory: `{_rel(repo, run_dir)}`
-- Repo inventory (all files, with size/binary hints): `{inventory_md}`
-- Recently changed files (HEAD/worktree):
-{changed_block}
- - SKILLS_INDEX summary (select skill_id per task; do NOT inline full skill text):
-{skills_index_summary}
-{docs_hint}
-{mode_hint}
-[IMPORTANT RULES]
-- You may use tools to read/search files. Prefer Grep/Glob + targeted reads.
-- Avoid re-reading huge files unless necessary.
-- DO NOT modify product/source code in PM stage.
-- You MAY edit/create `{analysis_md}` only.
-- If a SKILLS_INDEX summary is provided, include skills and skills_rationale per task.
-
-[OUTPUT CONTRACT]
-- Your FINAL message MUST be valid JSON that matches this schema:
-{schema_hint}
-- Do NOT wrap JSON in markdown fences.
-- `tasks` should be concrete and actionable. Each task MUST include `prompt` and `done_when`.
-- Set `analysis_updated` true if you edited `{analysis_md}`. Set `analysis_path` to `{analysis_md}`.
-"""
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "permission_mode": cfg.permission_mode,
+        "max_turns": int(cfg.max_turns),
+        "setting_sources": cfg.setting_sources,
+        "allowed_tools": allowed,
+        "disallowed_tools": disallowed,
+        "output_format": output_format,
+        "system_prompt": system_prompt,
+        "continue_conversation": cfg.continue_conversation,
+        "resume": cfg.resume or None,
+        "enable_file_checkpointing": cfg.enable_file_checkpointing,
+        "user": cfg.user or None,
+        "include_partial_messages": bool(cfg.include_partial_messages),
+        "fork_session": bool(cfg.fork_session),
+        "max_thinking_tokens": cfg.max_thinking_tokens,
+    }
+    kwargs = _filter_kwargs_for_ctor(ClaudeAgentOptions, kwargs)
+    return ClaudeAgentOptions(**kwargs)
 
 
-def _dev_prompt(repo: Path, run_dir: Path, task: TaskItem, skills_context: str, digest_rel: str, docs_read_mode: str) -> str:
-    files_hint = "\n".join([f"- {f}" for f in (task.files or [])[:50]]) if task.files else "(not specified)"
-
-    # Docs hint for token saving (same as Codex)
-    docs_hint = ""
-    if docs_read_mode == "digest" and digest_rel:
-        docs_hint = f"\n[DOCS - TOKEN SAVING]\n- Docs digest (preferred): `{digest_rel}`\n- Use digest for high-level context; avoid reading full docs unless necessary.\n"
-    elif docs_read_mode == "full":
-        docs_hint = f"\n[DOCS]\n- You may read full documentation files if needed.\n"
-
-    return f"""You are the Dev agent.
-
-[ONE TASK ONLY]
-- Implement exactly this task: {task.id} {task.title}
-
-[TASK PROMPT]
-{task.prompt}
-
-[FILES HINT]
-{files_hint}
-
-[SELECTED SKILLS]
-{skills_context}
-{docs_hint}
-[ACCEPTANCE]
-- done_when: {task.done_when}
-- You MUST produce a meaningful git diff for the repository (unless the task explicitly says no code changes).
-- Keep changes minimal and consistent with existing style.
-
-[WORKDIR]
-- Repo root: `{_rel(repo, repo)}`
-- Run dir: `{_rel(repo, run_dir)}` (you may write logs/reports here)
-
-[IMPORTANT]
-- TOKEN SAVING: Use digest instead of reading full docs. Avoid broad repo scans.
-- If you need to create an operational note for PM, write a short markdown hint into:
-  `{_rel(repo, run_dir / 'analysis_hints' / (task.id + '.md'))}`
-"""
-
-
-def _qa_prompt(repo: Path, run_dir: Path, recent_done_ids: list[str], skills_context: str) -> str:
-    done_block = "\n".join([f"- {x}" for x in recent_done_ids]) if recent_done_ids else "(none)"
-    return f"""You are the QA agent.
-
-[CONTEXT]
-- Repo root: `{_rel(repo, repo)}`
-- Run dir: `{_rel(repo, run_dir)}`
-
-[RECENT COMPLETED TASKS]
-{done_block}
-
-[SKILLS CONTEXT]
-{skills_context}
-
-[GOAL]
-- Review recent changes. Look for obvious bugs, missing edge cases, and regression risks.
-- If tests/build are available, suggest how to run them.
-
-[OUTPUT]
-- Write a concise markdown QA report.
-"""
-
+# ---------------------------------------------------------------------------
+# Claude SDK message stream helpers
+# ---------------------------------------------------------------------------
 
 async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tuple[str, Optional[Any]]:
-    """Drain Claude Agent SDK messages.
-
-    Returns: (assistant_text, structured_output_if_any)
-    """
-
     text_parts: list[str] = []
     structured: Any = None
 
-    # We avoid importing message classes eagerly; the SDK package may not exist.
     if hasattr(stream, "__aiter__"):
         iterator = stream
     elif hasattr(stream, "__iter__"):
@@ -452,31 +315,19 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
                     if isinstance(t, str) and t.strip():
                         text_parts.append(t)
 
-        if debug:
-            try:
-                if msg_name in {"AssistantMessage", "ResultMessage", "ResponseMessage"}:
-                    pass
-            except Exception:
-                pass
-
     return ("\n".join(text_parts).strip(), structured)
 
 
 async def _start_query(client: Any, prompt: str) -> None:
-    """Start a Claude SDK query. Message retrieval is handled separately."""
-
     try:
         result = client.query(prompt)
     except TypeError:
         result = client.query(prompt=prompt)
-
     if inspect.isawaitable(result):
         await result
 
 
 async def _receive_messages(client: Any, *, stop_path: Path, debug: bool) -> Tuple[str, Optional[Any]]:
-    """Receive messages from the Claude SDK client."""
-
     if hasattr(client, "receive_response"):
         stream = client.receive_response()
         if inspect.isawaitable(stream):
@@ -496,108 +347,127 @@ async def _receive_messages(client: Any, *, stop_path: Path, debug: bool) -> Tup
             if hasattr(candidate, attr_name):
                 obj = getattr(candidate, attr_name)
                 try:
-                    stream = obj() if callable(obj) else obj
+                    s = obj() if callable(obj) else obj
                 except TypeError:
                     continue
-                if hasattr(stream, "__aiter__") or hasattr(stream, "__iter__"):
-                    return stream
+                if hasattr(s, "__aiter__") or hasattr(s, "__iter__"):
+                    return s
         return None
 
     stream = _coerce_stream(client)
     if stream is not None:
         return await _collect_messages(stream, stop_path=stop_path, debug=debug)
 
-    try:
-        import claude_agent_sdk
-    except Exception:
-        claude_agent_sdk = None
-    if claude_agent_sdk is not None:
-        version = getattr(claude_agent_sdk, "__version__", None)
-        if version:
-            eprint(f"Claude Agent SDK version detected: {version}")
-
     raise RuntimeError("ClaudeSDKClient does not provide a message stream")
 
 
-def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str) -> Any:
-    """Build Claude Agent SDK options for a stage."""
+async def _run_claude_query(
+    cfg: ClaudeCodeConfig,
+    prompt: str,
+    *,
+    repo: Path,
+    stage: str,
+    stop_path: Path,
+    debug: bool,
+    model_override: str = "",
+) -> Tuple[str, Optional[Any]]:
+    """High-level helper: create client, send query, collect messages."""
+    from claude_agent_sdk import ClaudeSDKClient
 
-    try:
-        from claude_agent_sdk import ClaudeAgentOptions
-    except Exception as ex:
-        raise RuntimeError(
-            "claude_agent_sdk is not installed. Install it first (see: https://platform.claude.com/docs/ko/agent-sdk/python). "
-            f"Original error: {ex}"
-        )
+    options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override)
+    async with ClaudeSDKClient(options=options) as client:
+        await _start_query(client, prompt)
+        return await _receive_messages(client, stop_path=stop_path, debug=debug)
 
-    stage_low = (stage or "").strip().lower()
-    if stage_low == "pm":
-        # PM may need to update `.doc/PM_CACHE/PROJECT_ANALYSIS.md`.
-        # Even if a user config predates this change (missing Write/Edit), we
-        # add them here to preserve "works by default" behavior for ClaudeCode.
-        allowed = list(cfg.pm_allowed_tools)
-        for t in ("Write", "Edit"):
-            if t not in allowed:
-                allowed.append(t)
-        disallowed = cfg.pm_disallowed_tools
-        output_format = {"type": "json_schema", "schema": pm_output_json_schema()}
-    elif stage_low == "dev":
-        allowed = cfg.dev_allowed_tools
-        disallowed = cfg.dev_disallowed_tools
-        output_format = None
-    else:
-        allowed = cfg.qa_allowed_tools
-        disallowed = cfg.qa_disallowed_tools
-        output_format = None
 
-    system_prompt = "".join(
-        [
-            "You are running inside AgentCLI. Follow the stage instructions exactly.\n",
-            cfg.system_prompt_append.strip() + "\n" if cfg.system_prompt_append.strip() else "",
-        ]
+# ---------------------------------------------------------------------------
+# Exception detection helpers (ported from cycle.py)
+# ---------------------------------------------------------------------------
+
+def _iter_exc_chain(ex: Exception, max_depth: int = 6):
+    cur = ex
+    seen: set[int] = set()
+    for _ in range(max_depth):
+        if cur is None or id(cur) in seen:
+            break
+        seen.add(id(cur))
+        yield cur
+        nxt = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+        if nxt is None or not isinstance(nxt, BaseException):
+            break
+        cur = nxt  # type: ignore[assignment]
+
+
+def is_max_turns_exception(ex: Exception) -> bool:
+    for e in _iter_exc_chain(ex):
+        try:
+            msg = (str(e) or "").lower()
+        except Exception:
+            msg = ""
+        name = type(e).__name__.lower()
+        rep = (repr(e) or "").lower()
+        if (
+            "max turns" in msg or "max_turn" in msg or "maxturn" in msg
+            or "maxturn" in name or "max_turn" in name
+            or ("turn" in name and "max" in name)
+            or "maxturnsexceeded" in rep
+        ):
+            return True
+    return False
+
+
+def is_quota_exception(ex: Exception) -> bool:
+    needles = (
+        "insufficient_quota", "quota exceeded", "exceeded your current quota",
+        "billing hard limit", "hard limit", "plan and billing", "payment required",
+        "you've hit your usage limit", "purchase more credits", "upgrade to pro",
+        "codex/settings/usage", "user limit", "user_limit",
+        "credit balance is too low", "plans & billing", "purchase credits",
+        "spend limit", "insufficient credits", "usage limit", "budgetexceeded",
     )
+    for e in _iter_exc_chain(ex):
+        try:
+            msg = (str(e) or "").lower()
+        except Exception:
+            msg = ""
+        rep = (repr(e) or "").lower()
+        if any(n in msg for n in needles) or any(n in rep for n in needles):
+            return True
+        if has_quota_text(msg) or has_quota_text(rep):
+            return True
+    return False
 
-    # NOTE: permission_mode default is 'acceptEdits' (safe for PM analysis edits and Dev code edits).
-    kwargs: dict[str, Any] = {
-        "model": cfg.model,
-        "permission_mode": cfg.permission_mode,
-        "max_turns": int(cfg.max_turns),
-        "setting_sources": cfg.setting_sources,
-        "allowed_tools": allowed,
-        "disallowed_tools": disallowed,
-        "output_format": output_format,
-        "system_prompt": system_prompt,
-        "continue_conversation": cfg.continue_conversation,
-        "resume": cfg.resume or None,
-        "enable_file_checkpointing": cfg.enable_file_checkpointing,
 
-        # advanced toggles (best-effort)
-        "user": cfg.user or None,
-        "include_partial_messages": bool(cfg.include_partial_messages),
-        "fork_session": bool(cfg.fork_session),
-        "max_thinking_tokens": cfg.max_thinking_tokens,
-    }
-    kwargs = _filter_kwargs_for_ctor(ClaudeAgentOptions, kwargs)
-    return ClaudeAgentOptions(**kwargs)
+def is_model_invalid_exception(ex: Exception) -> bool:
+    needles = (
+        "model_not_found", "model not found", "does not exist",
+        "unknown model", "invalid model", "is not available",
+    )
+    for e in _iter_exc_chain(ex):
+        try:
+            msg = (str(e) or "").lower()
+        except Exception:
+            msg = ""
+        rep = (repr(e) or "").lower()
+        if ("model" in msg or "model" in rep) and (any(n in msg for n in needles) or any(n in rep for n in needles)):
+            return True
+    return False
 
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
-    """Claude Code backend main.
-
-    This backend aims to match Codex backend behavior:
-    - same PM cache paths (.doc/PM_CACHE/PROJECT_ANALYSIS.md)
-    - fingerprint-based incremental PM
-    - stage pipeline with --roles
-    """
+    """Claude Code backend main — full parity with Codex backend (cycle.py)."""
 
     force_utf8_stdio()
 
     repo = repo.expanduser().resolve()
     if not repo.exists():
-        eprint(f"[ERR] repo not found: {repo}")
+        eprint(f"Repo not found: {repo}")
         return 2
 
-    # Load .env files (repo/.env and AgentCLI env_file, best-effort)
     load_dotenv_best_effort(repo, getattr(args, "env_file", ""))
 
     if not (os.getenv("ANTHROPIC_API_KEY") or "").strip():
@@ -608,8 +478,31 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
     cfg = _load_claudecode_cfg(args)
 
-    run_dir = _pick_run_dir(repo, args)
+    # Run dir
+    if getattr(args, "run_dir", ""):
+        run_dir = Path(args.run_dir).expanduser().resolve()
+    elif bool(getattr(args, "resume_latest", False)):
+        latest = find_latest_run_dir(repo)
+        run_dir = latest.expanduser().resolve() if latest is not None else make_run_dir(repo)
+    else:
+        run_dir = make_run_dir(repo)
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    run_summary: dict[str, Any] = {
+        "run_id": run_dir.name,
+        "repo": str(repo),
+        "profile": str(getattr(args, "profile", "personal") or "personal"),
+        "cycles": [],
+    }
+
+    def _write_run_summary() -> None:
+        try:
+            (run_dir / "run_summary.json").write_text(
+                json.dumps(run_summary, ensure_ascii=False, indent=2),
+                encoding="utf-8", errors="replace",
+            )
+        except Exception:
+            pass
 
     def _is_unsafe_path(raw: str) -> bool:
         try:
@@ -617,14 +510,17 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         except Exception:
             return True
 
+    def _fail_validation(name: str, value: str) -> None:
+        msg = (
+            "# Validation failure\n\n"
+            f"Blocked unsafe path for `{name}`: `{value}`\n\n"
+            "Path traversal patterns like `..` are not allowed. Use an absolute path or a safe relative path.\n"
+        )
+        safe_write_text(run_dir / "VALIDATION_FAILURE.md", msg)
+
     for _name, _value in (("env_file", getattr(args, "env_file", "") or ""), ("prompts_dir", getattr(args, "prompts_dir", "") or "")):
         if str(_value).strip() and _is_unsafe_path(str(_value)):
-            msg = (
-                "# Validation failure\n\n"
-                f"Blocked unsafe path for `{_name}`: `{_value}`\n\n"
-                "Path traversal patterns like `..` are not allowed. Use an absolute path or a safe relative path.\n"
-            )
-            safe_write_text(run_dir / "VALIDATION_FAILURE.md", msg)
+            _fail_validation(_name, str(_value))
             eprint(f"[STOP] Validation failure for {_name}: {_value}")
             return 2
 
@@ -639,47 +535,37 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             return 2
         repo = worktree_dir
 
-    # Ensure we operate within repo root
-    try:
-        os.chdir(repo)
-    except Exception:
-        pass
+    os.chdir(repo)
 
-    # STOP file
-    stop_path = run_dir / "STOP"
+    # Observability
+    metrics = MetricsLogger(run_dir / "metrics.jsonl")
+    logger = create_logger(run_dir, debug=bool(getattr(args, "debug", False)))
+    trace_ctx = TraceCtx(trace_id=new_trace_id(), parent_span_id=None)
+    stop_path = run_dir / str(getattr(args, "stop_file", "STOP"))
+    cycle_summary_path = run_dir / "cycle_summary.log"
+    last_run_summary_path = run_dir / "last_run_summary.json"
 
-    metrics = MetricsLogger(run_dir)
-
-    # Global PM cache (shared across runs)
+    # Global PM cache
     pm_cache_dir = repo / ".doc" / "PM_CACHE"
     pm_cache_dir.mkdir(parents=True, exist_ok=True)
     analysis_md = pm_cache_dir / "PROJECT_ANALYSIS.md"
 
-    # Drift guard for PM incremental
-    pm_fp_path = pm_cache_dir / "PM_LAST_FINGERPRINT.json"
-    pm_fp_obj = _load_json_if_exists(pm_fp_path, default={"fingerprint": "", "updated_at": ""})
-    last_pm_fp = str(pm_fp_obj.get("fingerprint") or "")
+    # Docs
+    docs_dir = resolve_docs_dir(repo, str(getattr(args, "docs_dir", "") or ""))
+    digest_path = (repo / Path(str(getattr(args, "docs_digest_file", ".doc/DOCS_DIGEST.md") or ".doc/DOCS_DIGEST.md"))).resolve()
+    digest_rel = digest_path.relative_to(repo).as_posix() if repo in digest_path.parents else digest_path.as_posix()
 
-    # Snapshot for HEAD tracking
-    snapshot_json = pm_cache_dir / "REPO_SNAPSHOT.json"
-    snapshot = _load_json_if_exists(snapshot_json, default={"head": "", "updated_at": ""})
-    prev_head = str(snapshot.get("head") or "").strip()
-
-    # Docs digest (optional)
-    docs_dir = resolve_docs_dir(repo, getattr(args, "docs_dir", ""))
-    digest_path = (repo / Path(getattr(args, "docs_digest_file", ".doc/Docs/DIGEST.md"))).resolve()
-    digest_rel = _rel(repo, digest_path)
-    docs_read_mode = str(getattr(args, "docs_read_mode", "off") or "off")
-
-    if docs_read_mode == "digest" and bool(getattr(args, "generate_digest", False)) and docs_dir:
-        try:
+    docs_read_mode = str(getattr(args, "docs_read_mode", "digest") or "digest")
+    if docs_read_mode == "digest":
+        if bool(getattr(args, "generate_digest", False)) and docs_dir:
             generate_docs_digest(repo, docs_dir, digest_path)
-        except Exception as ex:
-            eprint(f"[WARN] docs digest generation failed: {ex}")
+        elif not digest_path.exists() and docs_dir:
+            generate_docs_digest(repo, docs_dir, digest_path)
 
+    # Skills
     skills_cfg = getattr(args, "skills", {}) if isinstance(getattr(args, "skills", {}), dict) else {}
     skills_enabled = bool(skills_cfg.get("enabled", False))
-    skills_records = []
+    skills_records: list = []
     skills_index_summary = "(skills disabled)"
     skills_by_id: dict[str, Any] = {}
     if skills_enabled:
@@ -694,21 +580,83 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             max_chars=int(skills_cfg.get("pm_summary_max_chars", 0) or 0),
         )
 
-    # Run-local state
-    backlog_json_path = run_dir / "BACKLOG.json"
-    backlog_md_path = run_dir / "BACKLOG.md"
-    state_path = run_dir / "STATE.json"
+    autopilot = bool(getattr(args, "autopilot", False))
+
+    # Prompt store (same as Codex)
+    prompts_dir_raw = str(getattr(args, "prompts_dir", "") or "")
+    prompts_dir = (repo / prompts_dir_raw).resolve() if prompts_dir_raw and not Path(prompts_dir_raw).is_absolute() else Path(prompts_dir_raw).resolve() if prompts_dir_raw else (repo / "prompts").resolve()
+    store = PromptStore(prompts_dir=prompts_dir)
+
+    pm_instructions = ensure_pm_instructions_have_output_schema(store.get("pm_instructions", PM_INSTRUCTIONS_DEFAULT))
+    dev_instructions = store.get("dev_instructions", DEV_INSTRUCTIONS_DEFAULT)
+    qa_instructions = store.get("qa_instructions", QA_INSTRUCTIONS_DEFAULT)
+
+    # Gates
+    build_enabled = (not bool(getattr(args, "no_build", False))) or bool(getattr(args, "require_build", False))
+    stop_on_no_diff = (not bool(getattr(args, "allow_no_diff", False))) or bool(getattr(args, "stop_if_no_diff", False))
+    run_tests = bool(getattr(args, "run_tests", False))
+
+    # Policy
+    policy_cfg = getattr(args, "policy", {}) if isinstance(getattr(args, "policy", {}), dict) else {}
+    policy_scan_enabled = bool(policy_cfg.get("enabled", not bool(getattr(args, "no_policy_scan", False))))
+    policy_fail_severity = str(policy_cfg.get("fail_severity") or "high")
+    policy_rules = load_policy_rules(getattr(args, "policy_rules_file", ""), list(getattr(args, "policy_rule", []) or []))
+    policy_rules.extend(list(policy_cfg.get("rules", []) or []))
+    policy_ignore_paths = list(policy_cfg.get("ignore_paths", []) or [])
+    policy_allow_patterns = list(policy_cfg.get("allow_patterns", []) or [])
+
+    # Security
+    security_cfg = getattr(args, "security", {}) if isinstance(getattr(args, "security", {}), dict) else {}
+    security_enabled = bool(security_cfg.get("enabled", False))
+    security_fail_severity = str(security_cfg.get("fail_severity") or "high")
+    security_rules = load_security_rules(str(security_cfg.get("rules_path") or ""))
+
+    # Scan
+    scan_scope = str(getattr(args, "scan_scope", "quick") or "quick").strip().lower()
+    policy_scan_scope = str(getattr(args, "policy_scan_scope", "") or "").strip().lower() or scan_scope
+    security_scan_scope = str(getattr(args, "security_scan_scope", "") or "").strip().lower() or scan_scope
+    scan_max_files = int(getattr(args, "scan_max_files", 500) or 500)
+    scan_max_bytes_per_file = int(getattr(args, "scan_max_bytes_per_file", 200_000) or 200_000)
+    scan_max_total_bytes = int(getattr(args, "scan_max_total_bytes", 20_000_000) or 20_000_000)
+    scan_timeout_seconds = int(getattr(args, "scan_timeout_seconds", 60) or 60)
+    scan_ignore_globs = list(getattr(args, "scan_ignore_globs", []) or [])
+    if not scan_ignore_globs:
+        scan_ignore_globs = list(DEFAULT_SCAN_IGNORE_GLOBS)
+    scan_ignore_paths = list(getattr(args, "scan_ignore_paths", []) or [])
+    scan_include_untracked_in_full = bool(getattr(args, "scan_include_untracked_in_full", False))
+
+    # Budgets
+    budgets_cfg = getattr(args, "budgets", {}) if isinstance(getattr(args, "budgets", {}), dict) else {}
+    budget_state: dict[str, Any] = {
+        "total_escalations": 0,
+        "total_continuations": 0,
+        "total_repairs": 0,
+        "per_task_escalations": {},
+        "per_task_continuations": {},
+    }
+
+    def _severity_at_or_above(found: str, threshold: str) -> bool:
+        order = {"low": 0, "medium": 1, "high": 2}
+        return order.get(found, 1) >= order.get(threshold, 1)
+
+    def _budget_exceeded(key: str, current: int, limit: int) -> bool:
+        if limit <= 0:
+            return False
+        return current >= limit
+
+    # PM state
+    pm_fp_path = pm_cache_dir / "PM_LAST_FINGERPRINT.json"
+    pm_fp_obj = _load_json_if_exists(pm_fp_path, default={"fingerprint": "", "updated_at": ""})
+    last_pm_fp = str(pm_fp_obj.get("fingerprint") or "")
+
+    pm_stop_reason: dict[str, str] = {}
+
+    snapshot_json = pm_cache_dir / "REPO_SNAPSHOT.json"
+    snapshot = _load_json_if_exists(snapshot_json, default={"head": "", "updated_at": ""})
+    prev_head = (snapshot.get("head") or "").strip()
 
     dev_hints_dir = run_dir / "analysis_hints"
     dev_hints_dir.mkdir(parents=True, exist_ok=True)
-
-    # Behavior flags
-    build_enabled = (not bool(getattr(args, "no_build", False))) or bool(getattr(args, "require_build", False))
-    run_tests = bool(getattr(args, "run_tests", False))
-    stop_on_no_diff = (not bool(getattr(args, "allow_no_diff", False))) or bool(getattr(args, "stop_if_no_diff", False))
-
-    build_cmd = getattr(args, "build_cmd", [])
-    test_cmd = getattr(args, "test_cmd", [])
 
     continuous = bool(getattr(args, "continuous", False) or getattr(args, "loop", False))
 
@@ -717,6 +665,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     if isinstance(plugins_allowlist, str):
         plugins_allowlist = [p.strip() for p in plugins_allowlist.split(",") if p.strip()]
 
+    stages: list = []
+    plugin_failure: Optional[Exception] = None
     try:
         stages = make_stages(
             roles_raw,
@@ -725,58 +675,1117 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             plugins_strict=bool(getattr(args, "plugins_strict", True)),
         )
     except Exception as ex:
+        plugin_failure = ex
         safe_write_text(run_dir / "PLUGIN_LOAD_FAILURE.md", f"# Plugin load failure\n\n{ex}\n")
         eprint(f"[STOP] Plugin load failure: {ex}")
+
+    if plugin_failure is not None:
         if worktree_dir is not None:
             try:
                 remove_worktree(source_repo, worktree_dir)
-            except Exception as rm_ex:
-                eprint(f"[WARN] Failed to remove worktree: {rm_ex}")
+            except Exception as ex:
+                eprint(f"[WARN] Failed to remove worktree: {ex}")
         return 1
-    pipeline_mgr = PipelineManager(stages)
 
-    # --- Sync helpers required by PipelineSession ---
+    pipeline_mgr = PipelineManager(stages)
+    pm_stage_enabled = any((getattr(s, 'name', '') or '').strip().lower() == 'pm' for s in stages)
+
+    def append_cycle_summary(line: str) -> None:
+        try:
+            with cycle_summary_path.open("a", encoding="utf-8", errors="replace") as f:
+                f.write(line.rstrip() + "\n")
+        except Exception:
+            pass
+
+    # Backlog state
+    backlog_json_path = run_dir / "BACKLOG.json"
+    backlog_md_path = run_dir / "BACKLOG.md"
+    state_path = run_dir / "STATE.json"
+
+    # ---------------------------------------------------------------------------
+    # Shared helpers (same as Codex)
+    # ---------------------------------------------------------------------------
+
+    def _collect_scan(scope: str, *, ignore_paths: Optional[list[str]] = None) -> tuple[list[tuple[str, str]], dict[str, Any]]:
+        return collect_scan_files(
+            repo, scope,
+            ignore_paths=scan_ignore_paths if ignore_paths is None else ignore_paths,
+            ignore_globs=scan_ignore_globs,
+            max_files=scan_max_files,
+            max_bytes_per_file=scan_max_bytes_per_file,
+            max_total_bytes=scan_max_total_bytes,
+            timeout_seconds=scan_timeout_seconds,
+            include_untracked_in_full=scan_include_untracked_in_full,
+        )
+
+    def _hash_prompt(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:10]
+
+    def _normalize_followup_prompt(text: str) -> str:
+        s = str(text or "").strip()
+        if len(s) > 1000:
+            s = s[:1000].rstrip()
+        return s
+
+    def _extract_qa_followups(text: str, *, max_items: int) -> list[dict[str, Any]]:
+        items: list[str] = []
+        for line in (text or "").splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            if re.match(r"^[-*•]\s+", s) or re.match(r"^\d+[\.\)]\s+", s):
+                s = re.sub(r"^[-*•]\s+", "", s)
+                s = re.sub(r"^\d+[\.\)]\s+", "", s)
+                if len(s) >= 10:
+                    items.append(s)
+            if len(items) >= max_items:
+                break
+        tasks: list[dict[str, Any]] = []
+        for s in items:
+            prompt = _normalize_followup_prompt(s)
+            if not prompt:
+                continue
+            tid = f"QA-FU-{_hash_prompt(prompt)}"
+            title = f"QA Follow-up: {s[:60]}".strip()
+            tasks.append({
+                "id": tid, "title": title, "prompt": prompt, "files": [],
+                "done_when": "QA follow-up addressed and relevant tests/builds pass.",
+                "skills": [], "skills_rationale": None,
+            })
+        return tasks
+
+    def _followups_from_structured(model: Any, *, max_items: int) -> list[dict[str, Any]]:
+        tasks: list[dict[str, Any]] = []
+        if not model or not getattr(model, "followups", None):
+            return tasks
+        for item in list(model.followups)[:max_items]:
+            prompt = _normalize_followup_prompt(getattr(item, "prompt", ""))
+            if not prompt:
+                continue
+            tid = f"QA-FU-{_hash_prompt(prompt)}"
+            title = str(getattr(item, "title", "") or f"QA Follow-up: {prompt[:60]}").strip()
+            severity = str(getattr(item, "severity", "") or "").strip()
+            if severity:
+                title = f"[{severity}] {title}"
+            files = list(getattr(item, "files", []) or [])
+            tasks.append({
+                "id": tid, "title": title, "prompt": prompt, "files": files,
+                "done_when": "QA follow-up addressed and relevant tests/builds pass.",
+                "skills": [], "skills_rationale": None,
+            })
+        return tasks
+
+    def _merge_qa_followups(
+        base_tasks: list[dict[str, Any]],
+        followups: list[dict[str, Any]],
+        done_ids: set[str],
+    ) -> list[dict[str, Any]]:
+        existing_ids = {str(t.get("id") or "") for t in base_tasks if str(t.get("id") or "")}
+        merged = list(base_tasks)
+        for t in followups:
+            tid = str(t.get("id") or "")
+            if not tid or tid in existing_ids or tid in done_ids:
+                continue
+            merged.append(t)
+        return merged
+
+    def _normalize_backlog_tasks(raw_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        def _looks_like_pm_work(t: dict[str, Any]) -> bool:
+            txt = f"{t.get('title','')}\n{t.get('prompt','')}".lower()
+            forbidden = (
+                "create backlog", "generate backlog", "backlog.json", "backlog.md",
+                "backlog", "triage", "prioritize", "roadmap", "plan", "planning",
+                "analysis", "review", "audit", "repo_inventory", "repo inventory",
+                "inventory", "prompt engineering", "update prompts", "pm instructions",
+                "status report", "progress report", "shutdown report", "postmortem",
+                "project_analysis.md", "project analysis", "pm_cache", "pm cache",
+                "agent_runs", "run_dir", "state.json", "notes_pm.md", "requirements.md",
+                "agent_tasks.md", "notes.md",
+                "백로그", "분석", "검토", "리포트", "보고서", "인벤토리", "프롬프트", "계획", "정리",
+            )
+            if any(k in txt for k in forbidden):
+                positive = ("implement", "fix", "build", "test", "ui", "screen", "page", "component", "refactor")
+                if any(p in txt for p in positive):
+                    return False
+                return True
+            files = t.get("files") or []
+            if isinstance(files, list) and files:
+                fl = [str(x).replace("\\", "/").lower().strip() for x in files if str(x).strip()]
+                if all((p.startswith(".doc/") or "/.doc/" in p) for p in fl):
+                    return True
+                if any("agent_runs" in p or "pm_cache" in p or "project_analysis" in p or "repo_inventory" in p for p in fl):
+                    return True
+            return False
+
+        filtered: list[dict[str, Any]] = []
+        removed: list[dict[str, Any]] = []
+        for t in raw_tasks:
+            if not isinstance(t, dict):
+                continue
+            if _looks_like_pm_work(t):
+                removed.append(t)
+            else:
+                filtered.append(t)
+
+        if removed:
+            try:
+                notes_path = run_dir / "NOTES_PM.md"
+                existing = ""
+                if notes_path.exists():
+                    existing = notes_path.read_text(encoding="utf-8-sig", errors="replace")
+                extra = ["\n\n## Removed PM-only tasks (auto-filter)", "(These were removed to avoid PM delegating planning artifacts to Dev.)", ""]
+                for t in removed[:20]:
+                    extra.append(f"- {t.get('id','(no id)')} {t.get('title','')}")
+                notes_path.write_text((existing.rstrip() + "\n" + "\n".join(extra)).strip() + "\n", encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+        used: set[str] = set()
+        next_num = 1
+        out: list[dict[str, Any]] = []
+        for t in filtered:
+            tid = str(t.get("id") or "").strip()
+            m = re.match(r"^T(\d+)$", tid)
+            n = int(m.group(1)) if m else 0
+
+            if n >= 1 and tid and tid not in used:
+                fixed_id = tid
+            else:
+                while True:
+                    cand = f"T{next_num}"
+                    next_num += 1
+                    if cand not in used:
+                        fixed_id = cand
+                        break
+
+            used.add(fixed_id)
+            skills_val = t.get("skills") or []
+            if isinstance(skills_val, list):
+                skills = [str(s).strip() for s in skills_val if str(s).strip()]
+            elif isinstance(skills_val, str):
+                skills = [s.strip() for s in skills_val.split(",") if s.strip()]
+            else:
+                skills = []
+            out.append({
+                "id": fixed_id,
+                "title": str(t.get("title") or fixed_id).strip() or fixed_id,
+                "prompt": str(t.get("prompt") or "").strip() or f"Implement {fixed_id}.",
+                "files": t.get("files") if isinstance(t.get("files"), list) else [],
+                "done_when": str(t.get("done_when") or "Git diff exists and build passes.").strip(),
+                "skills": skills,
+                "skills_rationale": None if t.get("skills_rationale") is None else str(t.get("skills_rationale")),
+            })
+        return out
+
+    def _validate_skill_ids(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not skills_enabled or not tasks:
+            return tasks
+        autofix = bool(skills_cfg.get("skill_match_autofix", False))
+        threshold = float(skills_cfg.get("skill_match_autofix_threshold") or 0)
+        updated: list[dict[str, Any]] = []
+        for task in tasks:
+            skills_list = [str(s).strip() for s in (task.get("skills") or []) if str(s).strip()]
+            new_skills: list[str] = []
+            for sid in skills_list:
+                if sid in skills_by_id:
+                    new_skills.append(sid)
+                    continue
+                suggestions = suggest_skills(sid, skills_records, max_results=3)
+                if suggestions:
+                    top = suggestions[0]
+                    suggestion_msg = ", ".join([f"{s.skill_id}({s.name}, {s.score:.2f})" for s in suggestions])
+                    eprint(f"[SKILLS] Unknown skill_id '{sid}'. Suggestions: {suggestion_msg}")
+                    if autofix and top.score >= threshold:
+                        eprint(f"[SKILLS] Auto-fix: '{sid}' -> '{top.skill_id}' (score {top.score:.2f})")
+                        new_skills.append(top.skill_id)
+                    else:
+                        new_skills.append(sid)
+                else:
+                    eprint(f"[SKILLS] Unknown skill_id '{sid}' (no suggestions)")
+                    new_skills.append(sid)
+            new_task = dict(task)
+            new_task["skills"] = new_skills
+            updated.append(new_task)
+        return updated
 
     def ensure_backlog() -> bool:
         if backlog_json_path.exists() or backlog_md_path.exists():
             return True
+        eprint("[PM ERROR] BACKLOG not created by PM. Stopping to avoid running irrelevant tasks.")
+        try:
+            stop_path.write_text("BACKLOG missing\n", encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        metrics.event("pm_backlog_missing", cycle=-1)
         return False
 
     def load_tasks() -> list[TaskItem]:
+        tasks: list[TaskItem] = []
         if backlog_json_path.exists():
-            return load_backlog_json(backlog_json_path)
-        if backlog_md_path.exists():
-            return parse_backlog_md(backlog_md_path)
-        return []
+            try:
+                tasks = load_backlog_json(backlog_json_path)
+            except Exception as ex:
+                eprint(f"Failed to parse BACKLOG.json: {ex}")
+        if not tasks and backlog_md_path.exists():
+            tasks = parse_backlog_md(backlog_md_path)
+        return tasks
 
-    # --- Stage implementations ---
+    def _load_backlog_context_for_pm() -> tuple[str, list[TaskItem], set[str]]:
+        tasks: list[TaskItem] = []
+        if backlog_json_path.exists():
+            try:
+                tasks = load_backlog_json(backlog_json_path)
+            except Exception:
+                pass
+        if not tasks and backlog_md_path.exists():
+            try:
+                tasks = parse_backlog_md(backlog_md_path)
+            except Exception:
+                pass
+        try:
+            state_obj = load_state(state_path)
+        except Exception:
+            state_obj = {"done": [], "failed": []}
+        done_ids = set(state_obj.get("done", []) or [])
+        lines: list[str] = []
+        for t in tasks:
+            mark = "x" if t.id in done_ids else " "
+            lines.append(f"- [{mark}] {t.id} {t.title}")
+        block = "\n".join(lines) if lines else "(no backlog found)"
+        return block, tasks, done_ids
 
-    async def pm_phase(cycle_idx: int) -> StageOutcome:
-        # Skip PM if disabled in roles
-        if not any((getattr(s, "name", "") or "").strip().lower() == "pm" for s in stages):
-            return StageOutcome.skip("pm_disabled")
+    # ---------------------------------------------------------------------------
+    # PM phase (structured output with repair — same as Codex)
+    # ---------------------------------------------------------------------------
 
-        # Check stop early
+    async def _run_pm_structured(pm_prompt: str, *, max_turns: int, cycle_idx: int, kind: str, output_path: Path) -> PMOutputV2 | None:
+        retries = int(getattr(args, "pm_structured_retries", 2))
+        max_budget_retries = int(budgets_cfg.get("max_pm_structured_retries") or retries)
+        retries = min(retries, max_budget_retries) if max_budget_retries > 0 else retries
+        last_raw = ""
+        repair_prompt = ""
+        for attempt in range(retries + 1):
+            prompt = pm_prompt if attempt == 0 else repair_prompt
+            try:
+                text, structured = await _run_claude_query(
+                    cfg, prompt, repo=repo, stage="PM",
+                    stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
+                )
+            except StopRequested:
+                raise
+            except BudgetExceeded as ex:
+                metrics.event("budget_exceeded", cycle=cycle_idx, reason=str(ex))
+                return None
+            except Exception as ex:
+                if is_quota_exception(ex):
+                    raise
+                eprint(f"[PM] Claude error: {ex}")
+                if bool(getattr(args, "debug", False)):
+                    eprint(traceback.format_exc())
+                return None
+
+            if structured is not None:
+                try:
+                    last_raw = json.dumps(structured, ensure_ascii=False)
+                except Exception:
+                    last_raw = str(structured)
+            else:
+                last_raw = text
+
+            try:
+                output_path.write_text(last_raw + "\n", encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+            parsed, missing, type_errors = parse_pm_output_with_errors(last_raw, kind_hint=kind)
+            if parsed is not None:
+                metrics.event("pm_structured_parse", cycle=cycle_idx, attempt=attempt, ok=True)
+                return parsed
+            metrics.event("pm_structured_parse", cycle=cycle_idx, attempt=attempt, ok=False)
+            if attempt < retries:
+                repair_limit = int(budgets_cfg.get("max_total_repair_attempts_per_run") or 0)
+                if _budget_exceeded("total_repairs", budget_state["total_repairs"], repair_limit):
+                    metrics.event("budget_exceeded", cycle=cycle_idx, reason="total_repairs")
+                    break
+                budget_state["total_repairs"] += 1
+
+            repair_prompt = (
+                "Your previous response was invalid or did not match the required JSON schema. "
+                "Return ONLY a single JSON object with keys: kind, summary, tasks, notes_md, warnings, open_questions, analysis_updated, analysis_path. "
+                "No markdown, no prose outside JSON.\n\n"
+                f"Validation errors:\n- Missing fields: {', '.join(missing) if missing else '(none)'}\n"
+                f"- Type errors: {', '.join(type_errors) if type_errors else '(none)'}\n\n"
+                "Previous response (for repair):\n" + last_raw[:8000]
+            )
+
+        if last_raw:
+            describe_parse_failure(f"pm_{kind}", last_raw)
+
+        # Fallback: file-based artifacts
+        try:
+            bj = run_dir / "BACKLOG.json"
+            if bj.exists():
+                fb_tasks = load_backlog_json(bj)
+                if fb_tasks:
+                    notes_md = None
+                    notes_p = run_dir / "NOTES.md"
+                    if notes_p.exists():
+                        try:
+                            notes_md = notes_p.read_text(encoding="utf-8-sig", errors="replace")
+                        except Exception:
+                            notes_md = notes_p.read_text(encoding="utf-8", errors="replace")
+                    return PMOutputV2(
+                        kind=kind,
+                        summary="PM output JSON did not validate; loaded tasks from run_dir/BACKLOG.json.",
+                        tasks=[{"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files, "done_when": t.done_when or "Git diff exists and build passes."} for t in fb_tasks],
+                        notes_md=notes_md,
+                        warnings=[], open_questions=[],
+                        analysis_updated=False, analysis_path=str(analysis_md),
+                    )
+        except Exception:
+            pass
+        return None
+
+    async def run_pm_if_needed(cycle_idx: int, curr_head: str, changed_files: list[str], repo_fp: str, force_refresh_backlog: bool = False) -> bool:
+        nonlocal last_pm_fp, prev_head
+
+        need_bootstrap = not analysis_md.exists()
+        need_incremental = False
+        force_refresh = bool(force_refresh_backlog)
+
+        if not need_bootstrap:
+            if changed_files:
+                need_incremental = True
+            elif bool(getattr(args, "pm_include_working_tree", False)) and repo_fp and repo_fp != last_pm_fp:
+                need_incremental = True
+            if bool(getattr(args, "pm_refresh_backlog", False)):
+                pm_refresh_every = int(getattr(args, "pm_refresh_every_cycles", 0) or 0)
+                if pm_refresh_every and pm_refresh_every > 0:
+                    if (cycle_idx % pm_refresh_every) == 0:
+                        force_refresh = True
+
         if stop_path.exists():
-            return StageOutcome.stop("stop_file", rc=0)
+            return True
 
-        curr_head = git_head(repo).strip()
+        pm_output_path = run_dir / f"pm_final_output_cycle_{cycle_idx:03d}.txt"
 
-        # Merge dev hints into global changelog (cheap context merge)
+        try:
+            inventory = build_repo_inventory(repo)
+            _, inv_md = write_repo_inventory_files(repo, pm_cache_dir, inventory)
+        except Exception as inv_ex:
+            metrics.event("inventory_error", cycle=cycle_idx, error=str(inv_ex))
+            inv_md = pm_cache_dir / "REPO_INVENTORY.md"
+            try:
+                pm_cache_dir.mkdir(parents=True, exist_ok=True)
+                inv_md.write_text("# REPO_INVENTORY\n\n- (inventory generation failed)\n", encoding="utf-8", errors="replace")
+            except Exception:
+                inv_md = run_dir / "REPO_INVENTORY.md"
+                try:
+                    inv_md.write_text("# REPO_INVENTORY\n\n- (inventory generation failed)\n", encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+
+        todo_path, todo_text = read_current_todo(repo)
+        todo_block = format_todo_block(todo_path, todo_text)
+
+        try:
+            if need_bootstrap:
+                metrics.event("pm_start", cycle=cycle_idx, kind="bootstrap")
+                ctx = {
+                    "analysis_md": str(analysis_md), "inv_md": str(inv_md),
+                    "repo": str(repo), "run_dir": str(run_dir),
+                    "todo_block": todo_block,
+                    "docs_dir": str(docs_dir) if docs_dir else "(none)",
+                    "docs_read_mode": docs_read_mode, "digest_rel": str(digest_rel),
+                    "skills_index_summary": skills_index_summary,
+                    "codex_call_hint": codex_call_hint(autopilot),
+                }
+                pm_prompt = append_pm_output_contract(store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx))
+                pm_out = await _run_pm_structured(pm_prompt, max_turns=int(getattr(args, "pm_bootstrap_max_turns", 30) or 30), cycle_idx=cycle_idx, kind="bootstrap", output_path=pm_output_path)
+                if pm_out is None:
+                    metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=1, error="structured_output_failed")
+                    return False
+
+                (run_dir / f"PM_OUTPUT_cycle_{cycle_idx:03d}.json").write_text(dump_pretty(pm_out.model_dump()) + "\n", encoding="utf-8", errors="replace")
+                if pm_out.notes_md:
+                    (run_dir / "NOTES_PM.md").write_text(pm_out.notes_md.strip() + "\n", encoding="utf-8", errors="replace")
+
+                current_backlog_block, existing_tasks, done_ids = _load_backlog_context_for_pm()
+                existing_pending = [t for t in existing_tasks if t.id not in done_ids]
+                merged_tasks: list[dict[str, Any]] = [t.model_dump() for t in (pm_out.tasks or [])]
+                pm_ids = {str(t.get("id", "")).strip() for t in merged_tasks if isinstance(t, dict)}
+                for t in existing_pending:
+                    if t.id not in pm_ids:
+                        merged_tasks.append({"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files or [], "done_when": t.done_when, "skills": t.skills or [], "skills_rationale": t.skills_rationale})
+                if merged_tasks:
+                    merged_tasks = _normalize_backlog_tasks(merged_tasks)
+                    merged_tasks = _validate_skill_ids(merged_tasks)
+                    if merged_tasks:
+                        try:
+                            existing_tasks_2 = load_tasks()
+                            state_obj = load_state(state_path)
+                            done_ids_2 = set(state_obj.get("done", []) or [])
+                            qa_followups = [{"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files, "done_when": t.done_when, "skills": t.skills, "skills_rationale": t.skills_rationale} for t in existing_tasks_2 if t.id.startswith("QA-FU-") and t.id not in done_ids_2]
+                            if qa_followups:
+                                merged_tasks = _merge_qa_followups(merged_tasks, qa_followups, done_ids_2)
+                        except Exception:
+                            pass
+                        write_backlog_files(run_dir, merged_tasks)
+
+                last_pm_fp = repo_fp or last_pm_fp
+                pm_fp_path.write_text(json.dumps({"fingerprint": last_pm_fp, "updated_at": now_iso()}, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
+                metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=0)
+                return True
+
+            if need_incremental or force_refresh:
+                metrics.event("pm_start", cycle=cycle_idx, kind="incremental" if need_incremental else "refresh")
+                changed_files_block = "\n".join([f"- {p}" for p in (changed_files or [])]) or "- (none)"
+                hint_lines: list[str] = []
+                if dev_hints_dir.exists():
+                    for hf in sorted(dev_hints_dir.glob("*.md"), key=lambda x: x.stat().st_mtime)[-12:]:
+                        try:
+                            rel = hf.relative_to(run_dir).as_posix()
+                            content = hf.read_text(encoding="utf-8", errors="replace").strip()
+                            hint_lines.append(f"- {rel}:")
+                            hint_lines.extend([f"  {ln}" for ln in content.splitlines()[:10]])
+                        except Exception:
+                            continue
+                hint_block = "\n".join(hint_lines) or "(none)"
+                current_backlog_block, _, _ = _load_backlog_context_for_pm()
+
+                ctx = {
+                    "analysis_md": str(analysis_md), "inv_md": str(inv_md),
+                    "repo": str(repo), "run_dir": str(run_dir),
+                    "todo_block": todo_block,
+                    "docs_dir": str(docs_dir) if docs_dir else "(none)",
+                    "docs_read_mode": docs_read_mode, "digest_rel": str(digest_rel),
+                    "skills_index_summary": skills_index_summary,
+                    "codex_call_hint": codex_call_hint(autopilot),
+                    "prev_head": prev_head or curr_head, "curr_head": curr_head,
+                    "changed_files_block": changed_files_block,
+                    "current_backlog_block": current_backlog_block,
+                    "hint_block": hint_block,
+                }
+                pm_prompt = append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx))
+                pm_out = await _run_pm_structured(pm_prompt, max_turns=int(getattr(args, "pm_incremental_max_turns", 15) or 15), cycle_idx=cycle_idx, kind="incremental" if need_incremental else "refresh", output_path=pm_output_path)
+                if pm_out is None:
+                    metrics.event("pm_end", cycle=cycle_idx, kind="incremental" if need_incremental else "refresh", rc=1, error="structured_output_failed")
+                    return False
+
+                (run_dir / f"PM_OUTPUT_cycle_{cycle_idx:03d}.json").write_text(dump_pretty(pm_out.model_dump()) + "\n", encoding="utf-8", errors="replace")
+                if pm_out.notes_md:
+                    (run_dir / "NOTES_PM.md").write_text(pm_out.notes_md.strip() + "\n", encoding="utf-8", errors="replace")
+
+                current_backlog_block, existing_tasks, done_ids = _load_backlog_context_for_pm()
+                existing_pending = [t for t in existing_tasks if t.id not in done_ids]
+                merged_tasks = [t.model_dump() for t in (pm_out.tasks or [])]
+                pm_ids = {str(t.get("id", "")).strip() for t in merged_tasks if isinstance(t, dict)}
+                for t in existing_pending:
+                    if t.id not in pm_ids:
+                        merged_tasks.append({"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files or [], "done_when": t.done_when, "skills": t.skills or [], "skills_rationale": t.skills_rationale})
+                if merged_tasks:
+                    merged_tasks = _normalize_backlog_tasks(merged_tasks)
+                    merged_tasks = _validate_skill_ids(merged_tasks)
+                    if merged_tasks:
+                        write_backlog_files(run_dir, merged_tasks)
+
+                last_pm_fp = repo_fp or last_pm_fp
+                pm_fp_path.write_text(json.dumps({"fingerprint": last_pm_fp, "updated_at": now_iso()}, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
+                metrics.event("pm_end", cycle=cycle_idx, kind="incremental" if need_incremental else "refresh", rc=0)
+                return True
+
+            metrics.event("pm_skip", cycle=cycle_idx)
+            return True
+        except Exception as ex:
+            eprint(f"[PM ERROR] {ex}")
+            if is_quota_exception(ex):
+                pm_stop_reason["reason"] = STOP_REASON_QUOTA
+                try:
+                    stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+                metrics.event("runner_stop", cycle=cycle_idx, reason=STOP_REASON_QUOTA)
+                try:
+                    await write_shutdown_report(STOP_REASON_QUOTA, cycle=cycle_idx, step=-1)
+                except Exception:
+                    pass
+            metrics.event("pm_end", cycle=cycle_idx, rc=1, error=str(ex))
+            return False
+
+    # ---------------------------------------------------------------------------
+    # Dev loop (full parity with Codex — escalation, continuations, policy scan)
+    # ---------------------------------------------------------------------------
+
+    policy_scan_summary: Optional[dict[str, Any]] = None
+    security_scan_summary: Optional[dict[str, Any]] = None
+
+    async def run_dev_loop(
+        cycle_idx: int, tasks: list[TaskItem],
+        curr_head: str, changed_files: list[str], repo_fp: str, cycle_t0: float,
+    ) -> tuple[int, str, int, bool]:
+        nonlocal policy_scan_summary
+
+        state = load_state(state_path)
+        done_set = set(state.get("done", []))
+        task_ids = {t.id for t in tasks}
+        before_done = len(done_set.intersection(task_ids))
+
+        if pm_stage_enabled and bool(getattr(args, "pm_refresh_backlog", False)) and (before_done >= len(task_ids)):
+            pm_ok2 = await run_pm_if_needed(cycle_idx, curr_head, changed_files, repo_fp, force_refresh_backlog=True)
+            if not pm_ok2:
+                if pm_stop_reason.get("reason") == STOP_REASON_QUOTA:
+                    return 0, STOP_REASON_QUOTA, 0, (len(done_set) > before_done)
+                if stop_path.exists():
+                    detected = detect_stop_reason([stop_path])
+                    return 0, (detected or STOP_REASON_STOP_FILE), 0, (len(done_set) > before_done)
+                return 1, "pm_failed", 0, (len(done_set) > before_done)
+            ensure_backlog()
+            tasks = load_tasks()
+            task_ids = {t.id for t in tasks}
+            before_done = len(done_set.intersection(task_ids))
+
+        tasks_root = run_dir / "tasks"
+        tasks_root.mkdir(parents=True, exist_ok=True)
+
+        iterations = int(getattr(args, "iterations", 10) or 10)
+
+        for step in range(iterations):
+            if stop_path.exists():
+                break
+
+            next_task: Optional[TaskItem] = None
+            for t in tasks:
+                if t.id not in done_set:
+                    next_task = t
+                    break
+            if not next_task:
+                break
+
+            task_dir = tasks_root / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}"
+            task_dir.mkdir(parents=True, exist_ok=True)
+
+            metrics.event("task_start", cycle=cycle_idx, step=step, task_id=next_task.id)
+
+            cp: Optional[RepoCheckpoint] = None
+            if bool(getattr(args, "isolate_task", False)):
+                metrics.event("checkpoint_start", cycle=cycle_idx, step=step, task_id=next_task.id)
+                cp = create_checkpoint(repo, task_dir / "checkpoint")
+                metrics.event("checkpoint_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0)
+
+            # Dev model tiering
+            dev_auto_escalate = bool(getattr(args, "dev_auto_escalate", False))
+            dev_max_escalations = int(getattr(args, "dev_max_escalations", 0) or 0)
+            dev_escalate_on = set(getattr(args, "dev_escalate_on", []) or [])
+            per_task_escalations = budget_state["per_task_escalations"]
+            per_task_escalations.setdefault(next_task.id, 0)
+            max_escalations_per_task_budget = int(budgets_cfg.get("max_dev_escalations_per_task") or 0)
+            if max_escalations_per_task_budget > 0:
+                dev_max_escalations = min(dev_max_escalations, max_escalations_per_task_budget)
+
+            base_model = str(getattr(args, "dev_model", "") or cfg.model)
+            tiers: list[str] = [base_model]
+            t1 = str(getattr(args, "dev_model_tier1", "") or "").strip()
+            t2 = str(getattr(args, "dev_model_tier2", "") or "").strip()
+            if t1 and t1 not in tiers:
+                tiers.append(t1)
+            if t2 and t2 not in tiers:
+                tiers.append(t2)
+
+            max_attempts = 1
+            if dev_auto_escalate and dev_max_escalations > 0:
+                max_attempts = min(1 + dev_max_escalations, len(tiers))
+
+            if dev_auto_escalate and not cp:
+                metrics.event("checkpoint_start", cycle=cycle_idx, step=step, task_id=next_task.id, reason="retry_escalation")
+                cp = create_checkpoint(repo, task_dir / "checkpoint")
+                metrics.event("checkpoint_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0, reason="retry_escalation")
+
+            task_completed = False
+
+            def _restore_or_stop(reason: str) -> tuple[bool, str]:
+                if not cp:
+                    return True, ""
+                try:
+                    restore_checkpoint(repo, cp, dangerous=bool(getattr(args, "dangerous_git_rollback", False)), run_dir=run_dir, stop_path=stop_path)
+                    metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason=reason)
+                    return True, ""
+                except Exception as ex:
+                    detail = str(ex)
+                    blocked = "blocked" in detail.lower()
+                    fail_reason = "rollback_blocked" if blocked else "rollback_failed"
+                    state.setdefault("failed", []).append({"task": next_task.id, "reason": fail_reason, "detail": detail})
+                    save_state(state_path, state)
+                    metrics.event("rollback_failed", cycle=cycle_idx, step=step, task_id=next_task.id, reason=reason, detail=detail)
+                    eprint(f"[STOP] Rollback {fail_reason}: {detail}")
+                    return False, fail_reason
+
+            for attempt in range(max_attempts):
+                if stop_path.exists():
+                    break
+
+                if attempt > 0 and dev_auto_escalate:
+                    if _budget_exceeded("total_escalations", budget_state["total_escalations"], int(budgets_cfg.get("max_total_escalations_per_run") or 0)):
+                        metrics.event("budget_exceeded", cycle=cycle_idx, step=step, task_id=next_task.id, reason="total_escalations")
+                        return 1, "budget_exceeded", 0, (len(done_set) > before_done)
+                    budget_state["total_escalations"] += 1
+                    per_task_escalations[next_task.id] += 1
+                    metrics.event("escalate_attempt", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
+
+                if attempt > 0 and cp:
+                    ok, fail_reason = _restore_or_stop("retry")
+                    if not ok:
+                        return 1, fail_reason, 0, (len(done_set) > before_done)
+
+                model_name = tiers[attempt]
+                attempt_dir = task_dir / f"attempt_{attempt:02d}"
+                attempt_dir.mkdir(parents=True, exist_ok=True)
+
+                before = git_porcelain(repo)
+                analysis_hint_out = dev_hints_dir / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}_a{attempt:02d}.md"
+                files_hint = "\n".join([f"- {f}" for f in (next_task.files or [])]) or "- (unspecified)"
+                skills_context = _format_skill_selection(next_task.skills or [], skills_by_id)
+                dev_ctx = {
+                    "repo": str(repo), "run_dir": str(run_dir),
+                    "task_id": next_task.id, "task_title": next_task.title,
+                    "task_prompt": next_task.prompt, "files_hint": files_hint,
+                    "skills_context": skills_context,
+                    "done_when": next_task.done_when or "(unspecified)",
+                    "docs_read_mode": docs_read_mode, "digest_rel": str(digest_rel),
+                    "analysis_hint_out": str(analysis_hint_out),
+                    "codex_call_hint": codex_call_hint(autopilot),
+                }
+                dev_prompt = store.render("dev_task_prompt", DEV_TASK_TEMPLATE_DEFAULT, dev_ctx)
+
+                metrics.event("dev_attempt_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, model=model_name)
+                logger.set_context(cycle=cycle_idx, step=step, model=model_name, max_turns=int(getattr(args, "max_turns_per_task", 12) or 12), timeout_sec=0)
+                logger.task_start(task_id=next_task.id, task_title=next_task.title, attempt=attempt, files=next_task.files or [])
+
+                task_start_time = time.time()
+                dev_exc: Optional[Exception] = None
+                dev_is_max_turns = False
+                dev_quota_exhausted = False
+                dev_final = ""
+
+                try:
+                    text, _structured = await _run_claude_query(
+                        cfg, dev_prompt, repo=repo, stage="Dev",
+                        stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
+                        model_override=model_name,
+                    )
+                    dev_final = text or ""
+                    task_duration = time.time() - task_start_time
+                    logger.timing("dev_task_execution", task_duration, task_id=next_task.id, attempt=attempt)
+                except StopRequested:
+                    if cp:
+                        ok, fail_reason = _restore_or_stop("stop_requested")
+                        if not ok:
+                            return 1, fail_reason, 0, (len(done_set) > before_done)
+                    return 0, STOP_REASON_STOP_FILE, 0, (len(done_set) > before_done)
+                except Exception as ex:
+                    dev_exc = ex
+                    dev_final = ""
+                    dev_is_max_turns = is_max_turns_exception(ex)
+                    dev_quota_exhausted = is_quota_exception(ex)
+                    task_duration = time.time() - task_start_time
+                    logger.error(
+                        f"Dev task execution failed: {next_task.id}", exc=ex, include_traceback=True,
+                        task_id=next_task.id, task_title=next_task.title, attempt=attempt,
+                        duration_sec=task_duration, is_max_turns=dev_is_max_turns, is_quota_exhausted=dev_quota_exhausted,
+                    )
+                    eprint(f"[DEV ERROR] {ex}")
+                    if bool(getattr(args, "debug", False)):
+                        eprint(traceback.format_exc())
+
+                dev_log = dev_final or ""
+                if dev_exc:
+                    exc_header = f"{type(dev_exc).__name__}: {str(dev_exc)}" if str(dev_exc) else type(dev_exc).__name__
+                    exc_traceback = traceback.format_exc()
+                    dev_log += f"\n[EXCEPTION]\n{exc_header}\n\nTraceback:\n{exc_traceback}\n"
+
+                (attempt_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
+                (run_dir / "dev_logs").mkdir(parents=True, exist_ok=True)
+                (run_dir / "dev_logs" / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}_a{attempt:02d}.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
+
+                dev_quota_exhausted = dev_quota_exhausted or has_quota_text(dev_log)
+                if isinstance(dev_exc, BudgetExceeded):
+                    metrics.event("budget_exceeded", cycle=cycle_idx, step=step, task_id=next_task.id, reason=str(dev_exc))
+                    return 1, "budget_exceeded", 0, (len(done_set) > before_done)
+                if dev_quota_exhausted:
+                    state.setdefault("warnings", []).append({"task": next_task.id, "reason": STOP_REASON_QUOTA, "detail": str(dev_exc) if dev_exc else "usage limit"})
+                    save_state(state_path, state)
+                    metrics.event("runner_stop", cycle=cycle_idx, step=step, task_id=next_task.id, reason=STOP_REASON_QUOTA)
+                    try:
+                        stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
+                    except Exception:
+                        pass
+                    try:
+                        await write_shutdown_report(STOP_REASON_QUOTA, cycle=cycle_idx, step=step, last_task_id=next_task.id)
+                    except Exception:
+                        pass
+                    return 0, STOP_REASON_QUOTA, 0, (len(done_set) > before_done)
+
+                if dev_exc and is_model_invalid_exception(dev_exc):
+                    if (attempt + 1) < max_attempts:
+                        metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="model_invalid")
+                        continue
+
+                if dev_exc and not dev_is_max_turns:
+                    state.setdefault("failed", []).append({"task": next_task.id, "reason": "exception", "detail": str(dev_exc)})
+                    save_state(state_path, state)
+                    metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="exception")
+                    logger.task_end(task_id=next_task.id, success=False, reason="exception", exception=str(dev_exc))
+                    if cp:
+                        ok, fail_reason = _restore_or_stop("exception")
+                        if not ok:
+                            return 1, fail_reason, 0, (len(done_set) > before_done)
+                    return 1, "dev_exception", 0, (len(done_set) > before_done)
+
+                if dev_exc and dev_is_max_turns:
+                    state.setdefault("warnings", []).append({"task": next_task.id, "reason": "max_turns_exceeded", "detail": str(dev_exc)})
+                    save_state(state_path, state)
+                    metrics.event("task_warn", cycle=cycle_idx, step=step, task_id=next_task.id, reason="max_turns_exceeded")
+
+                after = git_porcelain(repo)
+                changed = (before != after)
+
+                if stop_on_no_diff and not changed:
+                    if dev_is_max_turns and dev_auto_escalate and (attempt + 1) < max_attempts:
+                        eprint(f"[INFO] Max turns exceeded with no diff for {next_task.id}. Auto-retrying with escalation...")
+                        metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="max_turns_no_diff")
+                        continue
+                    if dev_auto_escalate and (attempt + 1) < max_attempts and "no_diff" in dev_escalate_on:
+                        metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="no_diff")
+                        continue
+                    state.setdefault("failed", []).append({"task": next_task.id, "reason": "no_diff"})
+                    save_state(state_path, state)
+                    metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="no_diff")
+                    logger.task_end(task_id=next_task.id, success=False, reason="no_diff", was_max_turns=dev_is_max_turns)
+                    eprint(f"[STOP] No diff produced for {next_task.id}.")
+                    if cp:
+                        ok, fail_reason = _restore_or_stop("no_diff")
+                        if not ok:
+                            return 1, fail_reason, 0, (len(done_set) > before_done)
+                    return 1, "no_diff", 0, (len(done_set) > before_done)
+
+                if build_enabled:
+                    metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
+                    ok = await run_build_gate_async(
+                        repo=repo, build_cmd=getattr(args, "build_cmd", []),
+                        build_timeout_sec=int(getattr(args, "build_timeout_seconds", 1800)),
+                        legacy_build_target=str(getattr(args, "dotnet_build_target", "") or ""),
+                        log_path=attempt_dir / "build.txt", stop_path=stop_path,
+                    )
+                    metrics.event("build_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
+                    if not ok:
+                        if dev_auto_escalate and (attempt + 1) < max_attempts and "build_failed" in dev_escalate_on:
+                            metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="build_failed")
+                            continue
+                        state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
+                        save_state(state_path, state)
+                        eprint(f"[STOP] Build failed after {next_task.id}. See {attempt_dir / 'build.txt'}")
+                        if cp:
+                            ok_r, fr = _restore_or_stop("build_failed")
+                            if not ok_r:
+                                return 1, fr, 0, (len(done_set) > before_done)
+                        return 1, "build_failed", 0, (len(done_set) > before_done)
+
+                if run_tests:
+                    metrics.event("test_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
+                    ok = await run_test_gate_async(
+                        repo=repo, test_cmd=getattr(args, "test_cmd", []),
+                        test_timeout_sec=int(getattr(args, "test_timeout_seconds", 3600)),
+                        legacy_test_target=str(getattr(args, "dotnet_test_target", "") or ""),
+                        legacy_test_filter=str(getattr(args, "dotnet_test_filter", "") or ""),
+                        log_path=attempt_dir / "test.txt", stop_path=stop_path,
+                    )
+                    metrics.event("test_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
+                    if not ok:
+                        if dev_auto_escalate and (attempt + 1) < max_attempts and "test_failed" in dev_escalate_on:
+                            metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="test_failed")
+                            continue
+                        state.setdefault("failed", []).append({"task": next_task.id, "reason": "test_failed"})
+                        save_state(state_path, state)
+                        eprint(f"[STOP] Tests failed after {next_task.id}. See {attempt_dir / 'test.txt'}")
+                        if cp:
+                            ok_r, fr = _restore_or_stop("test_failed")
+                            if not ok_r:
+                                return 1, fr, 0, (len(done_set) > before_done)
+                        return 1, "test_failed", 0, (len(done_set) > before_done)
+
+                if policy_scan_enabled:
+                    policy_scan_ignore = list(scan_ignore_paths)
+                    if policy_ignore_paths:
+                        policy_scan_ignore = list(dict.fromkeys([*policy_scan_ignore, *policy_ignore_paths]))
+                    scan_files, scan_stats = _collect_scan(policy_scan_scope, ignore_paths=policy_scan_ignore)
+                    scan_result = policy_scan_files(scan_files, policy_rules, allow_patterns=policy_allow_patterns, ignore_paths=policy_scan_ignore)
+                    violations = scan_result.get("violations", [])
+                    fail_hits = [v for v in violations if _severity_at_or_above(str(v.get("severity", "")), policy_fail_severity)]
+                    scan_result["stats"] = scan_stats
+                    scan_result["ok"] = len(fail_hits) == 0
+                    scan_result["fail_severity"] = policy_fail_severity
+                    scan_result["fail_violations"] = fail_hits
+                    policy_scan_summary = {
+                        "scope": scan_stats.get("scope", policy_scan_scope),
+                        "files_scanned": scan_stats.get("files_scanned", 0),
+                        "bytes_scanned": scan_stats.get("bytes_scanned", 0),
+                        "files_skipped": scan_stats.get("files_skipped", 0),
+                        "violations_total": len(violations),
+                        "violations_fail": len(fail_hits),
+                    }
+                    metrics.event("policy_scan_summary", cycle=cycle_idx, step=step, **policy_scan_summary)
+                    (attempt_dir / "policy_scan.json").write_text(json.dumps(scan_result, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
+                    (run_dir / "policy_scan.json").write_text(json.dumps({"cycle": cycle_idx, "step": step, "task_id": next_task.id, **scan_result}, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
+                    (run_dir / f"policy_scan_cycle_{cycle_idx:03d}.json").write_text(json.dumps({"cycle": cycle_idx, "step": step, "task_id": next_task.id, **scan_result}, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
+                    try:
+                        with (run_dir / "policy_scan_history.jsonl").open("a", encoding="utf-8", errors="replace") as f:
+                            f.write(json.dumps({"ts": now_iso(), "cycle": cycle_idx, "step": step, "task_id": next_task.id, **scan_result}, ensure_ascii=False) + "\n")
+                    except Exception:
+                        pass
+                    if not scan_result.get("ok", True):
+                        state.setdefault("failed", []).append({"task": next_task.id, "reason": "policy_violation"})
+                        save_state(state_path, state)
+                        eprint(f"[STOP] Policy scan failed after {next_task.id}. See {attempt_dir / 'policy_scan.json'}")
+                        metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="policy_violation", violations=len(fail_hits))
+                        if cp:
+                            ok_r, fr = _restore_or_stop("policy_violation")
+                            if not ok_r:
+                                return 1, fr, 0, (len(done_set) > before_done)
+                        return 1, "policy_violation", 0, (len(done_set) > before_done)
+
+                metrics.event("dev_attempt_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0)
+                logger.task_end(task_id=next_task.id, success=True, reason="completed", attempt=attempt)
+                task_completed = True
+                break
+
+            if not task_completed:
+                state.setdefault("failed", []).append({"task": next_task.id, "reason": "exhausted_attempts"})
+                save_state(state_path, state)
+                logger.task_end(task_id=next_task.id, success=False, reason="exhausted_attempts", attempts=max_attempts)
+                return 1, "exhausted_attempts", 0, (len(done_set) > before_done)
+
+            done_set.add(next_task.id)
+            state["done"] = sorted(list(done_set))
+            save_state(state_path, state)
+            mark_backlog_done(backlog_md_path, next_task.id)
+
+            (run_dir / "progress.txt").write_text(f"done={len(done_set)}/{len(tasks)} last={next_task.id}\n", encoding="utf-8", errors="replace")
+            code, names = run_cmd(["git", "diff", "--name-only"], cwd=repo, timeout_sec=60)
+            files_changed_count = len([ln for ln in names.splitlines() if ln.strip()]) if code == 0 else 0
+            metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0, files_changed_count=files_changed_count)
+
         try:
             merge_dev_hints_to_global_changelog(analysis_md, dev_hints_dir, curr_head)
         except Exception:
             pass
 
-        # Inventory (always available for PM)
-        try:
-            inv = build_repo_inventory(repo)
-        except Exception as ex:
-            eprint(f"[PM] inventory build failed: {ex}")
-            inv = []
-        _, inv_md = write_repo_inventory_files(repo, pm_cache_dir, inv)
+        ran_tasks = (len(done_set) > before_done)
+        cycle_dt = time.time() - cycle_t0
+        failed_count = len(state.get("failed", []))
+        summary = {
+            "ts": now_iso(), "cycle": cycle_idx, "run_dir": str(run_dir),
+            "done": len(done_set), "total_tasks": len(tasks), "failed_count": failed_count,
+            "duration_seconds": cycle_dt, "build_enabled": build_enabled,
+            "run_tests": run_tests, "policy_scan_enabled": policy_scan_enabled,
+        }
+        last_run_summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
+        done_count = len(done_set.intersection(task_ids))
+        total_count = len(task_ids)
+        append_cycle_summary(f"{now_iso()} cycle={cycle_idx} done={done_count}/{total_count} failed={failed_count} dt={cycle_dt:.1f}s")
+        metrics.event("cycle_end", cycle=cycle_idx, rc=0, done=done_count, total=total_count, failed=failed_count, duration_seconds=cycle_dt)
 
-        # Change detection
+        done_delta = done_count - before_done
+
+        try:
+            latest_head = git_head(repo).strip()
+            if latest_head:
+                snapshot_json.write_text(json.dumps({"head": latest_head, "updated_at": now_iso()}, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
+                prev_head = latest_head
+        except Exception:
+            pass
+
+        if total_count > 0 and done_count >= total_count:
+            return 0, STOP_REASON_ALL_TASKS_DONE, done_delta, ran_tasks
+
+        return 0, "ok", done_delta, ran_tasks
+
+    # ---------------------------------------------------------------------------
+    # QA phase (with followup injection — same as Codex)
+    # ---------------------------------------------------------------------------
+
+    async def run_qa_if_needed(cycle_idx: int, ran_tasks: bool) -> dict[str, Any]:
+        if stop_path.exists():
+            return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0}
+        qa_always = bool(getattr(args, "qa_always", False))
+        if not (qa_always or ran_tasks):
+            metrics.event("qa_skip", cycle=cycle_idx, reason="no_progress")
+            return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0}
+        try:
+            metrics.event("qa_start", cycle=cycle_idx)
+            skills_context = "(skills disabled)"
+            if skills_enabled:
+                skill_ids: list[str] = []
+                for t in load_tasks():
+                    skill_ids.extend(t.skills or [])
+                deduped = list(dict.fromkeys([s for s in skill_ids if s]))
+                selected_records = [skills_by_id[sid] for sid in deduped if sid in skills_by_id]
+                include_excerpts = _inline_skills_for("qa", skills_cfg.get("inline_mode", ""))
+                skills_context = build_skills_context(
+                    selected_records,
+                    max_excerpt_lines=int(skills_cfg.get("max_excerpt_lines", 0) or 0),
+                    total_char_cap=int(skills_cfg.get("qa_max_total_chars", 0) or 0),
+                    include_excerpts=include_excerpts,
+                )
+                missing = [sid for sid in deduped if sid not in skills_by_id]
+                if missing:
+                    skills_context += "\nMissing skills: " + ", ".join(missing)
+
+            qa_ctx = {"repo": str(repo), "run_dir": str(run_dir), "skills_context": skills_context}
+            qa_prompt = store.render("qa_prompt", QA_TEMPLATE_DEFAULT, qa_ctx)
+            if bool(getattr(args, "qa_to_backlog", False)):
+                qa_prompt = qa_prompt.rstrip() + "\n\n" + QA_FOLLOWUPS_OUTPUT_CONTRACT + "\n"
+
+            text, _structured = await _run_claude_query(
+                cfg, qa_prompt, repo=repo, stage="QA",
+                stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
+            )
+
+            qa_output_path = run_dir / f"qa_final_output_cycle_{cycle_idx:03d}.txt"
+            qa_output_path.write_text((text or "") + "\n", encoding="utf-8", errors="replace")
+
+            followups_added = 0
+            followups_candidates = 0
+            followups_skipped = 0
+            parse_ok: Optional[bool] = None
+
+            if bool(getattr(args, "qa_to_backlog", False)):
+                qa_text = qa_output_path.read_text(encoding="utf-8", errors="replace")
+                max_items = int(getattr(args, "max_qa_followups", 5)) or 5
+                parsed_qa, parse_err = parse_qa_followups(qa_text)
+                if parsed_qa is not None:
+                    parse_ok = True
+                    followups = _followups_from_structured(parsed_qa, max_items=max_items)
+                else:
+                    parse_ok = False
+                    followups = _extract_qa_followups(qa_text, max_items=max_items)
+                    metrics.event("qa_followups_parse", cycle=cycle_idx, parse_ok=False, error=str(parse_err or "parse_failed"))
+                if parse_ok:
+                    metrics.event("qa_followups_parse", cycle=cycle_idx, parse_ok=True)
+                if followups:
+                    followups_candidates = len(followups)
+                    state_obj = load_state(state_path)
+                    done_ids = set(state_obj.get("done", []) or [])
+                    existing = load_tasks()
+                    base_tasks = [{"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files, "done_when": t.done_when, "skills": t.skills, "skills_rationale": t.skills_rationale} for t in existing]
+                    merged = _merge_qa_followups(base_tasks, followups, done_ids)
+                    followups_added = max(0, len(merged) - len(base_tasks))
+                    followups_skipped = max(0, followups_candidates - followups_added)
+                    write_backlog_files(run_dir, merged)
+                (run_dir / f"qa_followups_cycle_{cycle_idx:03d}.json").write_text(
+                    json.dumps({"cycle": cycle_idx, "parse_ok": parse_ok, "candidates_count": followups_candidates, "added_count": followups_added, "skipped_count": followups_skipped, "tasks": followups if 'followups' in dir() else []}, ensure_ascii=False, indent=2),
+                    encoding="utf-8", errors="replace",
+                )
+            metrics.event("qa_end", cycle=cycle_idx, rc=0)
+            return {"parse_ok": parse_ok, "candidates": followups_candidates, "added": followups_added, "skipped": followups_skipped}
+        except StopRequested:
+            return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0}
+        except Exception as ex:
+            if is_quota_exception(ex):
+                try:
+                    stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+                metrics.event("runner_stop", stage="qa", reason="quota_exhausted")
+            metrics.event("qa_end", cycle=cycle_idx, rc=1, error=str(ex))
+            return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0}
+
+    # ---------------------------------------------------------------------------
+    # Shutdown report
+    # ---------------------------------------------------------------------------
+
+    async def write_shutdown_report(stop_reason: str, *, cycle: int, step: int, last_task_id: Optional[str] = None) -> None:
+        report_path = run_dir / "SHUTDOWN_REPORT.md"
+        ctx_path = run_dir / "SHUTDOWN_CONTEXT.json"
+        ctx_obj: dict[str, Any]
+        try:
+            ctx_obj = collect_shutdown_context(repo, run_dir)
+            ctx_obj["stop_reason"] = stop_reason
+            if last_task_id:
+                ctx_obj["last_task_id"] = last_task_id
+            ctx_path.write_text(json.dumps(ctx_obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+        except Exception:
+            ctx_obj = {"stop_reason": stop_reason}
+            try:
+                ctx_path.write_text(json.dumps(ctx_obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+        try:
+            local_md = build_local_shutdown_report(repo, run_dir, reason=stop_reason, last_task_id=last_task_id)
+            report_path.write_text(local_md, encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        # Try PM-authored report via Claude SDK
+        try:
+            reporter_prompt = store.render("pm_shutdown_report_prompt", PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT, {"stop_reason": stop_reason, "context_json": json.dumps(ctx_obj, ensure_ascii=False, indent=2)})
+            text, _ = await _run_claude_query(
+                cfg, reporter_prompt, repo=repo, stage="QA",
+                stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
+            )
+            if text and text.strip():
+                report_path.write_text(text.strip() + "\n", encoding="utf-8", errors="replace")
+                (run_dir / "PM_SHUTDOWN_REPORT_OUTPUT.txt").write_text(text.strip() + "\n", encoding="utf-8", errors="replace")
+            metrics.event("shutdown_report", cycle=cycle, step=step, reason=stop_reason, ok=bool(text))
+        except Exception as ex:
+            metrics.event("shutdown_report", cycle=cycle, step=step, reason=stop_reason, ok=False, error=str(ex))
+
+    # ---------------------------------------------------------------------------
+    # Security phase
+    # ---------------------------------------------------------------------------
+
+    async def security_phase_fn(ci: int) -> StageOutcome:
+        nonlocal security_scan_summary
+        if not security_enabled:
+            return StageOutcome.skip("security_disabled")
+        if stop_path.exists():
+            return StageOutcome.stop("stop_file")
+        metrics.event("security_start", cycle=ci)
+        scan_files, scan_stats = _collect_scan(security_scan_scope)
+        scan_result = security_scan_files(scan_files, security_rules, ignore_paths=scan_ignore_paths)
+        findings = scan_result.get("findings", [])
+        fail_hits = [f for f in findings if _severity_at_or_above(str(f.get("severity", "")), security_fail_severity)]
+        ok = len(fail_hits) == 0
+        security_scan_summary = {
+            "scope": scan_stats.get("scope", security_scan_scope),
+            "files_scanned": scan_stats.get("files_scanned", 0),
+            "bytes_scanned": scan_stats.get("bytes_scanned", 0),
+            "files_skipped": scan_stats.get("files_skipped", 0),
+            "findings_total": len(findings),
+            "findings_fail": len(fail_hits),
+        }
+        out = {"cycle": ci, "ok": ok, "fail_severity": security_fail_severity, "findings": findings, "stats": scan_stats}
+        (run_dir / f"security_scan_cycle_{ci:03d}.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
+        metrics.event("security_end", cycle=ci, rc=0 if ok else 1, findings=len(fail_hits), **security_scan_summary)
+        metrics.event("security_scan_summary", cycle=ci, **security_scan_summary)
+        if not ok:
+            metrics.event("security_violation", cycle=ci, findings=len(fail_hits))
+            return StageOutcome.fail("security_violation", rc=1)
+        return StageOutcome.ok("security_ok")
+
+    # ---------------------------------------------------------------------------
+    # Run cycle (same structure as Codex)
+    # ---------------------------------------------------------------------------
+
+    async def run_cycle(cycle_idx: int) -> tuple[int, str, int]:
+        nonlocal prev_head, policy_scan_summary, security_scan_summary
+
+        if stop_path.exists():
+            return 0, STOP_REASON_STOP_FILE, 0
+
+        policy_scan_summary = None
+        security_scan_summary = None
+        cycle_t0 = time.time()
+        metrics.event("cycle_start", cycle=cycle_idx)
+
+        curr_head = git_head(repo).strip()
         head_changed_files = git_changed_files(repo, prev_head, curr_head)
         wt_changed_files: list[str] = []
         if bool(getattr(args, "pm_include_working_tree", False)):
@@ -784,506 +1793,173 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 wt_changed_files = git_worktree_changed_files(repo)
             except Exception as ex:
                 eprint(f"[WARN] working-tree change detection failed: {ex}")
-                wt_changed_files = []
         changed_files = sorted(set([*head_changed_files, *wt_changed_files]))
-
         repo_fp = repo_fingerprint(repo)
 
-        pm_refresh = bool(getattr(args, "pm_refresh_backlog", False))
+        async def pm_phase_fn(ci: int) -> StageOutcome:
+            if stop_path.exists():
+                return StageOutcome.stop("stop_file")
+            metrics.event("pm_stage_start", cycle=ci)
+            ok = await run_pm_if_needed(ci, curr_head, changed_files, repo_fp, force_refresh_backlog=False)
+            if not ok:
+                if pm_stop_reason.get("reason") == STOP_REASON_QUOTA:
+                    metrics.event("pm_stage_end", cycle=ci, rc=0, reason=STOP_REASON_QUOTA)
+                    return StageOutcome.stop(STOP_REASON_QUOTA, rc=0)
+                if stop_path.exists():
+                    detected = detect_stop_reason([stop_path]) or STOP_REASON_STOP_FILE
+                    metrics.event("pm_stage_end", cycle=ci, rc=0, reason=detected)
+                    return StageOutcome.stop(detected, rc=0)
+                metrics.event("pm_stage_end", cycle=ci, rc=1)
+                return StageOutcome.fail("pm_failed", rc=1)
+            metrics.event("pm_stage_end", cycle=ci, rc=0)
+            return StageOutcome.ok("pm_ok")
 
-        if (not pm_refresh) and last_pm_fp and (repo_fp == last_pm_fp) and ensure_backlog():
-            return StageOutcome.skip("pm_skip_fingerprint")
+        async def dev_phase_fn(ci: int) -> StageOutcome:
+            if stop_path.exists():
+                return StageOutcome.stop("stop_file")
+            if not session.tasks:
+                return StageOutcome.fail("no_tasks", rc=1)
+            rc, reason, done_delta, ran = await run_dev_loop(ci, session.tasks, curr_head, changed_files, repo_fp, cycle_t0)
+            session.done_delta = int(done_delta or 0)
+            session.ran_tasks = bool(ran)
+            if reason == STOP_REASON_QUOTA:
+                return StageOutcome.stop(STOP_REASON_QUOTA, rc=0)
+            if reason == STOP_REASON_ALL_TASKS_DONE:
+                return StageOutcome.stop(STOP_REASON_ALL_TASKS_DONE, rc=0)
+            if reason == STOP_REASON_STOP_FILE:
+                return StageOutcome.stop(STOP_REASON_STOP_FILE, rc=0)
+            if rc != 0:
+                return StageOutcome.fail(reason, rc=rc)
+            return StageOutcome.ok(reason)
 
-        kind = "bootstrap"
-        if pm_refresh:
-            kind = "refresh"
-        elif analysis_md.exists() and last_pm_fp and repo_fp != last_pm_fp:
-            kind = "incremental"
-        elif analysis_md.exists() and last_pm_fp and repo_fp == last_pm_fp:
-            kind = "skip"
+        async def qa_phase_fn(ci: int) -> StageOutcome:
+            if stop_path.exists():
+                return StageOutcome.stop("stop_file")
+            qa_summary = await run_qa_if_needed(ci, ran_tasks=session.ran_tasks)
+            session.data["qa_followups_summary"] = qa_summary
+            session.data["qa_followups_added"] = int(qa_summary.get("added", 0) or 0)
+            return StageOutcome.ok("qa_done")
 
-        # Prompt
-        prompt = _pm_prompt(
-            repo=repo,
-            run_dir=run_dir,
-            inventory_md=_rel(repo, inv_md),
-            analysis_md=_rel(repo, analysis_md),
-            kind=kind,
-            changed_files=changed_files,
-            digest_rel=digest_rel,
-            docs_read_mode=docs_read_mode,
-            skills_index_summary=skills_index_summary,
+        session = PipelineSession(
+            args=args, repo=repo, run_dir=run_dir, stop_path=stop_path,
+            ensure_backlog=ensure_backlog, load_tasks=load_tasks,
+            pm_phase=pm_phase_fn, dev_phase=dev_phase_fn, qa_phase=qa_phase_fn,
+            security_phase=security_phase_fn,
         )
 
-        options = _build_options(cfg, repo=repo, stage="PM")
+        res = await pipeline_mgr.run_cycle(session, cycle_idx, continuous=continuous)
 
+        cycle_entry: dict[str, Any] = {
+            "cycle": cycle_idx, "stages": [],
+            "budget": {
+                "total_escalations": budget_state["total_escalations"],
+                "total_continuations": budget_state["total_continuations"],
+                "total_repairs": budget_state["total_repairs"],
+            },
+            "policy_scan": policy_scan_summary or {"scope": policy_scan_scope, "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "violations_total": 0, "violations_fail": 0},
+            "security_scan": security_scan_summary or {"scope": security_scan_scope, "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "findings_total": 0, "findings_fail": 0},
+            "qa_followups": session.data.get("qa_followups_summary") or {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0},
+        }
+        for st in res.stages:
+            entry = dict(st)
+            if str(entry.get("name", "")).lower() == "qa":
+                entry["followups_added"] = int(session.data.get("qa_followups_added", 0) or 0)
+            cycle_entry["stages"].append(entry)
+        run_summary["cycles"].append(cycle_entry)
         try:
-            from claude_agent_sdk import ClaudeSDKClient
-        except Exception as ex:
-            return StageOutcome.fail("claude_agent_sdk_missing", rc=2, detail=str(ex))
+            (run_dir / f"run_summary_cycle_{cycle_idx:03d}.json").write_text(json.dumps(cycle_entry, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        _write_run_summary()
 
-        try:
-            async with ClaudeSDKClient(options=options) as client:
-                await _start_query(client, prompt)
-                text, structured = await _receive_messages(
-                    client,
-                    stop_path=stop_path,
-                    debug=bool(getattr(args, "debug", False)),
-                )
-        except StopRequested:
-            return StageOutcome.stop("stop_requested", rc=130)
-        except Exception as ex:
-            if _is_quota_error(ex):
-                # Quota/credits exhausted: stop gracefully so failover (if enabled) can take over.
-                try:
-                    stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
-                except Exception:
-                    pass
-                metrics.event("runner_stop", stage="pm", reason="quota_exhausted")
-                return StageOutcome.stop("quota_exhausted", rc=0)
-
-            eprint(f"[PM] Claude error: {ex}")
-            if bool(getattr(args, "debug", False)):
-                eprint(traceback.format_exc())
-            # PM failure => fallback backlog
-            write_default_p0_backlog(run_dir)
-            return StageOutcome.ok("pm_failed_fallback_backlog")
-
-        # Parse structured output
-        pm_text = ""
-        if structured is not None:
+        if res.reason not in ("stop_file",) and not stop_path.exists():
             try:
-                pm_text = json.dumps(structured, ensure_ascii=False)
-            except Exception:
-                pm_text = str(structured)
-        else:
-            pm_text = text
+                final_head = git_head(repo).strip()
+                if final_head:
+                    snapshot_json.write_text(json.dumps({"prev_head": prev_head, "head": final_head, "ts": datetime.utcnow().isoformat() + "Z"}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                    prev_head = final_head
+            except Exception as ex:
+                eprint(f"[WARN] snapshot update failed: {ex}")
 
-        pm_out = parse_pm_output(pm_text, kind_hint=kind)
-        if pm_out is None:
-            describe_parse_failure("PM", pm_text)
-            write_default_p0_backlog(run_dir)
-            return StageOutcome.ok("pm_parse_failed_fallback_backlog")
+        return res.rc, res.reason, res.done_delta
 
-        # Persist parsed JSON for debugging (Codex-style)
-        try:
-            (run_dir / f"PM_OUTPUT_cycle_{cycle_idx:03d}.json").write_text(
-                dump_pretty(pm_out.model_dump()) + "\n",
-                encoding="utf-8",
-                errors="replace",
-            )
-        except Exception:
-            pass
+    # ---------------------------------------------------------------------------
+    # Main loop (same as Codex — with idle tracking and shutdown report)
+    # ---------------------------------------------------------------------------
 
-        # Save PM notes if provided (Codex-style)
-        if pm_out.notes_md:
-            try:
-                (run_dir / "NOTES_PM.md").write_text(
-                    pm_out.notes_md.strip() + "\n",
-                    encoding="utf-8",
-                    errors="replace",
-                )
-            except Exception:
-                pass
+    idle_accum = 0
+    last_rc = 0
+    last_reason = ""
+    loop_mode = bool(getattr(args, "loop", False))
+    loop_max_cycles = int(getattr(args, "loop_max_cycles", 0) or 0)
+    loop_sleep_seconds = int(getattr(args, "loop_sleep_seconds", 60) or 60)
+    loop_idle_exit_after = int(getattr(args, "loop_idle_exit_after", 0) or 0)
+    cycles = 1 if not loop_mode else (loop_max_cycles if loop_max_cycles > 0 else 10**9)
 
-        # Write backlog files
-        try:
-            tasks_dicts = [t.model_dump() for t in (pm_out.tasks or [])]  # pydantic v2
-        except Exception:
-            tasks_dicts = []
-            for t in (pm_out.tasks or []):
-                try:
-                    tasks_dicts.append({
-                        "id": getattr(t, "id", ""),
-                        "title": getattr(t, "title", ""),
-                        "prompt": getattr(t, "prompt", ""),
-                        "files": getattr(t, "files", []) or [],
-                        "done_when": getattr(t, "done_when", ""),
-                        "skills": getattr(t, "skills", []) or [],
-                        "skills_rationale": getattr(t, "skills_rationale", None),
-                    })
-                except Exception:
-                    continue
-
-        write_backlog_files(run_dir, tasks_dicts)
-
-        # Update PM fingerprint
-        try:
-            pm_fp_path.write_text(
-                json.dumps({"fingerprint": repo_fp, "updated_at": now_iso(), "head": curr_head}, ensure_ascii=False, indent=2)
-                + "\n",
-                encoding="utf-8",
-                errors="replace",
-            )
-        except Exception:
-            pass
-
-        # Update snapshot head
-        try:
-            snapshot_json.write_text(
-                json.dumps({"head": curr_head, "updated_at": now_iso()}, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-                errors="replace",
-            )
-        except Exception:
-            pass
-
-        # Human-friendly PM summary
-        try:
-            (run_dir / "PM_SUMMARY.txt").write_text(
-                dump_pretty({
-                    "kind": pm_out.kind,
-                    "summary": pm_out.summary,
-                    "warnings": pm_out.warnings,
-                    "open_questions": pm_out.open_questions,
-                    "analysis_path": pm_out.analysis_path,
-                })
-                + "\n",
-                encoding="utf-8",
-                errors="replace",
-            )
-        except Exception:
-            pass
-
-        return StageOutcome.ok("pm_ok")
-
-    async def dev_phase(cycle_idx: int) -> StageOutcome:
-        # Do nothing if no tasks
-        if stop_path.exists():
-            return StageOutcome.stop("stop_file", rc=0)
-
-        # Ensure tasks are loaded (PipelineManager already did this in continuous mode)
-        tasks: list[TaskItem] = list(getattr(session, "tasks", []) or [])  # type: ignore[name-defined]
-
-        state = load_state(state_path)
-        done_set = set([str(x) for x in (state.get("done") or [])])
-
-        before_done_count = len(done_set)
-        completed_this_cycle: list[str] = []
-
-        # Config
-        autopilot = bool(getattr(args, "autopilot", False))
-        max_turns_per_task = int(getattr(args, "max_turns_per_task", 12) or 12)
-        max_tasks_per_cycle = int(getattr(args, "max_tasks_per_cycle", 1) or 1)
-
-        # Find next pending tasks
-        pending = [t for t in tasks if t.id not in done_set]
-        if not pending:
-            return StageOutcome.skip("dev_no_pending")
-
-        # Dev options
-        options = _build_options(cfg, repo=repo, stage="Dev")
-
-        try:
-            from claude_agent_sdk import ClaudeSDKClient
-        except Exception as ex:
-            return StageOutcome.fail("claude_agent_sdk_missing", rc=2, detail=str(ex))
-
-        executed = 0
-
-        for task in pending:
+    try:
+        for cycle_idx in range(int(cycles)):
             if stop_path.exists():
-                return StageOutcome.stop("stop_file", rc=0)
-            if executed >= max_tasks_per_cycle:
+                append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=stop_file")
                 break
 
-            executed += 1
-            skills_context = _format_skill_selection(task.skills or [], skills_by_id)
-            prompt = _dev_prompt(repo, run_dir, task, skills_context, digest_rel, docs_read_mode)
+            rc, reason, delta = await run_cycle(cycle_idx)
+            last_rc = rc
+            last_reason = reason
+            print(f"[CYCLE] {now_iso()} idx={cycle_idx} rc={rc} reason={reason} progress_delta={delta}")
 
-            # checkpoint before edits
-            cp: Optional[RepoCheckpoint] = None
+            if rc != 0:
+                break
+            if reason == STOP_REASON_QUOTA:
+                break
+            if reason == STOP_REASON_ALL_TASKS_DONE:
+                append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
+                break
+
+            if loop_mode:
+                if delta <= 0:
+                    idle_accum += loop_sleep_seconds
+                else:
+                    idle_accum = 0
+                if loop_idle_exit_after > 0 and idle_accum >= loop_idle_exit_after:
+                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=idle_exit idle_accum={idle_accum}")
+                    break
+                await asyncio.sleep(max(0, loop_sleep_seconds))
+            else:
+                break
+    finally:
+        detected_reason = ""
+        try:
+            detected_reason = detect_stop_reason([stop_path])
+        except Exception:
+            detected_reason = ""
+        final_reason = choose_stop_reason([last_reason, detected_reason]) or last_reason
+        report_path = run_dir / "SHUTDOWN_REPORT.md"
+        if not report_path.exists():
             try:
-                cp = create_checkpoint(repo, run_dir / "checkpoints" / task.id)
-            except Exception:
-                cp = None
-
-            def _restore_or_stop(reason: str, before_porcelain: str) -> tuple[bool, str]:
-                if not cp:
-                    return True, ""
-                current_porcelain = git_porcelain(repo)
-                if before_porcelain == current_porcelain:
-                    return True, ""
-                try:
-                    restore_checkpoint(
-                        repo,
-                        cp,
-                        dangerous=bool(getattr(args, "dangerous_git_rollback", False)),
-                        run_dir=run_dir,
-                        stop_path=stop_path,
-                    )
-                    metrics.event("rollback", task=task.id, reason=reason)
-                    return True, ""
-                except Exception as ex:
-                    detail = str(ex)
-                    blocked = "blocked" in detail.lower()
-                    fail_reason = "rollback_blocked" if blocked else "rollback_failed"
-                    state.setdefault("failed", []).append({"task": task.id, "reason": fail_reason, "detail": detail})
-                    save_state(state_path, state)
-                    metrics.event("rollback_failed", task=task.id, reason=reason, detail=detail)
-                    eprint(f"[STOP] Rollback {fail_reason}: {detail}")
-                    return False, fail_reason
-
-            before = git_porcelain(repo)
-
-            # Run the agent
-            try:
-                async with ClaudeSDKClient(options=options) as client:
-                    await _start_query(client, prompt)
-                    _text, _structured = await _receive_messages(
-                        client,
-                        stop_path=stop_path,
-                        debug=bool(getattr(args, "debug", False)),
-                    )
-            except StopRequested:
-                if cp:
-                    ok, fail_reason = _restore_or_stop("stop_requested", before)
-                    if not ok:
-                        return StageOutcome.fail(fail_reason, rc=1)
-                return StageOutcome.stop("stop_requested", rc=130)
-            except Exception as ex:
-                if _is_quota_error(ex):
-                    # Quota/credits exhausted: rollback and stop gracefully.
-                    if cp:
-                        ok, fail_reason = _restore_or_stop("quota_exhausted", before)
-                        if not ok:
-                            return StageOutcome.fail(fail_reason, rc=1)
-                    state.setdefault("warnings", []).append({"task": task.id, "reason": "quota_exhausted", "detail": str(ex)})
-                    save_state(state_path, state)
-                    try:
-                        stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
-                    except Exception:
-                        pass
-                    metrics.event("runner_stop", stage="dev", task=task.id, reason="quota_exhausted")
-                    return StageOutcome.stop("quota_exhausted", rc=0)
-
-                eprint(f"[DEV] Claude error: {ex}")
-                if bool(getattr(args, "debug", False)):
-                    eprint(traceback.format_exc())
-                if cp:
-                    ok, fail_reason = _restore_or_stop("exception", before)
-                    if not ok:
-                        return StageOutcome.fail(fail_reason, rc=1)
-                state.setdefault("failed", []).append({"task": task.id, "reason": "exception", "detail": str(ex)})
-                save_state(state_path, state)
-                return StageOutcome.fail("dev_exception", rc=1, detail=str(ex))
-
-            after = git_porcelain(repo)
-            changed = (before != after)
-
-            if stop_on_no_diff and (not changed):
-                eprint(f"[STOP] No diff produced for {task.id}.")
-                if cp:
-                    ok, fail_reason = _restore_or_stop("no_diff", before)
-                    if not ok:
-                        return StageOutcome.fail(fail_reason, rc=1)
-                state.setdefault("failed", []).append({"task": task.id, "reason": "no_diff"})
-                save_state(state_path, state)
-                return StageOutcome.fail("no_diff", rc=1)
-
-            # Gates (run in thread so event loop stays responsive)
-            if build_enabled:
-                ok = await run_build_gate_async(
-                    repo=repo,
-                    build_cmd=build_cmd,
-                    build_timeout_sec=int(getattr(args, "build_timeout_seconds", 1800) or 1800),
-                    legacy_build_target=str(getattr(args, "dotnet_build_target", "") or ""),
-                    log_path=(run_dir / "attempts" / task.id / "build.txt"),
-                    stop_path=stop_path,
-                )
-                if not ok:
-                    eprint(f"[STOP] Build failed after {task.id}.")
-                    if cp:
-                        ok_restore, fail_reason = _restore_or_stop("build_failed")
-                        if not ok_restore:
-                            return StageOutcome.fail(fail_reason, rc=1)
-                    state.setdefault("failed", []).append({"task": task.id, "reason": "build_failed"})
-                    save_state(state_path, state)
-                    return StageOutcome.fail("build_failed", rc=1)
-
-            if run_tests:
-                ok = await run_test_gate_async(
-                    repo=repo,
-                    test_cmd=test_cmd,
-                    test_timeout_sec=int(getattr(args, "test_timeout_seconds", 3600) or 3600),
-                    legacy_test_target=str(getattr(args, "dotnet_test_target", "") or ""),
-                    legacy_test_filter=str(getattr(args, "dotnet_test_filter", "") or ""),
-                    log_path=(run_dir / "attempts" / task.id / "test.txt"),
-                    stop_path=stop_path,
-                )
-                if not ok:
-                    eprint(f"[STOP] Tests failed after {task.id}.")
-                    if cp:
-                        ok_restore, fail_reason = _restore_or_stop("test_failed")
-                        if not ok_restore:
-                            return StageOutcome.fail(fail_reason, rc=1)
-                    state.setdefault("failed", []).append({"task": task.id, "reason": "test_failed"})
-                    save_state(state_path, state)
-                    return StageOutcome.fail("test_failed", rc=1)
-
-            # Mark done
-            done_set.add(task.id)
-            state.setdefault("done", []).append(task.id)
-            save_state(state_path, state)
-
-            try:
-                mark_backlog_done(backlog_md_path, task.id)
+                await write_shutdown_report(final_reason or "ok", cycle=cycle_idx if "cycle_idx" in locals() else -1, step=-1)
             except Exception:
                 pass
-
-            completed_this_cycle.append(task.id)
-
-        # Update session stats
-        delta = len(done_set) - before_done_count
-        session.ran_tasks = bool(delta > 0)  # type: ignore[name-defined]
-        session.done_delta = int(delta)  # type: ignore[name-defined]
-
-        if delta > 0:
-            return StageOutcome.ok("dev_tasks_completed")
-        return StageOutcome.skip("dev_no_progress")
-
-    async def qa_phase(cycle_idx: int) -> StageOutcome:
-        if stop_path.exists():
-            return StageOutcome.stop("stop_file", rc=0)
-
-        qa_always = bool(getattr(args, "qa_always", False))
-
-        state = load_state(state_path)
-        done_ids: list[str] = []
+        if worktree_dir is not None:
+            gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
+            exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []
+            last_rc = handle_worktree_patch(repo, source_repo, run_dir, last_rc, exclude_globs=exclude_globs)
+            try:
+                remove_worktree(source_repo, worktree_dir)
+            except Exception as ex:
+                eprint(f"[WARN] Failed to remove worktree: {ex}")
+        run_summary["final"] = {"rc": last_rc, "reason": final_reason or ""}
+        _write_run_summary()
         try:
-            done_ids = list(state.get("done", []))
+            ctx = collect_shutdown_context(repo, run_dir)
+            tasks_done = int(ctx.get("tasks_done") or 0)
+            tasks_total = int(ctx.get("tasks_total") or 0)
+            porcelain = (ctx.get("git_porcelain") or "").strip()
+            change_count = len([ln for ln in porcelain.splitlines() if ln.strip()])
+            policy_summary = ctx.get("policy_scan_summary") or {}
+            policy_fail = policy_summary.get("fail_total")
+            policy_part = f" policy_fail={policy_fail}" if policy_fail is not None else ""
+            print(f"[SHUTDOWN] reason={final_reason or 'ok'} cycles={len(run_summary['cycles'])} tasks={tasks_done}/{tasks_total} changes={change_count} run_dir={run_dir}{policy_part}")
         except Exception:
-            done_ids = []
+            print(f"[SHUTDOWN] reason={final_reason or last_reason or 'ok'} run_dir={run_dir}")
 
-        if (not qa_always) and (not getattr(session, "ran_tasks", False)):  # type: ignore[name-defined]
-            return StageOutcome.skip("qa_skip_no_tasks")
-
-        skills_context = "(skills disabled)"
-        if skills_enabled:
-            skill_ids: list[str] = []
-            for t in load_tasks():
-                skill_ids.extend(t.skills or [])
-            deduped = list(dict.fromkeys([s for s in skill_ids if s]))
-            selected_records = [skills_by_id[sid] for sid in deduped if sid in skills_by_id]
-            include_excerpts = _inline_skills_for("qa", skills_cfg.get("inline_mode", ""))
-            skills_context = build_skills_context(
-                selected_records,
-                max_excerpt_lines=int(skills_cfg.get("max_excerpt_lines", 0) or 0),
-                total_char_cap=int(skills_cfg.get("qa_max_total_chars", 0) or 0),
-                include_excerpts=include_excerpts,
-            )
-            missing = [sid for sid in deduped if sid not in skills_by_id]
-            if missing:
-                skills_context += "\nMissing skills: " + ", ".join(missing)
-
-        prompt = _qa_prompt(repo, run_dir, done_ids[-10:], skills_context)
-        options = _build_options(cfg, repo=repo, stage="QA")
-
-        try:
-            from claude_agent_sdk import ClaudeSDKClient
-        except Exception as ex:
-            return StageOutcome.fail("claude_agent_sdk_missing", rc=2, detail=str(ex))
-
-        try:
-            async with ClaudeSDKClient(options=options) as client:
-                await _start_query(client, prompt)
-                md, _structured = await _receive_messages(
-                    client,
-                    stop_path=stop_path,
-                    debug=bool(getattr(args, "debug", False)),
-                )
-        except StopRequested:
-            return StageOutcome.stop("stop_requested", rc=130)
-        except Exception as ex:
-            if _is_quota_error(ex):
-                try:
-                    stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
-                except Exception:
-                    pass
-                metrics.event("runner_stop", stage="qa", reason="quota_exhausted")
-                return StageOutcome.stop("quota_exhausted", rc=0)
-
-            eprint(f"[QA] Claude error: {ex}")
-            if bool(getattr(args, "debug", False)):
-                eprint(traceback.format_exc())
-            return StageOutcome.ok("qa_failed")
-
-        out_path = run_dir / "QA_REPORT.md"
-        out_path.write_text((md or "") + "\n", encoding="utf-8", errors="replace")
-        return StageOutcome.ok("qa_ok")
-
-    # Wire the session (stages call session.pm_phase/dev_phase/qa_phase)
-    session = PipelineSession(
-        args=args,
-        repo=repo,
-        run_dir=run_dir,
-        stop_path=stop_path,
-        ensure_backlog=ensure_backlog,
-        load_tasks=load_tasks,
-        pm_phase=pm_phase,
-        dev_phase=dev_phase,
-        qa_phase=qa_phase,
-    )
-
-    # Execution modes
-    loop = bool(getattr(args, "loop", False))
-    sleep_s = int(getattr(args, "loop_sleep_seconds", 60) or 60)
-    max_cycles = int(getattr(args, "loop_max_cycles", 0) or 0)
-
-    cycle_idx = 0
-
-    exit_code = 0
-    while True:
-        if stop_path.exists():
-            metrics.event("stop_file")
-            exit_code = 0
-            break
-
-        metrics.event("cycle_start", cycle=cycle_idx)
-
-        try:
-            res = await pipeline_mgr.run_cycle(session, cycle_idx=cycle_idx, continuous=continuous)
-        except Exception as ex:
-            eprint(f"[ERR] pipeline cycle exception: {ex}")
-            if bool(getattr(args, "debug", False)):
-                eprint(traceback.format_exc())
-            exit_code = 1
-            break
-
-        metrics.event("cycle_end", cycle=cycle_idx, rc=res.rc, reason=res.reason, done_delta=res.done_delta)
-
-        if not loop and not continuous:
-            exit_code = 0
-            break
-
-        if res.rc != 0:
-            exit_code = int(res.rc)
-            break
-
-        cycle_idx += 1
-
-        if (max_cycles > 0) and (cycle_idx >= max_cycles):
-            exit_code = 0
-            break
-
-        if not (loop or continuous):
-            break
-
-        await asyncio.sleep(max(1, sleep_s))
-
-    if worktree_dir is not None:
-        gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
-        exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []
-        exit_code = handle_worktree_patch(
-            repo,
-            source_repo,
-            run_dir,
-            exit_code,
-            exclude_globs=exclude_globs,
-        )
-        try:
-            remove_worktree(source_repo, worktree_dir)
-        except Exception as ex:
-            eprint(f"[WARN] Failed to remove worktree: {ex}")
-
-    return exit_code
+    return last_rc
