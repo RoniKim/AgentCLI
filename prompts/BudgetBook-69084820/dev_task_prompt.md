@@ -6,8 +6,9 @@ Implement ONLY this task now. This is a MICRO-TASK designed to be completed in 5
 1. Read each file EXACTLY ONCE - never re-read unless absolutely necessary
 2. Make edits immediately after reading - don't explore, just execute
 3. Write summary ONCE at the end - don't create multiple summaries
-4. Skip git diff verification - the system will check automatically
-5. Finish in 5-8 turns or less
+4. After ALL edits, run `git diff --stat` ONCE to confirm changes were applied
+5. If git diff shows no changes, your Edit calls FAILED - re-read the file and retry with exact string matching
+6. Finish in 5-8 turns or less
 
 Task:
 - ID: {task_id}
@@ -19,9 +20,11 @@ Implementation instructions:
 **Implementation Strategy (follow this exact order):**
 1. Read ONLY the files listed below (don't explore other files)
 2. Locate the exact section to modify (use line numbers from task)
-3. Make targeted edits (< 50 lines total change)
-4. Verify compilation safety mentally before editing
-5. Write brief summary to {run_dir}/NOTES.md
+3. Make targeted edits (< 50 lines total change) - check Edit tool return for errors
+4. If an Edit call fails (old_string not found), re-read the target section and copy the EXACT text
+5. Run `git diff --stat` to verify at least one file was modified
+6. If no diff exists after edits, something went wrong - diagnose and retry
+7. Write brief summary to {run_dir}/NOTES.md
 
 Files to touch (keep minimal, read ONLY these):
 {files_hint}
@@ -93,15 +96,16 @@ Definition of done:
 
 **Completion (SIMPLE - no checklist):**
 1. Make the code changes
-2. Write brief summary to {run_dir}/NOTES.md (3-5 lines max)
-3. DONE - stop immediately
+2. Run `git diff --stat` to confirm changes exist (if empty, your edits failed - fix them)
+3. Write brief summary to {run_dir}/NOTES.md (3-5 lines max)
+4. DONE - stop immediately
 
 When editing files, call Codex MCP with {codex_call_hint}.
 Repo root: {repo}
 
 **SPEED OPTIMIZATION:**
 - DO NOT create analysis_hints files unless explicitly required
-- DO NOT run git commands manually (system handles this)
 - DO NOT read NOTES.md before writing to it
-- DO NOT verify your changes by re-reading files
-- Trust your edits and finish quickly
+- ALWAYS check Edit tool return values - if it says "old_string not found", the edit FAILED
+- After all edits, run `git diff --stat` ONCE (mandatory, non-negotiable)
+- If diff is empty after edits, RE-READ the file and use exact text for old_string

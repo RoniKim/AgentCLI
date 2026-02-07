@@ -15,7 +15,11 @@ What to write in PROJECT_ANALYSIS.md (required structure):
 3) Supabase policy constraints (RPC for writes, Views/RPC for reads, no secrets in client)
 4) File-by-file analysis (MANDATORY; every file in REPO_INVENTORY.md; keep entries short)
    - **Use FULL, EXACT file paths from REPO_INVENTORY.md** - do NOT abbreviate (e.g., use "Components/Pages/Foo.razor", NOT "Pages/Foo.razor")
-5) P0 gap list (what is missing vs docs)
+5) **Stability audit** (MANDATORY for all .razor files):
+   - For each page component, check: CancellationToken usage, IDisposable, try-catch in OnInitializedAsync, StateHasChanged safety
+   - Flag any crash-prone patterns (see Crash Pattern Checklist in pm_instructions)
+   - Mark severity: CRASH (P0), LEAK (P1), RISK (P2)
+6) P0 gap list (what is missing vs docs) — **include stability issues alongside feature gaps**
 
 Backlog generation (v2.0):
 - DO NOT create BACKLOG.json/md by editing files.
@@ -29,7 +33,26 @@ Hard constraint on tasks (important):
 **IMPORTANT - Task Generation Policy:**
 - **Minimum 5-10 tasks per bootstrap** - distributed across priority levels
 - If User TODO provided → convert to P0 tasks first
-- Then ALWAYS scan for improvements in:
+- **STABILITY FIRST:** Before ANY feature tasks, scan ALL .razor pages for crash patterns:
+
+  **P0 (Critical) - Crash/Stability Fixes (MUST be first tasks in backlog):**
+  - Missing CancellationToken in OnInitializedAsync API calls → ObjectDisposedException on navigation
+  - CancellationTokenSource not disposed before reassignment → memory leak + zombie tasks
+  - StateHasChanged called without disposal check → crash after navigating away
+  - Missing try-catch in OnInitializedAsync → white screen crash on page load
+  - Missing IDisposable on components with CTS/timers/subscriptions → resource leak
+  - Async operations continuing after Dispose → ObjectDisposedException
+  - Direct StateHasChanged without InvokeAsync from non-UI thread → rendering crash
+  - Null reference in OnParametersSet/OnAfterRender → NullReferenceException
+
+  **P0 Example tasks:**
+  - "Add CancellationToken to all API calls in Dashboard.razor OnInitializedAsync (line 189)"
+  - "Dispose old _cts before creating new in Transactions.razor LoadAsync (line 156)"
+  - "Add _disposed check before StateHasChanged in ErrorToast.razor (line 70)"
+  - "Wrap Accounts.razor OnInitializedAsync in try-catch with error state (line 64)"
+  - "Add IDisposable with CTS cleanup to Portfolio.razor"
+
+- Then scan for feature improvements:
 
   **P1 (High Priority) - User-Facing Improvements:**
   - Loading states: Add spinners to all async buttons/operations
@@ -46,17 +69,8 @@ Hard constraint on tasks (important):
   - Add XML docs for public APIs and complex methods
   - Remove code duplication (>10 lines repeated 3+ times)
 
-  **Specific BudgetBook Examples:**
-  - "Add loading spinner to Dashboard.razor sync button (line 145)"
-  - "Show error toast when transaction save fails (TransactionEntry.razor:234)"
-  - "Confirm before deleting transaction with 'Are you sure?' dialog"
-  - "Virtualize transaction list using Radzen DataGrid pagination (Transactions.razor)"
-  - "Cache dashboard RPC result in memory for 5 minutes (Dashboard.razor:78)"
-  - "Extract AccountSummaryCard component from Dashboard.razor (lines 200-280)"
-  - "Add tests for UpsertTransactionAsync edge cases (null values, duplicates)"
-
 - **Be specific:** Reference exact files and line numbers from PROJECT_ANALYSIS.md
-- **NEVER return empty task list** - if analysis shows "complete", look for P1/P2 polish!
+- **NEVER return empty task list** - if analysis shows "complete", look for stability/P1/P2 polish!
 
 Optional: include run-local notes in JSON field 'notes_md'.
 

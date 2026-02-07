@@ -15,8 +15,11 @@ Git:
 - changed files (name-only):
 {changed_files_block}
 
-Current backlog (from run_dir; [x]=done, [ ]=pending):
+Current backlog (from run_dir; [x]=done, [ ]=pending, [F]=failed):
 {current_backlog_block}
+
+Failed tasks from previous cycles (with failure reasons):
+{failed_tasks_block}
 
 Dev change-hints (optional, run-local; use as clues):
 {hint_block}
@@ -31,18 +34,27 @@ Backlog generation (v2.0):
 Hard constraint on tasks (important):
 - Tasks MUST be development work only (features, UI/screens, bugfixes, tests, required in-repo docs).
 - Do NOT include PM/meta work as tasks (planning, analysis/review/triage, inventory, prompt/backlog/report creation, run artifacts).
+- **NEVER recreate a task that failed with `no_diff` or `exhausted_attempts` unless you provide a fundamentally different approach with more specific instructions (exact line numbers, exact code to add/replace).**
+- If a task failed 2+ times across cycles, it likely means the feature is already implemented or the task spec is ambiguous. Read the actual file before recreating.
+- Tasks marked [F] in the backlog MUST NOT be blindly recreated with the same title/description.
 
 **IMPORTANT - Task Generation Policy:**
 - **Minimum 3-5 tasks per incremental cycle**
 - If User TODO provided → convert to P0 tasks first
-- Review completed tasks → identify follow-up work:
-  - Add tests for newly implemented features
-  - Polish UI for recent changes (animations, transitions)
-  - Improve error handling in modified code
-  - Extract patterns discovered during implementation
-  - Document complex logic added
+- **STABILITY SCAN FIRST (every cycle):** Check changed files + related .razor pages for crash patterns:
+  - Missing CancellationToken in async API calls → P0 task
+  - CancellationTokenSource not disposed before reassignment → P0 task
+  - StateHasChanged without disposal check → P0 task
+  - Missing try-catch in OnInitializedAsync → P0 task
+  - Missing IDisposable on components with async resources → P1 task
 
-- If backlog empty/complete → scan for new opportunities:
+- Review completed tasks → identify follow-up work:
+  - Verify completed stability fix didn't break other components
+  - Add tests for newly implemented features
+  - Polish UI for recent changes
+  - Improve error handling in modified code
+
+- If no stability issues → scan for new opportunities:
 
   **Mining Techniques:**
   1. Search changed files for TODO/FIXME/HACK comments
@@ -69,9 +81,10 @@ Hard constraint on tasks (important):
   - Refactor Dashboard.razor (currently 450+ lines) into smaller components
 
 - **Priority distribution:**
+  - If stability issues found: **100% P0 stability tasks first**, then P1/P2
   - If critical issues: 80% P0/P1, 20% P2
   - If no critical issues: 50% P1, 50% P2
-  - Always include at least 1 user-facing P1 task
+  - Always include at least 1 stability or user-facing P1 task
 
 - **Be specific:** "Add try-catch to TransactionEntry.razor SaveAsync() (line 234)"
   NOT generic: "Improve error handling"

@@ -37,6 +37,7 @@ Digest file (preferred): {digest_rel}
 Definition of done:
 - {done_when}
 - MUST produce a real git diff in the repo.
+- After ALL edits, run `git diff --stat` ONCE to confirm changes were applied. If empty, your Edit calls FAILED - re-read the file and retry with exact string matching.
 - Update {run_dir}/NOTES.md with: files changed, why, how to validate.
 
 IMPORTANT (analysis update safety):

@@ -818,13 +818,40 @@ async def main_async(args: argparse.Namespace) -> int:
                 state_obj = {"done": [], "failed": []}
 
             done_ids = set(state_obj.get("done", []) or [])
+            failed_list = state_obj.get("failed", []) or []
+            failed_ids = {(f["task"] if isinstance(f, dict) else f) for f in failed_list}
             lines: list[str] = []
             for t in tasks:
-                mark = "x" if t.id in done_ids else " "
+                if t.id in done_ids:
+                    mark = "x"
+                elif t.id in failed_ids:
+                    mark = "F"
+                else:
+                    mark = " "
                 lines.append(f"- [{mark}] {t.id} {t.title}")
 
             block = "\n".join(lines) if lines else "(no backlog found)"
             return block, tasks, done_ids
+
+        def _build_failed_tasks_block() -> str:
+            """Build a summary of failed tasks with reasons for PM context."""
+            state_path_local = run_dir / "STATE.json"
+            try:
+                state_obj = load_state(state_path_local)
+            except Exception:
+                state_obj = {"failed": []}
+            failed_list = state_obj.get("failed", []) or []
+            if not failed_list:
+                return "(none)"
+            lines: list[str] = []
+            for f in failed_list:
+                if isinstance(f, dict):
+                    tid = f.get("task", "?")
+                    reason = f.get("reason", "unknown")
+                    lines.append(f"- {tid}: {reason}")
+                else:
+                    lines.append(f"- {f}: unknown")
+            return "\n".join(lines)
 
         def _normalize_backlog_tasks(raw_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             """Normalize/defend backlog tasks produced by PM.
@@ -1165,6 +1192,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     hint_block = "\n".join(hint_lines) or "(none)"
 
                     current_backlog_block, _, _ = _load_backlog_context_for_pm()
+                    failed_tasks_block = _build_failed_tasks_block()
 
                     ctx = {
                         "analysis_md": str(analysis_md),
@@ -1182,6 +1210,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "changed_files_block": changed_files_block,
                         "current_backlog_block": current_backlog_block,
                         "hint_block": hint_block,
+                        "failed_tasks_block": failed_tasks_block,
                     }
                     pm_prompt = append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx))
                     pm_out = await _run_pm_structured(

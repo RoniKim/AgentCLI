@@ -1191,12 +1191,38 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         except Exception:
             state_obj = {"done": [], "failed": []}
         done_ids = set(state_obj.get("done", []) or [])
+        failed_list = state_obj.get("failed", []) or []
+        failed_ids = {(f["task"] if isinstance(f, dict) else f) for f in failed_list}
         lines: list[str] = []
         for t in tasks:
-            mark = "x" if t.id in done_ids else " "
+            if t.id in done_ids:
+                mark = "x"
+            elif t.id in failed_ids:
+                mark = "F"
+            else:
+                mark = " "
             lines.append(f"- [{mark}] {t.id} {t.title}")
         block = "\n".join(lines) if lines else "(no backlog found)"
         return block, tasks, done_ids
+
+    def _build_failed_tasks_block() -> str:
+        """Build a summary of failed tasks with reasons for PM context."""
+        try:
+            state_obj = load_state(state_path)
+        except Exception:
+            state_obj = {"failed": []}
+        failed_list = state_obj.get("failed", []) or []
+        if not failed_list:
+            return "(none)"
+        lines: list[str] = []
+        for f in failed_list:
+            if isinstance(f, dict):
+                tid = f.get("task", "?")
+                reason = f.get("reason", "unknown")
+                lines.append(f"- {tid}: {reason}")
+            else:
+                lines.append(f"- {f}: unknown")
+        return "\n".join(lines)
 
     # ---------------------------------------------------------------------------
     # PM phase (structured output with repair — same as Codex)
@@ -1400,6 +1426,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                             continue
                 hint_block = "\n".join(hint_lines) or "(none)"
                 current_backlog_block, _, _ = _load_backlog_context_for_pm()
+                failed_tasks_block = _build_failed_tasks_block()
 
                 ctx = {
                     "analysis_md": str(analysis_md), "inv_md": str(inv_md),
@@ -1413,6 +1440,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "changed_files_block": changed_files_block,
                     "current_backlog_block": current_backlog_block,
                     "hint_block": hint_block,
+                    "failed_tasks_block": failed_tasks_block,
                 }
                 pm_prompt = _patch_prompt_for_claude(append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx)))
                 pm_out = await _run_pm_structured(pm_prompt, max_turns=int(getattr(args, "pm_incremental_max_turns", 15) or 15), cycle_idx=cycle_idx, kind="incremental" if need_incremental else "refresh", output_path=pm_output_path)

@@ -6,10 +6,13 @@ Your role is to ALWAYS identify improvement opportunities across multiple priori
 Do NOT just fix bugs - proactively find enhancements, optimizations, and quality improvements.
 
 Priority Levels (consider ALL in every cycle):
-- **P0 (Critical)**: Blocking bugs, security issues, broken features, data integrity
-- **P1 (High)**: UI/UX improvements, performance, missing error handling, incomplete features
+- **P0 (Critical)**: Runtime crashes, navigation crashes, ObjectDisposedException, blocking bugs, security issues, data integrity
+- **P1 (High)**: Stability fixes (missing error handling, null guards, disposal issues), UI/UX improvements, incomplete features
 - **P2 (Medium)**: Code quality, refactoring, test coverage, documentation gaps
 - **P3 (Low)**: Nice-to-have enhancements, polish, minor optimizations
+
+**STABILITY IS HIGHER PRIORITY THAN NEW FEATURES.**
+Always fix crash-causing code before adding new functionality.
 
 Hard scope constraints:
 - Each task must be specific and actionable (reference exact files/lines when possible)
@@ -36,7 +39,26 @@ Backlog policy (critical):
 
 **Task Generation Rules (IMPORTANT):**
 1. If TODO provided → prioritize as P0 tasks, **but break into micro-tasks**
-2. If no TODO or TODO completed → ALWAYS generate 3-5 new tasks from:
+2. **STABILITY SCAN (MUST DO EVERY CYCLE)** — scan changed files + all .razor pages for:
+
+   **MAUI Blazor Crash Pattern Checklist (P0 priority):**
+   - [ ] **Missing CancellationToken**: Any `OnInitializedAsync()` calling API/service methods without passing `CancellationToken` → causes `ObjectDisposedException` on page navigation
+   - [ ] **CancellationTokenSource not disposed**: `_cts = new CancellationTokenSource()` without `_cts?.Cancel(); _cts?.Dispose();` before reassignment → memory leak + zombie tasks
+   - [ ] **StateHasChanged on disposed component**: `StateHasChanged()` or `InvokeAsync(StateHasChanged)` called in async callbacks without checking `_disposed` flag → crash after navigating away
+   - [ ] **Missing try-catch in OnInitializedAsync**: API calls without error handling → white screen crash on page load
+   - [ ] **Missing IDisposable/@implements IDisposable**: Components with `CancellationTokenSource`, timers, or event subscriptions that don't implement `IDisposable` → resource leak
+   - [ ] **Async operations after Dispose**: `Task.Delay()`, `HttpClient.GetAsync()` continuing after component disposal → `ObjectDisposedException`
+   - [ ] **Direct StateHasChanged without InvokeAsync**: `StateHasChanged()` called from non-UI thread (inside Task.Run, timer callbacks) → rendering crash
+   - [ ] **Null reference in lifecycle**: `OnParametersSet()` or `OnAfterRender()` accessing injected services or properties before initialization → `NullReferenceException`
+   - [ ] **Navigation parameter null**: `NavigationManager.NavigateTo()` with null/unvalidated parameters → crash
+
+   **How to create stability tasks (examples):**
+   - "Add CancellationToken to Dashboard.razor OnInitializedAsync API calls (lines 189-230)"
+   - "Dispose old CancellationTokenSource before creating new in Transactions.razor LoadAsync (line 156)"
+   - "Add _disposed flag and check before StateHasChanged in ErrorToast.razor ShowAsync (line 70)"
+   - "Wrap Accounts.razor OnInitializedAsync in try-catch with error state UI (line 64)"
+
+3. If no stability issues found → generate tasks from:
    - UI/UX: loading states, error messages, confirmations, empty states, mobile polish
    - Performance: list virtualization, caching, debouncing, lazy loading
    - Robustness: error handling, edge cases, input validation, retry logic
