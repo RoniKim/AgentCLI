@@ -398,8 +398,6 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
 
     if tool_calls_made:
         eprint(f"  [TOOLS_SUMMARY] {len(tool_calls_made)} tool calls: {', '.join(tool_calls_made)}")
-    else:
-        eprint("  [WARN] No tool calls detected in message stream — agent may not have edited files")
 
     return ("\n".join(text_parts).strip(), structured)
 
@@ -1740,6 +1738,22 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 changed = has_working_tree_changes(repo, before, after, before_untracked=before_untracked)
 
                 if stop_on_no_diff and not changed:
+                    # Check if agent determined the task was already implemented (legitimate no-diff)
+                    already_done_keywords = [
+                        "already implemented", "already correct", "already exists",
+                        "already complete", "already working", "no changes needed",
+                        "no code changes", "no changes were needed", "implementation is already",
+                        "already has", "already in place",
+                    ]
+                    dev_lower = dev_log.lower() if dev_log else ""
+                    task_already_done = any(kw in dev_lower for kw in already_done_keywords)
+                    if task_already_done:
+                        eprint(f"[INFO] Task {next_task.id} reports already implemented; marking as done (no diff expected).")
+                        metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0, reason="already_implemented")
+                        logger.task_end(task_id=next_task.id, success=True, reason="already_implemented")
+                        task_completed = True
+                        break
+
                     if dev_is_max_turns and dev_auto_escalate and (attempt + 1) < max_attempts:
                         eprint(f"[INFO] Max turns exceeded with no diff for {next_task.id}. Auto-retrying with escalation...")
                         metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="max_turns_no_diff")
