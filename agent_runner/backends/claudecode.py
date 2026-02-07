@@ -1498,6 +1498,66 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
         iterations = int(getattr(args, "iterations", 10) or 10)
 
+        # --- Pre-cycle build health check ---
+        if build_enabled and not stop_path.exists():
+            pre_build_log = run_dir / "pre_cycle_build.txt"
+            pre_build_ok = await run_build_gate_async(
+                repo=repo, build_cmd=getattr(args, "build_cmd", []),
+                build_timeout_sec=int(getattr(args, "build_timeout_seconds", 1800)),
+                legacy_build_target=str(getattr(args, "dotnet_build_target", "") or ""),
+                log_path=pre_build_log, stop_path=stop_path,
+            )
+            if not pre_build_ok:
+                eprint("[BUILD-FIX] Build is broken before tasks start. Running auto-fix...")
+                metrics.event("build_fix_start", cycle=cycle_idx)
+                build_errors = pre_build_log.read_text(encoding="utf-8", errors="replace")
+                error_lines = [ln for ln in build_errors.splitlines() if "error " in ln.lower()]
+                error_summary = "\n".join(error_lines[:80]) or build_errors[-3000:]
+
+                build_fix_prompt = _patch_prompt_for_claude(
+                    f"The project at {repo} does NOT build. You must fix ALL build errors before any feature work.\n\n"
+                    f"Build output (errors only):\n```\n{error_summary}\n```\n\n"
+                    "Instructions:\n"
+                    "1. Read the failing files and fix each error\n"
+                    "2. After fixing, run the build command to verify\n"
+                    "3. Keep fixing until the build succeeds with 0 errors\n"
+                    "4. Do NOT add new features — only fix build errors\n"
+                )
+
+                build_fix_max_turns = int(getattr(args, "max_turns_per_task", 12) or 12) * 2
+                build_fix_model = cfg.dev_model or cfg.model
+                try:
+                    await _run_with_continuations(
+                        cfg, build_fix_prompt, repo=repo, stage="BuildFix",
+                        stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
+                        model_override=build_fix_model,
+                        stage_instructions=dev_instructions,
+                        max_turns_override=build_fix_max_turns,
+                        timeout_seconds=int(getattr(args, "dev_timeout_seconds", 600) or 600),
+                        label="build_fix", max_continuations=int(getattr(args, "dev_max_turns_continuations", 0) or 0),
+                        task_id="__build_fix__",
+                        budget_state=budget_state, budgets_cfg=budgets_cfg,
+                        metrics=metrics, _budget_exceeded=_budget_exceeded,
+                    )
+                except Exception as bfx:
+                    eprint(f"[BUILD-FIX] Auto-fix agent error: {bfx}")
+
+                # Verify build after fix attempt
+                post_fix_ok = await run_build_gate_async(
+                    repo=repo, build_cmd=getattr(args, "build_cmd", []),
+                    build_timeout_sec=int(getattr(args, "build_timeout_seconds", 1800)),
+                    legacy_build_target=str(getattr(args, "dotnet_build_target", "") or ""),
+                    log_path=run_dir / "pre_cycle_build_post_fix.txt", stop_path=stop_path,
+                )
+                if post_fix_ok:
+                    eprint("[BUILD-FIX] Build fixed successfully!")
+                    metrics.event("build_fix_end", cycle=cycle_idx, rc=0)
+                else:
+                    eprint("[BUILD-FIX] Build still broken after fix attempt.")
+                    metrics.event("build_fix_end", cycle=cycle_idx, rc=1)
+                    # In continuous mode, proceed anyway — partial fixes may help
+                    # In non-continuous mode, also proceed — tasks may fix remaining issues
+
         for step in range(iterations):
             if stop_path.exists():
                 break
@@ -1551,6 +1611,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 metrics.event("checkpoint_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0, reason="retry_escalation")
 
             task_completed = False
+            _prev_build_error: str = ""  # Carried across attempts for build-error-aware retry
 
             def _restore_or_stop(reason: str) -> tuple[bool, str]:
                 if not cp:
@@ -1610,6 +1671,14 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "codex_call_hint": "Use Claude Code built-in tools (Read, Write, Edit, Grep, Glob, Bash) directly. Do NOT call Codex MCP.",
                 }
                 dev_prompt = _patch_prompt_for_claude(store.render("dev_task_prompt", DEV_TASK_TEMPLATE_DEFAULT, dev_ctx))
+
+                # Inject build error context from a previous failed attempt
+                if _prev_build_error:
+                    dev_prompt = dev_prompt + (
+                        f"\n\n[BUILD FAILED] The previous attempt broke the build. "
+                        f"Fix these errors:\n```\n{_prev_build_error}\n```\n"
+                        "Fix the build errors first, then complete the task."
+                    )
 
                 metrics.event("dev_attempt_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, model=model_name)
                 logger.set_context(cycle=cycle_idx, step=step, model=model_name, max_turns=int(getattr(args, "max_turns_per_task", 12) or 12), timeout_sec=0)
@@ -1843,6 +1912,13 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     metrics.event("build_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
                     if not ok:
                         if dev_auto_escalate and (attempt + 1) < max_attempts and "build_failed" in dev_escalate_on:
+                            # Capture build errors for injection into the next attempt's prompt
+                            try:
+                                _berr_raw = (attempt_dir / "build.txt").read_text(encoding="utf-8", errors="replace")
+                                _berr_lines = [ln for ln in _berr_raw.splitlines() if "error " in ln.lower()]
+                                _prev_build_error = "\n".join(_berr_lines[:50]) or _berr_raw[-2000:]
+                            except Exception:
+                                _prev_build_error = ""
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="build_failed")
                             continue
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
@@ -2328,7 +2404,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 break
             if reason == STOP_REASON_ALL_TASKS_DONE:
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
-                break
+                if not loop_mode:
+                    break
+                # In loop mode, fall through — PM refresh may generate new tasks
             if reason == "all_tasks_attempted":
                 # All tasks tried but some skipped — in loop mode, next cycle may get new tasks from PM
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_attempted")

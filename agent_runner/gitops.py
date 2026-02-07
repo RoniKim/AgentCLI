@@ -402,9 +402,12 @@ def restore_checkpoint(
             "# Untracked restore warning\n\n" + "\n".join(f"- {w}" for w in untracked_warnings) + "\n",
         )
 
-    porcelain = git_porcelain(repo)
-    if not porcelain.strip():
-        fail("Rollback applied but working tree is clean; expected changes after restore.")
+    # Only validate non-empty working tree if the checkpoint patch had content.
+    # An empty patch means the tree was clean at checkpoint time — clean after restore is correct.
+    if not empty_patch:
+        porcelain = git_porcelain(repo)
+        if not porcelain.strip():
+            fail("Rollback applied but working tree is clean; expected changes after restore.")
 
 
 def create_worktree(repo: Path, worktree_dir: Path) -> None:
