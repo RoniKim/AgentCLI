@@ -1985,9 +1985,13 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         except Exception:
             pass
 
-        processed_count = done_count + len(skipped_set.intersection(task_ids))
-        if total_count > 0 and processed_count >= total_count:
+        skipped_count = len(skipped_set.intersection(task_ids))
+        if total_count > 0 and done_count >= total_count:
             return 0, STOP_REASON_ALL_TASKS_DONE, done_delta, ran_tasks
+        if total_count > 0 and (done_count + skipped_count) >= total_count:
+            # All tasks attempted but some were skipped — not truly "all done"
+            eprint(f"[INFO] All tasks attempted: {done_count} done, {skipped_count} skipped out of {total_count}.")
+            return 0, "all_tasks_attempted", done_delta, ran_tasks
 
         return 0, "ok", done_delta, ran_tasks
 
@@ -2314,6 +2318,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             if reason == STOP_REASON_ALL_TASKS_DONE:
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
                 break
+            if reason == "all_tasks_attempted":
+                # All tasks tried but some skipped — in loop mode, next cycle may get new tasks from PM
+                append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_attempted")
+                if not loop_mode:
+                    break
+                # In loop mode, fall through to loop sleep — PM refresh may add new tasks
             if rc != 0 and not (loop_mode and continuous):
                 # In continuous loop mode, non-critical failures don't stop the run
                 break
