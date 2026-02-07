@@ -235,6 +235,152 @@ def copy_untracked(repo: Path, files: list[str], dest_dir: Path) -> None:
 
 
 @dataclass
+class TaskBranch:
+    """Metadata for a per-task isolation branch."""
+    branch_name: str   # e.g. "task/T1_2026-02-08T14-30-22"
+    base_branch: str   # e.g. "main" or "HEAD" (detached)
+    base_commit: str   # SHA at creation
+    created_at: str
+    task_id: str
+
+
+def create_task_branch(repo: Path, task_id: str) -> TaskBranch:
+    """Create a ``task/<id>_<timestamp>`` branch for isolated work.
+
+    If the working tree is dirty the changes are stashed, the branch is
+    created, and the stash is popped so work-in-progress is preserved on
+    the new branch.
+    """
+    check_and_remove_stale_git_lock(repo)
+
+    # Determine base branch
+    rc, ref = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, timeout_sec=30)
+    base_branch = ref.strip() if rc == 0 and ref.strip() != "HEAD" else "HEAD"
+
+    base_commit = git_head(repo)
+    if not base_commit:
+        raise RuntimeError("Cannot create task branch: unable to determine HEAD")
+
+    ts = _safe_ts()
+    branch_name = f"task/{task_id}_{ts}"
+
+    # Stash dirty tree if needed
+    dirty = bool(git_porcelain(repo).strip())
+    if dirty:
+        run_cmd(["git", "stash", "push", "-m", f"task-branch-{task_id}"], cwd=repo, timeout_sec=120)
+
+    rc, out = run_cmd(["git", "checkout", "-b", branch_name], cwd=repo, timeout_sec=30)
+    if rc != 0:
+        # Restore stash on failure
+        if dirty:
+            run_cmd(["git", "stash", "pop"], cwd=repo, timeout_sec=120)
+        raise RuntimeError(f"Failed to create task branch {branch_name}: {out}")
+
+    if dirty:
+        run_cmd(["git", "stash", "pop"], cwd=repo, timeout_sec=120)
+
+    eprint(f"[INFO] Created task branch: {branch_name} (base={base_branch}, commit={base_commit[:8]})")
+    return TaskBranch(
+        branch_name=branch_name,
+        base_branch=base_branch,
+        base_commit=base_commit,
+        created_at=now_iso(),
+        task_id=task_id,
+    )
+
+
+def merge_task_branch(repo: Path, tb: TaskBranch) -> bool:
+    """Merge the task branch back to the base branch.
+
+    Commits any uncommitted work first, then attempts fast-forward merge
+    followed by a regular merge.  Returns ``True`` on success, ``False``
+    on conflict.
+    """
+    check_and_remove_stale_git_lock(repo)
+
+    # Commit any remaining uncommitted changes on the task branch
+    porcelain = git_porcelain(repo)
+    if porcelain.strip():
+        run_cmd(["git", "add", "-A"], cwd=repo, timeout_sec=120)
+        run_cmd(
+            ["git", "commit", "--no-verify", "-m", f"[auto] task {tb.task_id} final commit"],
+            cwd=repo, timeout_sec=120,
+        )
+
+    # Switch back to base
+    checkout_target = tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit
+    rc, out = run_cmd(["git", "checkout", checkout_target], cwd=repo, timeout_sec=30)
+    if rc != 0:
+        eprint(f"[WARN] Failed to checkout {checkout_target}: {out}")
+        return False
+
+    # Try fast-forward first
+    rc, out = run_cmd(["git", "merge", "--ff-only", tb.branch_name], cwd=repo, timeout_sec=120)
+    if rc == 0:
+        eprint(f"[INFO] Fast-forward merged {tb.branch_name} into {checkout_target}")
+        return True
+
+    # Fall back to regular merge
+    rc, out = run_cmd(["git", "merge", "--no-edit", tb.branch_name], cwd=repo, timeout_sec=120)
+    if rc == 0:
+        eprint(f"[INFO] Merged {tb.branch_name} into {checkout_target}")
+        return True
+
+    # Conflict — abort merge and report failure
+    run_cmd(["git", "merge", "--abort"], cwd=repo, timeout_sec=30)
+    eprint(f"[WARN] Merge conflict for {tb.branch_name}; work preserved on branch")
+    return False
+
+
+def abandon_task_branch(repo: Path, tb: TaskBranch) -> str:
+    """Abandon a task branch, preserving work, and return to the base branch.
+
+    Any uncommitted changes are committed so nothing is lost.  The branch
+    is *not* deleted — the user can inspect or cherry-pick from it later.
+
+    Returns the branch name for reference.
+    """
+    check_and_remove_stale_git_lock(repo)
+
+    # Commit uncommitted work so it's not lost
+    porcelain = git_porcelain(repo)
+    if porcelain.strip():
+        run_cmd(["git", "add", "-A"], cwd=repo, timeout_sec=120)
+        run_cmd(
+            ["git", "commit", "--no-verify", "-m", f"[auto] task {tb.task_id} abandoned — preserving work"],
+            cwd=repo, timeout_sec=120,
+        )
+
+    # Switch back to base
+    checkout_target = tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit
+    rc, out = run_cmd(["git", "checkout", checkout_target], cwd=repo, timeout_sec=30)
+    if rc != 0:
+        eprint(f"[WARN] Failed to checkout {checkout_target} after abandon: {out}")
+
+    eprint(f"[INFO] Abandoned task branch {tb.branch_name} (work preserved)")
+    return tb.branch_name
+
+
+def reset_task_branch(repo: Path, tb: TaskBranch) -> None:
+    """Reset a task branch to its base commit for retry.
+
+    This performs ``git reset --hard`` + ``git clean -fd`` but *only* on
+    the task branch, so main is never affected.
+    """
+    check_and_remove_stale_git_lock(repo)
+
+    rc, out = run_cmd(["git", "reset", "--hard", tb.base_commit], cwd=repo, timeout_sec=120)
+    if rc != 0:
+        raise RuntimeError(f"reset_task_branch: git reset --hard failed: {out}")
+
+    rc, out = run_cmd(["git", "clean", "-fd"], cwd=repo, timeout_sec=120)
+    if rc != 0:
+        eprint(f"[WARN] reset_task_branch: git clean -fd failed: {out}")
+
+    eprint(f"[INFO] Reset task branch {tb.branch_name} to {tb.base_commit[:8]}")
+
+
+@dataclass
 class RepoCheckpoint:
     patch_path: Path
     untracked_dir: Path
@@ -287,6 +433,74 @@ def _write_report(path: Path, content: str) -> None:
         pass
 
 
+def _create_rescue_branch(repo: Path, task_id: str = "") -> str | None:
+    """Create a rescue branch preserving all current work before rollback.
+
+    Commits staged, unstaged, and untracked changes to a detached rescue branch
+    so the work can be recovered later (e.g. ``git cherry-pick`` or ``git diff``).
+
+    Returns the rescue branch name on success, or ``None`` if nothing to save.
+    """
+    ts = _safe_ts()
+    label = f"{task_id}_" if task_id else ""
+    branch_name = f"rescue/{label}{ts}"
+
+    # Check if there are any changes worth saving
+    porcelain = git_porcelain(repo)
+    untracked = list_untracked(repo)
+    if not porcelain.strip() and not untracked:
+        return None  # Nothing to save
+
+    # Remember current branch/HEAD to restore after
+    _rc, original_ref = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, timeout_sec=30)
+    original_ref = original_ref.strip() if _rc == 0 else ""
+
+    try:
+        # Create and switch to rescue branch
+        code, out = run_cmd(["git", "checkout", "-b", branch_name], cwd=repo, timeout_sec=30)
+        if code != 0:
+            eprint(f"[WARN] Failed to create rescue branch {branch_name}: {out}")
+            return None
+
+        # Stage all changes including untracked files
+        run_cmd(["git", "add", "-A"], cwd=repo, timeout_sec=120)
+
+        # Commit everything
+        msg = f"[rescue] Work preserved before rollback (task: {task_id or 'unknown'})"
+        code, out = run_cmd(["git", "commit", "-m", msg, "--no-verify"], cwd=repo, timeout_sec=120)
+        if code != 0:
+            eprint(f"[WARN] Rescue commit failed: {out}")
+            # Switch back even if commit failed
+            if original_ref and original_ref != "HEAD":
+                run_cmd(["git", "checkout", original_ref], cwd=repo, timeout_sec=30)
+            return None
+
+        eprint(f"[INFO] Work preserved in rescue branch: {branch_name}")
+        return branch_name
+    except Exception as ex:
+        eprint(f"[WARN] Rescue branch creation failed: {ex}")
+        return None
+    finally:
+        # Switch back to original branch for the actual rollback
+        if original_ref and original_ref != "HEAD":
+            run_cmd(["git", "checkout", original_ref], cwd=repo, timeout_sec=30)
+
+
+def update_checkpoint(repo: Path, cp: RepoCheckpoint) -> RepoCheckpoint:
+    """Refresh an existing checkpoint to the current working tree state.
+
+    This advances the rollback baseline so that a subsequent rollback returns
+    to this (more recent) state rather than the original task start.
+    """
+    check_and_remove_stale_git_lock(repo)
+    checkpoint_dir = cp.patch_path.parent
+
+    # Overwrite the existing checkpoint in-place
+    new_cp = create_checkpoint(repo, checkpoint_dir)
+    eprint(f"[INFO] Checkpoint updated (head={new_cp.head_commit[:8] if new_cp.head_commit else '?'})")
+    return new_cp
+
+
 def restore_checkpoint(
     repo: Path,
     cp: RepoCheckpoint,
@@ -294,7 +508,12 @@ def restore_checkpoint(
     dangerous: bool,
     run_dir: Path | None,
     stop_path: Path | None,
-) -> None:
+    task_id: str = "",
+) -> str | None:
+    """Restore working tree to a checkpoint.
+
+    Returns the rescue branch name if work was preserved, or ``None``.
+    """
     check_and_remove_stale_git_lock(repo)
     report_dir = run_dir if run_dir is not None else cp.patch_path.parent
     blocked_path = report_dir / "ROLLBACK_BLOCKED.md"
@@ -310,6 +529,9 @@ def restore_checkpoint(
         _write_report(blocked_path, msg)
         raise RuntimeError("Rollback blocked: dangerous_git_rollback is disabled.")
 
+    # Preserve current work in a rescue branch before destructive rollback
+    rescue_branch = _create_rescue_branch(repo, task_id=task_id)
+
     rescue_dir = (run_dir or cp.patch_path.parent.parent) / f"checkpoint_rescue_{_safe_ts()}"
     rescue_cp: RepoCheckpoint | None = None
     try:
@@ -320,6 +542,8 @@ def restore_checkpoint(
 
     def fail(reason: str) -> None:
         rescue_note = f"\n\nRescue checkpoint: {rescue_dir}\n" if rescue_cp else "\n\nRescue checkpoint: (none)\n"
+        if rescue_branch:
+            rescue_note += f"Rescue branch: {rescue_branch}\n"
         _write_report(failure_path, f"# Rollback failure\n\n{reason}{rescue_note}")
         raise RuntimeError(reason)
 
@@ -408,6 +632,8 @@ def restore_checkpoint(
         porcelain = git_porcelain(repo)
         if not porcelain.strip():
             fail("Rollback applied but working tree is clean; expected changes after restore.")
+
+    return rescue_branch
 
 
 def create_worktree(repo: Path, worktree_dir: Path) -> None:

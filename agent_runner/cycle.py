@@ -25,7 +25,13 @@ from .gitops import (
     repo_fingerprint,
     create_checkpoint,
     restore_checkpoint,
+    update_checkpoint,
     RepoCheckpoint,
+    TaskBranch,
+    create_task_branch,
+    merge_task_branch,
+    abandon_task_branch,
+    reset_task_branch,
     create_worktree,
     remove_worktree,
     handle_worktree_patch,
@@ -1646,11 +1652,17 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 metrics.event("task_start", cycle=cycle_idx, step=step, task_id=next_task.id)
 
+                tb: Optional[TaskBranch] = None
                 cp: Optional[RepoCheckpoint] = None
                 if args.isolate_task:
-                    metrics.event("checkpoint_start", cycle=cycle_idx, step=step, task_id=next_task.id)
-                    cp = create_checkpoint(repo, task_dir / "checkpoint")
-                    metrics.event("checkpoint_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0)
+                    try:
+                        tb = create_task_branch(repo, next_task.id)
+                        metrics.event("task_branch_created", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name)
+                    except Exception as _tb_ex:
+                        eprint(f"[WARN] Task branch creation failed ({_tb_ex}); falling back to checkpoint")
+                        metrics.event("checkpoint_start", cycle=cycle_idx, step=step, task_id=next_task.id)
+                        cp = create_checkpoint(repo, task_dir / "checkpoint")
+                        metrics.event("checkpoint_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0)
 
                 before = git_porcelain(repo)
 
@@ -1680,27 +1692,49 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 # Ensure a rollback point when we may retry/escalate.
                 # (Even if isolate_task is false, retries need a clean baseline.)
-                if dev_auto_escalate and not cp:
-                    metrics.event("checkpoint_start", cycle=cycle_idx, step=step, task_id=next_task.id, reason="retry_escalation")
-                    cp = create_checkpoint(repo, task_dir / "checkpoint")
-                    metrics.event("checkpoint_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0, reason="retry_escalation")
+                if dev_auto_escalate and not tb and not cp:
+                    try:
+                        tb = create_task_branch(repo, next_task.id)
+                        metrics.event("task_branch_created", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name, reason="retry_escalation")
+                    except Exception:
+                        metrics.event("checkpoint_start", cycle=cycle_idx, step=step, task_id=next_task.id, reason="retry_escalation")
+                        cp = create_checkpoint(repo, task_dir / "checkpoint")
+                        metrics.event("checkpoint_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0, reason="retry_escalation")
 
                 task_completed = False
                 task_blocked = False
                 _prev_build_error: str = ""  # Carried across attempts for build-error-aware retry
 
-                def _restore_or_stop(reason: str) -> tuple[bool, str]:
+                def _isolate_or_stop(reason: str) -> tuple[bool, str]:
+                    """Isolate failed task work: abandon branch (non-destructive) or restore checkpoint (fallback)."""
+                    if tb:
+                        try:
+                            abandon_task_branch(repo, tb)
+                            metrics.event("task_branch_abandoned", cycle=cycle_idx, step=step, task_id=next_task.id,
+                                          reason=reason, branch=tb.branch_name)
+                            return True, ""
+                        except Exception as ex:
+                            detail = str(ex)
+                            eprint(f"[WARN] abandon_task_branch failed: {detail}")
+                            state.setdefault("failed", []).append({"task": next_task.id, "reason": "abandon_failed", "detail": detail})
+                            save_state(state_path, state)
+                            metrics.event("task_branch_abandon_failed", cycle=cycle_idx, step=step, task_id=next_task.id, reason=reason, detail=detail)
+                            return False, "abandon_failed"
                     if not cp:
                         return True, ""
                     try:
-                        restore_checkpoint(
+                        rescue_branch = restore_checkpoint(
                             repo,
                             cp,
                             dangerous=bool(getattr(args, "dangerous_git_rollback", False)),
                             run_dir=run_dir,
                             stop_path=stop_path,
+                            task_id=next_task.id,
                         )
-                        metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason=reason)
+                        metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason=reason,
+                                      rescue_branch=rescue_branch or "")
+                        if rescue_branch:
+                            eprint(f"[INFO] Work preserved in branch: {rescue_branch}")
                         return True, ""
                     except Exception as ex:
                         detail = str(ex)
@@ -1729,14 +1763,25 @@ async def main_async(args: argparse.Namespace) -> int:
                         metrics.event("escalate_attempt", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
 
                     # Restore baseline before retries
-                    if attempt > 0 and cp:
-                        ok, fail_reason = _restore_or_stop("retry")
-                        if not ok:
-                            if not continuous:
-                                return 1, fail_reason, 0, (len(done_set) > before_done)
-                            eprint(f"[WARN] Rollback {fail_reason} during retry for {next_task.id}; skipping task.")
-                            skipped_set.add(next_task.id)
-                            break
+                    if attempt > 0 and (tb or cp):
+                        if tb:
+                            try:
+                                reset_task_branch(repo, tb)
+                                metrics.event("task_branch_reset", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
+                            except Exception as _rst_ex:
+                                eprint(f"[WARN] reset_task_branch failed: {_rst_ex}; skipping task.")
+                                if not continuous:
+                                    return 1, "branch_reset_failed", 0, (len(done_set) > before_done)
+                                skipped_set.add(next_task.id)
+                                break
+                        else:
+                            ok, fail_reason = _isolate_or_stop("retry")
+                            if not ok:
+                                if not continuous:
+                                    return 1, fail_reason, 0, (len(done_set) > before_done)
+                                eprint(f"[WARN] Rollback {fail_reason} during retry for {next_task.id}; skipping task.")
+                                skipped_set.add(next_task.id)
+                                break
 
                     model_name = tiers[attempt]
                     dev_agent = dev if attempt == 0 else make_dev_agent(model_name)
@@ -1881,8 +1926,8 @@ async def main_async(args: argparse.Namespace) -> int:
                         save_state(state_path, state)
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="exception")
                         logger.task_end(task_id=next_task.id, success=False, reason="exception", exception=str(dev_exc))
-                        if cp:
-                            ok, fail_reason = _restore_or_stop("exception")
+                        if tb or cp:
+                            ok, fail_reason = _isolate_or_stop("exception")
                             if not ok:
                                 if not continuous:
                                     return 1, fail_reason, 0, (len(done_set) > before_done)
@@ -1943,8 +1988,8 @@ async def main_async(args: argparse.Namespace) -> int:
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="no_diff")
                         logger.task_end(task_id=next_task.id, success=False, reason="no_diff", was_max_turns=dev_is_max_turns)
                         eprint(f"[{'SKIP' if continuous else 'STOP'}] No diff produced for {next_task.id}.")
-                        if cp:
-                            ok, fail_reason = _restore_or_stop("no_diff")
+                        if tb or cp:
+                            ok, fail_reason = _isolate_or_stop("no_diff")
                             if not ok:
                                 if not continuous:
                                     return 1, fail_reason, 0, (len(done_set) > before_done)
@@ -1964,6 +2009,23 @@ async def main_async(args: argparse.Namespace) -> int:
                             stop_path=stop_path,
                         )
                         metrics.event("build_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
+                        if ok and tb:
+                            # Auto-commit on task branch as incremental checkpoint
+                            try:
+                                _porcelain = git_porcelain(repo)
+                                if _porcelain.strip():
+                                    run_cmd(["git", "add", "-A"], cwd=repo, timeout_sec=120)
+                                    run_cmd(["git", "commit", "--no-verify", "-m", f"[auto] task {next_task.id} build passed"], cwd=repo, timeout_sec=120)
+                                    metrics.event("task_branch_commit", cycle=cycle_idx, step=step, task_id=next_task.id, trigger="build_passed")
+                            except Exception as _tb_ex:
+                                eprint(f"[WARN] Auto-commit on task branch failed: {_tb_ex}")
+                        elif ok and cp:
+                            # Incremental checkpoint: advance baseline to build-passing state
+                            try:
+                                cp = update_checkpoint(repo, cp)
+                                metrics.event("checkpoint_incremental", cycle=cycle_idx, step=step, task_id=next_task.id, trigger="build_passed")
+                            except Exception as _cp_ex:
+                                eprint(f"[WARN] Incremental checkpoint failed: {_cp_ex}")
                         if not ok:
                             if dev_auto_escalate and (attempt + 1) < max_attempts and "build_failed" in dev_escalate_on:
                                 # Capture build errors for injection into the next attempt's prompt
@@ -1978,8 +2040,8 @@ async def main_async(args: argparse.Namespace) -> int:
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
                             save_state(state_path, state)
                             eprint(f"[{'SKIP' if continuous else 'STOP'}] Build failed after {next_task.id}. See {attempt_dir / 'build.txt'}")
-                            if cp:
-                                ok_restore, fail_reason = _restore_or_stop("build_failed")
+                            if tb or cp:
+                                ok_restore, fail_reason = _isolate_or_stop("build_failed")
                                 if not ok_restore:
                                     if not continuous:
                                         return 1, fail_reason, 0, (len(done_set) > before_done)
@@ -2007,8 +2069,8 @@ async def main_async(args: argparse.Namespace) -> int:
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "test_failed"})
                             save_state(state_path, state)
                             eprint(f"[{'SKIP' if continuous else 'STOP'}] Tests failed after {next_task.id}. See {attempt_dir / 'test.txt'}")
-                            if cp:
-                                ok_restore, fail_reason = _restore_or_stop("test_failed")
+                            if tb or cp:
+                                ok_restore, fail_reason = _isolate_or_stop("test_failed")
                                 if not ok_restore:
                                     if not continuous:
                                         return 1, fail_reason, 0, (len(done_set) > before_done)
@@ -2076,8 +2138,8 @@ async def main_async(args: argparse.Namespace) -> int:
                             eprint(f"[{'SKIP' if continuous else 'STOP'}] Policy scan failed after {next_task.id}. See {attempt_dir / 'policy_scan.json'}")
                             metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="policy_violation",
                                           violations=len(scan_result.get("fail_violations", [])))
-                            if cp:
-                                ok_restore, fail_reason = _restore_or_stop("policy_violation")
+                            if tb or cp:
+                                ok_restore, fail_reason = _isolate_or_stop("policy_violation")
                                 if not ok_restore:
                                     if not continuous:
                                         return 1, fail_reason, 0, (len(done_set) > before_done)
@@ -2092,13 +2154,30 @@ async def main_async(args: argparse.Namespace) -> int:
                     task_completed = True
                     break
 
+                # Merge or abandon task branch
+                if task_completed and tb:
+                    merge_ok = merge_task_branch(repo, tb)
+                    if merge_ok:
+                        metrics.event("task_branch_merged", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name)
+                    else:
+                        eprint(f"[WARN] Merge failed for {tb.branch_name}; work preserved on branch")
+                        metrics.event("task_branch_merge_failed", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name)
+                    tb = None
+
                 if task_blocked:
                     # Blocked tasks: skip to next task instead of stopping
+                    if tb:
+                        abandon_task_branch(repo, tb)
+                        tb = None
                     skipped_set.add(next_task.id)
                     eprint(f"[INFO] Skipped blocked task {next_task.id}, continuing to next task...")
                     continue
 
                 if not task_completed:
+                    if tb:
+                        abandon_task_branch(repo, tb)
+                        metrics.event("task_branch_abandoned", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name, reason="exhausted_attempts")
+                        tb = None
                     # No success after attempts and not otherwise returned: treat as failure.
                     state.setdefault("failed", []).append({"task": next_task.id, "reason": "exhausted_attempts"})
                     save_state(state_path, state)
