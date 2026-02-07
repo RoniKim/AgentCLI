@@ -242,9 +242,10 @@ class TaskBranch:
     base_commit: str   # SHA at creation
     created_at: str
     task_id: str
+    task_title: str = ""  # e.g. "Add IDisposable + CTS to TransactionEntry.razor"
 
 
-def create_task_branch(repo: Path, task_id: str) -> TaskBranch:
+def create_task_branch(repo: Path, task_id: str, task_title: str = "") -> TaskBranch:
     """Create a ``task/<id>_<timestamp>`` branch for isolated work.
 
     If the working tree is dirty the changes are stashed, the branch is
@@ -286,6 +287,7 @@ def create_task_branch(repo: Path, task_id: str) -> TaskBranch:
         base_commit=base_commit,
         created_at=now_iso(),
         task_id=task_id,
+        task_title=task_title,
     )
 
 
@@ -302,8 +304,9 @@ def merge_task_branch(repo: Path, tb: TaskBranch) -> bool:
     porcelain = git_porcelain(repo)
     if porcelain.strip():
         run_cmd(["git", "add", "-A"], cwd=repo, timeout_sec=120)
+        _msg = f"[{tb.task_id}] {tb.task_title}" if tb.task_title else f"[auto] task {tb.task_id} final commit"
         run_cmd(
-            ["git", "commit", "--no-verify", "-m", f"[auto] task {tb.task_id} final commit"],
+            ["git", "commit", "--no-verify", "-m", _msg],
             cwd=repo, timeout_sec=120,
         )
 
@@ -348,8 +351,9 @@ def abandon_task_branch(repo: Path, tb: TaskBranch) -> str:
     porcelain = git_porcelain(repo)
     if porcelain.strip():
         run_cmd(["git", "add", "-A"], cwd=repo, timeout_sec=120)
+        _msg = f"[{tb.task_id}] {tb.task_title} (abandoned)" if tb.task_title else f"[auto] task {tb.task_id} abandoned — preserving work"
         run_cmd(
-            ["git", "commit", "--no-verify", "-m", f"[auto] task {tb.task_id} abandoned — preserving work"],
+            ["git", "commit", "--no-verify", "-m", _msg],
             cwd=repo, timeout_sec=120,
         )
 

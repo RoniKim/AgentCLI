@@ -1656,7 +1656,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 cp: Optional[RepoCheckpoint] = None
                 if args.isolate_task:
                     try:
-                        tb = create_task_branch(repo, next_task.id)
+                        tb = create_task_branch(repo, next_task.id, task_title=next_task.title)
                         metrics.event("task_branch_created", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name)
                     except Exception as _tb_ex:
                         eprint(f"[WARN] Task branch creation failed ({_tb_ex}); falling back to checkpoint")
@@ -1694,7 +1694,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 # (Even if isolate_task is false, retries need a clean baseline.)
                 if dev_auto_escalate and not tb and not cp:
                     try:
-                        tb = create_task_branch(repo, next_task.id)
+                        tb = create_task_branch(repo, next_task.id, task_title=next_task.title)
                         metrics.event("task_branch_created", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name, reason="retry_escalation")
                     except Exception:
                         metrics.event("checkpoint_start", cycle=cycle_idx, step=step, task_id=next_task.id, reason="retry_escalation")
@@ -2015,7 +2015,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 _porcelain = git_porcelain(repo)
                                 if _porcelain.strip():
                                     run_cmd(["git", "add", "-A"], cwd=repo, timeout_sec=120)
-                                    run_cmd(["git", "commit", "--no-verify", "-m", f"[auto] task {next_task.id} build passed"], cwd=repo, timeout_sec=120)
+                                    run_cmd(["git", "commit", "--no-verify", "-m", f"[{next_task.id}] {next_task.title} (build passed)"], cwd=repo, timeout_sec=120)
                                     metrics.event("task_branch_commit", cycle=cycle_idx, step=step, task_id=next_task.id, trigger="build_passed")
                             except Exception as _tb_ex:
                                 eprint(f"[WARN] Auto-commit on task branch failed: {_tb_ex}")

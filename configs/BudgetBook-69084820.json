@@ -91,8 +91,14 @@
   "dotnet_build_target": "",
   "dotnet_test_target": "",
   "dotnet_test_filter": "",
-  "build_cmd": ["dotnet", "build"],
-  "test_cmd": ["dotnet", "test"],
+  "build_cmd": [
+    "dotnet",
+    "build"
+  ],
+  "test_cmd": [
+    "dotnet",
+    "test"
+  ],
   "build_timeout_seconds": 1800,
   "pm_model": "gpt-5.2",
   "dev_auto_escalate": true,
@@ -111,7 +117,7 @@
   "max_qa_followups": 3,
   "reporter_model": "gpt-5-nano",
   "report_max_turns": 8,
-  "pm_timeout_seconds": 900,
+  "pm_timeout_seconds": 1800,
   "dev_timeout_seconds": 600,
   "mcp_timeout_seconds": 3600,
   "test_timeout_seconds": 3600,
