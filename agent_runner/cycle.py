@@ -518,9 +518,12 @@ async def main_async(args: argparse.Namespace) -> int:
 
         def is_transient_exception(ex: Exception) -> bool:
             """Detect transient / retryable API errors (rate-limit, 5xx, timeout)."""
+            # NOTE: "500" removed from needles to avoid false positives on port numbers
+            # (e.g. "localhost:5000"). HTTP 500 is caught by the status_code check below.
             needles = (
-                "rate_limit", "429", "503", "502", "500",
+                "rate_limit", "429", "503", "502",
                 "overloaded", "connection", "timeout", "timed out",
+                "internal server error",
             )
             for e in _iter_exc_chain(ex):
                 try:

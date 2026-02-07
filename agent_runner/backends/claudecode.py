@@ -27,6 +27,8 @@ from ..gitops import (
     git_changed_files,
     git_worktree_changed_files,
     git_porcelain,
+    git_untracked_files,
+    has_working_tree_changes,
     repo_fingerprint,
     create_checkpoint,
     restore_checkpoint,
@@ -105,8 +107,6 @@ from ..utils import (
 
 def _patch_prompt_for_claude(prompt: str) -> str:
     """Replace ALL Codex/OpenAI-specific references in prompts with Claude Code equivalents."""
-    import re
-
     # 1) Catch-all first: replace any "Codex MCP" mentions before inserting new text
     prompt = re.sub(r"Codex MCP", "Claude Code built-in tools", prompt)
 
@@ -130,22 +130,6 @@ def _patch_prompt_for_claude(prompt: str) -> str:
         "Use the Edit tool for targeted modifications and the Write tool for new files.",
         prompt,
     )
-
-    # 5) Add explicit tool guidance if not already present
-    if "TOOL USAGE (Claude Code)" not in prompt:
-        tool_block = (
-            "\n\n<tool_usage_claude_code>\n"
-            "TOOL USAGE (Claude Code):\n"
-            "- To read files: use the Read tool (NOT cat/head/tail)\n"
-            "- To edit files: use the Edit tool for targeted changes\n"
-            "- To create files: use the Write tool\n"
-            "- To search file names: use the Glob tool\n"
-            "- To search file contents: use the Grep tool\n"
-            "- To run commands: use the Bash tool\n"
-            "- Do NOT call any MCP tools. Use only the built-in tools listed above.\n"
-            "</tool_usage_claude_code>\n"
-        )
-        prompt = prompt.rstrip() + tool_block
 
     return prompt
 
@@ -273,7 +257,7 @@ def _filter_kwargs_for_ctor(cls: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
         return kwargs
 
 
-def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_override: str = "", stage_instructions: str = "") -> Any:
+def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_override: str = "", stage_instructions: str = "", max_turns_override: int = 0) -> Any:
     """Build Claude Agent SDK options for a stage."""
     try:
         from claude_agent_sdk import ClaudeAgentOptions
@@ -317,12 +301,13 @@ def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_overr
     kwargs: dict[str, Any] = {
         "model": model,
         "permission_mode": cfg.permission_mode,
-        "max_turns": int(cfg.max_turns),
+        "max_turns": int(max_turns_override) if max_turns_override > 0 else int(cfg.max_turns),
         "setting_sources": cfg.setting_sources,
         "allowed_tools": allowed,
         "disallowed_tools": disallowed,
         "output_format": output_format,
         "system_prompt": system_prompt,
+        "cwd": str(repo),
         "continue_conversation": cfg.continue_conversation,
         "resume": cfg.resume or None,
         "enable_file_checkpointing": cfg.enable_file_checkpointing,
@@ -390,8 +375,14 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
 async def _start_query(client: Any, prompt: str) -> None:
     try:
         result = client.query(prompt)
-    except TypeError:
-        result = client.query(prompt=prompt)
+    except TypeError as te:
+        # Only retry with keyword arg if the error is about call signature,
+        # not about an unrelated type error inside .query()
+        msg = str(te).lower()
+        if "argument" in msg or "positional" in msg or "unexpected" in msg or "required" in msg:
+            result = client.query(prompt=prompt)
+        else:
+            raise
     if inspect.isawaitable(result):
         await result
 
@@ -417,7 +408,8 @@ async def _receive_messages(client: Any, *, stop_path: Path, debug: bool) -> Tup
                 obj = getattr(candidate, attr_name)
                 try:
                     s = obj() if callable(obj) else obj
-                except TypeError:
+                except TypeError as te:
+                    eprint(f"[DEBUG] _coerce_stream: {attr_name}() raised TypeError: {te}")
                     continue
                 if hasattr(s, "__aiter__") or hasattr(s, "__iter__"):
                     return s
@@ -427,7 +419,12 @@ async def _receive_messages(client: Any, *, stop_path: Path, debug: bool) -> Tup
     if stream is not None:
         return await _collect_messages(stream, stop_path=stop_path, debug=debug)
 
-    raise RuntimeError("ClaudeSDKClient does not provide a message stream")
+    # Provide a more informative error with available attributes
+    client_attrs = [a for a in dir(client) if not a.startswith("_")]
+    raise RuntimeError(
+        f"ClaudeSDKClient does not provide a message stream. "
+        f"Available attributes: {', '.join(client_attrs[:15])}"
+    )
 
 
 async def _run_claude_query(
@@ -440,6 +437,8 @@ async def _run_claude_query(
     debug: bool,
     model_override: str = "",
     stage_instructions: str = "",
+    max_turns_override: int = 0,
+    timeout_seconds: int = 0,
     max_retries: int = 3,
     initial_backoff: float = 5.0,
 ) -> Tuple[str, Optional[Any]]:
@@ -452,10 +451,13 @@ async def _run_claude_query(
 
     for attempt in range(max_retries + 1):
         try:
-            options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override, stage_instructions=stage_instructions)
+            options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override, stage_instructions=stage_instructions, max_turns_override=max_turns_override)
             async with ClaudeSDKClient(options=options) as client:
                 await _start_query(client, prompt)
-                return await _receive_messages(client, stop_path=stop_path, debug=debug)
+                coro = _receive_messages(client, stop_path=stop_path, debug=debug)
+                if timeout_seconds > 0:
+                    return await asyncio.wait_for(coro, timeout=timeout_seconds)
+                return await coro
         except (StopRequested, BudgetExceeded):
             raise
         except Exception as ex:
@@ -468,6 +470,88 @@ async def _run_claude_query(
                 continue
             raise
     raise RuntimeError("unreachable")  # pragma: no cover
+
+
+async def _run_with_continuations(
+    cfg: "ClaudeCodeConfig",
+    prompt: str,
+    *,
+    repo: Path,
+    stage: str,
+    stop_path: Path,
+    debug: bool,
+    model_override: str = "",
+    stage_instructions: str = "",
+    max_turns_override: int = 0,
+    timeout_seconds: int = 0,
+    label: str = "",
+    max_continuations: int = 0,
+    task_id: str = "",
+    budget_state: dict | None = None,
+    budgets_cfg: dict | None = None,
+    metrics: Any = None,
+    _budget_exceeded: Any = None,
+) -> Tuple[str, Optional[Any]]:
+    """Run a Claude query, optionally continuing if max-turns exception occurs.
+
+    Mirrors cycle.py's _run_with_continuations pattern.
+    """
+    cont_left = int(max_continuations or 0)
+    bs = budget_state or {}
+    bc = budgets_cfg or {}
+    per_task = bs.get("per_task_continuations", {})
+    task_key = task_id or label or stage
+
+    continuation_msg = (
+        f"\n\n[CONTINUE] You hit a turn limit previously while running '{label or stage}'. "
+        "Continue EXACTLY from where you left off.\n"
+        "- Do NOT restate a plan.\n"
+        "- Do NOT summarize.\n"
+        "- Apply changes now (call tools / edit files).\n"
+        "- End with only the required output."
+    )
+
+    while True:
+        try:
+            return await _run_claude_query(
+                cfg, prompt, repo=repo, stage=stage, stop_path=stop_path, debug=debug,
+                model_override=model_override, stage_instructions=stage_instructions,
+                max_turns_override=max_turns_override, timeout_seconds=timeout_seconds,
+            )
+        except (StopRequested, BudgetExceeded):
+            raise
+        except Exception as ex:
+            if is_quota_exception(ex):
+                raise
+            if cont_left > 0 and is_max_turns_exception(ex):
+                # Budget checks
+                if _budget_exceeded and callable(_budget_exceeded):
+                    if _budget_exceeded("total_continuations", bs.get("total_continuations", 0),
+                                        int(bc.get("max_total_continuations_per_run") or 0)):
+                        if metrics:
+                            metrics.event("budget_exceeded", cycle=-1, reason="total_continuations")
+                        raise BudgetExceeded("total_continuations")
+                    per_task.setdefault(task_key, 0)
+                    if _budget_exceeded("dev_continuations_per_task", per_task[task_key],
+                                        int(bc.get("max_dev_continuations_per_task") or 0)):
+                        if metrics:
+                            metrics.event("budget_exceeded", cycle=-1, reason="dev_continuations_per_task", task_id=task_id)
+                        raise BudgetExceeded("dev_continuations_per_task")
+
+                bs["total_continuations"] = bs.get("total_continuations", 0) + 1
+                per_task.setdefault(task_key, 0)
+                per_task[task_key] += 1
+                if metrics:
+                    metrics.event("continuation_attempt", stage=label or stage, task_id=task_id, count=bs["total_continuations"])
+                cont_left -= 1
+                eprint(f"[CONTINUE] Max turns exceeded for {task_key}; continuing ({cont_left} left)...")
+
+                if "[CONTINUE]" in prompt:
+                    prompt = prompt.split("[CONTINUE]")[0] + continuation_msg
+                else:
+                    prompt = prompt + continuation_msg
+                continue
+            raise
 
 
 # ---------------------------------------------------------------------------
@@ -546,9 +630,12 @@ def is_model_invalid_exception(ex: Exception) -> bool:
 
 def is_transient_exception(ex: Exception) -> bool:
     """Detect transient / retryable API errors (rate-limit, 5xx, timeout)."""
+    # NOTE: "500" removed from needles to avoid false positives on port numbers
+    # (e.g. "localhost:5000"). HTTP 500 is caught by the status_code check below.
     needles = (
-        "rate_limit", "429", "503", "502", "500",
+        "rate_limit", "429", "503", "502",
         "overloaded", "connection", "timeout", "timed out",
+        "internal server error",
     )
     for e in _iter_exc_chain(ex):
         try:
@@ -654,7 +741,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     # Observability
     metrics = MetricsLogger(run_dir / "metrics.jsonl")
     logger = create_logger(run_dir, debug=bool(getattr(args, "debug", False)))
-    trace_ctx = TraceCtx(trace_id=new_trace_id(), parent_span_id=None)
+    # trace_ctx reserved for future tracing support
     stop_path = run_dir / str(getattr(args, "stop_file", "STOP"))
     cycle_summary_path = run_dir / "cycle_summary.log"
     last_run_summary_path = run_dir / "last_run_summary.json"
@@ -694,7 +781,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             max_chars=int(skills_cfg.get("pm_summary_max_chars", 0) or 0),
         )
 
-    autopilot = bool(getattr(args, "autopilot", False))
+    # autopilot flag not needed for Claude backend (no codex_call_hint dependency)
 
     # Prompt store (same as Codex)
     prompts_dir_raw = str(getattr(args, "prompts_dir", "") or "")
@@ -1086,6 +1173,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
                     model_override=cfg.pm_model,
                     stage_instructions=pm_instructions,
+                    max_turns_override=max_turns,
+                    timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
                 )
             except StopRequested:
                 raise
@@ -1343,6 +1432,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
         state = load_state(state_path)
         done_set = set(state.get("done", []))
+        skipped_set: set[str] = set()  # Track skipped/failed tasks separately from done
         task_ids = {t.id for t in tasks}
         before_done = len(done_set.intersection(task_ids))
 
@@ -1370,8 +1460,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 break
 
             next_task: Optional[TaskItem] = None
+            processed = done_set | skipped_set
             for t in tasks:
-                if t.id not in done_set:
+                if t.id not in processed:
                     next_task = t
                     break
             if not next_task:
@@ -1457,6 +1548,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 attempt_dir.mkdir(parents=True, exist_ok=True)
 
                 before = git_porcelain(repo)
+                before_untracked = set(git_untracked_files(repo))
                 analysis_hint_out = dev_hints_dir / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}_a{attempt:02d}.md"
                 files_hint = "\n".join([f"- {f}" for f in (next_task.files or [])]) or "- (unspecified)"
                 skills_context = _format_skill_selection(next_task.skills or [], skills_by_id)
@@ -1483,11 +1575,18 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 dev_final = ""
 
                 try:
-                    text, _structured = await _run_claude_query(
+                    dev_max_conts = int(getattr(args, "dev_max_turns_continuations", 0) or 0)
+                    text, _structured = await _run_with_continuations(
                         cfg, dev_prompt, repo=repo, stage="Dev",
                         stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
                         model_override=model_name,
                         stage_instructions=dev_instructions,
+                        max_turns_override=int(getattr(args, "max_turns_per_task", 12) or 12),
+                        timeout_seconds=int(getattr(args, "dev_timeout_seconds", 600) or 600),
+                        label="dev", max_continuations=dev_max_conts,
+                        task_id=next_task.id,
+                        budget_state=budget_state, budgets_cfg=budgets_cfg,
+                        metrics=metrics, _budget_exceeded=_budget_exceeded,
                     )
                     dev_final = text or ""
                     task_duration = time.time() - task_start_time
@@ -1554,16 +1653,46 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     if cp:
                         ok, fail_reason = _restore_or_stop("exception")
                         if not ok:
-                            return 1, fail_reason, 0, (len(done_set) > before_done)
-                    return 1, "dev_exception", 0, (len(done_set) > before_done)
+                            if not continuous:
+                                return 1, fail_reason, 0, (len(done_set) > before_done)
+                            eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; skipping task.")
+                    if continuous:
+                        # Continuous mode: skip this task and continue to next
+                        eprint(f"[SKIP] Dev exception for {next_task.id}; skipping to next task.")
+                        skipped_set.add(next_task.id)
+                        break
+                    else:
+                        # Non-continuous mode: stop the run (matches cycle.py behavior)
+                        return 1, "dev_exception", 0, (len(done_set) > before_done)
 
                 if dev_exc and dev_is_max_turns:
                     state.setdefault("warnings", []).append({"task": next_task.id, "reason": "max_turns_exceeded", "detail": str(dev_exc)})
                     save_state(state_path, state)
                     metrics.event("task_warn", cycle=cycle_idx, step=step, task_id=next_task.id, reason="max_turns_exceeded")
 
+                # Blocked-task detection (ported from cycle.py)
+                blocked_keywords = ["blocked:", "couldn't", "can't", "no such", "doesn't exist", "not found", "missing dependency"]
+                dev_output_lower = dev_log.lower() if dev_log else ""
+                task_is_blocked = any(kw in dev_output_lower for kw in blocked_keywords)
+                if not task_is_blocked:
+                    notes_path = attempt_dir / "NOTES.md"
+                    if notes_path.exists():
+                        try:
+                            notes_content = notes_path.read_text(encoding="utf-8", errors="ignore").lower()
+                            task_is_blocked = any(kw in notes_content for kw in blocked_keywords)
+                        except Exception:
+                            pass
+                if task_is_blocked:
+                    eprint(f"[SKIP] Task {next_task.id} appears blocked (dependency/resource missing). Skipping...")
+                    state.setdefault("failed", []).append({"task": next_task.id, "reason": "blocked_dependency"})
+                    save_state(state_path, state)
+                    metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="blocked_dependency")
+                    logger.task_end(task_id=next_task.id, success=False, reason="blocked_dependency")
+                    skipped_set.add(next_task.id)
+                    break
+
                 after = git_porcelain(repo)
-                changed = (before != after)
+                changed = has_working_tree_changes(repo, before, after, before_untracked=before_untracked)
 
                 if stop_on_no_diff and not changed:
                     if dev_is_max_turns and dev_auto_escalate and (attempt + 1) < max_attempts:
@@ -1577,12 +1706,18 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     save_state(state_path, state)
                     metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="no_diff")
                     logger.task_end(task_id=next_task.id, success=False, reason="no_diff", was_max_turns=dev_is_max_turns)
-                    eprint(f"[STOP] No diff produced for {next_task.id}.")
                     if cp:
                         ok, fail_reason = _restore_or_stop("no_diff")
                         if not ok:
-                            return 1, fail_reason, 0, (len(done_set) > before_done)
-                    return 1, "no_diff", 0, (len(done_set) > before_done)
+                            if not continuous:
+                                return 1, fail_reason, 0, (len(done_set) > before_done)
+                            eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
+                    if continuous:
+                        eprint(f"[SKIP] No diff produced for {next_task.id}; skipping to next task.")
+                        skipped_set.add(next_task.id)
+                        break
+                    else:
+                        return 1, "no_diff", 0, (len(done_set) > before_done)
 
                 if build_enabled:
                     metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
@@ -1599,12 +1734,18 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                             continue
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
                         save_state(state_path, state)
-                        eprint(f"[STOP] Build failed after {next_task.id}. See {attempt_dir / 'build.txt'}")
+                        eprint(f"[SKIP] Build failed after {next_task.id}. See {attempt_dir / 'build.txt'}")
                         if cp:
                             ok_r, fr = _restore_or_stop("build_failed")
                             if not ok_r:
-                                return 1, fr, 0, (len(done_set) > before_done)
-                        return 1, "build_failed", 0, (len(done_set) > before_done)
+                                if not continuous:
+                                    return 1, fr, 0, (len(done_set) > before_done)
+                                eprint(f"[WARN] Rollback {fr} for {next_task.id}; continuing anyway.")
+                        if continuous:
+                            skipped_set.add(next_task.id)
+                            break
+                        else:
+                            return 1, "build_failed", 0, (len(done_set) > before_done)
 
                 if run_tests:
                     metrics.event("test_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
@@ -1622,12 +1763,18 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                             continue
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": "test_failed"})
                         save_state(state_path, state)
-                        eprint(f"[STOP] Tests failed after {next_task.id}. See {attempt_dir / 'test.txt'}")
+                        eprint(f"[SKIP] Tests failed after {next_task.id}. See {attempt_dir / 'test.txt'}")
                         if cp:
                             ok_r, fr = _restore_or_stop("test_failed")
                             if not ok_r:
-                                return 1, fr, 0, (len(done_set) > before_done)
-                        return 1, "test_failed", 0, (len(done_set) > before_done)
+                                if not continuous:
+                                    return 1, fr, 0, (len(done_set) > before_done)
+                                eprint(f"[WARN] Rollback {fr} for {next_task.id}; continuing anyway.")
+                        if continuous:
+                            skipped_set.add(next_task.id)
+                            break
+                        else:
+                            return 1, "test_failed", 0, (len(done_set) > before_done)
 
                 if policy_scan_enabled:
                     policy_scan_ignore = list(scan_ignore_paths)
@@ -1661,13 +1808,19 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     if not scan_result.get("ok", True):
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": "policy_violation"})
                         save_state(state_path, state)
-                        eprint(f"[STOP] Policy scan failed after {next_task.id}. See {attempt_dir / 'policy_scan.json'}")
+                        eprint(f"[SKIP] Policy scan failed after {next_task.id}. See {attempt_dir / 'policy_scan.json'}")
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="policy_violation", violations=len(fail_hits))
                         if cp:
                             ok_r, fr = _restore_or_stop("policy_violation")
                             if not ok_r:
-                                return 1, fr, 0, (len(done_set) > before_done)
-                        return 1, "policy_violation", 0, (len(done_set) > before_done)
+                                if not continuous:
+                                    return 1, fr, 0, (len(done_set) > before_done)
+                                eprint(f"[WARN] Rollback {fr} for {next_task.id}; continuing anyway.")
+                        if continuous:
+                            skipped_set.add(next_task.id)
+                            break
+                        else:
+                            return 1, "policy_violation", 0, (len(done_set) > before_done)
 
                 metrics.event("dev_attempt_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0)
                 logger.task_end(task_id=next_task.id, success=True, reason="completed", attempt=attempt)
@@ -1678,14 +1831,16 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 state.setdefault("failed", []).append({"task": next_task.id, "reason": "exhausted_attempts"})
                 save_state(state_path, state)
                 logger.task_end(task_id=next_task.id, success=False, reason="exhausted_attempts", attempts=max_attempts)
-                return 1, "exhausted_attempts", 0, (len(done_set) > before_done)
+                eprint(f"[SKIP] Exhausted all attempts for {next_task.id}; skipping to next task.")
+                skipped_set.add(next_task.id)
+                continue
 
             done_set.add(next_task.id)
             state["done"] = sorted(list(done_set))
             save_state(state_path, state)
             mark_backlog_done(backlog_md_path, next_task.id)
 
-            (run_dir / "progress.txt").write_text(f"done={len(done_set)}/{len(tasks)} last={next_task.id}\n", encoding="utf-8", errors="replace")
+            (run_dir / "progress.txt").write_text(f"done={len(done_set)}/{len(tasks)} skipped={len(skipped_set)} last={next_task.id}\n", encoding="utf-8", errors="replace")
             code, names = run_cmd(["git", "diff", "--name-only"], cwd=repo, timeout_sec=60)
             files_changed_count = len([ln for ln in names.splitlines() if ln.strip()]) if code == 0 else 0
             metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0, files_changed_count=files_changed_count)
@@ -1700,7 +1855,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         failed_count = len(state.get("failed", []))
         summary = {
             "ts": now_iso(), "cycle": cycle_idx, "run_dir": str(run_dir),
-            "done": len(done_set), "total_tasks": len(tasks), "failed_count": failed_count,
+            "done": len(done_set), "skipped": len(skipped_set),
+            "total_tasks": len(tasks), "failed_count": failed_count,
             "duration_seconds": cycle_dt, "build_enabled": build_enabled,
             "run_tests": run_tests, "policy_scan_enabled": policy_scan_enabled,
         }
@@ -1720,7 +1876,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         except Exception:
             pass
 
-        if total_count > 0 and done_count >= total_count:
+        processed_count = done_count + len(skipped_set.intersection(task_ids))
+        if total_count > 0 and processed_count >= total_count:
             return 0, STOP_REASON_ALL_TASKS_DONE, done_delta, ran_tasks
 
         return 0, "ok", done_delta, ran_tasks
@@ -1766,6 +1923,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
                 model_override=cfg.qa_model,
                 stage_instructions=qa_instructions,
+                max_turns_override=int(getattr(args, "report_max_turns", 8) or 8),
+                timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
             )
 
             qa_output_path = run_dir / f"qa_final_output_cycle_{cycle_idx:03d}.txt"
@@ -1809,11 +1968,14 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0}
         except Exception as ex:
             if is_quota_exception(ex):
+                eprint(f"[QA] Quota exhausted during QA stage: {ex}")
                 try:
                     stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
                 except Exception:
                     pass
                 metrics.event("runner_stop", stage="qa", reason="quota_exhausted")
+                return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0, "quota_exhausted": True}
+            eprint(f"[QA] QA stage error: {ex}")
             metrics.event("qa_end", cycle=cycle_idx, rc=1, error=str(ex))
             return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0}
 
@@ -1843,12 +2005,16 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         except Exception:
             pass
         # Try PM-authored report via Claude SDK
+        reporter_instructions = store.get("reporter_instructions", REPORTER_INSTRUCTIONS_DEFAULT)
         try:
-            reporter_prompt = store.render("pm_shutdown_report_prompt", PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT, {"stop_reason": stop_reason, "context_json": json.dumps(ctx_obj, ensure_ascii=False, indent=2)})
+            reporter_prompt = _patch_prompt_for_claude(store.render("pm_shutdown_report_prompt", PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT, {"stop_reason": stop_reason, "context_json": json.dumps(ctx_obj, ensure_ascii=False, indent=2)}))
             text, _ = await _run_claude_query(
                 cfg, reporter_prompt, repo=repo, stage="Reporter",
                 stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
                 model_override=cfg.reporter_model,
+                stage_instructions=reporter_instructions,
+                max_turns_override=int(getattr(args, "report_max_turns", 8) or 8),
+                timeout_seconds=300,
             )
             if text and text.strip():
                 report_path.write_text(text.strip() + "\n", encoding="utf-8", errors="replace")
@@ -1958,6 +2124,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             qa_summary = await run_qa_if_needed(ci, ran_tasks=session.ran_tasks)
             session.data["qa_followups_summary"] = qa_summary
             session.data["qa_followups_added"] = int(qa_summary.get("added", 0) or 0)
+            if qa_summary.get("quota_exhausted"):
+                return StageOutcome.stop(STOP_REASON_QUOTA)
             return StageOutcome.ok("qa_done")
 
         session = PipelineSession(
@@ -2032,12 +2200,13 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             last_reason = reason
             print(f"[CYCLE] {now_iso()} idx={cycle_idx} rc={rc} reason={reason} progress_delta={delta}")
 
-            if rc != 0:
-                break
             if reason == STOP_REASON_QUOTA:
                 break
             if reason == STOP_REASON_ALL_TASKS_DONE:
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
+                break
+            if rc != 0 and not (loop_mode and continuous):
+                # In continuous loop mode, non-critical failures don't stop the run
                 break
 
             if loop_mode:
