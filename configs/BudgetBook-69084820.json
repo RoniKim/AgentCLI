@@ -5,7 +5,7 @@
   "run_dir": "",
   "resume_latest": true,
   "env_file": "",
-  "execution_backend": "codex",
+  "execution_backend": "claudecode",
   "claudecode_model": "sonnet",
   "claudecode_permission_mode": "acceptEdits",
   "claudecode_max_turns": 32,
@@ -158,8 +158,8 @@
   "dangerous_git_rollback": false,
   "failover_enabled": true,
   "failover_backends": [
-    "codex",
-    "claudecode"
+    "claudecode",
+    "codex"
   ],
   "failover_on": [
     "quota_exhausted"

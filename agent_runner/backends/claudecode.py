@@ -103,6 +103,53 @@ from ..utils import (
 )
 
 
+def _patch_prompt_for_claude(prompt: str) -> str:
+    """Replace ALL Codex/OpenAI-specific references in prompts with Claude Code equivalents."""
+    import re
+
+    # 1) Catch-all first: replace any "Codex MCP" mentions before inserting new text
+    prompt = re.sub(r"Codex MCP", "Claude Code built-in tools", prompt)
+
+    # 2) "When editing files, call Claude Code built-in tools with ..." → clean instruction
+    prompt = re.sub(
+        r"When editing files,\s*(?:call|use)\s+Claude Code built-in tools\s+with[^\n]*",
+        "When editing files, use Claude Code built-in tools (Read, Write, Edit, Grep, Glob, Bash) directly.",
+        prompt,
+    )
+
+    # 3) "use Codex skills system" → neutral phrasing
+    prompt = re.sub(
+        r"\(use Codex skills system;\s*do NOT inline skill text\)",
+        "(apply the skills listed below; do NOT inline full skill text)",
+        prompt,
+    )
+
+    # 4) "Prefer apply_patch for edits" → Claude Code Edit tool
+    prompt = re.sub(
+        r"Prefer apply_patch for (?:edits|modifications)[^.\n]*\.?",
+        "Use the Edit tool for targeted modifications and the Write tool for new files.",
+        prompt,
+    )
+
+    # 5) Add explicit tool guidance if not already present
+    if "TOOL USAGE (Claude Code)" not in prompt:
+        tool_block = (
+            "\n\n<tool_usage_claude_code>\n"
+            "TOOL USAGE (Claude Code):\n"
+            "- To read files: use the Read tool (NOT cat/head/tail)\n"
+            "- To edit files: use the Edit tool for targeted changes\n"
+            "- To create files: use the Write tool\n"
+            "- To search file names: use the Glob tool\n"
+            "- To search file contents: use the Grep tool\n"
+            "- To run commands: use the Bash tool\n"
+            "- Do NOT call any MCP tools. Use only the built-in tools listed above.\n"
+            "</tool_usage_claude_code>\n"
+        )
+        prompt = prompt.rstrip() + tool_block
+
+    return prompt
+
+
 # ---------------------------------------------------------------------------
 # Claude SDK adapter helpers (SDK-specific, not shared with Codex)
 # ---------------------------------------------------------------------------
@@ -226,7 +273,7 @@ def _filter_kwargs_for_ctor(cls: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
         return kwargs
 
 
-def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_override: str = "") -> Any:
+def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_override: str = "", stage_instructions: str = "") -> Any:
     """Build Claude Agent SDK options for a stage."""
     try:
         from claude_agent_sdk import ClaudeAgentOptions
@@ -240,7 +287,7 @@ def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_overr
     stage_low = (stage or "").strip().lower()
     if stage_low == "pm":
         allowed = list(cfg.pm_allowed_tools)
-        for t in ("Write", "Edit"):
+        for t in ("Read", "Write", "Edit", "Grep", "Glob", "Bash"):
             if t not in allowed:
                 allowed.append(t)
         disallowed = cfg.pm_disallowed_tools
@@ -254,10 +301,16 @@ def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_overr
         disallowed = cfg.qa_disallowed_tools
         output_format = None
 
-    system_prompt = "".join([
-        "You are running inside AgentCLI. Follow the stage instructions exactly.\n",
-        cfg.system_prompt_append.strip() + "\n" if cfg.system_prompt_append.strip() else "",
-    ])
+    parts = [
+        "You are running inside AgentCLI (Claude Code backend). Follow the stage instructions exactly.\n",
+        "You have access to Claude Code built-in tools: Read, Write, Edit, Grep, Glob, Bash.\n",
+        "Do NOT attempt to call Codex MCP or any external MCP tools. Use only the built-in tools.\n\n",
+    ]
+    if stage_instructions.strip():
+        parts.append(_patch_prompt_for_claude(stage_instructions.strip()) + "\n\n")
+    if cfg.system_prompt_append.strip():
+        parts.append(cfg.system_prompt_append.strip() + "\n")
+    system_prompt = "".join(parts)
 
     model = model_override or cfg.model
 
@@ -386,6 +439,7 @@ async def _run_claude_query(
     stop_path: Path,
     debug: bool,
     model_override: str = "",
+    stage_instructions: str = "",
     max_retries: int = 3,
     initial_backoff: float = 5.0,
 ) -> Tuple[str, Optional[Any]]:
@@ -398,7 +452,7 @@ async def _run_claude_query(
 
     for attempt in range(max_retries + 1):
         try:
-            options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override)
+            options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override, stage_instructions=stage_instructions)
             async with ClaudeSDKClient(options=options) as client:
                 await _start_query(client, prompt)
                 return await _receive_messages(client, stop_path=stop_path, debug=debug)
@@ -1031,6 +1085,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     cfg, prompt, repo=repo, stage="PM",
                     stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
                     model_override=cfg.pm_model,
+                    stage_instructions=pm_instructions,
                 )
             except StopRequested:
                 raise
@@ -1159,9 +1214,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "docs_dir": str(docs_dir) if docs_dir else "(none)",
                     "docs_read_mode": docs_read_mode, "digest_rel": str(digest_rel),
                     "skills_index_summary": skills_index_summary,
-                    "codex_call_hint": codex_call_hint(autopilot),
+                    "codex_call_hint": "Use Claude Code built-in tools (Read, Write, Edit, Grep, Glob, Bash) directly. Do NOT call Codex MCP.",
                 }
-                pm_prompt = append_pm_output_contract(store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx))
+                pm_prompt = _patch_prompt_for_claude(append_pm_output_contract(store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx)))
                 pm_out = await _run_pm_structured(pm_prompt, max_turns=int(getattr(args, "pm_bootstrap_max_turns", 30) or 30), cycle_idx=cycle_idx, kind="bootstrap", output_path=pm_output_path)
                 if pm_out is None:
                     metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=1, error="structured_output_failed")
@@ -1221,13 +1276,13 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "docs_dir": str(docs_dir) if docs_dir else "(none)",
                     "docs_read_mode": docs_read_mode, "digest_rel": str(digest_rel),
                     "skills_index_summary": skills_index_summary,
-                    "codex_call_hint": codex_call_hint(autopilot),
+                    "codex_call_hint": "Use Claude Code built-in tools (Read, Write, Edit, Grep, Glob, Bash) directly. Do NOT call Codex MCP.",
                     "prev_head": prev_head or curr_head, "curr_head": curr_head,
                     "changed_files_block": changed_files_block,
                     "current_backlog_block": current_backlog_block,
                     "hint_block": hint_block,
                 }
-                pm_prompt = append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx))
+                pm_prompt = _patch_prompt_for_claude(append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx)))
                 pm_out = await _run_pm_structured(pm_prompt, max_turns=int(getattr(args, "pm_incremental_max_turns", 15) or 15), cycle_idx=cycle_idx, kind="incremental" if need_incremental else "refresh", output_path=pm_output_path)
                 if pm_out is None:
                     metrics.event("pm_end", cycle=cycle_idx, kind="incremental" if need_incremental else "refresh", rc=1, error="structured_output_failed")
@@ -1413,9 +1468,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "done_when": next_task.done_when or "(unspecified)",
                     "docs_read_mode": docs_read_mode, "digest_rel": str(digest_rel),
                     "analysis_hint_out": str(analysis_hint_out),
-                    "codex_call_hint": codex_call_hint(autopilot),
+                    "codex_call_hint": "Use Claude Code built-in tools (Read, Write, Edit, Grep, Glob, Bash) directly. Do NOT call Codex MCP.",
                 }
-                dev_prompt = store.render("dev_task_prompt", DEV_TASK_TEMPLATE_DEFAULT, dev_ctx)
+                dev_prompt = _patch_prompt_for_claude(store.render("dev_task_prompt", DEV_TASK_TEMPLATE_DEFAULT, dev_ctx))
 
                 metrics.event("dev_attempt_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, model=model_name)
                 logger.set_context(cycle=cycle_idx, step=step, model=model_name, max_turns=int(getattr(args, "max_turns_per_task", 12) or 12), timeout_sec=0)
@@ -1432,6 +1487,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         cfg, dev_prompt, repo=repo, stage="Dev",
                         stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
                         model_override=model_name,
+                        stage_instructions=dev_instructions,
                     )
                     dev_final = text or ""
                     task_duration = time.time() - task_start_time
@@ -1701,7 +1757,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     skills_context += "\nMissing skills: " + ", ".join(missing)
 
             qa_ctx = {"repo": str(repo), "run_dir": str(run_dir), "skills_context": skills_context}
-            qa_prompt = store.render("qa_prompt", QA_TEMPLATE_DEFAULT, qa_ctx)
+            qa_prompt = _patch_prompt_for_claude(store.render("qa_prompt", QA_TEMPLATE_DEFAULT, qa_ctx))
             if bool(getattr(args, "qa_to_backlog", False)):
                 qa_prompt = qa_prompt.rstrip() + "\n\n" + QA_FOLLOWUPS_OUTPUT_CONTRACT + "\n"
 
@@ -1709,6 +1765,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 cfg, qa_prompt, repo=repo, stage="QA",
                 stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
                 model_override=cfg.qa_model,
+                stage_instructions=qa_instructions,
             )
 
             qa_output_path = run_dir / f"qa_final_output_cycle_{cycle_idx:03d}.txt"

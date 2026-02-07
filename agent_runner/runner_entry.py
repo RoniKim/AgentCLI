@@ -38,6 +38,7 @@ def _ensure_run_dir(repo: Path, args: argparse.Namespace) -> Path:
 async def _run_single_backend(args: argparse.Namespace, repo: Path, backend: str) -> int:
     args.execution_backend = backend
     runner = get_runner(backend)
+    eprint(f"[BACKEND] Starting execution with backend: {runner.name}")
     return await runner.run(args, repo)
 
 
@@ -52,7 +53,9 @@ async def _main_async_dispatch(args: argparse.Namespace) -> int:
         return await _run_single_backend(args, repo, str(getattr(args, "execution_backend", "codex") or "codex"))
 
     base_backend = str(getattr(args, "execution_backend", "codex") or "codex").strip().lower()
-    backends = _normalize_backend_list(getattr(args, "failover_backends", None), base_backend)
+    raw_backends = _normalize_backend_list(getattr(args, "failover_backends", None), base_backend)
+    # Ensure primary backend runs first, then the rest in failover order
+    backends = [base_backend] + [b for b in raw_backends if b != base_backend]
     failover_on = set(str(x).strip().lower() for x in (getattr(args, "failover_on", []) or []))
     max_switches = int(getattr(args, "failover_max_switches", 1) or 1)
 
@@ -120,13 +123,17 @@ def _install_signal_handlers(args: argparse.Namespace) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    _install_signal_handlers(args)
+    try:
+        _install_signal_handlers(args)
+    except ValueError:
+        # signal handlers can only be set from the main thread;
+        # in shell mode the runner runs in a background thread, so skip gracefully.
+        pass
     try:
         return asyncio.run(_main_async_dispatch(args))
     except KeyboardInterrupt:
         return 130
     except Exception as ex:
         eprint(f"[FATAL] {ex}")
-        if bool(getattr(args, "debug", False)):
-            eprint(traceback.format_exc())
+        eprint(traceback.format_exc())
         return 1

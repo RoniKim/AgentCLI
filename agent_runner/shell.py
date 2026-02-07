@@ -385,7 +385,10 @@ class RunnerShell:
             self._runner_started_at = time.time()
             try:
                 rc = run_runner(args)
-            except Exception:
+            except Exception as ex:
+                import traceback
+                print(f"[RUNNER ERROR] {ex}", flush=True)
+                traceback.print_exc()
                 rc = 1
             self._runner_exit_code = int(rc)
 
