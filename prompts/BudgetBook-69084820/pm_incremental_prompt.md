@@ -84,6 +84,7 @@ User TODO (highest priority; if present, reflect into backlog tasks):
 {todo_block}
 
 Rules:
+- **FILE PATHS**: Always use FULL, EXACT paths from REPO_INVENTORY.md in task `files` field - NEVER abbreviate or guess paths
 - Keep backlog atomic; each task must create a git diff.
 - Avoid broad scans: inspect changed files + direct dependencies only.
 - No questions unless required for ambiguity; use open_questions in JSON.

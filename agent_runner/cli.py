@@ -75,6 +75,14 @@ DEFAULTS: Dict[str, Any] = {
     "claudecode_qa_allowed_tools": "Read,Grep,Glob,Bash",
     "claudecode_qa_disallowed_tools": "",
 
+    # Claude Code role-specific model overrides (empty => claudecode_model fallback)
+    "claudecode_pm_model": "",
+    "claudecode_dev_model": "",
+    "claudecode_dev_model_tier1": "",
+    "claudecode_dev_model_tier2": "",
+    "claudecode_qa_model": "",
+    "claudecode_reporter_model": "",
+
     # Pipeline roles (comma-separated). Default keeps legacy order.
     # Example: "PM,Dev,QA" or "PM,Dev".
     "roles": "PM,Dev,QA",
@@ -439,6 +447,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--claudecode-dev-disallowed-tools", default=None, help="Dev stage disallowed tools (comma-separated)")
     p.add_argument("--claudecode-qa-allowed-tools", default=None, help="QA stage allowed tools (comma-separated)")
     p.add_argument("--claudecode-qa-disallowed-tools", default=None, help="QA stage disallowed tools (comma-separated)")
+
+    # Claude Code role-specific model overrides
+    p.add_argument("--claudecode-pm-model", default=None, help="Claude model for PM stage (empty => claudecode_model)")
+    p.add_argument("--claudecode-dev-model", default=None, help="Claude model for Dev stage (empty => claudecode_model)")
+    p.add_argument("--claudecode-dev-model-tier1", default=None, help="Claude model for Dev escalation tier1 (empty => no escalation)")
+    p.add_argument("--claudecode-dev-model-tier2", default=None, help="Claude model for Dev escalation tier2 (empty => no escalation)")
+    p.add_argument("--claudecode-qa-model", default=None, help="Claude model for QA stage (empty => claudecode_model)")
+    p.add_argument("--claudecode-reporter-model", default=None, help="Claude model for Reporter stage (empty => claudecode_model)")
 
     p.add_argument("--dev-auto-escalate", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--dev-max-escalations", type=int, default=None)

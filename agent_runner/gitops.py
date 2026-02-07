@@ -37,6 +37,54 @@ def git_porcelain(repo: Path) -> str:
     return out if code == 0 else ""
 
 
+def git_untracked_files(repo: Path) -> list[str]:
+    """Get list of untracked files (not ignored)."""
+    code, out = run_cmd(["git", "ls-files", "--others", "--exclude-standard"], cwd=repo, timeout_sec=30)
+    if code != 0 or not out.strip():
+        return []
+    return [f.strip() for f in out.splitlines() if f.strip()]
+
+
+def has_working_tree_changes(
+    repo: Path,
+    before_porcelain: str,
+    after_porcelain: str,
+    before_untracked: "set[str] | None" = None,
+) -> bool:
+    """
+    Check if there are actual working tree changes, including new untracked files.
+
+    This handles the edge case where new files are created in already-untracked directories,
+    which don't change the porcelain output (since the directory is already marked as untracked).
+
+    Args:
+        repo: Repository path
+        before_porcelain: Porcelain output before task
+        after_porcelain: Porcelain output after task
+        before_untracked: Untracked file set recorded BEFORE task execution
+
+    Returns:
+        True if there are changes (modified, staged, or new untracked files)
+    """
+    # Quick check: if porcelain changed, definitely changed
+    if before_porcelain != after_porcelain:
+        return True
+
+    # Deeper check: compare untracked file lists (before vs current)
+    # before_untracked must be captured before task execution in cycle.py
+    if before_untracked is not None:
+        after_untracked = set(git_untracked_files(repo))
+        if before_untracked != after_untracked:
+            return True
+
+    # Check for staged changes
+    code, staged = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=repo, timeout_sec=30)
+    if code == 0 and staged.strip():
+        return True
+
+    return False
+
+
 def git_worktree_changed_files(repo: Path) -> list[str]:
     """Best-effort list of files changed in the working tree (incl. untracked).
 

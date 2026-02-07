@@ -20,6 +20,8 @@ from .gitops import (
     git_changed_files,
     git_worktree_changed_files,
     git_porcelain,
+    has_working_tree_changes,
+    git_untracked_files,
     repo_fingerprint,
     create_checkpoint,
     restore_checkpoint,
@@ -1541,6 +1543,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     metrics.event("checkpoint_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0, reason="retry_escalation")
 
                 task_completed = False
+                task_blocked = False
 
                 def _restore_or_stop(reason: str) -> tuple[bool, str]:
                     if not cp:
@@ -1594,6 +1597,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     attempt_dir.mkdir(parents=True, exist_ok=True)
 
                     before = git_porcelain(repo)
+                    before_untracked = set(git_untracked_files(repo))
 
                     analysis_hint_out = dev_hints_dir / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}_a{attempt:02d}.md"
 
@@ -1733,10 +1737,36 @@ async def main_async(args: argparse.Namespace) -> int:
                         metrics.event("task_warn", cycle=cycle_idx, step=step, task_id=next_task.id, reason="max_turns_exceeded")
 
                     after = git_porcelain(repo)
-                    changed = (before != after)
+                    # Use enhanced change detection that includes new untracked files
+                    changed = has_working_tree_changes(repo, before, after, before_untracked=before_untracked)
 
                     # Escalate conditions: retry same task with a higher tier model.
                     if stop_on_no_diff and (not changed):
+                        # Check if dev output or NOTES.md indicates task is blocked/impossible
+                        blocked_keywords = ["blocked:", "couldn't", "can't", "no such", "doesn't exist", "not found", "missing"]
+                        dev_output_lower = dev_log.lower() if dev_log else ""
+                        is_blocked = any(keyword in dev_output_lower for keyword in blocked_keywords)
+
+                        # Also check NOTES.md file for BLOCKED: marker (dev prompt instructs to write here)
+                        if not is_blocked:
+                            notes_path = attempt_dir / "NOTES.md"
+                            if notes_path.exists():
+                                try:
+                                    notes_content = notes_path.read_text(encoding="utf-8", errors="ignore").lower()
+                                    is_blocked = any(keyword in notes_content for keyword in blocked_keywords)
+                                except Exception:
+                                    pass
+
+                        if is_blocked:
+                            eprint(f"[SKIP] Task {next_task.id} appears blocked (dependency/resource missing). Skipping...")
+                            state.setdefault("failed", []).append({"task": next_task.id, "reason": "blocked_dependency"})
+                            save_state(state_path, state)
+                            metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="blocked_dependency", was_max_turns=dev_is_max_turns)
+                            logger.task_end(task_id=next_task.id, success=False, reason="blocked_dependency", was_max_turns=dev_is_max_turns)
+                            # Don't rollback for blocked tasks - continue to next task
+                            task_blocked = True
+                            break  # Exit retry loop
+
                         # Special case: if max_turns was hit and no diff, auto-retry instead of immediate failure
                         # This prevents wasting 30+ minutes on incomplete work
                         if dev_is_max_turns and dev_auto_escalate and (attempt + 1) < max_attempts:
@@ -1872,6 +1902,11 @@ async def main_async(args: argparse.Namespace) -> int:
                     logger.task_end(task_id=next_task.id, success=True, reason="completed", attempt=attempt)
                     task_completed = True
                     break
+
+                if task_blocked:
+                    # Blocked tasks: skip to next task instead of stopping
+                    eprint(f"[INFO] Skipped blocked task {next_task.id}, continuing to next task...")
+                    continue
 
                 if not task_completed:
                     # No success after attempts and not otherwise returned: treat as failure.

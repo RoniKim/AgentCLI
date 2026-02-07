@@ -10,8 +10,11 @@ BOOTSTRAP MODE (first-time; expensive but must be done once):
 What to write in PROJECT_ANALYSIS.md (required structure):
 1) Executive summary (P0 readiness, biggest risks, immediate priorities)
 2) Repo architecture map (folders/modules, where MAUI/Blazor pages/services/models live)
+   - **CRITICAL**: Document EXACT folder structure for .razor files (e.g., "Pages/" vs "Components/Pages/")
+   - Verify actual file locations using REPO_INVENTORY.md - do NOT guess or abbreviate paths
 3) Supabase policy constraints (RPC for writes, Views/RPC for reads, no secrets in client)
 4) File-by-file analysis (MANDATORY; every file in REPO_INVENTORY.md; keep entries short)
+   - **Use FULL, EXACT file paths from REPO_INVENTORY.md** - do NOT abbreviate (e.g., use "Components/Pages/Foo.razor", NOT "Pages/Foo.razor")
 5) P0 gap list (what is missing vs docs)
 
 Backlog generation (v2.0):
@@ -71,6 +74,7 @@ Context:
 
 Hard rules:
 - TOKEN SAVING: Prefer digest. Avoid broad repo scans; use REPO_INVENTORY.md.
+- **FILE PATHS**: Always use FULL, EXACT paths from REPO_INVENTORY.md in task `files` field - NEVER abbreviate or guess paths
 - Backlog tasks MUST be atomic and implementable within one Dev iteration.
 - Each task MUST be expected to produce a git diff.
 - No questions to the user unless required for ambiguity; use open_questions in JSON.

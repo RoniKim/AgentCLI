@@ -164,6 +164,14 @@ class ClaudeCodeConfig:
     fork_session: bool
     max_thinking_tokens: Optional[int]
 
+    # Role-specific model overrides (empty => use self.model fallback)
+    pm_model: str
+    dev_model: str
+    dev_model_tier1: str
+    dev_model_tier2: str
+    qa_model: str
+    reporter_model: str
+
     pm_allowed_tools: list[str]
     pm_disallowed_tools: list[str]
     dev_allowed_tools: list[str]
@@ -190,6 +198,12 @@ def _load_claudecode_cfg(args: argparse.Namespace) -> ClaudeCodeConfig:
             if int(getattr(args, "claudecode_max_thinking_tokens", 0) or 0) > 0
             else None
         ),
+        pm_model=str(getattr(args, "claudecode_pm_model", "") or ""),
+        dev_model=str(getattr(args, "claudecode_dev_model", "") or ""),
+        dev_model_tier1=str(getattr(args, "claudecode_dev_model_tier1", "") or ""),
+        dev_model_tier2=str(getattr(args, "claudecode_dev_model_tier2", "") or ""),
+        qa_model=str(getattr(args, "claudecode_qa_model", "") or ""),
+        reporter_model=str(getattr(args, "claudecode_reporter_model", "") or ""),
         pm_allowed_tools=_as_str_list(getattr(args, "claudecode_pm_allowed_tools", "Read,Grep,Glob,Write,Edit")),
         pm_disallowed_tools=_as_str_list(getattr(args, "claudecode_pm_disallowed_tools", "")),
         dev_allowed_tools=_as_str_list(getattr(args, "claudecode_dev_allowed_tools", "Read,Write,Edit,Grep,Glob,Bash")),
@@ -970,6 +984,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 text, structured = await _run_claude_query(
                     cfg, prompt, repo=repo, stage="PM",
                     stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
+                    model_override=cfg.pm_model,
                 )
             except StopRequested:
                 raise
@@ -1282,10 +1297,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             if max_escalations_per_task_budget > 0:
                 dev_max_escalations = min(dev_max_escalations, max_escalations_per_task_budget)
 
-            base_model = str(getattr(args, "dev_model", "") or cfg.model)
+            base_model = cfg.dev_model or cfg.model
             tiers: list[str] = [base_model]
-            t1 = str(getattr(args, "dev_model_tier1", "") or "").strip()
-            t2 = str(getattr(args, "dev_model_tier2", "") or "").strip()
+            t1 = cfg.dev_model_tier1.strip()
+            t2 = cfg.dev_model_tier2.strip()
             if t1 and t1 not in tiers:
                 tiers.append(t1)
             if t2 and t2 not in tiers:
@@ -1647,6 +1662,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             text, _structured = await _run_claude_query(
                 cfg, qa_prompt, repo=repo, stage="QA",
                 stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
+                model_override=cfg.qa_model,
             )
 
             qa_output_path = run_dir / f"qa_final_output_cycle_{cycle_idx:03d}.txt"
@@ -1727,8 +1743,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         try:
             reporter_prompt = store.render("pm_shutdown_report_prompt", PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT, {"stop_reason": stop_reason, "context_json": json.dumps(ctx_obj, ensure_ascii=False, indent=2)})
             text, _ = await _run_claude_query(
-                cfg, reporter_prompt, repo=repo, stage="QA",
+                cfg, reporter_prompt, repo=repo, stage="Reporter",
                 stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
+                model_override=cfg.reporter_model,
             )
             if text and text.strip():
                 report_path.write_text(text.strip() + "\n", encoding="utf-8", errors="replace")
