@@ -1754,6 +1754,56 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         task_completed = True
                         break
 
+                    # Detect phantom edits: agent claims success but no diff exists.
+                    # Retry once with an explicit "your edits did not persist" warning.
+                    phantom_keywords = [
+                        "completed", "successfully", "i've made", "i made", "i've updated",
+                        "i updated", "i've added", "i added", "i've modified", "changes are",
+                        "task complete", "i'll add", "now i'll add", "let me add",
+                    ]
+                    agent_claims_edit = any(kw in dev_lower for kw in phantom_keywords)
+                    no_diff_retry_key = f"_no_diff_retry_{next_task.id}"
+                    already_retried = budget_state.get(no_diff_retry_key, False)
+                    if agent_claims_edit and not already_retried:
+                        budget_state[no_diff_retry_key] = True
+                        eprint(f"[RETRY] Task {next_task.id}: agent claims edits but no git diff detected. Retrying with explicit instructions...")
+                        metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="phantom_edit_retry")
+                        # Rebuild prompt with explicit warning
+                        phantom_retry_prompt = (
+                            dev_prompt + "\n\n"
+                            "[CRITICAL WARNING] Your previous attempt produced NO changes to any files. "
+                            "Your edits did NOT persist. This likely means your tool calls failed silently.\n"
+                            "To fix this:\n"
+                            f"1. Use ABSOLUTE file paths (e.g. {repo}/Components/Pages/...)\n"
+                            "2. Use the Edit tool with exact old_string matching (copy from Read output)\n"
+                            "3. After editing, run: Bash(command='git diff') to VERIFY your changes exist\n"
+                            "4. If Edit fails, use Write tool to rewrite the entire file\n"
+                            "DO NOT just describe changes. Actually call the Edit/Write tool NOW."
+                        )
+                        try:
+                            text2, _ = await _run_claude_query(
+                                cfg, phantom_retry_prompt, repo=repo, stage="Dev",
+                                stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
+                                model_override=model_name,
+                                stage_instructions=dev_instructions,
+                                max_turns_override=int(getattr(args, "max_turns_per_task", 12) or 12),
+                                timeout_seconds=int(getattr(args, "dev_timeout_seconds", 600) or 600),
+                            )
+                            dev_log = (dev_log or "") + "\n[PHANTOM_RETRY]\n" + (text2 or "")
+                            (attempt_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
+                        except Exception as retry_ex:
+                            eprint(f"[WARN] Phantom edit retry failed: {retry_ex}")
+                        # Re-check diff after retry
+                        after = git_porcelain(repo)
+                        changed = has_working_tree_changes(repo, before, after, before_untracked=before_untracked)
+                        if changed:
+                            eprint(f"[INFO] Phantom edit retry succeeded for {next_task.id} — diff now exists.")
+                            metrics.event("dev_attempt_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0, reason="phantom_retry_success")
+                            logger.task_end(task_id=next_task.id, success=True, reason="completed_after_retry", attempt=attempt)
+                            task_completed = True
+                            break
+                        # If still no diff after retry, fall through to normal no_diff handling
+
                     if dev_is_max_turns and dev_auto_escalate and (attempt + 1) < max_attempts:
                         eprint(f"[INFO] Max turns exceeded with no diff for {next_task.id}. Auto-retrying with escalation...")
                         metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="max_turns_no_diff")
