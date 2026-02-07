@@ -239,6 +239,7 @@ class RepoCheckpoint:
     patch_path: Path
     untracked_dir: Path
     created_at: str
+    head_commit: str = ""  # HEAD at checkpoint time; used to reset before applying patch
 
 
 def create_checkpoint(repo: Path, checkpoint_dir: Path) -> RepoCheckpoint:
@@ -247,6 +248,12 @@ def create_checkpoint(repo: Path, checkpoint_dir: Path) -> RepoCheckpoint:
 
     patch_path = checkpoint_dir / "tracked.patch"
     untracked_dir = checkpoint_dir / "untracked"
+
+    # Save HEAD commit so restore can reset to it even if dev agent commits
+    head_commit = ""
+    _rc, _head = run_cmd(["git", "rev-parse", "HEAD"], cwd=repo, timeout_sec=30)
+    if _rc == 0 and _head.strip():
+        head_commit = _head.strip()
 
     # Tracked changes patch.
     # IMPORTANT: `git diff` (without a commit-ish) only captures *unstaged* changes.
@@ -266,7 +273,7 @@ def create_checkpoint(repo: Path, checkpoint_dir: Path) -> RepoCheckpoint:
     if untracked:
         copy_untracked(repo, untracked, untracked_dir)
 
-    return RepoCheckpoint(patch_path=patch_path, untracked_dir=untracked_dir, created_at=now_iso())
+    return RepoCheckpoint(patch_path=patch_path, untracked_dir=untracked_dir, created_at=now_iso(), head_commit=head_commit)
 
 
 def _safe_ts() -> str:
@@ -324,11 +331,12 @@ def restore_checkpoint(
         fail(f"Missing checkpoint patch: {cp.patch_path}")
 
     patch_text = cp.patch_path.read_text(encoding="utf-8", errors="replace")
-    if not patch_text.strip():
-        fail(f"Checkpoint patch is empty: {cp.patch_path}")
+    empty_patch = not patch_text.strip()
 
-    temp_patch = Path(tempfile.mkstemp(prefix="rollback_patch_", suffix=".patch")[1])
-    temp_patch.write_text(patch_text + "\n", encoding="utf-8", errors="replace")
+    temp_patch: Path | None = None
+    if not empty_patch:
+        temp_patch = Path(tempfile.mkstemp(prefix="rollback_patch_", suffix=".patch")[1])
+        temp_patch.write_text(patch_text + "\n", encoding="utf-8", errors="replace")
 
     temp_untracked_dir: Path | None = None
     if cp.untracked_dir.exists():
@@ -337,13 +345,11 @@ def restore_checkpoint(
 
     untracked_warnings: list[str] = []
     try:
-        code, out = run_cmd(["git", "apply", "--check", "--binary", str(temp_patch)], cwd=repo, timeout_sec=120)
+        # Reset to checkpoint HEAD first (reverts any commits made by the dev agent)
+        reset_target = cp.head_commit or "HEAD"
+        code, out = run_cmd(["git", "reset", "--hard", reset_target], cwd=repo, timeout_sec=120)
         if code != 0:
-            fail(f"Patch pre-check failed (git apply --check): rc={code}\n{out}")
-
-        code, out = run_cmd(["git", "reset", "--hard"], cwd=repo, timeout_sec=120)
-        if code != 0:
-            fail(f"git reset --hard failed: rc={code}\n{out}")
+            fail(f"git reset --hard {reset_target} failed: rc={code}\n{out}")
 
         clean_cmd = ["git", "clean", "-fd"]
         for path in (run_dir, rescue_dir):
@@ -358,9 +364,11 @@ def restore_checkpoint(
         if code != 0:
             fail(f"git clean -fd failed: rc={code}\n{out}")
 
-        code, out = run_cmd(["git", "apply", "--binary", "--whitespace=nowarn", str(temp_patch)], cwd=repo, timeout_sec=120)
-        if code != 0:
-            fail(f"git apply failed: rc={code}\n{out}")
+        # Apply patch only if non-empty (empty = working tree was clean at checkpoint)
+        if temp_patch is not None:
+            code, out = run_cmd(["git", "apply", "--binary", "--whitespace=nowarn", str(temp_patch)], cwd=repo, timeout_sec=120)
+            if code != 0:
+                fail(f"git apply failed: rc={code}\n{out}")
 
         # Restore untracked files
         if temp_untracked_dir and temp_untracked_dir.exists():
@@ -376,10 +384,11 @@ def restore_checkpoint(
                     untracked_warnings.append(f"{rel}: {ex}")
     finally:
         # Clean up temp files to prevent leaks during unattended operation
-        try:
-            temp_patch.unlink(missing_ok=True)
-        except Exception:
-            pass
+        if temp_patch is not None:
+            try:
+                temp_patch.unlink(missing_ok=True)
+            except Exception:
+                pass
         if temp_untracked_dir is not None:
             try:
                 shutil.rmtree(temp_untracked_dir, ignore_errors=True)

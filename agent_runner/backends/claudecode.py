@@ -1584,7 +1584,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 if attempt > 0 and cp:
                     ok, fail_reason = _restore_or_stop("retry")
                     if not ok:
-                        return 1, fail_reason, 0, (len(done_set) > before_done)
+                        if not continuous:
+                            return 1, fail_reason, 0, (len(done_set) > before_done)
+                        eprint(f"[WARN] Rollback {fail_reason} during retry for {next_task.id}; skipping task.")
+                        skipped_set.add(next_task.id)
+                        break
 
                 model_name = tiers[attempt]
                 attempt_dir = task_dir / f"attempt_{attempt:02d}"
