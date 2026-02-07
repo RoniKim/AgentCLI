@@ -69,6 +69,7 @@ def _read_staged_blob(repo: Path, rel: str, timeout_seconds: int) -> Tuple[str, 
             text=False,
             timeout=timeout_seconds,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
     except Exception:
         return None

@@ -29,6 +29,7 @@ from .gitops import (
     create_worktree,
     remove_worktree,
     handle_worktree_patch,
+    check_and_remove_stale_git_lock,
 )
 from .inventory import build_repo_inventory, write_repo_inventory_files
 from .todo import read_current_todo, format_todo_block
@@ -74,6 +75,7 @@ from .utils import (
     has_quota_text,
     choose_stop_reason,
     detect_stop_reason,
+    write_heartbeat,
     STOP_REASON_QUOTA,
     STOP_REASON_STOP_FILE,
     STOP_REASON_ALL_TASKS_DONE,
@@ -175,8 +177,8 @@ async def main_async(args: argparse.Namespace) -> int:
                 encoding="utf-8",
                 errors="replace",
             )
-        except Exception:
-            pass
+        except Exception as ex:
+            eprint(f"[WARN] Failed to write run_summary.json: {ex}")
 
     def _is_unsafe_path(raw: str) -> bool:
         try:
@@ -514,6 +516,29 @@ async def main_async(args: argparse.Namespace) -> int:
 
 
 
+        def is_transient_exception(ex: Exception) -> bool:
+            """Detect transient / retryable API errors (rate-limit, 5xx, timeout)."""
+            needles = (
+                "rate_limit", "429", "503", "502", "500",
+                "overloaded", "connection", "timeout", "timed out",
+            )
+            for e in _iter_exc_chain(ex):
+                try:
+                    msg = (str(e) or "").lower()
+                except Exception:
+                    msg = ""
+                rep = (repr(e) or "").lower()
+                if any(n in msg for n in needles) or any(n in rep for n in needles):
+                    return True
+                status = getattr(e, "status_code", None) or getattr(e, "status", None)
+                if status is not None:
+                    try:
+                        if int(status) in (429, 500, 502, 503):
+                            return True
+                    except (ValueError, TypeError):
+                        pass
+            return False
+
         def is_quota_text(text: str) -> bool:
             return has_quota_text(text)
 
@@ -628,11 +653,29 @@ async def main_async(args: argparse.Namespace) -> int:
                 "- End with only the required output."
             )
 
+            _MAX_RETRIES = 3
+            _INITIAL_BACKOFF = 5.0
+
+            async def _run_once_with_retry(p: str) -> Any:
+                for attempt in range(_MAX_RETRIES + 1):
+                    try:
+                        if timeout_sec and timeout_sec > 0:
+                            return await asyncio.wait_for(Runner.run(agent_obj, p, max_turns=max_turns), timeout=timeout_sec)
+                        return await Runner.run(agent_obj, p, max_turns=max_turns)
+                    except Exception as ex:
+                        if is_quota_exception(ex) or isinstance(ex, BudgetExceeded):
+                            raise
+                        if is_transient_exception(ex) and attempt < _MAX_RETRIES:
+                            wait = _INITIAL_BACKOFF * (2 ** attempt)
+                            eprint(f"[RETRY] {label} transient error (attempt {attempt + 1}/{_MAX_RETRIES}): {ex}; retrying in {wait:.0f}s")
+                            await asyncio.sleep(wait)
+                            continue
+                        raise
+                raise RuntimeError("unreachable")  # pragma: no cover
+
             while True:
                 try:
-                    if timeout_sec and timeout_sec > 0:
-                        return await asyncio.wait_for(Runner.run(agent_obj, prompt, max_turns=max_turns), timeout=timeout_sec)
-                    return await Runner.run(agent_obj, prompt, max_turns=max_turns)
+                    return await _run_once_with_retry(prompt)
                 except Exception as ex:
                     if cont_left > 0 and is_max_turns_exception(ex):
                         if _budget_exceeded("total_continuations", budget_state["total_continuations"], int(budgets_cfg.get("max_total_continuations_per_run") or 0)):
@@ -2204,13 +2247,18 @@ async def main_async(args: argparse.Namespace) -> int:
         idle_accum = 0
         last_rc = 0
         last_reason = ""
-        cycles = 1 if not args.loop else (args.loop_max_cycles if args.loop_max_cycles and args.loop_max_cycles > 0 else 10**9)
+        if args.loop and (not args.loop_max_cycles or args.loop_max_cycles <= 0):
+            eprint("[WARN] loop_max_cycles not set; defaulting to 1000 to prevent infinite loops.")
+        cycles = 1 if not args.loop else (args.loop_max_cycles if args.loop_max_cycles and args.loop_max_cycles > 0 else 1000)
 
         try:
             for cycle_idx in range(int(cycles)):
                 if stop_path.exists():
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=stop_file")
                     break
+
+                check_and_remove_stale_git_lock(repo)
+                write_heartbeat(run_dir)
 
                 rc, reason, delta = await run_cycle(cycle_idx)
                 last_rc = rc
@@ -2251,8 +2299,8 @@ async def main_async(args: argparse.Namespace) -> int:
             if not report_path.exists():
                 try:
                     await write_shutdown_report(final_reason or "ok", cycle=cycle_idx if "cycle_idx" in locals() else -1, step=-1)
-                except Exception:
-                    pass
+                except Exception as ex:
+                    eprint(f"[WARN] Failed to write shutdown report: {ex}")
             if worktree_dir is not None:
                 gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
                 exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []

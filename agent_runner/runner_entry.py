@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import signal
 import traceback
 from pathlib import Path
 
@@ -94,7 +95,32 @@ async def _main_async_dispatch(args: argparse.Namespace) -> int:
     return 1
 
 
+def _install_signal_handlers(args: argparse.Namespace) -> None:
+    """Install signal handlers that create a STOP file for graceful shutdown."""
+    run_dir_str = str(getattr(args, "run_dir", "") or "").strip()
+    if not run_dir_str:
+        return
+
+    run_dir = Path(run_dir_str)
+
+    def _handler(signum: int, frame: object) -> None:
+        stop_file = run_dir / str(getattr(args, "stop_file", "STOP") or "STOP")
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            stop_file.write_text(f"signal {signum}\n", encoding="utf-8")
+        except Exception:
+            pass
+        eprint(f"[SIGNAL] Received signal {signum}, STOP file created for graceful shutdown.")
+
+    signal.signal(signal.SIGINT, _handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _handler)  # type: ignore[attr-defined]
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _handler)  # type: ignore[attr-defined]
+
+
 def run(args: argparse.Namespace) -> int:
+    _install_signal_handlers(args)
     try:
         return asyncio.run(_main_async_dispatch(args))
     except KeyboardInterrupt:

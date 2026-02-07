@@ -154,7 +154,16 @@ def parse_backlog_md(path: Path) -> list[TaskItem]:
 
 def load_state(path: Path) -> dict[str, Any]:
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
+        try:
+            return json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
+        except (json.JSONDecodeError, ValueError) as exc:
+            eprint(f"[WARN] STATE.json is corrupt ({exc}); backing up and resetting.")
+            try:
+                corrupt_path = path.with_suffix(".json.corrupt")
+                import shutil
+                shutil.copy2(path, corrupt_path)
+            except Exception:
+                pass
     return {"done": [], "failed": []}
 
 

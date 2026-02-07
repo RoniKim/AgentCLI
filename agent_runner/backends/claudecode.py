@@ -34,6 +34,7 @@ from ..gitops import (
     create_worktree,
     remove_worktree,
     handle_worktree_patch,
+    check_and_remove_stale_git_lock,
 )
 from ..inventory import build_repo_inventory, write_repo_inventory_files
 from ..todo import read_current_todo, format_todo_block
@@ -95,6 +96,7 @@ from ..utils import (
     has_quota_text,
     choose_stop_reason,
     detect_stop_reason,
+    write_heartbeat,
     STOP_REASON_QUOTA,
     STOP_REASON_STOP_FILE,
     STOP_REASON_ALL_TASKS_DONE,
@@ -384,14 +386,34 @@ async def _run_claude_query(
     stop_path: Path,
     debug: bool,
     model_override: str = "",
+    max_retries: int = 3,
+    initial_backoff: float = 5.0,
 ) -> Tuple[str, Optional[Any]]:
-    """High-level helper: create client, send query, collect messages."""
+    """High-level helper: create client, send query, collect messages.
+
+    Includes retry with exponential backoff for transient errors (429, 5xx, timeout).
+    Quota/budget/stop exceptions are never retried.
+    """
     from claude_agent_sdk import ClaudeSDKClient
 
-    options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override)
-    async with ClaudeSDKClient(options=options) as client:
-        await _start_query(client, prompt)
-        return await _receive_messages(client, stop_path=stop_path, debug=debug)
+    for attempt in range(max_retries + 1):
+        try:
+            options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override)
+            async with ClaudeSDKClient(options=options) as client:
+                await _start_query(client, prompt)
+                return await _receive_messages(client, stop_path=stop_path, debug=debug)
+        except (StopRequested, BudgetExceeded):
+            raise
+        except Exception as ex:
+            if is_quota_exception(ex):
+                raise
+            if is_transient_exception(ex) and attempt < max_retries:
+                wait = initial_backoff * (2 ** attempt)
+                eprint(f"[RETRY] {stage} transient error (attempt {attempt + 1}/{max_retries}): {ex}; retrying in {wait:.0f}s")
+                await asyncio.sleep(wait)
+                continue
+            raise
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +490,30 @@ def is_model_invalid_exception(ex: Exception) -> bool:
     return False
 
 
+def is_transient_exception(ex: Exception) -> bool:
+    """Detect transient / retryable API errors (rate-limit, 5xx, timeout)."""
+    needles = (
+        "rate_limit", "429", "503", "502", "500",
+        "overloaded", "connection", "timeout", "timed out",
+    )
+    for e in _iter_exc_chain(ex):
+        try:
+            msg = (str(e) or "").lower()
+        except Exception:
+            msg = ""
+        rep = (repr(e) or "").lower()
+        if any(n in msg for n in needles) or any(n in rep for n in needles):
+            return True
+        status = getattr(e, "status_code", None) or getattr(e, "status", None)
+        if status is not None:
+            try:
+                if int(status) in (429, 500, 502, 503):
+                    return True
+            except (ValueError, TypeError):
+                pass
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -515,8 +561,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 json.dumps(run_summary, ensure_ascii=False, indent=2),
                 encoding="utf-8", errors="replace",
             )
-        except Exception:
-            pass
+        except Exception as ex:
+            eprint(f"[WARN] Failed to write run_summary.json: {ex}")
 
     def _is_unsafe_path(raw: str) -> bool:
         try:
@@ -1911,13 +1957,18 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     loop_max_cycles = int(getattr(args, "loop_max_cycles", 0) or 0)
     loop_sleep_seconds = int(getattr(args, "loop_sleep_seconds", 60) or 60)
     loop_idle_exit_after = int(getattr(args, "loop_idle_exit_after", 0) or 0)
-    cycles = 1 if not loop_mode else (loop_max_cycles if loop_max_cycles > 0 else 10**9)
+    if loop_mode and loop_max_cycles <= 0:
+        eprint("[WARN] loop_max_cycles not set; defaulting to 1000 to prevent infinite loops.")
+    cycles = 1 if not loop_mode else (loop_max_cycles if loop_max_cycles > 0 else 1000)
 
     try:
         for cycle_idx in range(int(cycles)):
             if stop_path.exists():
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=stop_file")
                 break
+
+            check_and_remove_stale_git_lock(repo)
+            write_heartbeat(run_dir)
 
             rc, reason, delta = await run_cycle(cycle_idx)
             last_rc = rc
@@ -1954,8 +2005,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         if not report_path.exists():
             try:
                 await write_shutdown_report(final_reason or "ok", cycle=cycle_idx if "cycle_idx" in locals() else -1, step=-1)
-            except Exception:
-                pass
+            except Exception as ex:
+                eprint(f"[WARN] Failed to write shutdown report: {ex}")
         if worktree_dir is not None:
             gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
             exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []

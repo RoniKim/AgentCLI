@@ -80,6 +80,7 @@ def run_cmd(cmd: Sequence[str], cwd: Path, timeout_sec: int = 600) -> Tuple[int,
             errors="replace",
             timeout=timeout_sec,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
         out = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
         return r.returncode, out.strip()
@@ -108,6 +109,7 @@ async def run_cmd_async(
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        stdin=asyncio.subprocess.DEVNULL,
     )
     truncated = False
     written = 0
@@ -261,6 +263,14 @@ def _has_quota_text(text: str) -> bool:
 
 # Public alias (used by backends) for quota/credits text detection
 has_quota_text = _has_quota_text
+def write_heartbeat(run_dir: Path) -> None:
+    """Write a HEARTBEAT file for external monitoring."""
+    try:
+        (run_dir / "HEARTBEAT").write_text(now_iso() + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def detect_stop_reason(stop_paths: Sequence[Path]) -> str:
     """Detect stop reason from one of the provided stop files."""
     for path in stop_paths:

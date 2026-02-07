@@ -2,13 +2,42 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import os
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 from .utils import run_cmd, now_iso, safe_write_text, eprint
+
+
+def check_and_remove_stale_git_lock(repo: Path, max_age_seconds: int = 300) -> bool:
+    """Remove stale .git/index.lock if older than *max_age_seconds*.
+
+    Returns True if a stale lock was successfully removed.
+    On Windows, PermissionError means another process still holds the file — skip removal.
+    """
+    lock = repo / ".git" / "index.lock"
+    if not lock.exists():
+        return False
+    try:
+        age = time.time() - lock.stat().st_mtime
+    except Exception:
+        return False
+    if age < max_age_seconds:
+        return False
+    try:
+        lock.unlink()
+        eprint(f"[WARN] Removed stale .git/index.lock (age={age:.0f}s)")
+        return True
+    except PermissionError:
+        # Another process is actively using this lock — leave it alone.
+        return False
+    except Exception as ex:
+        eprint(f"[WARN] Failed to remove stale .git/index.lock: {ex}")
+        return False
 
 
 def git_head(repo: Path) -> str:
@@ -213,6 +242,7 @@ class RepoCheckpoint:
 
 
 def create_checkpoint(repo: Path, checkpoint_dir: Path) -> RepoCheckpoint:
+    check_and_remove_stale_git_lock(repo)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     patch_path = checkpoint_dir / "tracked.patch"
@@ -258,6 +288,7 @@ def restore_checkpoint(
     run_dir: Path | None,
     stop_path: Path | None,
 ) -> None:
+    check_and_remove_stale_git_lock(repo)
     report_dir = run_dir if run_dir is not None else cp.patch_path.parent
     blocked_path = report_dir / "ROLLBACK_BLOCKED.md"
     failure_path = report_dir / "ROLLBACK_FAILURE.md"
@@ -304,44 +335,56 @@ def restore_checkpoint(
         temp_untracked_dir = Path(tempfile.mkdtemp(prefix="rollback_untracked_"))
         shutil.copytree(cp.untracked_dir, temp_untracked_dir, dirs_exist_ok=True)
 
-    code, out = run_cmd(["git", "apply", "--check", "--binary", str(temp_patch)], cwd=repo, timeout_sec=120)
-    if code != 0:
-        fail(f"Patch pre-check failed (git apply --check): rc={code}\n{out}")
-
-    code, out = run_cmd(["git", "reset", "--hard"], cwd=repo, timeout_sec=120)
-    if code != 0:
-        fail(f"git reset --hard failed: rc={code}\n{out}")
-
-    clean_cmd = ["git", "clean", "-fd"]
-    for path in (run_dir, rescue_dir):
-        if path is None:
-            continue
-        try:
-            rel = path.resolve().relative_to(repo.resolve()).as_posix()
-            clean_cmd.extend(["-e", rel])
-        except Exception:
-            continue
-    code, out = run_cmd(clean_cmd, cwd=repo, timeout_sec=120)
-    if code != 0:
-        fail(f"git clean -fd failed: rc={code}\n{out}")
-
-    code, out = run_cmd(["git", "apply", "--binary", "--whitespace=nowarn", str(temp_patch)], cwd=repo, timeout_sec=120)
-    if code != 0:
-        fail(f"git apply failed: rc={code}\n{out}")
-
-    # Restore untracked files
     untracked_warnings: list[str] = []
-    if temp_untracked_dir and temp_untracked_dir.exists():
-        for src in temp_untracked_dir.rglob("*"):
-            if src.is_dir():
+    try:
+        code, out = run_cmd(["git", "apply", "--check", "--binary", str(temp_patch)], cwd=repo, timeout_sec=120)
+        if code != 0:
+            fail(f"Patch pre-check failed (git apply --check): rc={code}\n{out}")
+
+        code, out = run_cmd(["git", "reset", "--hard"], cwd=repo, timeout_sec=120)
+        if code != 0:
+            fail(f"git reset --hard failed: rc={code}\n{out}")
+
+        clean_cmd = ["git", "clean", "-fd"]
+        for path in (run_dir, rescue_dir):
+            if path is None:
                 continue
-            rel = src.relative_to(temp_untracked_dir)
-            dst = repo / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
             try:
-                shutil.copy2(src, dst)
-            except Exception as ex:
-                untracked_warnings.append(f"{rel}: {ex}")
+                rel = path.resolve().relative_to(repo.resolve()).as_posix()
+                clean_cmd.extend(["-e", rel])
+            except Exception:
+                continue
+        code, out = run_cmd(clean_cmd, cwd=repo, timeout_sec=120)
+        if code != 0:
+            fail(f"git clean -fd failed: rc={code}\n{out}")
+
+        code, out = run_cmd(["git", "apply", "--binary", "--whitespace=nowarn", str(temp_patch)], cwd=repo, timeout_sec=120)
+        if code != 0:
+            fail(f"git apply failed: rc={code}\n{out}")
+
+        # Restore untracked files
+        if temp_untracked_dir and temp_untracked_dir.exists():
+            for src in temp_untracked_dir.rglob("*"):
+                if src.is_dir():
+                    continue
+                rel = src.relative_to(temp_untracked_dir)
+                dst = repo / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copy2(src, dst)
+                except Exception as ex:
+                    untracked_warnings.append(f"{rel}: {ex}")
+    finally:
+        # Clean up temp files to prevent leaks during unattended operation
+        try:
+            temp_patch.unlink(missing_ok=True)
+        except Exception:
+            pass
+        if temp_untracked_dir is not None:
+            try:
+                shutil.rmtree(temp_untracked_dir, ignore_errors=True)
+            except Exception:
+                pass
 
     if untracked_warnings and run_dir is not None:
         warn_path = report_dir / "ROLLBACK_UNTRACKED_WARNING.md"
