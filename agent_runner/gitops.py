@@ -317,13 +317,15 @@ def merge_task_branch(repo: Path, tb: TaskBranch) -> bool:
     # Try fast-forward first
     rc, out = run_cmd(["git", "merge", "--ff-only", tb.branch_name], cwd=repo, timeout_sec=120)
     if rc == 0:
-        eprint(f"[INFO] Fast-forward merged {tb.branch_name} into {checkout_target}")
+        run_cmd(["git", "branch", "-d", tb.branch_name], cwd=repo, timeout_sec=30)
+        eprint(f"[INFO] Fast-forward merged and deleted {tb.branch_name}")
         return True
 
     # Fall back to regular merge
     rc, out = run_cmd(["git", "merge", "--no-edit", tb.branch_name], cwd=repo, timeout_sec=120)
     if rc == 0:
-        eprint(f"[INFO] Merged {tb.branch_name} into {checkout_target}")
+        run_cmd(["git", "branch", "-d", tb.branch_name], cwd=repo, timeout_sec=30)
+        eprint(f"[INFO] Merged and deleted {tb.branch_name}")
         return True
 
     # Conflict — abort merge and report failure
