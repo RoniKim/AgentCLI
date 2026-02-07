@@ -1528,6 +1528,13 @@ async def main_async(args: argparse.Namespace) -> int:
                 ensure_backlog()
                 tasks = load_tasks()
                 task_ids = {t.id for t in tasks}
+                # Clear done_set for IDs that appear in the new backlog — PM recycled these IDs for new tasks
+                recycled_ids = done_set & task_ids
+                if recycled_ids:
+                    eprint(f"[PM-REFRESH] Clearing {len(recycled_ids)} recycled task IDs from done set: {sorted(recycled_ids)}")
+                    done_set -= recycled_ids
+                    state["done"] = sorted(done_set)
+                    save_state(state_path, state)
                 before_done = len(done_set.intersection(task_ids))
 
             tasks_root = run_dir / "tasks"
