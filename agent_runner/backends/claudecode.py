@@ -252,6 +252,9 @@ def _filter_kwargs_for_ctor(cls: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
         allowed = set(sig.parameters.keys())
         if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
             return kwargs
+        dropped = {k for k in kwargs if k not in allowed}
+        if dropped:
+            eprint(f"[DEBUG] _filter_kwargs_for_ctor: dropped params not in {cls.__name__}: {sorted(dropped)}")
         return {k: v for k, v in kwargs.items() if k in allowed}
     except Exception:
         return kwargs
@@ -287,6 +290,8 @@ def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_overr
 
     parts = [
         "You are running inside AgentCLI (Claude Code backend). Follow the stage instructions exactly.\n",
+        f"Your working directory is: {repo}\n",
+        f"IMPORTANT: All file paths in Read/Write/Edit/Glob/Grep tool calls MUST use absolute paths under {repo}.\n",
         "You have access to Claude Code built-in tools: Read, Write, Edit, Grep, Glob, Bash.\n",
         "Do NOT attempt to call Codex MCP or any external MCP tools. Use only the built-in tools.\n\n",
     ]
@@ -338,6 +343,8 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
     else:
         raise RuntimeError("ClaudeSDKClient did not provide a message stream")
 
+    tool_calls_made: list[str] = []
+
     async for msg in iterator:
         if stop_path.exists():
             raise StopRequested()
@@ -345,13 +352,33 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
         msg_name = msg.__class__.__name__
         msg_type = getattr(msg, "type", None)
 
+        # Log tool calls for debugging (helps diagnose no_diff issues)
+        if msg_name in {"ToolUseMessage", "ToolCallMessage"} or msg_type in {"tool_use", "tool_call"}:
+            tool_name = getattr(msg, "name", None) or getattr(msg, "tool_name", None) or "unknown"
+            tool_calls_made.append(tool_name)
+            if debug:
+                eprint(f"  [TOOL] {tool_name}")
+        if msg_name in {"ToolResultMessage", "ToolResponseMessage"} or msg_type in {"tool_result", "tool_response"}:
+            if debug:
+                tool_name = getattr(msg, "name", None) or getattr(msg, "tool_name", None) or ""
+                is_error = getattr(msg, "is_error", None) or getattr(msg, "error", None)
+                status = "ERROR" if is_error else "ok"
+                eprint(f"  [TOOL_RESULT] {tool_name} → {status}")
+
         if msg_name in {"AssistantMessage", "TextMessage"} or msg_type == "assistant":
             content = getattr(msg, "content", None)
             if isinstance(content, list):
                 for blk in content:
+                    blk_type = getattr(blk, "type", None)
                     t = getattr(blk, "text", None)
                     if isinstance(t, str) and t.strip():
                         text_parts.append(t)
+                    # Capture tool_use blocks within assistant content
+                    if blk_type == "tool_use":
+                        tool_name = getattr(blk, "name", None) or "unknown"
+                        tool_calls_made.append(tool_name)
+                        if debug:
+                            eprint(f"  [TOOL] {tool_name}")
 
         if msg_name in {"ResultMessage", "ResponseMessage"} or msg_type == "result":
             result = getattr(msg, "result", None)
@@ -368,6 +395,11 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
                     t = getattr(blk, "text", None)
                     if isinstance(t, str) and t.strip():
                         text_parts.append(t)
+
+    if tool_calls_made:
+        eprint(f"  [TOOLS_SUMMARY] {len(tool_calls_made)} tool calls: {', '.join(tool_calls_made)}")
+    else:
+        eprint("  [WARN] No tool calls detected in message stream — agent may not have edited files")
 
     return ("\n".join(text_parts).strip(), structured)
 
@@ -449,27 +481,40 @@ async def _run_claude_query(
     """
     from claude_agent_sdk import ClaudeSDKClient
 
-    for attempt in range(max_retries + 1):
-        try:
-            options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override, stage_instructions=stage_instructions, max_turns_override=max_turns_override)
-            async with ClaudeSDKClient(options=options) as client:
-                await _start_query(client, prompt)
-                coro = _receive_messages(client, stop_path=stop_path, debug=debug)
-                if timeout_seconds > 0:
-                    return await asyncio.wait_for(coro, timeout=timeout_seconds)
-                return await coro
-        except (StopRequested, BudgetExceeded):
-            raise
-        except Exception as ex:
-            if is_quota_exception(ex):
+    # Ensure Claude operates in the correct repo directory even if 'cwd' kwarg
+    # was dropped by _filter_kwargs_for_ctor (ClaudeAgentOptions may not accept it).
+    saved_cwd = os.getcwd()
+    try:
+        os.chdir(str(repo))
+    except Exception:
+        pass
+    try:
+        for attempt in range(max_retries + 1):
+            try:
+                options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override, stage_instructions=stage_instructions, max_turns_override=max_turns_override)
+                async with ClaudeSDKClient(options=options) as client:
+                    await _start_query(client, prompt)
+                    coro = _receive_messages(client, stop_path=stop_path, debug=debug)
+                    if timeout_seconds > 0:
+                        return await asyncio.wait_for(coro, timeout=timeout_seconds)
+                    return await coro
+            except (StopRequested, BudgetExceeded):
                 raise
-            if is_transient_exception(ex) and attempt < max_retries:
-                wait = initial_backoff * (2 ** attempt)
-                eprint(f"[RETRY] {stage} transient error (attempt {attempt + 1}/{max_retries}): {ex}; retrying in {wait:.0f}s")
-                await asyncio.sleep(wait)
-                continue
-            raise
-    raise RuntimeError("unreachable")  # pragma: no cover
+            except Exception as ex:
+                if is_quota_exception(ex):
+                    raise
+                if is_transient_exception(ex) and attempt < max_retries:
+                    wait = initial_backoff * (2 ** attempt)
+                    eprint(f"[RETRY] {stage} transient error (attempt {attempt + 1}/{max_retries}): {ex}; retrying in {wait:.0f}s")
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+        raise RuntimeError("unreachable")  # pragma: no cover
+    finally:
+        try:
+            os.chdir(saved_cwd)
+        except Exception:
+            pass
 
 
 async def _run_with_continuations(
