@@ -1945,11 +1945,17 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 continue
 
             done_set.add(next_task.id)
+            # Clean up previous failure entries for this task (e.g. from earlier cycles)
+            if state.get("failed"):
+                state["failed"] = [f for f in state["failed"] if f.get("task") != next_task.id]
             state["done"] = sorted(list(done_set))
             save_state(state_path, state)
             mark_backlog_done(backlog_md_path, next_task.id)
 
-            (run_dir / "progress.txt").write_text(f"done={len(done_set)}/{len(tasks)} skipped={len(skipped_set)} last={next_task.id}\n", encoding="utf-8", errors="replace")
+            # Use current-cycle task IDs to avoid cross-cycle accumulation (done=16/11 bug)
+            _done_this_cycle = len(done_set.intersection(task_ids))
+            _skipped_this_cycle = len(skipped_set.intersection(task_ids))
+            (run_dir / "progress.txt").write_text(f"done={_done_this_cycle}/{len(tasks)} skipped={_skipped_this_cycle} last={next_task.id}\n", encoding="utf-8", errors="replace")
             code, names = run_cmd(["git", "diff", "--name-only"], cwd=repo, timeout_sec=60)
             files_changed_count = len([ln for ln in names.splitlines() if ln.strip()]) if code == 0 else 0
             metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0, files_changed_count=files_changed_count)
@@ -1961,17 +1967,19 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
         ran_tasks = (len(done_set) > before_done)
         cycle_dt = time.time() - cycle_t0
-        failed_count = len(state.get("failed", []))
+        # Count unique failed tasks (not raw entries — one task can have multiple failure records)
+        failed_count = len({f.get("task") for f in state.get("failed", []) if f.get("task")})
+        done_count = len(done_set.intersection(task_ids))
+        total_count = len(task_ids)
+        skipped_count = len(skipped_set.intersection(task_ids))
         summary = {
             "ts": now_iso(), "cycle": cycle_idx, "run_dir": str(run_dir),
-            "done": len(done_set), "skipped": len(skipped_set),
-            "total_tasks": len(tasks), "failed_count": failed_count,
+            "done": done_count, "skipped": skipped_count,
+            "total_tasks": total_count, "failed_count": failed_count,
             "duration_seconds": cycle_dt, "build_enabled": build_enabled,
             "run_tests": run_tests, "policy_scan_enabled": policy_scan_enabled,
         }
         last_run_summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
-        done_count = len(done_set.intersection(task_ids))
-        total_count = len(task_ids)
         append_cycle_summary(f"{now_iso()} cycle={cycle_idx} done={done_count}/{total_count} failed={failed_count} dt={cycle_dt:.1f}s")
         metrics.event("cycle_end", cycle=cycle_idx, rc=0, done=done_count, total=total_count, failed=failed_count, duration_seconds=cycle_dt)
 
@@ -1985,7 +1993,6 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         except Exception:
             pass
 
-        skipped_count = len(skipped_set.intersection(task_ids))
         if total_count > 0 and done_count >= total_count:
             return 0, STOP_REASON_ALL_TASKS_DONE, done_delta, ran_tasks
         if total_count > 0 and (done_count + skipped_count) >= total_count:

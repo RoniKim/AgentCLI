@@ -1511,6 +1511,7 @@ async def main_async(args: argparse.Namespace) -> int:
             backlog_md = run_dir / "BACKLOG.md"
             state = load_state(state_path)
             done_set = set(state.get("done", []))
+            skipped_set: set[str] = set()  # Track skipped/failed tasks separately from done
 
             task_ids = {t.id for t in tasks}
             before_done = len(done_set.intersection(task_ids))
@@ -1537,8 +1538,9 @@ async def main_async(args: argparse.Namespace) -> int:
                     break
 
                 next_task: Optional[TaskItem] = None
+                processed = done_set | skipped_set
                 for t in tasks:
-                    if t.id not in done_set:
+                    if t.id not in processed:
                         next_task = t
                         break
                 if not next_task:
@@ -1774,7 +1776,13 @@ async def main_async(args: argparse.Namespace) -> int:
                         if cp:
                             ok, fail_reason = _restore_or_stop("exception")
                             if not ok:
-                                return 1, fail_reason, 0, (len(done_set) > before_done)
+                                if not continuous:
+                                    return 1, fail_reason, 0, (len(done_set) > before_done)
+                                eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; skipping task.")
+                        if continuous:
+                            eprint(f"[SKIP] Dev exception for {next_task.id}; skipping to next task.")
+                            skipped_set.add(next_task.id)
+                            break
                         return 1, "dev_exception", 0, (len(done_set) > before_done)
                     # Max-turns exceptions are recoverable: continue to diff/build gates.
                     if dev_exc and dev_is_max_turns:
@@ -1826,11 +1834,16 @@ async def main_async(args: argparse.Namespace) -> int:
                         save_state(state_path, state)
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="no_diff")
                         logger.task_end(task_id=next_task.id, success=False, reason="no_diff", was_max_turns=dev_is_max_turns)
-                        eprint(f"[STOP] No diff produced for {next_task.id}.")
+                        eprint(f"[{'SKIP' if continuous else 'STOP'}] No diff produced for {next_task.id}.")
                         if cp:
                             ok, fail_reason = _restore_or_stop("no_diff")
                             if not ok:
-                                return 1, fail_reason, 0, (len(done_set) > before_done)
+                                if not continuous:
+                                    return 1, fail_reason, 0, (len(done_set) > before_done)
+                                eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
+                        if continuous:
+                            skipped_set.add(next_task.id)
+                            break
                         return 1, "no_diff", 0, (len(done_set) > before_done)
                     if build_enabled:
                         metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
@@ -1849,11 +1862,16 @@ async def main_async(args: argparse.Namespace) -> int:
                                 continue
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
                             save_state(state_path, state)
-                            eprint(f"[STOP] Build failed after {next_task.id}. See {attempt_dir / 'build.txt'}")
+                            eprint(f"[{'SKIP' if continuous else 'STOP'}] Build failed after {next_task.id}. See {attempt_dir / 'build.txt'}")
                             if cp:
                                 ok_restore, fail_reason = _restore_or_stop("build_failed")
                                 if not ok_restore:
-                                    return 1, fail_reason, 0, (len(done_set) > before_done)
+                                    if not continuous:
+                                        return 1, fail_reason, 0, (len(done_set) > before_done)
+                                    eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
+                            if continuous:
+                                skipped_set.add(next_task.id)
+                                break
                             return 1, "build_failed", 0, (len(done_set) > before_done)
                     if run_tests:
                         metrics.event("test_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
@@ -1873,11 +1891,16 @@ async def main_async(args: argparse.Namespace) -> int:
                                 continue
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "test_failed"})
                             save_state(state_path, state)
-                            eprint(f"[STOP] Tests failed after {next_task.id}. See {attempt_dir / 'test.txt'}")
+                            eprint(f"[{'SKIP' if continuous else 'STOP'}] Tests failed after {next_task.id}. See {attempt_dir / 'test.txt'}")
                             if cp:
                                 ok_restore, fail_reason = _restore_or_stop("test_failed")
                                 if not ok_restore:
-                                    return 1, fail_reason, 0, (len(done_set) > before_done)
+                                    if not continuous:
+                                        return 1, fail_reason, 0, (len(done_set) > before_done)
+                                    eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
+                            if continuous:
+                                skipped_set.add(next_task.id)
+                                break
                             return 1, "test_failed", 0, (len(done_set) > before_done)
                     if policy_scan_enabled:
                         policy_scan_ignore_paths = list(scan_ignore_paths)
@@ -1935,13 +1958,18 @@ async def main_async(args: argparse.Namespace) -> int:
                         if not scan_result.get("ok", True):
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "policy_violation"})
                             save_state(state_path, state)
-                            eprint(f"[STOP] Policy scan failed after {next_task.id}. See {attempt_dir / 'policy_scan.json'}")
+                            eprint(f"[{'SKIP' if continuous else 'STOP'}] Policy scan failed after {next_task.id}. See {attempt_dir / 'policy_scan.json'}")
                             metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="policy_violation",
                                           violations=len(scan_result.get("fail_violations", [])))
                             if cp:
                                 ok_restore, fail_reason = _restore_or_stop("policy_violation")
                                 if not ok_restore:
-                                    return 1, fail_reason, 0, (len(done_set) > before_done)
+                                    if not continuous:
+                                        return 1, fail_reason, 0, (len(done_set) > before_done)
+                                    eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
+                            if continuous:
+                                skipped_set.add(next_task.id)
+                                break
                             return 1, "policy_violation", 0, (len(done_set) > before_done)
                     # Success: exit attempt loop
                     metrics.event("dev_attempt_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0)
@@ -1951,6 +1979,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 if task_blocked:
                     # Blocked tasks: skip to next task instead of stopping
+                    skipped_set.add(next_task.id)
                     eprint(f"[INFO] Skipped blocked task {next_task.id}, continuing to next task...")
                     continue
 
@@ -1959,14 +1988,24 @@ async def main_async(args: argparse.Namespace) -> int:
                     state.setdefault("failed", []).append({"task": next_task.id, "reason": "exhausted_attempts"})
                     save_state(state_path, state)
                     logger.task_end(task_id=next_task.id, success=False, reason="exhausted_attempts", attempts=max_attempts)
+                    if continuous:
+                        eprint(f"[SKIP] Exhausted all attempts for {next_task.id}; skipping to next task.")
+                        skipped_set.add(next_task.id)
+                        continue
                     return 1, "exhausted_attempts", 0, (len(done_set) > before_done)
                 # Mark done only after gates
                 done_set.add(next_task.id)
+                # Clean up previous failure entries for this task (e.g. from earlier cycles)
+                if state.get("failed"):
+                    state["failed"] = [f for f in state["failed"] if f.get("task") != next_task.id]
                 state["done"] = sorted(list(done_set))
                 save_state(state_path, state)
                 mark_backlog_done(backlog_md, next_task.id)
 
-                (run_dir / "progress.txt").write_text(f"done={len(done_set)}/{len(tasks)} last={next_task.id}\n",
+                # Use current-cycle task IDs to avoid cross-cycle accumulation (done=16/11 bug)
+                _done_this_cycle = len(done_set.intersection(task_ids))
+                _skipped_this_cycle = len(skipped_set.intersection(task_ids))
+                (run_dir / "progress.txt").write_text(f"done={_done_this_cycle}/{len(tasks)} skipped={_skipped_this_cycle} last={next_task.id}\n",
                                                      encoding="utf-8", errors="replace")
 
                 code, names = run_cmd(["git", "diff", "--name-only"], cwd=repo, timeout_sec=60)
@@ -1981,13 +2020,18 @@ async def main_async(args: argparse.Namespace) -> int:
             ran_tasks = (len(done_set) > before_done)
 
             cycle_dt = time.time() - cycle_t0
-            failed_count = len(state.get("failed", []))
+            # Count unique failed tasks (not raw entries — one task can have multiple failure records)
+            failed_count = len({f.get("task") for f in state.get("failed", []) if f.get("task")})
+            done_count = len(done_set.intersection(task_ids))
+            total_count = len(task_ids)
+            skipped_count = len(skipped_set.intersection(task_ids))
             summary = {
                 "ts": now_iso(),
                 "cycle": cycle_idx,
                 "run_dir": str(run_dir),
-                "done": len(done_set),
-                "total_tasks": len(tasks),
+                "done": done_count,
+                "skipped": skipped_count,
+                "total_tasks": total_count,
                 "failed_count": failed_count,
                 "duration_seconds": cycle_dt,
                 "build_enabled": build_enabled,
@@ -1995,8 +2039,6 @@ async def main_async(args: argparse.Namespace) -> int:
                 "policy_scan_enabled": policy_scan_enabled,
             }
             last_run_summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
-            done_count = len(done_set.intersection(task_ids))
-            total_count = len(task_ids)
             append_cycle_summary(f"{now_iso()} cycle={cycle_idx} done={done_count}/{total_count} failed={failed_count} dt={cycle_dt:.1f}s")
             metrics.event("cycle_end", cycle=cycle_idx, rc=0, done=done_count, total=total_count, failed=failed_count, duration_seconds=cycle_dt)
 
@@ -2017,6 +2059,10 @@ async def main_async(args: argparse.Namespace) -> int:
 
             if total_count > 0 and done_count >= total_count:
                 return 0, STOP_REASON_ALL_TASKS_DONE, done_delta, ran_tasks
+            if total_count > 0 and (done_count + skipped_count) >= total_count:
+                # All tasks attempted but some were skipped — not truly "all done"
+                eprint(f"[INFO] All tasks attempted: {done_count} done, {skipped_count} skipped out of {total_count}.")
+                return 0, "all_tasks_attempted", done_delta, ran_tasks
 
             return 0, "ok", done_delta, ran_tasks
 
@@ -2277,6 +2323,11 @@ async def main_async(args: argparse.Namespace) -> int:
                 if reason == STOP_REASON_ALL_TASKS_DONE:
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
                     break
+                if reason == "all_tasks_attempted":
+                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_attempted")
+                    if not args.loop:
+                        break
+                    # In loop mode, fall through — PM refresh may add new tasks or retry skipped
 
                 if args.loop:
                     if delta <= 0:
