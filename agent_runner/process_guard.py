@@ -14,6 +14,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -21,8 +22,9 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Module state
+# Module state (protected by _lock)
 # ---------------------------------------------------------------------------
+_lock = threading.Lock()
 _initialized = False
 _tracked_pids: set[int] = set()
 _session_dir: Optional[Path] = None
@@ -38,6 +40,14 @@ _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 _JobObjectExtendedLimitInformation = 9
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
+_SYNCHRONIZE = 0x00100000
+
+# WaitForSingleObject return values
+_WAIT_OBJECT_0 = 0x00000000
+_WAIT_TIMEOUT = 0x00000102
+
+# ctypes type alias
+_HANDLE = ctypes.c_void_p
 
 
 class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
@@ -76,27 +86,38 @@ class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
     ]
 
 
+def _init_kernel32_types() -> None:
+    """Set Win32 API function signatures once."""
+    if sys.platform != "win32":
+        return
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+
+    kernel32.CreateJobObjectW.restype = _HANDLE
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+    kernel32.SetInformationJobObject.restype = ctypes.c_int
+    kernel32.SetInformationJobObject.argtypes = [_HANDLE, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+    kernel32.AssignProcessToJobObject.argtypes = [_HANDLE, _HANDLE]
+    kernel32.GetCurrentProcess.restype = _HANDLE
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [_HANDLE]
+    kernel32.GetLastError.restype = ctypes.c_uint32
+    kernel32.GetLastError.argtypes = []
+    kernel32.OpenProcess.restype = _HANDLE
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.TerminateProcess.restype = ctypes.c_int
+    kernel32.TerminateProcess.argtypes = [_HANDLE, ctypes.c_uint]
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+    kernel32.WaitForSingleObject.argtypes = [_HANDLE, ctypes.c_uint32]
+
+
 def _setup_job_object() -> Optional[int]:
     """Create a Windows Job Object with KILL_ON_JOB_CLOSE and assign current process."""
     if sys.platform != "win32":
         return None
     try:
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        HANDLE = ctypes.c_void_p
-
-        # Set proper return/arg types for Win32 API calls
-        kernel32.CreateJobObjectW.restype = HANDLE
-        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
-        kernel32.SetInformationJobObject.restype = ctypes.c_int
-        kernel32.SetInformationJobObject.argtypes = [HANDLE, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
-        kernel32.AssignProcessToJobObject.restype = ctypes.c_int
-        kernel32.AssignProcessToJobObject.argtypes = [HANDLE, HANDLE]
-        kernel32.GetCurrentProcess.restype = HANDLE
-        kernel32.GetCurrentProcess.argtypes = []
-        kernel32.CloseHandle.restype = ctypes.c_int
-        kernel32.CloseHandle.argtypes = [HANDLE]
-        kernel32.GetLastError.restype = ctypes.c_uint32
-        kernel32.GetLastError.argtypes = []
 
         job = kernel32.CreateJobObjectW(None, None)
         if not job:
@@ -154,8 +175,9 @@ def _session_file(pid: int) -> Path:
 
 
 def register_pid(pid: int) -> None:
-    """Register a child process PID for tracking."""
-    _tracked_pids.add(pid)
+    """Register a child process PID for tracking (thread-safe)."""
+    with _lock:
+        _tracked_pids.add(pid)
     try:
         data = {
             "child_pid": pid,
@@ -171,8 +193,9 @@ def register_pid(pid: int) -> None:
 
 
 def unregister_pid(pid: int) -> None:
-    """Unregister a child process PID."""
-    _tracked_pids.discard(pid)
+    """Unregister a child process PID (thread-safe)."""
+    with _lock:
+        _tracked_pids.discard(pid)
     try:
         sf = _session_file(pid)
         if sf.exists():
@@ -182,32 +205,19 @@ def unregister_pid(pid: int) -> None:
     logger.debug(f"[ProcessGuard] Unregistered child PID {pid}")
 
 
-def _kill_pid(pid: int, *, force: bool = False) -> None:
-    """Kill a single process by PID."""
+def _kill_pid(pid: int) -> None:
+    """Kill a single process by PID. On Windows always uses TerminateProcess."""
     try:
         if sys.platform == "win32":
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-            HANDLE = ctypes.c_void_p
-            kernel32.OpenProcess.restype = HANDLE
-            kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
-            kernel32.TerminateProcess.restype = ctypes.c_int
-            kernel32.TerminateProcess.argtypes = [HANDLE, ctypes.c_uint]
-            kernel32.CloseHandle.restype = ctypes.c_int
-            kernel32.CloseHandle.argtypes = [HANDLE]
             handle = kernel32.OpenProcess(_PROCESS_TERMINATE, False, pid)
             if handle:
                 kernel32.TerminateProcess(handle, 1)
                 kernel32.CloseHandle(handle)
         else:
-            sig = signal.SIGKILL if force else signal.SIGTERM
-            os.kill(pid, sig)
+            os.kill(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError):
         pass
-
-
-# WaitForSingleObject return values
-_WAIT_OBJECT_0 = 0x00000000
-_WAIT_TIMEOUT = 0x00000102
 
 
 def _pid_alive(pid: int) -> bool:
@@ -215,14 +225,6 @@ def _pid_alive(pid: int) -> bool:
     try:
         if sys.platform == "win32":
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-            HANDLE = ctypes.c_void_p
-            _SYNCHRONIZE = 0x00100000
-            kernel32.OpenProcess.restype = HANDLE
-            kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
-            kernel32.WaitForSingleObject.restype = ctypes.c_uint32
-            kernel32.WaitForSingleObject.argtypes = [HANDLE, ctypes.c_uint32]
-            kernel32.CloseHandle.restype = ctypes.c_int
-            kernel32.CloseHandle.argtypes = [HANDLE]
             handle = kernel32.OpenProcess(_SYNCHRONIZE | _PROCESS_TERMINATE, False, pid)
             if not handle:
                 return False
@@ -237,29 +239,26 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def terminate_all_children() -> None:
-    """Terminate all tracked child processes (L2/L3 handler)."""
-    if not _tracked_pids:
-        return
-    pids = list(_tracked_pids)
-    logger.info(f"[ProcessGuard] Terminating {len(pids)} tracked child process(es): {pids}")
-
-    # First pass: graceful terminate
+def _terminate_pids(pids: list[int], *, wait: bool = True) -> None:
+    """Kill a list of PIDs. If wait=True, waits briefly then force-kills survivors."""
     for pid in pids:
-        _kill_pid(pid, force=False)
+        _kill_pid(pid)
 
-    # Brief wait for graceful exit
-    time.sleep(0.5)
-
-    # Second pass: force kill any survivors
-    for pid in pids:
-        if _pid_alive(pid):
-            logger.info(f"[ProcessGuard] Force-killing PID {pid}")
-            _kill_pid(pid, force=True)
+    if wait and sys.platform != "win32":
+        # On Unix, first pass sends SIGTERM; wait then SIGKILL.
+        # On Windows, TerminateProcess is already a hard kill — no need to wait.
+        time.sleep(0.5)
+        for pid in pids:
+            if _pid_alive(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
 
     # Cleanup session files
     for pid in pids:
-        _tracked_pids.discard(pid)
+        with _lock:
+            _tracked_pids.discard(pid)
         try:
             sf = _session_file(pid)
             if sf.exists():
@@ -268,11 +267,28 @@ def terminate_all_children() -> None:
             pass
 
 
+def terminate_all_children(*, _from_signal: bool = False) -> None:
+    """Terminate all tracked child processes.
+
+    Args:
+        _from_signal: If True, called from signal handler — skip sleep/wait
+                      to avoid blocking the handler.
+    """
+    with _lock:
+        pids = list(_tracked_pids)
+    if not pids:
+        return
+    logger.info(f"[ProcessGuard] Terminating {len(pids)} tracked child process(es): {pids}")
+    _terminate_pids(pids, wait=not _from_signal)
+
+
 def _atexit_handler() -> None:
     """atexit handler: kill all tracked children on interpreter shutdown."""
-    if _tracked_pids:
+    with _lock:
+        has_pids = bool(_tracked_pids)
+    if has_pids:
         logger.info("[ProcessGuard] L2: atexit cleanup triggered")
-        terminate_all_children()
+        terminate_all_children(_from_signal=False)
 
 
 # ---------------------------------------------------------------------------
@@ -282,21 +298,30 @@ def _atexit_handler() -> None:
 def _make_signal_handler(
     stop_path_func: Optional[Callable[[], Optional[Path]]],
 ) -> Callable[[int, object], None]:
-    """Create a signal handler that writes STOP file + kills children."""
+    """Create a signal handler that writes STOP file + kills children.
+
+    Signal handler is kept minimal: write STOP file via low-level os.open/os.write
+    and kill processes without sleeping to avoid deadlock risk.
+    """
 
     def _handler(signum: int, frame: object) -> None:
-        # Write STOP file for graceful runner loop exit
+        # Write STOP file using low-level I/O (signal-safe)
         if stop_path_func is not None:
             try:
                 stop_path = stop_path_func()
                 if stop_path is not None:
                     stop_path.parent.mkdir(parents=True, exist_ok=True)
-                    stop_path.write_text(f"signal {signum}\n", encoding="utf-8")
+                    content = f"signal {signum}\n".encode("utf-8")
+                    fd = os.open(str(stop_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+                    try:
+                        os.write(fd, content)
+                    finally:
+                        os.close(fd)
             except Exception:
                 pass
 
-        # Kill tracked children immediately
-        terminate_all_children()
+        # Kill tracked children immediately (no wait in signal handler)
+        terminate_all_children(_from_signal=True)
 
         msg = f"[ProcessGuard] L3: Signal {signum} received, children terminated.\n"
         try:
@@ -369,6 +394,7 @@ def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
         return 0
 
     killed = 0
+    my_pid = os.getpid()
     for sf in list(sd.glob("session_*.json")):
         try:
             data = json.loads(sf.read_text(encoding="utf-8"))
@@ -378,23 +404,28 @@ def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
                 sf.unlink(missing_ok=True)
                 continue
 
+            # Skip our own session files — they belong to the current process
+            if parent_pid == my_pid:
+                continue
+
             parent_alive = _pid_alive(parent_pid)
             child_alive = _pid_alive(child_pid)
 
-            if not parent_alive and child_alive:
-                if _is_claude_process(child_pid):
+            if not parent_alive:
+                # Parent is dead — this is a stale session file
+                if child_alive and _is_claude_process(child_pid):
                     logger.warning(
                         f"[ProcessGuard] L4: Killing orphan PID {child_pid} "
                         f"(parent {parent_pid} dead)"
                     )
-                    _kill_pid(child_pid, force=True)
+                    _kill_pid(child_pid)
                     killed += 1
-                else:
-                    logger.debug(
-                        f"[ProcessGuard] L4: PID {child_pid} alive but not claude/node, skipping"
-                    )
-            # Clean up stale session file regardless
-            sf.unlink(missing_ok=True)
+                # Only delete session file when parent is dead (stale)
+                sf.unlink(missing_ok=True)
+            elif not child_alive:
+                # Parent alive but child already exited — stale file
+                sf.unlink(missing_ok=True)
+            # else: both alive — leave session file alone (active instance)
         except Exception as ex:
             logger.debug(f"[ProcessGuard] L4: Error processing {sf}: {ex}")
             try:
@@ -437,6 +468,9 @@ def init_process_guard(
         _session_dir.mkdir(parents=True, exist_ok=True)
 
     _stop_path_func = stop_path_func
+
+    # Set Win32 API types once
+    _init_kernel32_types()
 
     # L1: Job Object
     _job_handle = _setup_job_object()

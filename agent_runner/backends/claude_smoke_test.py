@@ -31,43 +31,57 @@ async def _run(prompt: str, model: str) -> int:
     )
 
     try:
+        from .claudecode import _extract_client_pid
+        from ..process_guard import register_pid, unregister_pid
+    except Exception:
+        _extract_client_pid = None  # type: ignore[assignment]
+        register_pid = unregister_pid = None  # type: ignore[assignment]
+
+    try:
         async with ClaudeSDKClient(options=options) as client:
+            child_pid = _extract_client_pid(client) if _extract_client_pid else None
+            if child_pid is not None and register_pid is not None:
+                register_pid(child_pid)
             try:
-                result = client.query(prompt)
-            except TypeError:
-                result = client.query(prompt=prompt)
-            if asyncio.iscoroutine(result):
-                await result
+                try:
+                    result = client.query(prompt)
+                except TypeError:
+                    result = client.query(prompt=prompt)
+                if asyncio.iscoroutine(result):
+                    await result
 
-            if hasattr(client, "receive_response"):
-                stream = client.receive_response()
-                if asyncio.iscoroutine(stream):
-                    stream = await stream
-            elif hasattr(client, "receive_messages"):
-                stream = client.receive_messages()
-                if asyncio.iscoroutine(stream):
-                    stream = await stream
-            else:
-                print("[error] ClaudeSDKClient receive_* API를 찾지 못했습니다.")
-                _print_help_on_failure()
-                return 2
+                if hasattr(client, "receive_response"):
+                    stream = client.receive_response()
+                    if asyncio.iscoroutine(stream):
+                        stream = await stream
+                elif hasattr(client, "receive_messages"):
+                    stream = client.receive_messages()
+                    if asyncio.iscoroutine(stream):
+                        stream = await stream
+                else:
+                    print("[error] ClaudeSDKClient receive_* API를 찾지 못했습니다.")
+                    _print_help_on_failure()
+                    return 2
 
-            async for msg in stream:  # type: ignore[assignment]
-                name = msg.__class__.__name__
-                msg_type = getattr(msg, "type", None)
-                if name in {"AssistantMessage", "TextMessage"} or msg_type == "assistant":
-                    content = getattr(msg, "content", None)
-                    if isinstance(content, list):
-                        texts = [getattr(b, "text", "") for b in content if getattr(b, "text", "").strip()]
-                        if texts:
-                            print("[assistant]", " ".join(texts)[:200])
-                if name in {"ResultMessage", "ResponseMessage"} or msg_type == "result":
-                    result = getattr(msg, "result", None)
-                    if isinstance(result, dict):
-                        print("[result] structured keys:", ", ".join(result.keys())[:200])
-                    elif isinstance(result, str) and result.strip():
-                        print("[result]", result[:200])
-        return 0
+                async for msg in stream:  # type: ignore[assignment]
+                    name = msg.__class__.__name__
+                    msg_type = getattr(msg, "type", None)
+                    if name in {"AssistantMessage", "TextMessage"} or msg_type == "assistant":
+                        content = getattr(msg, "content", None)
+                        if isinstance(content, list):
+                            texts = [getattr(b, "text", "") for b in content if getattr(b, "text", "").strip()]
+                            if texts:
+                                print("[assistant]", " ".join(texts)[:200])
+                    if name in {"ResultMessage", "ResponseMessage"} or msg_type == "result":
+                        result = getattr(msg, "result", None)
+                        if isinstance(result, dict):
+                            print("[result] structured keys:", ", ".join(result.keys())[:200])
+                        elif isinstance(result, str) and result.strip():
+                            print("[result]", result[:200])
+                return 0
+            finally:
+                if child_pid is not None and unregister_pid is not None:
+                    unregister_pid(child_pid)
     except Exception as ex:
         print(f"[error] Claude SDK 통신 실패: {ex}")
         _print_help_on_failure()
