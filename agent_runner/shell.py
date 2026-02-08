@@ -27,6 +27,7 @@ from .run_dir import make_run_dir
 from .run_dir import find_latest_run_dir
 from .todo import ensure_todo_file, read_current_todo, set_current_todo, open_path
 from .preflight import run_preflight
+from .process_guard import init_process_guard, terminate_all_children
 
 # prompt_toolkit is an optional dependency at import time (for nicer UX).
 # If it's missing, we fall back to basic input().
@@ -417,6 +418,12 @@ class RunnerShell:
             print(f"[ERR] Failed to create stop file: {ex}")
             return
 
+        # Kill any tracked child processes immediately
+        try:
+            terminate_all_children()
+        except Exception:
+            pass
+
         if wait and self._runner_thread:
             print("[INFO] Waiting for runner to exit...")
             self._runner_thread.join(timeout=60)
@@ -676,6 +683,12 @@ def _build_completer() -> Any:
 
 
 def shell_main(argv: list[str] | None = None) -> int:
+    # Initialize process guard early (L1 Job Object, L2 atexit, L4 orphan cleanup)
+    try:
+        init_process_guard()
+    except Exception:
+        pass
+
     sh = RunnerShell(initial_argv=argv or [])
     print("AgentCLI Shell (prompt_toolkit). Type /help.")
     if sh.repo:

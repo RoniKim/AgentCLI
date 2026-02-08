@@ -97,6 +97,16 @@ DEV_INSTRUCTIONS_DEFAULT = (
     "- Prefer apply_patch for edits (create/update/delete) over full-file rewrites.\n"
     "- Batch operations: read enough context first, then apply a coherent set of changes.\n"
     "- If multiple independent reads/searches are needed, issue them in parallel when supported.\n\n"
+    "Dependency rules (critical):\n"
+    "- Do NOT install/add packages yourself (no `dotnet add package`, `npm install`, `pip install`, etc.).\n"
+    "- If the task requires a new package/dependency that is not already in the project,\n"
+    "  STOP immediately and write a file `DEPENDENCY_REQUIRED.md` in the run_dir with:\n"
+    "  ## Required Dependencies\n"
+    "  - Package: <package name>\n"
+    "  - Manager: <nuget|npm|pip|etc>\n"
+    "  - Reason: <why it's needed>\n"
+    "  - Install command: <exact command>\n"
+    "  Then do NOT attempt the implementation.\n\n"
     "Quality rules:\n"
     "- Must be compilation-safe and incremental.\n"
     "- MUST produce a real git diff.\n"
@@ -235,6 +245,7 @@ Constraints (non-negotiable):
 - Use idempotency keys where required (client_tx_id).
 - Keep changes incremental and compilation-safe.
 - Avoid broad repo scan; use targeted rg/git ls-files.
+- Do NOT install packages. If a new dependency is needed, write DEPENDENCY_REQUIRED.md and stop.
 
 Docs read mode: {docs_read_mode}
 Digest file (preferred): {digest_rel}

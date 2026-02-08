@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional, Tuple
 import inspect
 
+from ..process_guard import register_pid, unregister_pid
 from ..analysis_cache import merge_dev_hints_to_global_changelog
 from ..docs import load_dotenv_best_effort, resolve_docs_dir, generate_docs_digest
 from ..gates import run_build_gate_async, run_test_gate_async
@@ -463,6 +464,21 @@ async def _receive_messages(client: Any, *, stop_path: Path, debug: bool) -> Tup
     )
 
 
+def _extract_client_pid(client: object) -> Optional[int]:
+    """Extract the child process PID from a ClaudeSDKClient instance.
+
+    Traverses client._transport._process.pid defensively.
+    """
+    transport = getattr(client, "_transport", None)
+    if transport is None:
+        return None
+    process = getattr(transport, "_process", None)
+    if process is None:
+        return None
+    pid = getattr(process, "pid", None)
+    return pid if isinstance(pid, int) else None
+
+
 async def _run_claude_query(
     cfg: ClaudeCodeConfig,
     prompt: str,
@@ -497,11 +513,18 @@ async def _run_claude_query(
             try:
                 options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override, stage_instructions=stage_instructions, max_turns_override=max_turns_override)
                 async with ClaudeSDKClient(options=options) as client:
-                    await _start_query(client, prompt)
-                    coro = _receive_messages(client, stop_path=stop_path, debug=debug)
-                    if timeout_seconds > 0:
-                        return await asyncio.wait_for(coro, timeout=timeout_seconds)
-                    return await coro
+                    child_pid = _extract_client_pid(client)
+                    if child_pid is not None:
+                        register_pid(child_pid)
+                    try:
+                        await _start_query(client, prompt)
+                        coro = _receive_messages(client, stop_path=stop_path, debug=debug)
+                        if timeout_seconds > 0:
+                            return await asyncio.wait_for(coro, timeout=timeout_seconds)
+                        return await coro
+                    finally:
+                        if child_pid is not None:
+                            unregister_pid(child_pid)
             except (StopRequested, BudgetExceeded):
                 raise
             except Exception as ex:
@@ -1870,8 +1893,42 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     save_state(state_path, state)
                     metrics.event("task_warn", cycle=cycle_idx, step=step, task_id=next_task.id, reason="max_turns_exceeded")
 
+                # Check for explicit dependency requirement signal
+                dep_req_path = run_dir / "DEPENDENCY_REQUIRED.md"
+                if not dep_req_path.exists():
+                    dep_req_path = attempt_dir / "DEPENDENCY_REQUIRED.md"
+                if dep_req_path.exists():
+                    dep_content = dep_req_path.read_text(encoding="utf-8", errors="replace")
+                    eprint(f"[SKIP] Task {next_task.id} requires new dependencies:")
+                    eprint(dep_content.strip())
+                    # Append to run-level summary
+                    dep_summary_path = run_dir / "DEPENDENCIES_NEEDED.md"
+                    with open(dep_summary_path, "a", encoding="utf-8") as f:
+                        f.write(f"\n## {next_task.id}: {next_task.title}\n\n{dep_content.strip()}\n\n---\n")
+                    state.setdefault("failed", []).append({
+                        "task": next_task.id,
+                        "reason": "needs_dependency",
+                        "detail": dep_content.strip()[:500],
+                    })
+                    save_state(state_path, state)
+                    metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="needs_dependency")
+                    logger.task_end(task_id=next_task.id, success=False, reason="needs_dependency")
+                    skipped_set.add(next_task.id)
+                    # Clean up the signal file so it doesn't affect subsequent tasks
+                    try:
+                        dep_req_path.unlink()
+                    except Exception:
+                        pass
+                    break
+
                 # Blocked-task detection (ported from cycle.py)
-                blocked_keywords = ["blocked:", "couldn't", "can't", "no such", "doesn't exist", "not found", "missing dependency"]
+                blocked_keywords = [
+                    "blocked:", "couldn't", "can't", "no such",
+                    "doesn't exist", "not found", "missing dependency",
+                    "missing package", "nuget package", "npm package",
+                    "pip install", "dotnet add package",
+                    "package is not installed", "module not found",
+                ]
                 dev_output_lower = dev_log.lower() if dev_log else ""
                 task_is_blocked = any(kw in dev_output_lower for kw in blocked_keywords)
                 if not task_is_blocked:
@@ -2556,6 +2613,18 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 await write_shutdown_report(final_reason or "ok", cycle=cycle_idx if "cycle_idx" in locals() else -1, step=-1)
             except Exception as ex:
                 eprint(f"[WARN] Failed to write shutdown report: {ex}")
+        # Print dependency summary if any tasks needed dependencies
+        dep_summary = run_dir / "DEPENDENCIES_NEEDED.md"
+        if dep_summary.exists():
+            try:
+                dep_text = dep_summary.read_text(encoding="utf-8", errors="replace").strip()
+                if dep_text:
+                    eprint("\n" + "=" * 60)
+                    eprint("[ACTION REQUIRED] Some tasks need manual dependency installation:")
+                    eprint(dep_text)
+                    eprint("=" * 60 + "\n")
+            except Exception:
+                pass
         if worktree_dir is not None:
             gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
             exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []

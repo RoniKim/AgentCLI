@@ -1947,10 +1947,44 @@ async def main_async(args: argparse.Namespace) -> int:
                     # Use enhanced change detection that includes new untracked files
                     changed = has_working_tree_changes(repo, before, after, before_untracked=before_untracked)
 
+                    # Check for explicit dependency requirement signal
+                    dep_req_path = run_dir / "DEPENDENCY_REQUIRED.md"
+                    if not dep_req_path.exists():
+                        dep_req_path = attempt_dir / "DEPENDENCY_REQUIRED.md"
+                    if dep_req_path.exists():
+                        dep_content = dep_req_path.read_text(encoding="utf-8", errors="replace")
+                        eprint(f"[SKIP] Task {next_task.id} requires new dependencies:")
+                        eprint(dep_content.strip())
+                        # Append to run-level summary
+                        dep_summary_path = run_dir / "DEPENDENCIES_NEEDED.md"
+                        with open(dep_summary_path, "a", encoding="utf-8") as f:
+                            f.write(f"\n## {next_task.id}: {next_task.title}\n\n{dep_content.strip()}\n\n---\n")
+                        state.setdefault("failed", []).append({
+                            "task": next_task.id,
+                            "reason": "needs_dependency",
+                            "detail": dep_content.strip()[:500],
+                        })
+                        save_state(state_path, state)
+                        metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="needs_dependency", was_max_turns=dev_is_max_turns)
+                        logger.task_end(task_id=next_task.id, success=False, reason="needs_dependency")
+                        skipped_set.add(next_task.id)
+                        # Clean up the signal file so it doesn't affect subsequent tasks
+                        try:
+                            dep_req_path.unlink()
+                        except Exception:
+                            pass
+                        break
+
                     # Escalate conditions: retry same task with a higher tier model.
                     if stop_on_no_diff and (not changed):
                         # Check if dev output or NOTES.md indicates task is blocked/impossible
-                        blocked_keywords = ["blocked:", "couldn't", "can't", "no such", "doesn't exist", "not found", "missing"]
+                        blocked_keywords = [
+                            "blocked:", "couldn't", "can't", "no such",
+                            "doesn't exist", "not found", "missing dependency",
+                            "missing package", "nuget package", "npm package",
+                            "pip install", "dotnet add package",
+                            "package is not installed", "module not found",
+                        ]
                         dev_output_lower = dev_log.lower() if dev_log else ""
                         is_blocked = any(keyword in dev_output_lower for keyword in blocked_keywords)
 
@@ -2551,6 +2585,18 @@ async def main_async(args: argparse.Namespace) -> int:
                     await write_shutdown_report(final_reason or "ok", cycle=cycle_idx if "cycle_idx" in locals() else -1, step=-1)
                 except Exception as ex:
                     eprint(f"[WARN] Failed to write shutdown report: {ex}")
+            # Print dependency summary if any tasks needed dependencies
+            dep_summary = run_dir / "DEPENDENCIES_NEEDED.md"
+            if dep_summary.exists():
+                try:
+                    dep_text = dep_summary.read_text(encoding="utf-8", errors="replace").strip()
+                    if dep_text:
+                        eprint("\n" + "=" * 60)
+                        eprint("[ACTION REQUIRED] Some tasks need manual dependency installation:")
+                        eprint(dep_text)
+                        eprint("=" * 60 + "\n")
+                except Exception:
+                    pass
             if worktree_dir is not None:
                 gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
                 exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []

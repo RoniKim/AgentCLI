@@ -34,6 +34,13 @@ def _has_flag(argv: list[str], flag: str) -> bool:
 
 
 if __name__ == "__main__":
+    # Initialize process guard as early as possible (L1 Job Object before any child spawns)
+    try:
+        from agent_runner.process_guard import init_process_guard
+        init_process_guard()
+    except Exception:
+        pass
+
     argv = sys.argv[1:]
 
     # Legacy / non-interactive paths

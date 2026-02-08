@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import signal
 import traceback
 from pathlib import Path
 
 from .backends.factory import get_runner
 from .preflight import run_preflight
+from .process_guard import init_process_guard, install_signal_handlers, terminate_all_children
 from .run_dir import find_latest_run_dir, make_run_dir
 from .utils import detect_stop_reason, eprint
 
@@ -99,30 +99,27 @@ async def _main_async_dispatch(args: argparse.Namespace) -> int:
 
 
 def _install_signal_handlers(args: argparse.Namespace) -> None:
-    """Install signal handlers that create a STOP file for graceful shutdown."""
+    """Install enhanced signal handlers: STOP file + child process kill (L3)."""
     run_dir_str = str(getattr(args, "run_dir", "") or "").strip()
     if not run_dir_str:
         return
 
     run_dir = Path(run_dir_str)
 
-    def _handler(signum: int, frame: object) -> None:
-        stop_file = run_dir / str(getattr(args, "stop_file", "STOP") or "STOP")
-        try:
-            run_dir.mkdir(parents=True, exist_ok=True)
-            stop_file.write_text(f"signal {signum}\n", encoding="utf-8")
-        except Exception:
-            pass
-        eprint(f"[SIGNAL] Received signal {signum}, STOP file created for graceful shutdown.")
+    def _stop_path_func() -> Path:
+        stop_file = str(getattr(args, "stop_file", "STOP") or "STOP")
+        return run_dir / stop_file
 
-    signal.signal(signal.SIGINT, _handler)
-    if hasattr(signal, "SIGBREAK"):
-        signal.signal(signal.SIGBREAK, _handler)  # type: ignore[attr-defined]
-    if hasattr(signal, "SIGTERM"):
-        signal.signal(signal.SIGTERM, _handler)  # type: ignore[attr-defined]
+    install_signal_handlers(stop_path_func=_stop_path_func)
 
 
 def run(args: argparse.Namespace) -> int:
+    # Init process guard (L1/L2/L4) before anything else
+    try:
+        init_process_guard()
+    except Exception:
+        pass
+
     try:
         _install_signal_handlers(args)
     except ValueError:
@@ -132,8 +129,10 @@ def run(args: argparse.Namespace) -> int:
     try:
         return asyncio.run(_main_async_dispatch(args))
     except KeyboardInterrupt:
+        terminate_all_children()
         return 130
     except Exception as ex:
         eprint(f"[FATAL] {ex}")
         eprint(traceback.format_exc())
+        terminate_all_children()
         return 1
