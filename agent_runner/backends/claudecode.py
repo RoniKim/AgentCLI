@@ -501,50 +501,43 @@ async def _run_claude_query(
 
     Includes retry with exponential backoff for transient errors (429, 5xx, timeout).
     Quota/budget/stop exceptions are never retried.
+
+    A safety timeout of 1 hour is applied when timeout_seconds is 0 (unlimited)
+    to prevent indefinite hangs from stalled SDK streams.
     """
     from claude_agent_sdk import ClaudeSDKClient
 
-    # Ensure Claude operates in the correct repo directory even if 'cwd' kwarg
-    # was dropped by _filter_kwargs_for_ctor (ClaudeAgentOptions may not accept it).
-    saved_cwd = os.getcwd()
-    try:
-        os.chdir(str(repo))
-    except Exception:
-        pass
-    try:
-        for attempt in range(max_retries + 1):
-            try:
-                options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override, stage_instructions=stage_instructions, max_turns_override=max_turns_override)
-                async with ClaudeSDKClient(options=options) as client:
-                    child_pid = _extract_client_pid(client)
-                    if child_pid is not None:
-                        register_pid(child_pid)
-                    try:
-                        await _start_query(client, prompt)
-                        coro = _receive_messages(client, stop_path=stop_path, debug=debug)
-                        if timeout_seconds > 0:
-                            return await asyncio.wait_for(coro, timeout=timeout_seconds)
-                        return await coro
-                    finally:
-                        if child_pid is not None:
-                            unregister_pid(child_pid)
-            except (StopRequested, BudgetExceeded):
-                raise
-            except Exception as ex:
-                if is_quota_exception(ex):
-                    raise
-                if is_transient_exception(ex) and attempt < max_retries:
-                    wait = initial_backoff * (2 ** attempt)
-                    eprint(f"[RETRY] {stage} transient error (attempt {attempt + 1}/{max_retries}): {ex}; retrying in {wait:.0f}s")
-                    await asyncio.sleep(wait)
-                    continue
-                raise
-        raise RuntimeError("unreachable")  # pragma: no cover
-    finally:
+    _DEFAULT_SAFETY_TIMEOUT = 3600  # 1 hour — prevents infinite hang
+    effective_timeout = timeout_seconds if timeout_seconds > 0 else _DEFAULT_SAFETY_TIMEOUT
+
+    # _build_options sets cwd=repo in ClaudeAgentOptions, so the SDK
+    # subprocess will start in the correct directory without os.chdir().
+    for attempt in range(max_retries + 1):
         try:
-            os.chdir(saved_cwd)
-        except Exception:
-            pass
+            options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override, stage_instructions=stage_instructions, max_turns_override=max_turns_override)
+            async with ClaudeSDKClient(options=options) as client:
+                child_pid = _extract_client_pid(client)
+                if child_pid is not None:
+                    register_pid(child_pid)
+                try:
+                    await _start_query(client, prompt)
+                    coro = _receive_messages(client, stop_path=stop_path, debug=debug)
+                    return await asyncio.wait_for(coro, timeout=effective_timeout)
+                finally:
+                    if child_pid is not None:
+                        unregister_pid(child_pid)
+        except (StopRequested, BudgetExceeded):
+            raise
+        except Exception as ex:
+            if is_quota_exception(ex):
+                raise
+            if is_transient_exception(ex) and attempt < max_retries:
+                wait = initial_backoff * (2 ** attempt)
+                eprint(f"[RETRY] {stage} transient error (attempt {attempt + 1}/{max_retries}): {ex}; retrying in {wait:.0f}s")
+                await asyncio.sleep(wait)
+                continue
+            raise
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 
 async def _run_with_continuations(
@@ -764,6 +757,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         run_dir = make_run_dir(repo)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    _MAX_SUMMARY_CYCLES = 50  # Keep only the last N cycles in-memory to prevent OOM
+
     run_summary: dict[str, Any] = {
         "run_id": run_dir.name,
         "repo": str(repo),
@@ -773,6 +768,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
     def _write_run_summary() -> None:
         try:
+            # Trim in-memory cycles to prevent unbounded growth
+            if len(run_summary["cycles"]) > _MAX_SUMMARY_CYCLES:
+                run_summary["cycles"] = run_summary["cycles"][-_MAX_SUMMARY_CYCLES:]
             (run_dir / "run_summary.json").write_text(
                 json.dumps(run_summary, ensure_ascii=False, indent=2),
                 encoding="utf-8", errors="replace",
@@ -811,7 +809,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             return 2
         repo = worktree_dir
 
-    os.chdir(repo)
+    # NOTE: Do NOT call os.chdir(repo) here — it is process-global and
+    # thread-unsafe when the runner executes in shell mode's background thread.
+    # The SDK receives 'cwd' via ClaudeAgentOptions instead.
 
     # Observability
     metrics = MetricsLogger(run_dir / "metrics.jsonl")
@@ -1841,7 +1841,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 dev_log = dev_final or ""
                 if dev_exc:
                     exc_header = f"{type(dev_exc).__name__}: {str(dev_exc)}" if str(dev_exc) else type(dev_exc).__name__
-                    exc_traceback = traceback.format_exc()
+                    exc_traceback = "".join(traceback.format_exception(type(dev_exc), dev_exc, dev_exc.__traceback__))
                     dev_log += f"\n[EXCEPTION]\n{exc_header}\n\nTraceback:\n{exc_traceback}\n"
 
                 (attempt_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
@@ -2574,6 +2574,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             last_rc = rc
             last_reason = reason
             print(f"[CYCLE] {now_iso()} idx={cycle_idx} rc={rc} reason={reason} progress_delta={delta}")
+
+            # Prune stale per-task keys from budget_state to prevent unbounded growth
+            stale_keys = [k for k in budget_state if k.startswith("_no_diff_retry_")]
+            for k in stale_keys:
+                del budget_state[k]
 
             if reason == STOP_REASON_QUOTA:
                 break

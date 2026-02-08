@@ -118,6 +118,7 @@ class RunnerShell:
         self._runner_thread: Optional[threading.Thread] = None
         self._runner_exit_code: Optional[int] = None
         self._runner_started_at: Optional[float] = None
+        self._start_lock = threading.Lock()
 
         self._apply_initial_argv(initial_argv or [])
 
@@ -344,6 +345,15 @@ class RunnerShell:
         print("[ERR] Usage: /todo --save | /todo --load <path|latest>")
 
     def start(self, extra_tokens: list[str]) -> None:
+        if not self._start_lock.acquire(blocking=False):
+            print("[INFO] Runner start already in progress.")
+            return
+        try:
+            self._start_locked(extra_tokens)
+        finally:
+            self._start_lock.release()
+
+    def _start_locked(self, extra_tokens: list[str]) -> None:
         if self._runner_is_alive():
             print("[INFO] Runner is already running. Use /status or /stop.")
             return

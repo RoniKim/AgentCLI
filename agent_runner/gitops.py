@@ -361,7 +361,7 @@ def abandon_task_branch(repo: Path, tb: TaskBranch) -> str:
     checkout_target = tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit
     rc, out = run_cmd(["git", "checkout", checkout_target], cwd=repo, timeout_sec=30)
     if rc != 0:
-        eprint(f"[WARN] Failed to checkout {checkout_target} after abandon: {out}")
+        raise RuntimeError(f"Failed to checkout {checkout_target} after abandon: {out}")
 
     eprint(f"[INFO] Abandoned task branch {tb.branch_name} (work preserved)")
     return tb.branch_name

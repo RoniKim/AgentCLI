@@ -169,6 +169,8 @@ async def main_async(args: argparse.Namespace) -> int:
         run_dir = make_run_dir(repo)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    _MAX_SUMMARY_CYCLES = 50
+
     run_summary: dict[str, Any] = {
         "run_id": run_dir.name,
         "repo": str(repo),
@@ -178,6 +180,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
     def _write_run_summary() -> None:
         try:
+            # Cap cycles to prevent unbounded memory growth
+            if len(run_summary["cycles"]) > _MAX_SUMMARY_CYCLES:
+                run_summary["cycles"] = run_summary["cycles"][-_MAX_SUMMARY_CYCLES:]
             (run_dir / "run_summary.json").write_text(
                 json.dumps(run_summary, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -217,8 +222,9 @@ async def main_async(args: argparse.Namespace) -> int:
             return 2
         repo = worktree_dir
 
-    # Ensure tools run inside repo
-    os.chdir(repo)
+    # NOTE: Do NOT call os.chdir(repo) here — it is process-global and
+    # thread-unsafe when the runner executes in shell mode's background thread.
+    # The SDK/MCP receives 'cwd' via options instead.
 
     # Observability
     metrics = MetricsLogger(run_dir / "metrics.jsonl")
@@ -1885,7 +1891,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     if dev_exc:
                         # Include exception type, message, and full traceback for debugging
                         exc_header = f"{type(dev_exc).__name__}: {str(dev_exc)}" if str(dev_exc) else type(dev_exc).__name__
-                        exc_traceback = traceback.format_exc()
+                        exc_traceback = "".join(traceback.format_exception(type(dev_exc), dev_exc, dev_exc.__traceback__))
                         dev_log += f"\n[EXCEPTION]\n{exc_header}\n\nTraceback:\n{exc_traceback}\n"
 
                     (attempt_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")

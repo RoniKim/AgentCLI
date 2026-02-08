@@ -28,7 +28,7 @@
   "claudecode_dev_model": "sonnet",
   "claudecode_dev_model_tier1": "opus",
   "claudecode_dev_model_tier2": "",
-  "claudecode_qa_model": "haiku",
+  "claudecode_qa_model": "sonnet",
   "claudecode_reporter_model": "haiku",
   "roles": "PM,Dev,QA",
   "profile": "personal",

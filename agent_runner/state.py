@@ -167,7 +167,13 @@ def load_state(path: Path) -> dict[str, Any]:
     return {"done": [], "failed": []}
 
 
+_MAX_FAILED_ENTRIES = 200
+
+
 def save_state(path: Path, state: dict[str, Any]) -> None:
+    # Cap failed list to prevent unbounded growth in long-running sessions
+    if len(state.get("failed", [])) > _MAX_FAILED_ENTRIES:
+        state["failed"] = state["failed"][-_MAX_FAILED_ENTRIES:]
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         atomic_write_json(path, state)
