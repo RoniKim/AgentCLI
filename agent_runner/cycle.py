@@ -1002,6 +1002,11 @@ async def main_async(args: argparse.Namespace) -> int:
                 else:
                     skills = []
 
+                depends_on_val = t.get("depends_on") or []
+                if isinstance(depends_on_val, list):
+                    depends_on = [str(d).strip() for d in depends_on_val if str(d).strip()]
+                else:
+                    depends_on = []
                 out.append(
                     {
                         "id": fixed_id,
@@ -1013,6 +1018,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "skills_rationale": (
                             None if t.get("skills_rationale") is None else str(t.get("skills_rationale"))
                         ),
+                        "depends_on": depends_on,
                     }
                 )
             return out
@@ -1148,6 +1154,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                     "done_when": t.done_when,
                                     "skills": t.skills or [],
                                     "skills_rationale": t.skills_rationale,
+                                    "depends_on": t.depends_on,
                                 }
                             )
 
@@ -1168,6 +1175,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                         "done_when": t.done_when,
                                         "skills": t.skills,
                                         "skills_rationale": t.skills_rationale,
+                                        "depends_on": t.depends_on,
                                     }
                                     for t in existing_tasks
                                     if t.id.startswith("QA-FU-") and t.id not in done_ids
@@ -1266,6 +1274,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                     "done_when": t.done_when,
                                     "skills": t.skills or [],
                                     "skills_rationale": t.skills_rationale,
+                                    "depends_on": t.depends_on,
                                 }
                             )
 
@@ -1385,6 +1394,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "done_when": "QA follow-up addressed and relevant tests/builds pass.",
                         "skills": [],
                         "skills_rationale": None,
+                        "depends_on": [],
                     }
                 )
             return tasks
@@ -1412,6 +1422,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "done_when": "QA follow-up addressed and relevant tests/builds pass.",
                         "skills": [],
                         "skills_rationale": None,
+                        "depends_on": [],
                     }
                 )
             return tasks
@@ -1497,6 +1508,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 "done_when": t.done_when,
                                 "skills": t.skills,
                                 "skills_rationale": t.skills_rationale,
+                                "depends_on": t.depends_on,
                             }
                             for t in existing
                         ]
@@ -1647,9 +1659,26 @@ async def main_async(args: argparse.Namespace) -> int:
                 next_task: Optional[TaskItem] = None
                 processed = done_set | skipped_set
                 for t in tasks:
-                    if t.id not in processed:
-                        next_task = t
-                        break
+                    if t.id in processed:
+                        continue
+                    # Dependency check: all depends_on tasks must be in done_set
+                    if t.depends_on:
+                        unmet = [dep for dep in t.depends_on if dep not in done_set]
+                        if unmet:
+                            failed_ids = {f.get("task") for f in state.get("failed", []) if isinstance(f, dict)}
+                            permanently_blocked = [dep for dep in unmet if dep in (skipped_set | failed_ids)]
+                            if permanently_blocked:
+                                eprint(f"[SKIP] Task {t.id} depends on failed tasks {permanently_blocked}; skipping.")
+                                skipped_set.add(t.id)
+                                state.setdefault("failed", []).append({
+                                    "task": t.id, "reason": "dependency_failed",
+                                    "detail": f"Depends on: {permanently_blocked}"
+                                })
+                                save_state(state_path, state)
+                                continue
+                            continue  # pending dependencies — try later
+                    next_task = t
+                    break
                 if not next_task:
                     break
 
@@ -1985,11 +2014,15 @@ async def main_async(args: argparse.Namespace) -> int:
                     if stop_on_no_diff and (not changed):
                         # Check if dev output or NOTES.md indicates task is blocked/impossible
                         blocked_keywords = [
-                            "blocked:", "couldn't", "can't", "no such",
-                            "doesn't exist", "not found", "missing dependency",
-                            "missing package", "nuget package", "npm package",
-                            "pip install", "dotnet add package",
-                            "package is not installed", "module not found",
+                            "blocked:",
+                            "missing dependency",
+                            "missing package",
+                            "nuget package",
+                            "npm package",
+                            "pip install",
+                            "dotnet add package",
+                            "package is not installed",
+                            "module not found",
                         ]
                         dev_output_lower = dev_log.lower() if dev_log else ""
                         is_blocked = any(keyword in dev_output_lower for keyword in blocked_keywords)

@@ -83,6 +83,11 @@ Backlog policy (critical):
 
 5. **NEVER return empty task list** - mature projects have endless improvement opportunities!
 
+**Task Dependencies (depends_on):**
+- If task B requires changes from task A, set depends_on: ["A's ID"]
+- For coupled API+caller changes, prefer combining into one task
+- If splitting, use optional parameters with defaults (e.g., `string? type = null`) for backward compatibility
+
 Uncertainty:
 - If requirements ambiguous, put 1-3 questions in "open_questions" but still generate tasks
 - Never fabricate repo facts; verify via tools

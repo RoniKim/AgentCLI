@@ -18,6 +18,7 @@ class TaskItem:
     done_when: str
     skills: list[str]
     skills_rationale: str | None
+    depends_on: list[str]
 
 
 def load_backlog_json(path: Path) -> list[TaskItem]:
@@ -87,6 +88,12 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
         if skills_rationale is not None:
             skills_rationale = str(skills_rationale)
 
+        depends_on_val = x.get("depends_on") or []
+        if isinstance(depends_on_val, list):
+            depends_on = [str(d).strip() for d in depends_on_val if str(d).strip()]
+        else:
+            depends_on = []
+
         # drop empty id/title/prompt
         if tid and title and prompt:
             items.append(
@@ -98,6 +105,7 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
                     done_when=done_when,
                     skills=skills,
                     skills_rationale=skills_rationale,
+                    depends_on=depends_on,
                 )
             )
 
@@ -147,6 +155,7 @@ def parse_backlog_md(path: Path) -> list[TaskItem]:
                 done_when="Git diff exists and build passes.",
                 skills=[],
                 skills_rationale=None,
+                depends_on=[],
             )
         )
     return items
@@ -221,6 +230,7 @@ def write_default_p0_backlog(run_dir: Path) -> None:
                 "done_when": "PM_FAILURE.md exists in run_dir and no product/source files were modified.",
                 "skills": [],
                 "skills_rationale": None,
+                "depends_on": [],
             }
         ],
     }

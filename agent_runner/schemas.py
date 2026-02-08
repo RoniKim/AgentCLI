@@ -22,6 +22,10 @@ class BacklogTaskV2(BaseModel):
     skills_rationale: Optional[str] = Field(
         default=None, description="Why these skills were selected for the task"
     )
+    depends_on: List[str] = Field(
+        default_factory=list,
+        description="Task IDs this task depends on (e.g. ['T1']); empty if no dependencies",
+    )
 
 
 class PMOutputV2(BaseModel):

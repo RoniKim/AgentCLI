@@ -1026,7 +1026,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             tasks.append({
                 "id": tid, "title": title, "prompt": prompt, "files": [],
                 "done_when": "QA follow-up addressed and relevant tests/builds pass.",
-                "skills": [], "skills_rationale": None,
+                "skills": [], "skills_rationale": None, "depends_on": [],
             })
         return tasks
 
@@ -1047,7 +1047,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             tasks.append({
                 "id": tid, "title": title, "prompt": prompt, "files": files,
                 "done_when": "QA follow-up addressed and relevant tests/builds pass.",
-                "skills": [], "skills_rationale": None,
+                "skills": [], "skills_rationale": None, "depends_on": [],
             })
         return tasks
 
@@ -1142,6 +1142,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 skills = [s.strip() for s in skills_val.split(",") if s.strip()]
             else:
                 skills = []
+            depends_on_val = t.get("depends_on") or []
+            if isinstance(depends_on_val, list):
+                depends_on = [str(d).strip() for d in depends_on_val if str(d).strip()]
+            else:
+                depends_on = []
             out.append({
                 "id": fixed_id,
                 "title": str(t.get("title") or fixed_id).strip() or fixed_id,
@@ -1150,6 +1155,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 "done_when": str(t.get("done_when") or "Git diff exists and build passes.").strip(),
                 "skills": skills,
                 "skills_rationale": None if t.get("skills_rationale") is None else str(t.get("skills_rationale")),
+                "depends_on": depends_on,
             })
         return out
 
@@ -1422,7 +1428,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 pm_ids = {str(t.get("id", "")).strip() for t in merged_tasks if isinstance(t, dict)}
                 for t in existing_pending:
                     if t.id not in pm_ids:
-                        merged_tasks.append({"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files or [], "done_when": t.done_when, "skills": t.skills or [], "skills_rationale": t.skills_rationale})
+                        merged_tasks.append({"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files or [], "done_when": t.done_when, "skills": t.skills or [], "skills_rationale": t.skills_rationale, "depends_on": t.depends_on})
                 if merged_tasks:
                     merged_tasks = _normalize_backlog_tasks(merged_tasks)
                     merged_tasks = _validate_skill_ids(merged_tasks)
@@ -1431,7 +1437,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                             existing_tasks_2 = load_tasks()
                             state_obj = load_state(state_path)
                             done_ids_2 = set(state_obj.get("done", []) or [])
-                            qa_followups = [{"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files, "done_when": t.done_when, "skills": t.skills, "skills_rationale": t.skills_rationale} for t in existing_tasks_2 if t.id.startswith("QA-FU-") and t.id not in done_ids_2]
+                            qa_followups = [{"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files, "done_when": t.done_when, "skills": t.skills, "skills_rationale": t.skills_rationale, "depends_on": t.depends_on} for t in existing_tasks_2 if t.id.startswith("QA-FU-") and t.id not in done_ids_2]
                             if qa_followups:
                                 merged_tasks = _merge_qa_followups(merged_tasks, qa_followups, done_ids_2)
                         except Exception:
@@ -1490,7 +1496,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 pm_ids = {str(t.get("id", "")).strip() for t in merged_tasks if isinstance(t, dict)}
                 for t in existing_pending:
                     if t.id not in pm_ids:
-                        merged_tasks.append({"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files or [], "done_when": t.done_when, "skills": t.skills or [], "skills_rationale": t.skills_rationale})
+                        merged_tasks.append({"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files or [], "done_when": t.done_when, "skills": t.skills or [], "skills_rationale": t.skills_rationale, "depends_on": t.depends_on})
                 if merged_tasks:
                     merged_tasks = _normalize_backlog_tasks(merged_tasks)
                     merged_tasks = _validate_skill_ids(merged_tasks)
@@ -1632,9 +1638,26 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             next_task: Optional[TaskItem] = None
             processed = done_set | skipped_set
             for t in tasks:
-                if t.id not in processed:
-                    next_task = t
-                    break
+                if t.id in processed:
+                    continue
+                # Dependency check: all depends_on tasks must be in done_set
+                if t.depends_on:
+                    unmet = [dep for dep in t.depends_on if dep not in done_set]
+                    if unmet:
+                        failed_ids = {f.get("task") for f in state.get("failed", []) if isinstance(f, dict)}
+                        permanently_blocked = [dep for dep in unmet if dep in (skipped_set | failed_ids)]
+                        if permanently_blocked:
+                            eprint(f"[SKIP] Task {t.id} depends on failed tasks {permanently_blocked}; skipping.")
+                            skipped_set.add(t.id)
+                            state.setdefault("failed", []).append({
+                                "task": t.id, "reason": "dependency_failed",
+                                "detail": f"Depends on: {permanently_blocked}"
+                            })
+                            save_state(state_path, state)
+                            continue
+                        continue  # pending dependencies — try later
+                next_task = t
+                break
             if not next_task:
                 break
 
@@ -1924,37 +1947,41 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         pass
                     break
 
-                # Blocked-task detection (ported from cycle.py)
-                blocked_keywords = [
-                    "blocked:", "couldn't", "can't", "no such",
-                    "doesn't exist", "not found", "missing dependency",
-                    "missing package", "nuget package", "npm package",
-                    "pip install", "dotnet add package",
-                    "package is not installed", "module not found",
-                ]
-                dev_output_lower = dev_log.lower() if dev_log else ""
-                task_is_blocked = any(kw in dev_output_lower for kw in blocked_keywords)
-                if not task_is_blocked:
-                    notes_path = attempt_dir / "NOTES.md"
-                    if notes_path.exists():
-                        try:
-                            notes_content = notes_path.read_text(encoding="utf-8", errors="ignore").lower()
-                            task_is_blocked = any(kw in notes_content for kw in blocked_keywords)
-                        except Exception:
-                            pass
-                if task_is_blocked:
-                    eprint(f"[SKIP] Task {next_task.id} appears blocked (dependency/resource missing). Skipping...")
-                    state.setdefault("failed", []).append({"task": next_task.id, "reason": "blocked_dependency"})
-                    save_state(state_path, state)
-                    metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="blocked_dependency")
-                    logger.task_end(task_id=next_task.id, success=False, reason="blocked_dependency")
-                    skipped_set.add(next_task.id)
-                    break
-
                 after = git_porcelain(repo)
                 changed = has_working_tree_changes(repo, before, after, before_untracked=before_untracked)
 
                 if stop_on_no_diff and not changed:
+                    # Blocked-task detection (only when no diff produced)
+                    blocked_keywords = [
+                        "blocked:",
+                        "missing dependency",
+                        "missing package",
+                        "nuget package",
+                        "npm package",
+                        "pip install",
+                        "dotnet add package",
+                        "package is not installed",
+                        "module not found",
+                    ]
+                    dev_output_lower = dev_log.lower() if dev_log else ""
+                    task_is_blocked = any(kw in dev_output_lower for kw in blocked_keywords)
+                    if not task_is_blocked:
+                        notes_path = attempt_dir / "NOTES.md"
+                        if notes_path.exists():
+                            try:
+                                notes_content = notes_path.read_text(encoding="utf-8", errors="ignore").lower()
+                                task_is_blocked = any(kw in notes_content for kw in blocked_keywords)
+                            except Exception:
+                                pass
+                    if task_is_blocked:
+                        eprint(f"[SKIP] Task {next_task.id} appears blocked (dependency/resource missing). Skipping...")
+                        state.setdefault("failed", []).append({"task": next_task.id, "reason": "blocked_dependency"})
+                        save_state(state_path, state)
+                        metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="blocked_dependency")
+                        logger.task_end(task_id=next_task.id, success=False, reason="blocked_dependency")
+                        skipped_set.add(next_task.id)
+                        break
+
                     # Check if agent determined the task was already implemented (legitimate no-diff)
                     already_done_keywords = [
                         "already implemented", "already correct", "already exists",
@@ -2328,7 +2355,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     state_obj = load_state(state_path)
                     done_ids = set(state_obj.get("done", []) or [])
                     existing = load_tasks()
-                    base_tasks = [{"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files, "done_when": t.done_when, "skills": t.skills, "skills_rationale": t.skills_rationale} for t in existing]
+                    base_tasks = [{"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files, "done_when": t.done_when, "skills": t.skills, "skills_rationale": t.skills_rationale, "depends_on": t.depends_on} for t in existing]
                     merged = _merge_qa_followups(base_tasks, followups, done_ids)
                     followups_added = max(0, len(merged) - len(base_tasks))
                     followups_skipped = max(0, followups_candidates - followups_added)

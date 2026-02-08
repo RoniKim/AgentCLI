@@ -26,7 +26,7 @@ Implementation instructions:
 6. If no diff exists after edits, something went wrong - diagnose and retry
 7. Write brief summary to {run_dir}/NOTES.md
 
-Files to touch (keep minimal, read ONLY these):
+Files to touch (suggested starting points; you may read/modify related files for backward compatibility):
 {files_hint}
 
 **Code Style (MAUI Blazor - follow existing patterns):**
@@ -38,7 +38,7 @@ Files to touch (keep minimal, read ONLY these):
 - Use existing CSS variables/classes instead of creating new ones
 
 **Token Optimization (CRITICAL):**
-- DO NOT read files not listed above unless absolutely necessary
+- Prefer files listed above; you MAY read other files if needed for compilation-safe changes
 - Use grep/glob with SPECIFIC paths, not broad searches
 - Read targeted line ranges when files are large
 - Prefer Edit tool over Write tool for existing files

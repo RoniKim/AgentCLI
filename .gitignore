@@ -81,3 +81,8 @@ supabase/functions/.env
 .DS_Store
 Thumbs.db
 nul
+fix_status.txt
+fix1.sed
+test_write.txt
+test_perl.pl
+test_script.py

@@ -41,7 +41,8 @@ PM_INSTRUCTIONS_DEFAULT = (
     "Your final response MUST be a single JSON object (no markdown) with keys:\n"
     "- kind: one of ['bootstrap','incremental','refresh','skip']\n"
     "- summary: string (1-3 sentences)\n"
-    "- tasks: array of task objects, each: {id,title,prompt,files,done_when,skills,skills_rationale}\n"
+    "- tasks: array of task objects, each: {id,title,prompt,files,done_when,skills,skills_rationale,depends_on}\n"
+    "- depends_on: array of task ID strings (e.g. ['T1']); use [] if no dependencies\n"
     "- task fields must include: skills (array of skill_id strings) and skills_rationale (string|null)\n"
     "- notes_md: string|null (optional run notes in markdown)\n"
     "- warnings: string[]\n"
@@ -56,7 +57,7 @@ PM_OUTPUT_CONTRACT_SUFFIX = (
     "FINAL RESPONSE MUST be ONLY a single JSON object (no markdown, no prose) that matches:\n"
     "- kind: one of ['bootstrap','incremental','refresh','skip']\n"
     "- summary: string\n"
-    "- tasks: array of {id,title,prompt,files,done_when,skills,skills_rationale}\n"
+    "- tasks: array of {id,title,prompt,files,done_when,skills,skills_rationale,depends_on}\n"
     "- notes_md: string|null\n"
     "- warnings: string[]\n"
     "- open_questions: string[]\n"
@@ -233,7 +234,7 @@ Task:
 Implementation instructions:
 {task_prompt}
 
-Files to touch (keep minimal):
+Files to touch (suggested starting points; you may read/modify related files if needed for compilation safety):
 {files_hint}
 
 Selected skills (use Codex skills system; do NOT inline skill text):
