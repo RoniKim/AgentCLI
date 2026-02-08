@@ -4,6 +4,21 @@ L1 - Windows Job Object (KILL_ON_JOB_CLOSE): OS-level automatic cleanup on paren
 L2 - PID tracking + atexit: Graceful cleanup on normal exit or unhandled exceptions.
 L3 - Enhanced signal handlers: Kill children on SIGINT/SIGTERM/SIGBREAK.
 L4 - Startup orphan cleanup: Detect and kill orphans from previous runs.
+
+Thread-safety:
+    All mutable module state is protected by ``_lock`` (a re-entrant lock) so that
+    signal handlers can safely call ``terminate_all_children`` even while a normal
+    code-path holds the lock on the same thread.
+
+Job Object handle lifecycle:
+    ``_job_handle`` is intentionally kept open for the process lifetime.
+    ``KILL_ON_JOB_CLOSE`` fires when the *last* handle to the Job Object is closed,
+    which happens automatically when our process exits.  Closing it earlier would
+    kill children prematurely.
+
+_is_claude_process:
+    This function spawns ``tasklist`` and must NEVER be called from signal handlers
+    or atexit handlers.  It is only used by ``cleanup_orphans`` (L4, startup-only).
 """
 from __future__ import annotations
 
@@ -14,6 +29,7 @@ import logging
 import os
 import signal
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -22,14 +38,18 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Module state (protected by _lock)
+# Module state (protected by _lock — RLock for signal-handler re-entrancy)
 # ---------------------------------------------------------------------------
-_lock = threading.Lock()
+_lock = threading.RLock()
 _initialized = False
 _tracked_pids: set[int] = set()
 _session_dir: Optional[Path] = None
 _stop_path_func: Optional[Callable[[], Optional[Path]]] = None
 _job_handle: Optional[int] = None
+
+# Session files older than this (seconds) are unconditionally cleaned up,
+# regardless of PID liveness — guards against PID-recycling false positives.
+_SESSION_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 
 # ---------------------------------------------------------------------------
 # L1 - Windows Job Object
@@ -87,7 +107,7 @@ class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
 
 
 def _init_kernel32_types() -> None:
-    """Set Win32 API function signatures once."""
+    """Set Win32 API function signatures once (idempotent, call under _lock)."""
     if sys.platform != "win32":
         return
     kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
@@ -142,9 +162,8 @@ def _setup_job_object() -> Optional[int]:
         ok = kernel32.AssignProcessToJobObject(job, current_process)
         if not ok:
             err = kernel32.GetLastError()
-            # ERROR_ACCESS_DENIED (5) means process is already in a job object
             if err == 5:
-                logger.debug("[ProcessGuard] Process already in a Job Object, L1 skipped")
+                logger.warning("[ProcessGuard] Process already in a Job Object, L1 skipped")
             else:
                 logger.warning(f"[ProcessGuard] Failed to assign to Job Object (err={err})")
             kernel32.CloseHandle(job)
@@ -161,13 +180,33 @@ def _setup_job_object() -> Optional[int]:
 # L2 - PID tracking + atexit
 # ---------------------------------------------------------------------------
 
+def _resolve_session_dir(requested: Optional[Path]) -> Path:
+    """Resolve and create session directory with fallback for read-only FS."""
+    candidates = []
+    if requested is not None:
+        candidates.append(requested)
+    candidates.append(Path.home() / ".agentcli" / "sessions")
+    candidates.append(Path(tempfile.gettempdir()) / "agentcli_sessions")
+
+    for d in candidates:
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            # Verify writable by creating a temp file
+            probe = d / ".probe"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            return d
+        except Exception:
+            continue
+    # Last resort — may not be writable, but at least return something
+    return candidates[0]
+
+
 def _get_session_dir() -> Path:
     """Return the session directory, creating it if needed."""
     if _session_dir is not None:
         return _session_dir
-    fallback = Path.home() / ".agentcli" / "sessions"
-    fallback.mkdir(parents=True, exist_ok=True)
-    return fallback
+    return _resolve_session_dir(None)
 
 
 def _session_file(pid: int) -> Path:
@@ -187,8 +226,8 @@ def register_pid(pid: int) -> None:
         sf = _session_file(pid)
         sf.parent.mkdir(parents=True, exist_ok=True)
         sf.write_text(json.dumps(data), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as ex:
+        logger.debug(f"[ProcessGuard] Session file write failed for PID {pid}: {ex}")
     logger.debug(f"[ProcessGuard] Registered child PID {pid}")
 
 
@@ -200,8 +239,8 @@ def unregister_pid(pid: int) -> None:
         sf = _session_file(pid)
         if sf.exists():
             sf.unlink()
-    except Exception:
-        pass
+    except Exception as ex:
+        logger.debug(f"[ProcessGuard] Session file cleanup failed for PID {pid}: {ex}")
     logger.debug(f"[ProcessGuard] Unregistered child PID {pid}")
 
 
@@ -228,7 +267,6 @@ def _pid_alive(pid: int) -> bool:
             handle = kernel32.OpenProcess(_SYNCHRONIZE | _PROCESS_TERMINATE, False, pid)
             if not handle:
                 return False
-            # Wait with 0 timeout: returns WAIT_TIMEOUT if still running
             result = kernel32.WaitForSingleObject(handle, 0)
             kernel32.CloseHandle(handle)
             return result == _WAIT_TIMEOUT
@@ -240,12 +278,11 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _terminate_pids(pids: list[int], *, wait: bool = True) -> None:
-    """Kill a list of PIDs. If wait=True, waits briefly then force-kills survivors."""
+    """Kill a list of PIDs. If wait=True on Unix, SIGTERM → wait → SIGKILL."""
     for pid in pids:
         _kill_pid(pid)
 
     if wait and sys.platform != "win32":
-        # On Unix, first pass sends SIGTERM; wait then SIGKILL.
         # On Windows, TerminateProcess is already a hard kill — no need to wait.
         time.sleep(0.5)
         for pid in pids:
@@ -255,7 +292,7 @@ def _terminate_pids(pids: list[int], *, wait: bool = True) -> None:
                 except (ProcessLookupError, PermissionError, OSError):
                     pass
 
-    # Cleanup session files
+    # Cleanup tracked set and session files
     for pid in pids:
         with _lock:
             _tracked_pids.discard(pid)
@@ -272,7 +309,8 @@ def terminate_all_children(*, _from_signal: bool = False) -> None:
 
     Args:
         _from_signal: If True, called from signal handler — skip sleep/wait
-                      to avoid blocking the handler.
+                      to avoid blocking. Safe because RLock allows re-entry
+                      from the same thread.
     """
     with _lock:
         pids = list(_tracked_pids)
@@ -300,12 +338,13 @@ def _make_signal_handler(
 ) -> Callable[[int, object], None]:
     """Create a signal handler that writes STOP file + kills children.
 
-    Signal handler is kept minimal: write STOP file via low-level os.open/os.write
-    and kill processes without sleeping to avoid deadlock risk.
+    The handler is kept minimal and avoids sleeping.  STOP file is written via
+    low-level ``os.open``/``os.write`` to minimise interaction with Python's
+    higher-level I/O machinery.
     """
 
     def _handler(signum: int, frame: object) -> None:
-        # Write STOP file using low-level I/O (signal-safe)
+        # Write STOP file using low-level I/O (safer in signal context)
         if stop_path_func is not None:
             try:
                 stop_path = stop_path_func()
@@ -320,12 +359,13 @@ def _make_signal_handler(
             except Exception:
                 pass
 
-        # Kill tracked children immediately (no wait in signal handler)
+        # Kill tracked children immediately (no wait — signal handler context)
         terminate_all_children(_from_signal=True)
 
-        msg = f"[ProcessGuard] L3: Signal {signum} received, children terminated.\n"
         try:
-            sys.stderr.write(msg)
+            sys.stderr.write(
+                f"[ProcessGuard] L3: Signal {signum} received, children terminated.\n"
+            )
             sys.stderr.flush()
         except Exception:
             pass
@@ -361,7 +401,11 @@ def install_signal_handlers(
 # ---------------------------------------------------------------------------
 
 def _is_claude_process(pid: int) -> bool:
-    """Heuristic: check if PID is a node/claude process."""
+    """Check if PID is a node.exe / claude.exe process via exact image-name match.
+
+    WARNING: This spawns ``tasklist`` — must NEVER be called from signal
+    handlers or atexit handlers.
+    """
     try:
         if sys.platform == "win32":
             import subprocess
@@ -373,7 +417,13 @@ def _is_claude_process(pid: int) -> bool:
                 creationflags=subprocess.CREATE_NO_WINDOW,  # type: ignore[attr-defined]
             )
             output = result.stdout.lower()
-            return any(name in output for name in ("node", "claude"))
+            # Exact image-name match: tasklist CSV gives "image_name.exe","PID",...
+            # Match only known Claude-related executables.
+            for token in output.split(","):
+                name = token.strip().strip('"')
+                if name in ("node.exe", "node", "claude.exe", "claude"):
+                    return True
+            return False
         else:
             cmdline_path = Path(f"/proc/{pid}/cmdline")
             if cmdline_path.exists():
@@ -395,17 +445,33 @@ def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
 
     killed = 0
     my_pid = os.getpid()
+    now = time.time()
+    file_count = 0
+
     for sf in list(sd.glob("session_*.json")):
+        file_count += 1
         try:
             data = json.loads(sf.read_text(encoding="utf-8"))
             child_pid = data.get("child_pid")
             parent_pid = data.get("parent_pid")
+            created_at = data.get("created_at", 0)
+
             if child_pid is None or parent_pid is None:
                 sf.unlink(missing_ok=True)
                 continue
 
             # Skip our own session files — they belong to the current process
             if parent_pid == my_pid:
+                continue
+
+            # TTL guard: unconditionally remove very old session files to prevent
+            # accumulation and PID-recycling false positives.
+            if now - created_at > _SESSION_TTL_SECONDS:
+                logger.debug(
+                    f"[ProcessGuard] L4: TTL expired for session {sf.name} "
+                    f"(age={int(now - created_at)}s), removing"
+                )
+                sf.unlink(missing_ok=True)
                 continue
 
             parent_alive = _pid_alive(parent_pid)
@@ -420,7 +486,6 @@ def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
                     )
                     _kill_pid(child_pid)
                     killed += 1
-                # Only delete session file when parent is dead (stale)
                 sf.unlink(missing_ok=True)
             elif not child_alive:
                 # Parent alive but child already exited — stale file
@@ -433,6 +498,8 @@ def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
             except Exception:
                 pass
 
+    if file_count:
+        logger.debug(f"[ProcessGuard] L4: Scanned {file_count} session file(s)")
     if killed:
         logger.info(f"[ProcessGuard] L4: Cleaned up {killed} orphan process(es)")
     return killed
@@ -446,7 +513,7 @@ def init_process_guard(
     session_dir: Optional[Path] = None,
     stop_path_func: Optional[Callable[[], Optional[Path]]] = None,
 ) -> None:
-    """Initialize all process guard layers (idempotent).
+    """Initialize all process guard layers (idempotent, thread-safe).
 
     Args:
         session_dir: Directory for session PID files. Defaults to ~/.agentcli/sessions.
@@ -454,43 +521,41 @@ def init_process_guard(
     """
     global _initialized, _session_dir, _stop_path_func, _job_handle
 
-    if _initialized:
-        # Update stop_path_func if provided (runner may set it later)
-        if stop_path_func is not None:
-            _stop_path_func = stop_path_func
-        return
+    with _lock:
+        if _initialized:
+            # Update stop_path_func if provided (runner may set it later)
+            if stop_path_func is not None:
+                _stop_path_func = stop_path_func
+            return
 
-    if session_dir is not None:
-        _session_dir = session_dir
-        _session_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        _session_dir = Path.home() / ".agentcli" / "sessions"
-        _session_dir.mkdir(parents=True, exist_ok=True)
+        _session_dir = _resolve_session_dir(session_dir)
+        _stop_path_func = stop_path_func
 
-    _stop_path_func = stop_path_func
+        # Set Win32 API types once
+        _init_kernel32_types()
 
-    # Set Win32 API types once
-    _init_kernel32_types()
+        # L1: Job Object (handle intentionally kept open — see module docstring)
+        _job_handle = _setup_job_object()
 
-    # L1: Job Object
-    _job_handle = _setup_job_object()
+        # L2: atexit
+        atexit.register(_atexit_handler)
+        logger.debug("[ProcessGuard] L2: atexit handler registered")
 
-    # L2: atexit
-    atexit.register(_atexit_handler)
-    logger.debug("[ProcessGuard] L2: atexit handler registered")
+        # L3: signal handlers (best effort, may fail in non-main thread)
+        try:
+            install_signal_handlers(stop_path_func)
+        except ValueError:
+            logger.debug("[ProcessGuard] L3: Signal handlers skipped (not main thread)")
 
-    # L3: signal handlers (best effort, may fail in non-main thread)
-    try:
-        install_signal_handlers(stop_path_func)
-    except ValueError:
-        logger.debug("[ProcessGuard] L3: Signal handlers skipped (not main thread)")
+        # L4: cleanup orphans from previous runs
+        try:
+            cleanup_orphans(_session_dir)
+        except Exception as ex:
+            logger.debug(f"[ProcessGuard] L4: Orphan cleanup failed: {ex}")
 
-    # L4: cleanup orphans from previous runs
-    try:
-        cleanup_orphans(_session_dir)
-    except Exception as ex:
-        logger.debug(f"[ProcessGuard] L4: Orphan cleanup failed: {ex}")
+        _initialized = True
 
-    _initialized = True
-    logger.info("[ProcessGuard] Initialized (L1=%s, L2=atexit, L3=signals, L4=orphan-scan)",
-                "JobObject" if _job_handle else "skipped")
+    logger.info(
+        "[ProcessGuard] Initialized (L1=%s, L2=atexit, L3=signals, L4=orphan-scan)",
+        "JobObject" if _job_handle else "skipped",
+    )

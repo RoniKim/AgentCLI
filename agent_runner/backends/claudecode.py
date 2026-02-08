@@ -468,21 +468,18 @@ def _extract_client_pid(client: object) -> Optional[int]:
     """Extract the child process PID from a ClaudeSDKClient instance.
 
     Traverses client._transport._process.pid defensively.
-    Retries briefly in case the subprocess hasn't fully initialized yet.
+    Single attempt — by the time ``__aenter__`` returns, the subprocess
+    should already be started.  Returns None if not available (L1 Job Object
+    still protects in that case).
     """
-    for _ in range(3):
-        transport = getattr(client, "_transport", None)
-        if transport is None:
-            return None
-        process = getattr(transport, "_process", None)
-        if process is not None:
-            pid = getattr(process, "pid", None)
-            if isinstance(pid, int):
-                return pid
-        # Process not yet available — brief wait for subprocess init
-        import time
-        time.sleep(0.05)
-    return None
+    transport = getattr(client, "_transport", None)
+    if transport is None:
+        return None
+    process = getattr(transport, "_process", None)
+    if process is None:
+        return None
+    pid = getattr(process, "pid", None)
+    return pid if isinstance(pid, int) else None
 
 
 async def _run_claude_query(
