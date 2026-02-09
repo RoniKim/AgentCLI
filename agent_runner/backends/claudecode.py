@@ -96,6 +96,7 @@ from ..skills import (
 from ..skills.match import suggest_skills
 from ..shared import load_json_if_exists as _load_json_if_exists, inline_skills_for as _inline_skills_for, format_skill_selection as _format_skill_selection
 from ..task_history import record_task as _record_task_history, format_history_block as _format_history_block
+from ..progress import print_cycle_report, TokenTracker, extract_claude_tokens
 from ..tracing import TraceCtx, new_trace_id
 from ..utils import (
     force_utf8_stdio,
@@ -1559,6 +1560,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         state = load_state(state_path)
         done_set = set(state.get("done", []))
         skipped_set: set[str] = set()  # Track skipped/failed tasks separately from done
+        task_results: list[dict] = []  # Per-task results for cycle-end progress report
+        token_tracker = TokenTracker()  # Per-cycle token usage accumulator
         task_ids = {t.id for t in tasks}
         before_done = len(done_set.intersection(task_ids))
 
@@ -1673,6 +1676,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                             save_state(state_path, state)
                             _record_history(t.id, t.title, "failed", reason="dependency_failed",
                                             detail=f"Depends on: {permanently_blocked}", files=t.files, cycle=cycle_idx)
+                            task_results.append({"id": t.id, "title": t.title, "status": "skipped", "reason": "dependency_failed", "duration": -1})
                             continue
                         continue  # pending dependencies — try later
                 next_task = t
@@ -1684,6 +1688,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             task_dir.mkdir(parents=True, exist_ok=True)
 
             metrics.event("task_start", cycle=cycle_idx, step=step, task_id=next_task.id)
+            task_outer_t0 = time.time()
 
             tb: Optional[TaskBranch] = None
             cp: Optional[RepoCheckpoint] = None
@@ -1859,6 +1864,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         metrics=metrics, _budget_exceeded=_budget_exceeded,
                     )
                     dev_final = text or ""
+                    _inp, _out = extract_claude_tokens(_structured)
+                    token_tracker.add("Dev", _inp, _out)
                     task_duration = time.time() - task_start_time
                     logger.timing("dev_task_execution", task_duration, task_id=next_task.id, attempt=attempt)
                 except StopRequested:
@@ -2250,6 +2257,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 state.setdefault("failed", []).append({"task": next_task.id, "reason": "exhausted_attempts"})
                 save_state(state_path, state)
                 _record_history(next_task.id, next_task.title, "failed", reason="exhausted_attempts", files=next_task.files, cycle=cycle_idx, attempt=max_attempts, max_attempts=max_attempts)
+                task_results.append({"id": next_task.id, "title": next_task.title, "status": "failed", "reason": "exhausted_attempts", "duration": time.time() - task_outer_t0, "attempt": max_attempts, "max_attempts": max_attempts})
                 logger.task_end(task_id=next_task.id, success=False, reason="exhausted_attempts", attempts=max_attempts)
                 eprint(f"[SKIP] Exhausted all attempts for {next_task.id}; skipping to next task.")
                 skipped_set.add(next_task.id)
@@ -2263,6 +2271,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             save_state(state_path, state)
             mark_backlog_done(backlog_md_path, next_task.id)
             _record_history(next_task.id, next_task.title, "done", files=next_task.files, cycle=cycle_idx)
+            task_results.append({"id": next_task.id, "title": next_task.title, "status": "done", "duration": time.time() - task_outer_t0})
 
             # Use current-cycle task IDs to avoid cross-cycle accumulation (done=16/11 bug)
             _done_this_cycle = len(done_set.intersection(task_ids))
@@ -2293,7 +2302,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         }
         last_run_summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
         append_cycle_summary(f"{now_iso()} cycle={cycle_idx} done={done_count}/{total_count} failed={failed_count} dt={cycle_dt:.1f}s")
-        metrics.event("cycle_end", cycle=cycle_idx, rc=0, done=done_count, total=total_count, failed=failed_count, duration_seconds=cycle_dt)
+        metrics.event("cycle_end", cycle=cycle_idx, rc=0, done=done_count, total=total_count, failed=failed_count, duration_seconds=cycle_dt, tokens=token_tracker.summary())
+        print_cycle_report(cycle_idx, cycle_dt, task_results, done_count, total_count, failed_count, skipped_count, token_tracker=token_tracker)
 
         done_delta = done_count - before_done
 

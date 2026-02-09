@@ -16,7 +16,16 @@ def codex_call_hint(autopilot: bool) -> str:
 PM_INSTRUCTIONS_DEFAULT = (
     "You are the Planner/PM for a MAUI Blazor Hybrid app.\n"
     "Token-saving is critical: avoid broad scans; prefer inventory + docs digest.\n"
-    "You MUST be precise and executable: backlog tasks must be atomic and produce a git diff.\n\n"
+    "You MUST be precise and executable: backlog tasks must produce a git diff.\n\n"
+    "<task_sizing_rules>\n"
+    "CRITICAL — avoid micro-tasks. Each Dev invocation has fixed overhead (~30-60s for git ops, gates, checkpoints).\n"
+    "- Aim for 3-7 tasks per cycle. More than 8 is almost always over-fragmented.\n"
+    "- Bundle related small fixes into ONE task (e.g., 'Fix crash-prone lifecycle in SyncBadge, Sync, Dashboard' instead of 3 separate tasks).\n"
+    "- A task that only adds/changes 1-5 lines in a single file is too small. Merge it with related work.\n"
+    "- Group by theme: all UI polish fixes → 1 task, all null-safety fixes → 1 task, all test additions → 1 task.\n"
+    "- Each task should represent meaningful, reviewable work (typically 10+ lines changed across 1-3 files).\n"
+    "- Exception: a genuinely independent, complex single-file change (new feature, major refactor) can be its own task.\n"
+    "</task_sizing_rules>\n\n"
     "<output_verbosity_spec>\n"
     "- Your outputs must be concise. Prefer short sentences and compact lists.\n"
     "- For summaries: 1-3 sentences. For warnings/questions: <= 5 short bullet points total.\n"
@@ -27,6 +36,7 @@ PM_INSTRUCTIONS_DEFAULT = (
     "- Do NOT delegate PM-only work to Dev (e.g., create backlog, update PROJECT_ANALYSIS.md, write BACKLOG.json).\n"
     "- Task IDs may start at T1/T2; they MUST be meaningful and unique (no placeholders).\n"
     "- Backlog tasks MUST be development work only: feature implementation, UI/screens, bugfixes, tests, and required in-repo docs for the change.\n"
+    "- Bundle related small changes into ONE task (e.g., group all null-safety fixes, or all UI polish for a module).\n"
     "- Do NOT include tasks whose deliverable is planning/analysis/review/triage, inventory generation, prompt changes, backlog/report creation, or run-artifact maintenance.\n"
     "- 'UI design' means implement UI in code (Blazor/XAML/CSS), NOT external mockups (Figma etc.).\n"
     "- If a SKILLS_INDEX summary is provided, select relevant skills for each task.\n"
@@ -73,6 +83,20 @@ PM_OUTPUT_CONTRACT_SUFFIX = (
     "</pm_output_contract>\n"
 )
 
+# Always injected alongside PM_OUTPUT_CONTRACT_SUFFIX — applies to ALL projects
+# regardless of custom per-project prompts.
+PM_TASK_SIZING_RULES = (
+    "<pm_task_sizing_rules>\n"
+    "CRITICAL — task sizing rules (always enforced):\n"
+    "- Aim for 3-7 tasks per cycle. More than 8 is almost always over-fragmented.\n"
+    "- Bundle related small fixes into ONE task (e.g., 'Fix lifecycle issues in SyncBadge, Sync, Dashboard' instead of 3 tasks).\n"
+    "- A task that only changes 1-5 lines in a single file is too small — merge it with related work.\n"
+    "- Group by theme: all UI polish → 1 task, all null-safety fixes → 1 task, all test additions → 1 task.\n"
+    "- Each task should represent meaningful, reviewable work (typically 10+ lines across 1-3 files).\n"
+    "- Exception: a genuinely independent, complex single-file change (new feature, major refactor) can stand alone.\n"
+    "</pm_task_sizing_rules>\n"
+)
+
 
 def ensure_pm_instructions_have_output_schema(text: str) -> str:
     """Append a hard output contract if user-provided pm_instructions omitted it."""
@@ -84,11 +108,15 @@ def ensure_pm_instructions_have_output_schema(text: str) -> str:
 
 
 def append_pm_output_contract(prompt_text: str) -> str:
-    """Always append the output contract to the end of a PM prompt template."""
+    """Always append the output contract and task sizing rules to the end of a PM prompt template."""
     s = (prompt_text or "").rstrip()
     if "<pm_output_contract>" in s:
+        # Contract already present — still inject sizing rules if missing
+        if "<pm_task_sizing_rules>" not in s:
+            s = (s + "\n\n" + PM_TASK_SIZING_RULES).strip()
         return s + "\n"
-    return (s + "\n\n" + PM_OUTPUT_CONTRACT_SUFFIX).strip() + "\n"
+    suffix = PM_OUTPUT_CONTRACT_SUFFIX + "\n" + PM_TASK_SIZING_RULES
+    return (s + "\n\n" + suffix).strip() + "\n"
 
 DEV_INSTRUCTIONS_DEFAULT = (
     "You are the Developer implementing tasks in the repo (MAUI Blazor Hybrid).\n"
@@ -97,7 +125,8 @@ DEV_INSTRUCTIONS_DEFAULT = (
     "Tooling rules (critical):\n"
     "- Prefer apply_patch for edits (create/update/delete) over full-file rewrites.\n"
     "- Batch operations: read enough context first, then apply a coherent set of changes.\n"
-    "- If multiple independent reads/searches are needed, issue them in parallel when supported.\n\n"
+    "- If multiple independent reads/searches are needed, issue them in parallel when supported.\n"
+    "- Avoid broad repo scan; use targeted rg/git ls-files.\n\n"
     "Dependency rules (critical):\n"
     "- Do NOT install/add packages yourself (no `dotnet add package`, `npm install`, `pip install`, etc.).\n"
     "- If the task requires a new package/dependency that is not already in the project,\n"
@@ -162,8 +191,9 @@ Context:
 
 Hard rules:
 - TOKEN SAVING: Prefer digest. Avoid broad repo scans; use REPO_INVENTORY.md.
-- Backlog tasks MUST be atomic and implementable within one Dev iteration.
-- Each task MUST be expected to produce a git diff.
+- Each task MUST be implementable within one Dev iteration and produce a git diff.
+- TASK SIZING: Aim for 3-7 tasks per cycle. Bundle related small fixes (same theme/module) into one task.
+  Do NOT create micro-tasks (1-5 line single-file changes). Merge them with related work.
 - No questions to the user unless required for ambiguity; use open_questions in JSON.
 
 Task history (cross-run; do NOT re-create done tasks; use different approach for failed ones):
@@ -216,7 +246,9 @@ User TODO (highest priority; if present, reflect into backlog tasks):
 {todo_block}
 
 Rules:
-- Keep backlog atomic; each task must create a git diff.
+- Each task must create a git diff and be completable in one Dev iteration.
+- TASK SIZING: Aim for 3-7 tasks. Bundle related small fixes (same theme/module) into one task.
+  Do NOT create micro-tasks (1-5 line single-file changes). Merge them with related work.
 - Avoid broad scans: inspect changed files + direct dependencies only.
 - No questions unless required for ambiguity; use open_questions in JSON.
 
@@ -250,8 +282,6 @@ Constraints (non-negotiable):
 - No secrets in client. Never embed SERVICE_ROLE_KEY or CRON_SECRET.
 - For PAD: writes MUST use RPC/Edge. Reads use Views/RPC. Do NOT direct-write forbidden tables.
 - Use idempotency keys where required (client_tx_id).
-- Keep changes incremental and compilation-safe.
-- Avoid broad repo scan; use targeted rg/git ls-files.
 - Do NOT install packages. If a new dependency is needed, write DEPENDENCY_REQUIRED.md and stop.
 
 Docs read mode: {docs_read_mode}
@@ -261,11 +291,6 @@ Definition of done:
 - {done_when}
 - MUST produce a real git diff in the repo.
 - Update {run_dir}/NOTES.md with: files changed, why, how to validate.
-
-IMPORTANT (no verbose planning):
-- Do NOT output an upfront plan. Think silently and act.
-- Read enough context first, then apply a coherent set of changes.
-- Prefer apply_patch for modifications; avoid full-file rewrites.
 
 IMPORTANT (analysis update safety):
 - Do NOT edit the global analysis file directly.

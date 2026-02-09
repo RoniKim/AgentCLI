@@ -254,7 +254,7 @@ DEFAULTS: Dict[str, Any] = {
 
     # Task history (cross-run SQLite)
     "task_history_enabled": True,
-    "task_history_max_items": 50,
+    "task_history_max_items": 15,
 }
 
 
