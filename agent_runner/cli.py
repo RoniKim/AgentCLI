@@ -251,6 +251,10 @@ DEFAULTS: Dict[str, Any] = {
     "plugins_enabled": False,
     "plugins_allowlist": [],
     "plugins_strict": True,
+
+    # Task history (cross-run SQLite)
+    "task_history_enabled": True,
+    "task_history_max_items": 50,
 }
 
 
@@ -487,6 +491,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-no-diff", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--stop-if-no-diff", action=argparse.BooleanOptionalAction, default=None)  # compat only
     p.add_argument("--test-timeout-seconds", type=int, default=None)
+
+    # Task history
+    p.add_argument("--task-history", dest="task_history_enabled",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="Enable/disable cross-run task history (SQLite)")
+    p.add_argument("--task-history-max-items", type=int, default=None,
+                   help="Max history items to inject into PM prompt")
 
     # PM tuning knobs
     p.add_argument("--pm-timeout-seconds", type=int, default=None)

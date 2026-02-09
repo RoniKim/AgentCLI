@@ -166,6 +166,9 @@ Hard rules:
 - Each task MUST be expected to produce a git diff.
 - No questions to the user unless required for ambiguity; use open_questions in JSON.
 
+Task history (cross-run; do NOT re-create done tasks; use different approach for failed ones):
+{task_history_block}
+
 When editing files, call Codex MCP with {codex_call_hint}.
 
 Now execute: update PROJECT_ANALYSIS.md, then respond ONLY with the JSON schema object.
@@ -216,6 +219,9 @@ Rules:
 - Keep backlog atomic; each task must create a git diff.
 - Avoid broad scans: inspect changed files + direct dependencies only.
 - No questions unless required for ambiguity; use open_questions in JSON.
+
+Task history (cross-run; do NOT re-create done tasks; use different approach for failed ones):
+{task_history_block}
 
 When editing files, call Codex MCP with {codex_call_hint}.
 

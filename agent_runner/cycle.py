@@ -99,6 +99,7 @@ from .skills import (
 )
 from .skills.match import suggest_skills
 from .shared import load_json_if_exists as _load_json_if_exists, inline_skills_for as _inline_skills_for, format_skill_selection as _format_skill_selection
+from .task_history import record_task as _record_task_history, format_history_block as _format_history_block
 
 from .pipeline import PipelineManager, make_stages
 from .pipeline.session import PipelineSession
@@ -865,6 +866,16 @@ async def main_async(args: argparse.Namespace) -> int:
                     lines.append(f"- {f}: unknown")
             return "\n".join(lines)
 
+        def _record_history(task_id: str, title: str, status: str, reason: str = "",
+                            detail: str = "", files: list[str] | None = None, cycle: int = 0,
+                            attempt: int = 0, max_attempts: int = 1) -> None:
+            if not bool(getattr(args, "task_history_enabled", True)):
+                return
+            _record_task_history(repo, task_id=task_id, title=title, status=status,
+                                 reason=reason, detail=detail, files=files,
+                                 cycle_idx=cycle, attempt=attempt, max_attempts=max_attempts,
+                                 run_id=run_dir.name, backend="codex")
+
         def _normalize_backlog_tasks(raw_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             """Normalize/defend backlog tasks produced by PM.
 
@@ -1105,6 +1116,8 @@ async def main_async(args: argparse.Namespace) -> int:
             try:
                 if need_bootstrap:
                     metrics.event("pm_start", cycle=cycle_idx, kind="bootstrap")
+                    _hist_enabled = bool(getattr(args, "task_history_enabled", True))
+                    _hist_max = int(getattr(args, "task_history_max_items", 50) or 50)
                     ctx = {
                         "analysis_md": str(analysis_md),
                         "inv_md": str(inv_md),
@@ -1116,6 +1129,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "digest_rel": str(digest_rel),
                         "skills_index_summary": skills_index_summary,
                         "codex_call_hint": codex_call_hint(autopilot),
+                        "task_history_block": _format_history_block(repo, max_items=_hist_max) if _hist_enabled else "(disabled)",
                     }
                     pm_prompt = append_pm_output_contract(store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx))
                     pm_out = await _run_pm_structured(
@@ -1214,6 +1228,8 @@ async def main_async(args: argparse.Namespace) -> int:
                     current_backlog_block, _, _ = _load_backlog_context_for_pm()
                     failed_tasks_block = _build_failed_tasks_block()
 
+                    _hist_enabled_i = bool(getattr(args, "task_history_enabled", True))
+                    _hist_max_i = int(getattr(args, "task_history_max_items", 50) or 50)
                     ctx = {
                         "analysis_md": str(analysis_md),
                         "inv_md": str(inv_md),
@@ -1231,6 +1247,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "current_backlog_block": current_backlog_block,
                         "hint_block": hint_block,
                         "failed_tasks_block": failed_tasks_block,
+                        "task_history_block": _format_history_block(repo, max_items=_hist_max_i) if _hist_enabled_i else "(disabled)",
                     }
                     pm_prompt = append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx))
                     pm_out = await _run_pm_structured(
@@ -1675,6 +1692,8 @@ async def main_async(args: argparse.Namespace) -> int:
                                     "detail": f"Depends on: {permanently_blocked}"
                                 })
                                 save_state(state_path, state)
+                                _record_history(t.id, t.title, "failed", reason="dependency_failed",
+                                                detail=f"Depends on: {permanently_blocked}", files=t.files, cycle=cycle_idx)
                                 continue
                             continue  # pending dependencies — try later
                     next_task = t
@@ -1753,6 +1772,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             eprint(f"[WARN] abandon_task_branch failed: {detail}")
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "abandon_failed", "detail": detail})
                             save_state(state_path, state)
+                            _record_history(next_task.id, next_task.title, "failed", reason="abandon_failed", detail=detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                             metrics.event("task_branch_abandon_failed", cycle=cycle_idx, step=step, task_id=next_task.id, reason=reason, detail=detail)
                             return False, "abandon_failed"
                     if not cp:
@@ -1777,6 +1797,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         fail_reason = "rollback_blocked" if blocked else "rollback_failed"
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": fail_reason, "detail": detail})
                         save_state(state_path, state)
+                        _record_history(next_task.id, next_task.title, "failed", reason=fail_reason, detail=detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                         metrics.event("rollback_failed", cycle=cycle_idx, step=step, task_id=next_task.id, reason=reason, detail=detail)
                         eprint(f"[STOP] Rollback {fail_reason}: {detail}")
                         return False, fail_reason
@@ -1959,6 +1980,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     if dev_exc and not dev_is_max_turns:
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": "exception", "detail": str(dev_exc)})
                         save_state(state_path, state)
+                        _record_history(next_task.id, next_task.title, "failed", reason="exception", detail=str(dev_exc), files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="exception")
                         logger.task_end(task_id=next_task.id, success=False, reason="exception", exception=str(dev_exc))
                         if tb or cp:
@@ -2000,6 +2022,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             "detail": dep_content.strip()[:500],
                         })
                         save_state(state_path, state)
+                        _record_history(next_task.id, next_task.title, "failed", reason="needs_dependency", detail=dep_content.strip()[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="needs_dependency", was_max_turns=dev_is_max_turns)
                         logger.task_end(task_id=next_task.id, success=False, reason="needs_dependency")
                         skipped_set.add(next_task.id)
@@ -2041,6 +2064,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             eprint(f"[SKIP] Task {next_task.id} appears blocked (dependency/resource missing). Skipping...")
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "blocked_dependency"})
                             save_state(state_path, state)
+                            _record_history(next_task.id, next_task.title, "failed", reason="blocked_dependency", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                             metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="blocked_dependency", was_max_turns=dev_is_max_turns)
                             logger.task_end(task_id=next_task.id, success=False, reason="blocked_dependency", was_max_turns=dev_is_max_turns)
                             # Don't rollback for blocked tasks - continue to next task
@@ -2058,6 +2082,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             continue
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": "no_diff"})
                         save_state(state_path, state)
+                        _record_history(next_task.id, next_task.title, "failed", reason="no_diff", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="no_diff")
                         logger.task_end(task_id=next_task.id, success=False, reason="no_diff", was_max_turns=dev_is_max_turns)
                         eprint(f"[{'SKIP' if continuous else 'STOP'}] No diff produced for {next_task.id}.")
@@ -2112,6 +2137,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 continue
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
                             save_state(state_path, state)
+                            _record_history(next_task.id, next_task.title, "failed", reason="build_failed", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                             eprint(f"[{'SKIP' if continuous else 'STOP'}] Build failed after {next_task.id}. See {attempt_dir / 'build.txt'}")
                             if tb or cp:
                                 ok_restore, fail_reason = _isolate_or_stop("build_failed")
@@ -2141,6 +2167,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 continue
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "test_failed"})
                             save_state(state_path, state)
+                            _record_history(next_task.id, next_task.title, "failed", reason="test_failed", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                             eprint(f"[{'SKIP' if continuous else 'STOP'}] Tests failed after {next_task.id}. See {attempt_dir / 'test.txt'}")
                             if tb or cp:
                                 ok_restore, fail_reason = _isolate_or_stop("test_failed")
@@ -2208,6 +2235,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         if not scan_result.get("ok", True):
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "policy_violation"})
                             save_state(state_path, state)
+                            _record_history(next_task.id, next_task.title, "failed", reason="policy_violation", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                             eprint(f"[{'SKIP' if continuous else 'STOP'}] Policy scan failed after {next_task.id}. See {attempt_dir / 'policy_scan.json'}")
                             metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="policy_violation",
                                           violations=len(scan_result.get("fail_violations", [])))
@@ -2254,6 +2282,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     # No success after attempts and not otherwise returned: treat as failure.
                     state.setdefault("failed", []).append({"task": next_task.id, "reason": "exhausted_attempts"})
                     save_state(state_path, state)
+                    _record_history(next_task.id, next_task.title, "failed", reason="exhausted_attempts", files=next_task.files, cycle=cycle_idx, attempt=max_attempts, max_attempts=max_attempts)
                     logger.task_end(task_id=next_task.id, success=False, reason="exhausted_attempts", attempts=max_attempts)
                     if continuous:
                         eprint(f"[SKIP] Exhausted all attempts for {next_task.id}; skipping to next task.")
@@ -2268,6 +2297,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 state["done"] = sorted(list(done_set))
                 save_state(state_path, state)
                 mark_backlog_done(backlog_md, next_task.id)
+                _record_history(next_task.id, next_task.title, "done", files=next_task.files, cycle=cycle_idx)
 
                 # Use current-cycle task IDs to avoid cross-cycle accumulation (done=16/11 bug)
                 _done_this_cycle = len(done_set.intersection(task_ids))

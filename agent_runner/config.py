@@ -59,6 +59,10 @@ def default_prompts_dir(repo: Path) -> Path:
     return (app_home() / "prompts" / _repo_slug(repo)).resolve()
 
 
+def default_database_path(repo: Path) -> Path:
+    return (app_home() / "databases" / f"{_repo_slug(repo)}.db").resolve()
+
+
 # ---- config io ----
 
 def load_config(path: Path) -> Dict[str, Any]:
