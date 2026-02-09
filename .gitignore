@@ -25,7 +25,7 @@ build/
 dist/
 *.egg-info/
 .eggs/
-configs
+
 
 # 패키지 설치 에러 로그
 pip-log.txt

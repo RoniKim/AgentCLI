@@ -45,6 +45,7 @@ User TODO (highest priority; if present, reflect into backlog tasks):
 Rules:
 - Keep backlog atomic; each task must create a git diff.
 - Avoid broad scans: inspect changed files + direct dependencies only.
+- If changed_files is empty, base the backlog on the current backlog status and failed tasks only (no full rescan).
 - No questions unless required for ambiguity; use open_questions in JSON.
 - For MCP-related tasks, ensure compliance with .doc/통신프로토콜.md (v2.4).
 
