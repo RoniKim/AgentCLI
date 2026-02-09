@@ -29,11 +29,18 @@ def load_policy_rules(rules_file: str, extra_rules: list[str]) -> list[dict[str,
                 if isinstance(parsed, list):
                     for i, item in enumerate(parsed):
                         if isinstance(item, dict) and "regex" in item:
-                            rules.append({
+                            rule = {
                                 "id": str(item.get("id") or f"custom_{i}"),
                                 "severity": str(item.get("severity") or "medium"),
                                 "regex": str(item["regex"]),
-                            })
+                            }
+                            try:
+                                re.compile(rule["regex"])
+                            except re.error as e:
+                                from .utils import eprint
+                                eprint(f"[WARN] Invalid policy regex '{rule['regex'][:60]}': {e}")
+                                continue
+                            rules.append(rule)
                     return rules
             except Exception:
                 pass
@@ -42,10 +49,24 @@ def load_policy_rules(rules_file: str, extra_rules: list[str]) -> list[dict[str,
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                rules.append({"id": f"file_{i}", "severity": "medium", "regex": line})
+                rule = {"id": f"file_{i}", "severity": "medium", "regex": line}
+                try:
+                    re.compile(rule["regex"])
+                except re.error as e:
+                    from .utils import eprint
+                    eprint(f"[WARN] Invalid policy regex '{rule['regex'][:60]}': {e}")
+                    continue
+                rules.append(rule)
     for i, r in enumerate(extra_rules or []):
         if r and isinstance(r, str):
-            rules.append({"id": f"cli_{i}", "severity": "medium", "regex": r})
+            rule = {"id": f"cli_{i}", "severity": "medium", "regex": r}
+            try:
+                re.compile(rule["regex"])
+            except re.error as e:
+                from .utils import eprint
+                eprint(f"[WARN] Invalid policy regex '{rule['regex'][:60]}': {e}")
+                continue
+            rules.append(rule)
     return rules
 
 
@@ -140,19 +161,21 @@ def policy_scan_files(
     ignore = {str(p).strip() for p in ignore_paths if str(p).strip()}
 
     def _ignored(path: str) -> bool:
-        return any(path.startswith(prefix) for prefix in ignore)
+        return any(path == prefix or path.startswith(prefix + "/") or path.startswith(prefix + "\\") for prefix in ignore)
+
+    compiled_rules = []
+    for rule in rules:
+        try:
+            compiled_rules.append((rule, re.compile(rule.get("regex", ""))))
+        except re.error:
+            continue
 
     for path, text in files:
         if not path or _ignored(path):
             continue
-        for rule in rules:
+        for rule, pat in compiled_rules:
             rid = rule.get("id", "rule")
             sev = rule.get("severity", "medium")
-            regex = rule.get("regex", "")
-            try:
-                pat = re.compile(regex)
-            except re.error:
-                continue
             hits = 0
             for m in pat.finditer(text):
                 if allow_pats and _is_allowed(m.group(0), allow_pats):

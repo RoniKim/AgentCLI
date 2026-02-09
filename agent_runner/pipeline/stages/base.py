@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
+
+_VALID_STATUSES = frozenset({"ok", "skip", "stop", "fail"})
 
 
 @dataclass
@@ -12,6 +15,10 @@ class StageOutcome:
     rc: int = 0
     reason: str = ""
     detail: str = ""
+
+    def __post_init__(self) -> None:
+        if self.status not in _VALID_STATUSES:
+            raise ValueError(f"Invalid StageOutcome status: {self.status!r}. Must be one of {_VALID_STATUSES}")
 
     @staticmethod
     def ok(reason: str = "", detail: str = "") -> "StageOutcome":
@@ -36,5 +43,5 @@ class Stage(ABC):
     name: str = "Stage"
 
     @abstractmethod
-    async def run(self, session: object, cycle_idx: int) -> StageOutcome:
+    async def run(self, session: Any, cycle_idx: int) -> StageOutcome:  # session: PipelineSession (avoid circular import)
         raise NotImplementedError

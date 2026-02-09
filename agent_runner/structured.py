@@ -8,7 +8,7 @@ from .utils import eprint
 
 T = TypeVar("T")
 
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", re.IGNORECASE)
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\{\[][\s\S]*?[\}\]])\s*```", re.IGNORECASE)
 
 
 def extract_json_object(text: str) -> Optional[str]:
@@ -25,6 +25,12 @@ def extract_json_object(text: str) -> Optional[str]:
     end = s.rfind("}")
     if start != -1 and end != -1 and end > start:
         return s[start : end + 1]
+
+    if start < 0 or end <= start:
+        start = s.find('[')
+        end = s.rfind(']')
+        if 0 <= start < end:
+            return s[start:end + 1]
 
     # sometimes the whole output is already json
     if s.startswith("{") and s.endswith("}"):
@@ -59,13 +65,13 @@ def loads_json_object(text: str) -> Optional[Any]:
 
     try:
         return json.loads(raw)
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         pass
 
     # one repair attempt
     try:
         return json.loads(_loose_json_repairs(raw))
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         return None
 
 
@@ -268,7 +274,7 @@ def summarize_validation_errors(err: Exception, *, max_items: int = 6) -> tuple[
     return missing[:max_items], type_errors[:max_items]
 
 
-def parse_pm_output_with_errors(text: str, *, kind_hint: str = "") -> Tuple[Optional["PMOutputV2"], list[str], list[str]]:
+def parse_pm_output_with_errors(text: str, *, kind_hint: str = "") -> tuple[Optional["PMOutputV2"], list[str], list[str]]:
     """Parse PM output and return validation error summaries.
 
     Returns (model, missing_fields, type_errors).

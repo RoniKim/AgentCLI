@@ -259,12 +259,15 @@ def _kill_pid(pid: int) -> None:
         pass
 
 
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
 def _pid_alive(pid: int) -> bool:
     """Check if a process with given PID is still running."""
     try:
         if sys.platform == "win32":
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-            handle = kernel32.OpenProcess(_SYNCHRONIZE | _PROCESS_TERMINATE, False, pid)
+            handle = kernel32.OpenProcess(_SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
             if not handle:
                 return False
             result = kernel32.WaitForSingleObject(handle, 0)
@@ -345,11 +348,11 @@ def _make_signal_handler(
 
     def _handler(signum: int, frame: object) -> None:
         # Write STOP file using low-level I/O (safer in signal context)
+        # Directory is pre-created in install_signal_handlers(); avoid mkdir here.
         if stop_path_func is not None:
             try:
                 stop_path = stop_path_func()
                 if stop_path is not None:
-                    stop_path.parent.mkdir(parents=True, exist_ok=True)
                     content = f"signal {signum}\n".encode("utf-8")
                     fd = os.open(str(stop_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
                     try:
@@ -378,6 +381,14 @@ def install_signal_handlers(
 ) -> None:
     """Install enhanced signal handlers (L3)."""
     func = stop_path_func or _stop_path_func
+    # Pre-create the stop file directory so the signal handler doesn't need mkdir
+    if func is not None:
+        try:
+            sp = func()
+            if sp is not None:
+                sp.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
     handler = _make_signal_handler(func)
     try:
         signal.signal(signal.SIGINT, handler)

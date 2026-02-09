@@ -25,6 +25,10 @@ def get_runner(execution_backend: Any):
 
         return ClaudeCodeRunner()
 
+    if backend != "codex":
+        from ..utils import eprint
+        eprint(f"[WARN] Unrecognized backend '{execution_backend}', falling back to codex")
+
     # default
     from .codex_runner import CodexRunner
 

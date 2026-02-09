@@ -64,6 +64,15 @@ def _coerce_value(key: str, raw: str, default: Any) -> Any:
     if isinstance(default, list):
         parts = [p.strip() for p in raw.split(",") if p.strip()]
         return parts
+    if isinstance(default, dict):
+        try:
+            import json
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return default  # ignore invalid input for dict keys
     return raw
 
 
@@ -75,28 +84,45 @@ def _shorten(path: Optional[Path]) -> str:
     return str(path) if path else "(not set)"
 
 
-def _parse_kv_tokens(tokens: list[str]) -> Dict[str, Any]:
+def _parse_kv_tokens(tokens: list[str], defaults: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """
     Parse tokens like:
       --autopilot
+      --no-autopilot
       --iterations 30
-    into overrides, based on DEFAULTS.
+    into overrides, based on DEFAULTS (or supplied defaults dict).
     """
+    defs = defaults if defaults is not None else DEFAULTS
     out: Dict[str, Any] = {}
     i = 0
     while i < len(tokens):
-        t = tokens[i]
-        if not t.startswith("--"):
+        token = tokens[i]
+        if not token.startswith("--"):
             i += 1
             continue
-        key = t[2:].replace("-", "_").strip()
-        if key not in DEFAULTS:
+        raw_key = token[2:]
+        # Handle --no-<key> prefix for booleans
+        if raw_key.startswith("no-") or raw_key.startswith("no_"):
+            key = raw_key[3:].replace("-", "_").strip()
+            if key in defs and isinstance(defs[key], bool):
+                out[key] = False
+                i += 1
+                continue
+        key = raw_key.replace("-", "_").strip()
+        if key not in defs:
             # Unknown option: ignore (shell should be forgiving)
             i += 1
             continue
-        default = DEFAULTS[key]
+        default = defs[key]
         if isinstance(default, bool):
-            out[key] = True
+            # Check for --no-<key> prefix
+            if token.startswith("--no-"):
+                out[key] = False
+            elif i + 1 < len(tokens) and tokens[i + 1].lower() in ("false", "no", "0", "off"):
+                out[key] = False
+                i += 1
+            else:
+                out[key] = True
             i += 1
             continue
         if i + 1 >= len(tokens):
@@ -149,6 +175,10 @@ class RunnerShell:
                 i += 1
                 continue
             i += 1
+
+        # Parse any remaining --key value tokens that match DEFAULTS
+        extra = _parse_kv_tokens(argv, DEFAULTS)
+        self.overrides.update(extra)
 
         if self.repo:
             self._ensure_config_loaded()

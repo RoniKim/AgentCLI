@@ -83,6 +83,19 @@ DEFAULTS: Dict[str, Any] = {
     "claudecode_qa_model": "",
     "claudecode_reporter_model": "",
 
+    # Claude Agent SDK extensions (opt-in, all disabled by default)
+    "claudecode_mcp_tools_enabled": False,
+    "claudecode_hooks_enabled": False,
+    "claudecode_can_use_tool_enabled": False,
+    "claudecode_can_use_tool_strict_isolation": False,
+    "claudecode_subagents_enabled": False,
+    "claudecode_subagent_reviewer_enabled": True,
+    "claudecode_subagent_runner_enabled": True,
+    "claudecode_subagent_auditor_enabled": True,
+    "claudecode_subagent_reviewer_model": "",
+    "claudecode_subagent_runner_model": "",
+    "claudecode_subagent_auditor_model": "",
+
     # Pipeline roles (comma-separated). Default keeps legacy order.
     # Example: "PM,Dev,QA" or "PM,Dev".
     "roles": "PM,Dev,QA",
@@ -303,7 +316,8 @@ def load_python_side_env(explicit_env_file: Optional[str] = None, override: bool
 
 
 # 모듈 import 시점에 python-side .env 한번 로드(override=False)
-load_python_side_env(explicit_env_file=None, override=False)
+# Disabled: causes side-effects on import. The call already exists inside parse_args().
+# load_python_side_env(explicit_env_file=None, override=False)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -459,6 +473,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--claudecode-dev-model-tier2", default=None, help="Claude model for Dev escalation tier2 (empty => no escalation)")
     p.add_argument("--claudecode-qa-model", default=None, help="Claude model for QA stage (empty => claudecode_model)")
     p.add_argument("--claudecode-reporter-model", default=None, help="Claude model for Reporter stage (empty => claudecode_model)")
+
+    # Claude Agent SDK extensions (opt-in)
+    p.add_argument("--claudecode-mcp-tools", dest="claudecode_mcp_tools_enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable custom MCP tools for Claude (check_state, run_build, etc.)")
+    p.add_argument("--claudecode-hooks", dest="claudecode_hooks_enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable PreToolUse/PostToolUse safety hooks")
+    p.add_argument("--claudecode-can-use-tool", dest="claudecode_can_use_tool_enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable dynamic tool permission control")
+    p.add_argument("--claudecode-can-use-tool-strict-isolation", dest="claudecode_can_use_tool_strict_isolation", action=argparse.BooleanOptionalAction, default=None, help="Strict task file isolation in Dev stage")
+    p.add_argument("--claudecode-subagents", dest="claudecode_subagents_enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable subagents (code-reviewer, test-runner, security-auditor)")
+    p.add_argument("--claudecode-subagent-reviewer", dest="claudecode_subagent_reviewer_enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable code-reviewer subagent")
+    p.add_argument("--claudecode-subagent-runner", dest="claudecode_subagent_runner_enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable test-runner subagent")
+    p.add_argument("--claudecode-subagent-auditor", dest="claudecode_subagent_auditor_enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable security-auditor subagent")
+    p.add_argument("--claudecode-subagent-reviewer-model", default=None, help="Model for code-reviewer subagent")
+    p.add_argument("--claudecode-subagent-runner-model", default=None, help="Model for test-runner subagent")
+    p.add_argument("--claudecode-subagent-auditor-model", default=None, help="Model for security-auditor subagent")
 
     p.add_argument("--dev-auto-escalate", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--dev-max-escalations", type=int, default=None)
@@ -668,13 +695,17 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
     if "security_scan_scope" in explicit_args:
         eff["security_scan_scope"] = str(eff.get("security_scan_scope") or "").strip().lower()
     if "scan_max_files" in explicit_args:
-        eff["scan_max_files"] = int(eff.get("scan_max_files") or eff["scan_max_files"])
+        _v = eff.get("scan_max_files")
+        eff["scan_max_files"] = int(_v) if _v is not None else int(eff["scan_max_files"])
     if "scan_max_bytes_per_file" in explicit_args:
-        eff["scan_max_bytes_per_file"] = int(eff.get("scan_max_bytes_per_file") or eff["scan_max_bytes_per_file"])
+        _v = eff.get("scan_max_bytes_per_file")
+        eff["scan_max_bytes_per_file"] = int(_v) if _v is not None else int(eff["scan_max_bytes_per_file"])
     if "scan_max_total_bytes" in explicit_args:
-        eff["scan_max_total_bytes"] = int(eff.get("scan_max_total_bytes") or eff["scan_max_total_bytes"])
+        _v = eff.get("scan_max_total_bytes")
+        eff["scan_max_total_bytes"] = int(_v) if _v is not None else int(eff["scan_max_total_bytes"])
     if "scan_timeout_seconds" in explicit_args:
-        eff["scan_timeout_seconds"] = int(eff.get("scan_timeout_seconds") or eff["scan_timeout_seconds"])
+        _v = eff.get("scan_timeout_seconds")
+        eff["scan_timeout_seconds"] = int(_v) if _v is not None else int(eff["scan_timeout_seconds"])
     if "scan_ignore_glob" in explicit_args and eff.get("scan_ignore_glob") is not None:
         eff["scan_ignore_globs"] = [str(p).strip() for p in (eff.get("scan_ignore_glob") or []) if str(p).strip()]
     if "scan_ignore_path" in explicit_args and eff.get("scan_ignore_path") is not None:

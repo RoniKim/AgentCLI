@@ -36,8 +36,11 @@ class PipelineManager:
 
         # If PM is disabled, require an existing backlog before any non-PM stage.
         if not self._has_stage("PM"):
-            if not session.ensure_backlog():
-                return CycleResult(rc=1, reason="pm_disabled_no_backlog", done_delta=0, stages=[])
+            try:
+                if not session.ensure_backlog():
+                    return CycleResult(rc=1, reason="pm_disabled_no_backlog", done_delta=0, stages=[])
+            except Exception as exc:
+                return CycleResult(rc=1, reason=f"ensure_backlog_exception: {exc}", done_delta=0, stages=[])
 
         tasks_checked = False
 
@@ -51,16 +54,23 @@ class PipelineManager:
 
             # Before running any non-PM stage, make sure tasks are available.
             if stage_name != "pm" and not tasks_checked:
-                if not session.ensure_tasks_loaded():
-                    # missing backlog or cannot parse
-                    return CycleResult(rc=1, reason="no_tasks", done_delta=0, stages=stage_results)
+                try:
+                    if not session.ensure_tasks_loaded():
+                        # missing backlog or cannot parse
+                        return CycleResult(rc=1, reason="no_tasks", done_delta=0, stages=stage_results)
+                except Exception as exc:
+                    return CycleResult(rc=1, reason=f"ensure_tasks_exception: {exc}", done_delta=0, stages=stage_results)
                 tasks_checked = True
 
                 if not continuous:
                     # behave like legacy: prepare artifacts and stop before executing tasks
                     return CycleResult(rc=0, reason="prepared_only", done_delta=0, stages=stage_results)
 
-            out: StageOutcome = await stage.run(session, cycle_idx)
+            try:
+                out: StageOutcome = await stage.run(session, cycle_idx)
+            except Exception as exc:
+                stage_results.append({"name": getattr(stage, "name", "") or stage.__class__.__name__, "status": "fail", "rc": 1, "reason": f"stage_exception: {exc}"})
+                return CycleResult(rc=1, reason="stage_exception", done_delta=getattr(session, 'done_delta', 0), stages=stage_results)
             stage_results.append(
                 {
                     "name": getattr(stage, "name", "") or stage.__class__.__name__,
@@ -79,8 +89,11 @@ class PipelineManager:
 
         # PM-only (or stages that never needed tasks): still validate/load backlog so the user can inspect it.
         if not tasks_checked:
-            if not session.ensure_tasks_loaded():
-                return CycleResult(rc=1, reason="no_tasks", done_delta=0, stages=stage_results)
+            try:
+                if not session.ensure_tasks_loaded():
+                    return CycleResult(rc=1, reason="no_tasks", done_delta=0, stages=stage_results)
+            except Exception as exc:
+                return CycleResult(rc=1, reason=f"ensure_tasks_exception: {exc}", done_delta=0, stages=stage_results)
             tasks_checked = True
 
             if not continuous:

@@ -64,7 +64,7 @@ class StructuredLogger:
         error_handler = logging.FileHandler(self.error_log, encoding="utf-8")
         error_handler.setLevel(logging.ERROR)
         error_formatter = logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(message)s\n%(message)s",
+            "%(asctime)s [%(levelname)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
         )
         error_handler.setFormatter(error_formatter)
@@ -72,6 +72,9 @@ class StructuredLogger:
 
         # Current context (for error tracing)
         self.context: Dict[str, Any] = {}
+
+        # Cached file handle for events.jsonl
+        self._events_fh: Optional[Any] = None
 
     def set_context(self, **kwargs: Any) -> None:
         """Set context information for error tracking."""
@@ -191,11 +194,22 @@ class StructuredLogger:
             **fields
         }
         try:
-            with self.events_log.open("a", encoding="utf-8", errors="replace") as f:
-                f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+            if self._events_fh is None or self._events_fh.closed:
+                self._events_fh = self.events_log.open("a", encoding="utf-8", errors="replace")
+            self._events_fh.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+            self._events_fh.flush()
         except Exception:
             # Don't break on logging failures
             pass
+
+    def close(self) -> None:
+        """Close cached file handles."""
+        if self._events_fh is not None and not self._events_fh.closed:
+            try:
+                self._events_fh.close()
+            except Exception:
+                pass
+            self._events_fh = None
 
     def _write_error_detail(self, error_context: Dict[str, Any]) -> None:
         """Write detailed error information to error.log."""

@@ -45,7 +45,7 @@ class PipelineSession:
     def has_stop(self) -> bool:
         try:
             return self.stop_path.exists()
-        except Exception:
+        except OSError:
             return False
 
     def ensure_tasks_loaded(self) -> bool:

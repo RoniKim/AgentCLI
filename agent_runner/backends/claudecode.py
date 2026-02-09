@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -221,6 +221,19 @@ class ClaudeCodeConfig:
     qa_allowed_tools: list[str]
     qa_disallowed_tools: list[str]
 
+    # Extensions (opt-in)
+    mcp_tools_enabled: bool
+    hooks_enabled: bool
+    can_use_tool_enabled: bool
+    can_use_tool_strict_isolation: bool
+    subagents_enabled: bool
+    subagent_reviewer_enabled: bool
+    subagent_runner_enabled: bool
+    subagent_auditor_enabled: bool
+    subagent_reviewer_model: str
+    subagent_runner_model: str
+    subagent_auditor_model: str
+
 
 def _load_claudecode_cfg(args: argparse.Namespace) -> ClaudeCodeConfig:
     return ClaudeCodeConfig(
@@ -252,6 +265,18 @@ def _load_claudecode_cfg(args: argparse.Namespace) -> ClaudeCodeConfig:
         dev_disallowed_tools=_as_str_list(getattr(args, "claudecode_dev_disallowed_tools", "")),
         qa_allowed_tools=_as_str_list(getattr(args, "claudecode_qa_allowed_tools", "Read,Grep,Glob,Bash")),
         qa_disallowed_tools=_as_str_list(getattr(args, "claudecode_qa_disallowed_tools", "")),
+        # Extensions
+        mcp_tools_enabled=bool(getattr(args, "claudecode_mcp_tools_enabled", False)),
+        hooks_enabled=bool(getattr(args, "claudecode_hooks_enabled", False)),
+        can_use_tool_enabled=bool(getattr(args, "claudecode_can_use_tool_enabled", False)),
+        can_use_tool_strict_isolation=bool(getattr(args, "claudecode_can_use_tool_strict_isolation", False)),
+        subagents_enabled=bool(getattr(args, "claudecode_subagents_enabled", False)),
+        subagent_reviewer_enabled=bool(getattr(args, "claudecode_subagent_reviewer_enabled", True)),
+        subagent_runner_enabled=bool(getattr(args, "claudecode_subagent_runner_enabled", True)),
+        subagent_auditor_enabled=bool(getattr(args, "claudecode_subagent_auditor_enabled", True)),
+        subagent_reviewer_model=str(getattr(args, "claudecode_subagent_reviewer_model", "") or ""),
+        subagent_runner_model=str(getattr(args, "claudecode_subagent_runner_model", "") or ""),
+        subagent_auditor_model=str(getattr(args, "claudecode_subagent_auditor_model", "") or ""),
     )
 
 
@@ -269,7 +294,7 @@ def _filter_kwargs_for_ctor(cls: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
         return kwargs
 
 
-def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_override: str = "", stage_instructions: str = "", max_turns_override: int = 0) -> Any:
+def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_override: str = "", stage_instructions: str = "", max_turns_override: int = 0, ext_ctx: Any = None) -> Any:
     """Build Claude Agent SDK options for a stage."""
     try:
         from claude_agent_sdk import ClaudeAgentOptions
@@ -330,7 +355,30 @@ def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_overr
         "fork_session": bool(cfg.fork_session),
         "max_thinking_tokens": cfg.max_thinking_tokens,
     }
+    # Apply SDK extensions (MCP tools, hooks, can_use_tool, subagents)
+    from .claude_extensions import apply_extensions, _MCP_TOOL_NAMES
+    apply_extensions(ext_ctx, cfg, kwargs, stage)
+
+    # Snapshot which extension keys were added before filtering
+    _ext_keys_before = {k for k in ("mcp_servers", "hooks", "can_use_tool", "agents") if k in kwargs}
+
     kwargs = _filter_kwargs_for_ctor(ClaudeAgentOptions, kwargs)
+
+    # Clean up orphaned tool names when _filter_kwargs_for_ctor drops extension keys
+    # (SDK version doesn't support these params yet → tool names would reference nothing)
+    _ext_keys_after = {k for k in ("mcp_servers", "hooks", "can_use_tool", "agents") if k in kwargs}
+    dropped_ext = _ext_keys_before - _ext_keys_after
+    if dropped_ext and "allowed_tools" in kwargs:
+        orphaned: set[str] = set()
+        if "mcp_servers" in dropped_ext:
+            orphaned.update(_MCP_TOOL_NAMES)
+        if "agents" in dropped_ext:
+            orphaned.add("Task")
+        if orphaned:
+            kwargs["allowed_tools"] = [t for t in kwargs["allowed_tools"] if t not in orphaned]
+            if ext_ctx and getattr(ext_ctx, "debug", False):
+                eprint(f"[DEBUG] Removed orphaned tool names after SDK filtering: {sorted(orphaned)}")
+
     return ClaudeAgentOptions(**kwargs)
 
 
@@ -345,10 +393,25 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
     if hasattr(stream, "__aiter__"):
         iterator = stream
     elif hasattr(stream, "__iter__"):
-        async def _sync_iter():
-            for msg in stream:
-                yield msg
-        iterator = _sync_iter()
+        import queue
+        _q: queue.Queue = queue.Queue()
+        _SENTINEL = object()
+        async def _threaded_sync_iter():
+            loop = asyncio.get_event_loop()
+            def _consume():
+                try:
+                    for msg in stream:
+                        _q.put(msg)
+                finally:
+                    _q.put(_SENTINEL)
+            fut = loop.run_in_executor(None, _consume)
+            while True:
+                item = await loop.run_in_executor(None, _q.get)
+                if item is _SENTINEL:
+                    break
+                yield item
+            await fut
+        iterator = _threaded_sync_iter()
     else:
         raise RuntimeError("ClaudeSDKClient did not provide a message stream")
 
@@ -498,6 +561,7 @@ async def _run_claude_query(
     timeout_seconds: int = 0,
     max_retries: int = 3,
     initial_backoff: float = 5.0,
+    ext_ctx: Any = None,
 ) -> Tuple[str, Optional[Any]]:
     """High-level helper: create client, send query, collect messages.
 
@@ -516,13 +580,13 @@ async def _run_claude_query(
     # subprocess will start in the correct directory without os.chdir().
     for attempt in range(max_retries + 1):
         try:
-            options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override, stage_instructions=stage_instructions, max_turns_override=max_turns_override)
+            options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override, stage_instructions=stage_instructions, max_turns_override=max_turns_override, ext_ctx=ext_ctx)
             async with ClaudeSDKClient(options=options) as client:
                 child_pid = _extract_client_pid(client)
                 if child_pid is not None:
                     register_pid(child_pid)
                 try:
-                    await _start_query(client, prompt)
+                    await asyncio.wait_for(_start_query(client, prompt), timeout=120)
                     coro = _receive_messages(client, stop_path=stop_path, debug=debug)
                     return await asyncio.wait_for(coro, timeout=effective_timeout)
                 finally:
@@ -561,6 +625,7 @@ async def _run_with_continuations(
     budgets_cfg: dict | None = None,
     metrics: Any = None,
     _budget_exceeded: Any = None,
+    ext_ctx: Any = None,
 ) -> Tuple[str, Optional[Any]]:
     """Run a Claude query, optionally continuing if max-turns exception occurs.
 
@@ -573,7 +638,7 @@ async def _run_with_continuations(
     task_key = task_id or label or stage
 
     continuation_msg = (
-        f"\n\n[CONTINUE] You hit a turn limit previously while running '{label or stage}'. "
+        f"\n\n[AGENTCLI_CONTINUATION_MARKER]\n You hit a turn limit previously while running '{label or stage}'. "
         "Continue EXACTLY from where you left off.\n"
         "- Do NOT restate a plan.\n"
         "- Do NOT summarize.\n"
@@ -587,6 +652,7 @@ async def _run_with_continuations(
                 cfg, prompt, repo=repo, stage=stage, stop_path=stop_path, debug=debug,
                 model_override=model_override, stage_instructions=stage_instructions,
                 max_turns_override=max_turns_override, timeout_seconds=timeout_seconds,
+                ext_ctx=ext_ctx,
             )
         except (StopRequested, BudgetExceeded):
             raise
@@ -616,8 +682,8 @@ async def _run_with_continuations(
                 cont_left -= 1
                 eprint(f"[CONTINUE] Max turns exceeded for {task_key}; continuing ({cont_left} left)...")
 
-                if "[CONTINUE]" in prompt:
-                    prompt = prompt.split("[CONTINUE]")[0] + continuation_msg
+                if "\n[AGENTCLI_CONTINUATION_MARKER]\n" in prompt:
+                    prompt = prompt.split("\n[AGENTCLI_CONTINUATION_MARKER]\n")[0] + continuation_msg
                 else:
                     prompt = prompt + continuation_msg
                 continue
@@ -703,7 +769,7 @@ def is_transient_exception(ex: Exception) -> bool:
     # NOTE: "500" removed from needles to avoid false positives on port numbers
     # (e.g. "localhost:5000"). HTTP 500 is caught by the status_code check below.
     needles = (
-        "rate_limit", "429", "503", "502",
+        "rate_limit", " 429", " 503", " 502",
         "overloaded", "connection", "timeout", "timed out",
         "internal server error",
     )
@@ -882,6 +948,21 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     policy_rules.extend(list(policy_cfg.get("rules", []) or []))
     policy_ignore_paths = list(policy_cfg.get("ignore_paths", []) or [])
     policy_allow_patterns = list(policy_cfg.get("allow_patterns", []) or [])
+
+    # Claude Agent SDK extension context
+    from .claude_extensions import ClaudeExtensionContext
+    ext_ctx: Optional[ClaudeExtensionContext] = None
+    if cfg.mcp_tools_enabled or cfg.hooks_enabled or cfg.can_use_tool_enabled or cfg.subagents_enabled:
+        ext_ctx = ClaudeExtensionContext(
+            repo=repo,
+            run_dir=run_dir,
+            stop_path=stop_path,
+            logger=logger,
+            metrics=metrics,
+            args=args,
+            debug=bool(getattr(args, "debug", False)),
+            policy_rules=policy_rules,
+        )
 
     # Security
     security_cfg = getattr(args, "security", {}) if isinstance(getattr(args, "security", {}), dict) else {}
@@ -1232,7 +1313,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             state_obj = {"done": [], "failed": []}
         done_ids = set(state_obj.get("done", []) or [])
         failed_list = state_obj.get("failed", []) or []
-        failed_ids = {(f["task"] if isinstance(f, dict) else f) for f in failed_list}
+        failed_ids = {(f.get("task", "") if isinstance(f, dict) else f) for f in failed_list}
         lines: list[str] = []
         for t in tasks:
             if t.id in done_ids:
@@ -1287,6 +1368,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         for attempt in range(retries + 1):
             prompt = pm_prompt if attempt == 0 else repair_prompt
             try:
+                if ext_ctx:
+                    ext_ctx.current_stage = "PM"
                 text, structured = await _run_claude_query(
                     cfg, prompt, repo=repo, stage="PM",
                     stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
@@ -1294,6 +1377,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     stage_instructions=pm_instructions,
                     max_turns_override=max_turns,
                     timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
+                    ext_ctx=ext_ctx,
                 )
             except StopRequested:
                 raise
@@ -1528,6 +1612,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
             metrics.event("pm_skip", cycle=cycle_idx)
             return True
+        except (StopRequested, BudgetExceeded):
+            raise
         except Exception as ex:
             eprint(f"[PM ERROR] {ex}")
             if is_quota_exception(ex):
@@ -1619,6 +1705,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
                 build_fix_max_turns = int(getattr(args, "max_turns_per_task", 12) or 12) * 2
                 build_fix_model = cfg.dev_model or cfg.model
+                if ext_ctx:
+                    ext_ctx.current_stage = "BuildFix"
                 try:
                     await _run_with_continuations(
                         cfg, build_fix_prompt, repo=repo, stage="BuildFix",
@@ -1631,6 +1719,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         task_id="__build_fix__",
                         budget_state=budget_state, budgets_cfg=budgets_cfg,
                         metrics=metrics, _budget_exceeded=_budget_exceeded,
+                        ext_ctx=ext_ctx,
                     )
                 except Exception as bfx:
                     eprint(f"[BUILD-FIX] Auto-fix agent error: {bfx}")
@@ -1849,6 +1938,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 dev_quota_exhausted = False
                 dev_final = ""
 
+                if ext_ctx:
+                    ext_ctx.current_stage = "Dev"
+                    ext_ctx.current_task_id = next_task.id
+                    ext_ctx.current_task_files = list(next_task.files or [])
                 try:
                     dev_max_conts = int(getattr(args, "dev_max_turns_continuations", 0) or 0)
                     text, _structured = await _run_with_continuations(
@@ -1862,6 +1955,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         task_id=next_task.id,
                         budget_state=budget_state, budgets_cfg=budgets_cfg,
                         metrics=metrics, _budget_exceeded=_budget_exceeded,
+                        ext_ctx=ext_ctx,
                     )
                     dev_final = text or ""
                     _inp, _out = extract_claude_tokens(_structured)
@@ -1958,7 +2052,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     eprint(dep_content.strip())
                     # Append to run-level summary
                     dep_summary_path = run_dir / "DEPENDENCIES_NEEDED.md"
-                    with open(dep_summary_path, "a", encoding="utf-8") as f:
+                    with open(dep_summary_path, "a", encoding="utf-8", errors="replace") as f:
                         f.write(f"\n## {next_task.id}: {next_task.title}\n\n{dep_content.strip()}\n\n---\n")
                     state.setdefault("failed", []).append({
                         "task": next_task.id,
@@ -2063,9 +2157,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                                 stage_instructions=dev_instructions,
                                 max_turns_override=int(getattr(args, "max_turns_per_task", 12) or 12),
                                 timeout_seconds=int(getattr(args, "dev_timeout_seconds", 600) or 600),
+                                ext_ctx=ext_ctx,
                             )
                             dev_log = (dev_log or "") + "\n[PHANTOM_RETRY]\n" + (text2 or "")
                             (attempt_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
+                        except (StopRequested, BudgetExceeded):
+                            raise
                         except Exception as retry_ex:
                             eprint(f"[WARN] Phantom edit retry failed: {retry_ex}")
                         # Re-check diff after retry
@@ -2247,12 +2344,20 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 else:
                     eprint(f"[WARN] Merge failed for {tb.branch_name}; work preserved on branch")
                     metrics.event("task_branch_merge_failed", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name)
+                    state.setdefault("failed", []).append({"task": next_task.id, "reason": "merge_conflict", "branch": tb.branch_name})
+                    save_state(state_path, state)
+                    tb = None
+                    continue  # skip marking as done
                 tb = None
 
             if not task_completed:
                 if tb:
-                    abandon_task_branch(repo, tb)
-                    metrics.event("task_branch_abandoned", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name, reason="exhausted_attempts")
+                    try:
+                        abandon_task_branch(repo, tb)
+                        metrics.event("task_branch_abandoned", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name, reason="exhausted_attempts")
+                    except Exception as ex:
+                        eprint(f"[WARN] abandon_task_branch failed: {ex}")
+                        metrics.event("task_branch_abandon_failed", task_id=next_task.id, error=str(ex)[:200])
                     tb = None
                 state.setdefault("failed", []).append({"task": next_task.id, "reason": "exhausted_attempts"})
                 save_state(state_path, state)
@@ -2277,14 +2382,17 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             _done_this_cycle = len(done_set.intersection(task_ids))
             _skipped_this_cycle = len(skipped_set.intersection(task_ids))
             (run_dir / "progress.txt").write_text(f"done={_done_this_cycle}/{len(tasks)} skipped={_skipped_this_cycle} last={next_task.id}\n", encoding="utf-8", errors="replace")
-            code, names = run_cmd(["git", "diff", "--name-only"], cwd=repo, timeout_sec=60)
-            files_changed_count = len([ln for ln in names.splitlines() if ln.strip()]) if code == 0 else 0
+            try:
+                code, names = run_cmd(["git", "diff", "--name-only"], cwd=repo, timeout_sec=60)
+                files_changed_count = len([ln for ln in names.splitlines() if ln.strip()]) if code == 0 else 0
+            except Exception:
+                files_changed_count = -1
             metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0, files_changed_count=files_changed_count)
 
         try:
             merge_dev_hints_to_global_changelog(analysis_md, dev_hints_dir, curr_head)
-        except Exception:
-            pass
+        except Exception as ex:
+            eprint(f"[WARN] merge_dev_hints failed: {ex}")
 
         ran_tasks = (len(done_set) > before_done)
         cycle_dt = time.time() - cycle_t0
@@ -2360,6 +2468,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             if bool(getattr(args, "qa_to_backlog", False)):
                 qa_prompt = qa_prompt.rstrip() + "\n\n" + QA_FOLLOWUPS_OUTPUT_CONTRACT + "\n"
 
+            if ext_ctx:
+                ext_ctx.current_stage = "QA"
+                ext_ctx.current_task_id = ""
+                ext_ctx.current_task_files = []
             text, _structured = await _run_claude_query(
                 cfg, qa_prompt, repo=repo, stage="QA",
                 stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
@@ -2367,6 +2479,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 stage_instructions=qa_instructions,
                 max_turns_override=int(getattr(args, "report_max_turns", 8) or 8),
                 timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
+                ext_ctx=ext_ctx,
             )
 
             qa_output_path = run_dir / f"qa_final_output_cycle_{cycle_idx:03d}.txt"
@@ -2376,6 +2489,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             followups_candidates = 0
             followups_skipped = 0
             parse_ok: Optional[bool] = None
+            followups: list = []
 
             if bool(getattr(args, "qa_to_backlog", False)):
                 qa_text = qa_output_path.read_text(encoding="utf-8", errors="replace")
@@ -2401,7 +2515,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     followups_skipped = max(0, followups_candidates - followups_added)
                     write_backlog_files(run_dir, merged)
                 (run_dir / f"qa_followups_cycle_{cycle_idx:03d}.json").write_text(
-                    json.dumps({"cycle": cycle_idx, "parse_ok": parse_ok, "candidates_count": followups_candidates, "added_count": followups_added, "skipped_count": followups_skipped, "tasks": followups if 'followups' in dir() else []}, ensure_ascii=False, indent=2),
+                    json.dumps({"cycle": cycle_idx, "parse_ok": parse_ok, "candidates_count": followups_candidates, "added_count": followups_added, "skipped_count": followups_skipped, "tasks": followups}, ensure_ascii=False, indent=2),
                     encoding="utf-8", errors="replace",
                 )
             metrics.event("qa_end", cycle=cycle_idx, rc=0)
@@ -2450,6 +2564,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         reporter_instructions = store.get("reporter_instructions", REPORTER_INSTRUCTIONS_DEFAULT)
         try:
             reporter_prompt = _patch_prompt_for_claude(store.render("pm_shutdown_report_prompt", PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT, {"stop_reason": stop_reason, "context_json": json.dumps(ctx_obj, ensure_ascii=False, indent=2)}))
+            if ext_ctx:
+                ext_ctx.current_stage = "Reporter"
+                ext_ctx.current_task_id = ""
+                ext_ctx.current_task_files = []
             text, _ = await _run_claude_query(
                 cfg, reporter_prompt, repo=repo, stage="Reporter",
                 stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
@@ -2457,6 +2575,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 stage_instructions=reporter_instructions,
                 max_turns_override=int(getattr(args, "report_max_turns", 8) or 8),
                 timeout_seconds=300,
+                ext_ctx=ext_ctx,
             )
             if text and text.strip():
                 report_path.write_text(text.strip() + "\n", encoding="utf-8", errors="replace")
@@ -2606,7 +2725,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             try:
                 final_head = git_head(repo).strip()
                 if final_head:
-                    snapshot_json.write_text(json.dumps({"prev_head": prev_head, "head": final_head, "ts": datetime.utcnow().isoformat() + "Z"}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                    snapshot_json.write_text(json.dumps({"prev_head": prev_head, "head": final_head, "ts": datetime.now(timezone.utc).isoformat() + "Z"}, indent=2, sort_keys=True) + "\n", encoding="utf-8", errors="replace")
                     prev_head = final_head
             except Exception as ex:
                 eprint(f"[WARN] snapshot update failed: {ex}")
@@ -2646,6 +2765,16 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             stale_keys = [k for k in budget_state if k.startswith("_no_diff_retry_")]
             for k in stale_keys:
                 del budget_state[k]
+
+            # Also prune completed task entries from per-task budgets
+            try:
+                _done_ids = set(load_state(state_path).get("done", []))
+            except Exception:
+                _done_ids = set()
+            if budget_state.get("per_task_escalations"):
+                budget_state["per_task_escalations"] = {k: v for k, v in budget_state["per_task_escalations"].items() if k not in _done_ids}
+            if budget_state.get("per_task_continuations"):
+                budget_state["per_task_continuations"] = {k: v for k, v in budget_state["per_task_continuations"].items() if k not in _done_ids}
 
             if reason == STOP_REASON_QUOTA:
                 break

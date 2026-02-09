@@ -148,6 +148,14 @@ def git_worktree_changed_files(repo: Path) -> list[str]:
         if path_part.startswith('"') and path_part.endswith('"'):
             path_part = path_part[1:-1]
 
+        # Unescape git's C-string octal escapes (e.g. \nnn for non-ASCII paths)
+        import codecs
+        if '\\' in path_part:
+            try:
+                path_part = codecs.decode(path_part, 'unicode_escape')
+            except Exception:
+                pass
+
         if path_part:
             out.append(path_part.replace("\\", "/"))
 
@@ -278,7 +286,9 @@ def create_task_branch(repo: Path, task_id: str, task_title: str = "") -> TaskBr
         raise RuntimeError(f"Failed to create task branch {branch_name}: {out}")
 
     if dirty:
-        run_cmd(["git", "stash", "pop"], cwd=repo, timeout_sec=120)
+        rc_pop, out_pop = run_cmd(["git", "stash", "pop"], cwd=repo, timeout_sec=120)
+        if rc_pop != 0:
+            eprint(f"[WARN] git stash pop failed (rc={rc_pop}): {out_pop[:200]}")
 
     eprint(f"[INFO] Created task branch: {branch_name} (base={base_branch}, commit={base_commit[:8]})")
     return TaskBranch(
@@ -461,6 +471,9 @@ def _create_rescue_branch(repo: Path, task_id: str = "") -> str | None:
     _rc, original_ref = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, timeout_sec=30)
     original_ref = original_ref.strip() if _rc == 0 else ""
 
+    _, original_sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=repo, timeout_sec=30)
+    original_sha = original_sha.strip()
+
     try:
         # Create and switch to rescue branch
         code, out = run_cmd(["git", "checkout", "-b", branch_name], cwd=repo, timeout_sec=30)
@@ -477,7 +490,9 @@ def _create_rescue_branch(repo: Path, task_id: str = "") -> str | None:
         if code != 0:
             eprint(f"[WARN] Rescue commit failed: {out}")
             # Switch back even if commit failed
-            if original_ref and original_ref != "HEAD":
+            if original_sha:
+                run_cmd(["git", "checkout", original_sha], cwd=repo, timeout_sec=30)
+            elif original_ref and original_ref != "HEAD":
                 run_cmd(["git", "checkout", original_ref], cwd=repo, timeout_sec=30)
             return None
 
@@ -487,8 +502,10 @@ def _create_rescue_branch(repo: Path, task_id: str = "") -> str | None:
         eprint(f"[WARN] Rescue branch creation failed: {ex}")
         return None
     finally:
-        # Switch back to original branch for the actual rollback
-        if original_ref and original_ref != "HEAD":
+        # Switch back to original branch/commit for the actual rollback
+        if original_sha:
+            run_cmd(["git", "checkout", original_sha], cwd=repo, timeout_sec=30)
+        elif original_ref and original_ref != "HEAD":
             run_cmd(["git", "checkout", original_ref], cwd=repo, timeout_sec=30)
 
 
@@ -565,7 +582,9 @@ def restore_checkpoint(
 
     temp_patch: Path | None = None
     if not empty_patch:
-        temp_patch = Path(tempfile.mkstemp(prefix="rollback_patch_", suffix=".patch")[1])
+        _fd, _tmp_name = tempfile.mkstemp(prefix="rollback_patch_", suffix=".patch")
+        os.close(_fd)
+        temp_patch = Path(_tmp_name)
         temp_patch.write_text(patch_text + "\n", encoding="utf-8", errors="replace")
 
     temp_untracked_dir: Path | None = None

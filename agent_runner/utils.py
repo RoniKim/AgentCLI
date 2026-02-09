@@ -70,6 +70,8 @@ def eprint(msg: str) -> None:
 
 def run_cmd(cmd: Sequence[str], cwd: Path, timeout_sec: int = 600) -> Tuple[int, str]:
     """Run a subprocess and capture output (stdout+stderr)."""
+    if not cmd:
+        return (1, "empty command")
     try:
         r = subprocess.run(
             list(cmd),
@@ -86,6 +88,8 @@ def run_cmd(cmd: Sequence[str], cwd: Path, timeout_sec: int = 600) -> Tuple[int,
         return r.returncode, out.strip()
     except subprocess.TimeoutExpired:
         return 124, f"TIMEOUT: {' '.join(cmd)}"
+    except (OSError, FileNotFoundError) as e:
+        return (127, str(e))
 
 
 async def run_cmd_async(
@@ -102,17 +106,23 @@ async def run_cmd_async(
     Returns (returncode, summary). Output is streamed to disk with a hard cap; excess output is discarded
     and a TRUNCATED marker is appended once.
     """
+    if not cmd:
+        return (1, "empty command")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
-    proc = await asyncio.create_subprocess_exec(
-        *list(cmd),
-        cwd=str(cwd),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        stdin=asyncio.subprocess.DEVNULL,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *list(cmd),
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
+        )
+    except (OSError, FileNotFoundError) as e:
+        return (127, str(e))
     truncated = False
     written = 0
+    log_fh = log_path.open("ab")
 
     async def _reader(stream: asyncio.StreamReader, label: str) -> None:
         nonlocal written, truncated
@@ -123,19 +133,17 @@ async def run_cmd_async(
             if not chunk:
                 break
             if written >= max_output_bytes:
-                if not truncated:
-                    with log_path.open("ab") as f:
-                        f.write(b"\n[TRUNCATED OUTPUT]\n")
-                    truncated = True
+                if truncated:
+                    return
+                log_fh.write(b"\n[TRUNCATED OUTPUT]\n")
+                truncated = True
                 continue
             remaining = max_output_bytes - written
             data = chunk[:remaining]
-            with log_path.open("ab") as f:
-                f.write(data)
+            log_fh.write(data)
             written += len(data)
             if len(chunk) > remaining and not truncated:
-                with log_path.open("ab") as f:
-                    f.write(b"\n[TRUNCATED OUTPUT]\n")
+                log_fh.write(b"\n[TRUNCATED OUTPUT]\n")
                 truncated = True
 
     reader_tasks = [
@@ -168,6 +176,7 @@ async def run_cmd_async(
         rc = await proc.wait()
     finally:
         await asyncio.gather(*reader_tasks, return_exceptions=True)
+        log_fh.close()
 
     if truncated:
         summary = (summary + " " if summary else "") + "truncated"
@@ -217,7 +226,11 @@ def atomic_write_text(path: Path, content: str) -> None:
         tmp.flush()
         os.fsync(tmp.fileno())
         tmp_path = Path(tmp.name)
-    os.replace(tmp_path, path)
+    try:
+        os.replace(tmp_path, path)
+    except Exception:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
 
 
 def atomic_write_json(path: Path, payload: Any) -> None:

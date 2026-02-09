@@ -22,7 +22,7 @@ from __future__ import annotations
 import sys
 
 
-_ONE_SHOT_FLAGS = {"--wizard", "--init-prompts", "-h", "--help"}
+_ONE_SHOT_FLAGS = {"--wizard", "--init-prompts", "--preflight", "-h", "--help"}
 
 
 def _has_any_flag(argv: list[str], flags: set[str]) -> bool:

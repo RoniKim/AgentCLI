@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shlex
 from pathlib import Path
 
 from .utils import run_cmd, run_cmd_async
@@ -22,7 +24,10 @@ def _norm_cmd(v: object) -> list[str]:
             return []
         if "," in s:
             return [p.strip() for p in s.split(",") if p.strip()]
-        return [p for p in s.split() if p]
+        try:
+            return shlex.split(s, posix=(os.name != 'nt'))
+        except ValueError:
+            return s.split()  # fallback
     return []
 
 
@@ -37,8 +42,8 @@ def run_build_gate(repo: Path, build_cmd: object, build_timeout_sec: int, legacy
     if not cmd:
         cmd = find_build_cmd(repo, legacy_build_target)
     timeout = int(build_timeout_sec or 1800)
-    code, out = run_cmd(cmd, cwd=repo, timeout_sec=timeout)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    code, out = run_cmd(cmd, cwd=repo, timeout_sec=timeout)
     log_path.write_text(out + "\n", encoding="utf-8", errors="replace")
     return code == 0
 
@@ -86,8 +91,8 @@ def run_test_gate(
     if not cmd:
         cmd = find_test_cmd(repo, legacy_test_target, legacy_test_filter)
     timeout = int(test_timeout_sec or 3600)
-    code, out = run_cmd(cmd, cwd=repo, timeout_sec=timeout)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    code, out = run_cmd(cmd, cwd=repo, timeout_sec=timeout)
     log_path.write_text(out + "\n", encoding="utf-8", errors="replace")
     return code == 0
 
@@ -124,7 +129,7 @@ def find_build_cmd(repo: Path, explicit: str) -> list[str]:
     root_csprojs = list(repo.glob("*.csproj"))
     if len(root_csprojs) == 1:
         return ["dotnet", "build", root_csprojs[0].name]
-    return ["dotnet", "build"]
+    return []
 
 
 def dotnet_build(repo: Path, build_target: str, log_path: Path) -> bool:

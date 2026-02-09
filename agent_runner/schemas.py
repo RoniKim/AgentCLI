@@ -13,7 +13,7 @@ except Exception as ex:  # pragma: no cover
 class BacklogTaskV2(BaseModel):
     """Atomic, single-iteration task for the Dev agent."""
 
-    id: str = Field(..., description="Task ID like T01")
+    id: str = Field(..., pattern=r"^[A-Za-z0-9_-]+$", description="Task ID like T01")
     title: str = Field(..., description="Short title")
     prompt: str = Field(..., description="Implementation instructions; must be executable")
     files: List[str] = Field(default_factory=list, description="Suggested files to touch (relative paths)")

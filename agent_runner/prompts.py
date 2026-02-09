@@ -101,8 +101,8 @@ PM_TASK_SIZING_RULES = (
 def ensure_pm_instructions_have_output_schema(text: str) -> str:
     """Append a hard output contract if user-provided pm_instructions omitted it."""
     s = (text or "").rstrip()
-    # Heuristic: if the key list exists, assume it's already present.
-    if "analysis_updated" in s and "open_questions" in s and "done_when" in s and "tasks" in s:
+    # Check for known schema markers to determine if contract is already present.
+    if "<response_schema>" in s or "pm_output_contract" in s or "<pm_output>" in s:
         return s + "\n"
     return (s + "\n\n" + PM_OUTPUT_CONTRACT_SUFFIX).strip() + "\n"
 
@@ -406,6 +406,8 @@ class PromptStore:
 
 class _SafeDict(dict):
     def __missing__(self, key: str) -> str:
+        import sys
+        print(f"[WARN] Missing template variable: {{{key}}}", file=sys.stderr)
         return "{" + key + "}"
 
 

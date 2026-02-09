@@ -120,6 +120,11 @@ def run(args: argparse.Namespace) -> int:
     except Exception:
         pass
 
+    # Ensure run_dir is set for signal handler STOP file creation
+    if not getattr(args, "run_dir", ""):
+        repo = Path(str(getattr(args, "repo", "") or ".")).resolve()
+        args.run_dir = str(_ensure_run_dir(repo, args))
+
     try:
         _install_signal_handlers(args)
     except ValueError:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import hashlib
 import os
@@ -244,7 +244,10 @@ async def main_async(args: argparse.Namespace) -> int:
     # Docs
     docs_dir = resolve_docs_dir(repo, args.docs_dir)
     digest_path = (repo / Path(args.docs_digest_file)).resolve()
-    digest_rel = digest_path.relative_to(repo).as_posix() if repo in digest_path.parents else digest_path.as_posix()
+    try:
+        digest_rel = digest_path.relative_to(repo).as_posix()
+    except ValueError:
+        digest_rel = digest_path.as_posix()
 
     if args.docs_read_mode == "digest":
         if args.generate_digest and docs_dir:
@@ -535,7 +538,7 @@ async def main_async(args: argparse.Namespace) -> int:
             # NOTE: "500" removed from needles to avoid false positives on port numbers
             # (e.g. "localhost:5000"). HTTP 500 is caught by the status_code check below.
             needles = (
-                "rate_limit", "429", "503", "502",
+                "rate_limit", " 429", " 503", " 502",
                 "overloaded", "connection", "timeout", "timed out",
                 "internal server error",
             )
@@ -1559,6 +1562,9 @@ async def main_async(args: argparse.Namespace) -> int:
                 }
             except Exception as ex:
                 metrics.event("qa_end", cycle=cycle_idx, rc=1, error=str(ex))
+                if is_quota_exception(ex):
+                    stop_path.write_text(STOP_REASON_QUOTA, encoding="utf-8")
+                    return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0, "quota_exhausted": True}
                 return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0}
 
         policy_scan_summary: Optional[dict[str, Any]] = None
@@ -2320,8 +2326,8 @@ async def main_async(args: argparse.Namespace) -> int:
 
             try:
                 merge_dev_hints_to_global_changelog(analysis_md, dev_hints_dir, curr_head)
-            except Exception:
-                pass
+            except Exception as ex:
+                eprint(f"[WARN] merge_dev_hints failed: {ex}")
 
             ran_tasks = (len(done_set) > before_done)
 
@@ -2509,6 +2515,8 @@ async def main_async(args: argparse.Namespace) -> int:
                 qa_summary = await run_qa_if_needed(ci, ran_tasks=session.ran_tasks)
                 session.data["qa_followups_summary"] = qa_summary
                 session.data["qa_followups_added"] = int(qa_summary.get("added", 0) or 0)
+                if qa_summary.get("quota_exhausted"):
+                    return StageOutcome.stop(STOP_REASON_QUOTA)
                 return StageOutcome.ok("qa_done")
 
             session = PipelineSession(
@@ -2586,13 +2594,14 @@ async def main_async(args: argparse.Namespace) -> int:
                                 {
                                     "prev_head": prev_head,
                                     "head": final_head,
-                                    "ts": datetime.utcnow().isoformat() + "Z",
+                                    "ts": datetime.now(timezone.utc).isoformat() + "Z",
                                 },
                                 indent=2,
                                 sort_keys=True,
                             )
                             + "\n",
                             encoding="utf-8",
+                            errors="replace",
                         )
                         prev_head = final_head
                 except Exception as ex:
@@ -2609,6 +2618,8 @@ async def main_async(args: argparse.Namespace) -> int:
 
         try:
             for cycle_idx in range(int(cycles)):
+                pm_stop_reason.clear()
+
                 if stop_path.exists():
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=stop_file")
                     break

@@ -32,7 +32,11 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
     This loader is intentionally tolerant of PM output drift:
     - task keys may be {id,title,prompt,files,done_when} or include {description,files_changed,definition_of_done,...}
     """
-    data = json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
+    except (json.JSONDecodeError, ValueError) as exc:
+        eprint(f"[WARN] BACKLOG.json parse error: {exc}")
+        return []
 
     if isinstance(data, list):
         raw_tasks = data
@@ -181,6 +185,7 @@ _MAX_FAILED_ENTRIES = 200
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
     # Cap failed list to prevent unbounded growth in long-running sessions
+    state = dict(state)
     if len(state.get("failed", [])) > _MAX_FAILED_ENTRIES:
         state["failed"] = state["failed"][-_MAX_FAILED_ENTRIES:]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -204,7 +209,7 @@ def mark_backlog_done(backlog_md: Path, task_id: str) -> None:
         else:
             out.append(line)
     if changed:
-        backlog_md.write_text("\n".join(out) + "\n", encoding="utf-8", errors="replace")
+        atomic_write_text(backlog_md, "\n".join(out) + "\n")
 
 
 def write_default_p0_backlog(run_dir: Path) -> None:
