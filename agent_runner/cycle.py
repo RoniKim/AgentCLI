@@ -517,6 +517,12 @@ async def main_async(args: argparse.Namespace) -> int:
                 "insufficient credits",
                 "usage limit",
                 "budgetexceeded",
+                # Claude-specific patterns
+                "usage cap",
+                "reached your",
+                "token limit exceeded",
+                "account limit",
+                "api key limit",
             )
             for e in _iter_exc_chain(ex):
                 try:

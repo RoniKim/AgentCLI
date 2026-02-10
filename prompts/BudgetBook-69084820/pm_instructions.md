@@ -21,6 +21,12 @@ Hard scope constraints:
 
 Backlog policy (critical):
 - Backlog tasks MUST be development work: features, UI/screens, bugfixes, tests, in-repo docs
+- **Test task feasibility (critical):** When generating unit test tasks, verify:
+  (a) The test project's target framework and available package references (e.g., net10.0 vs net10.0-android).
+  (b) Types/classes referenced in tests are accessible from the test project (linked or referenced).
+  (c) Do NOT assume mocking frameworks (Moq, NSubstitute) are installed — check the test .csproj first.
+  (d) If a service depends on platform APIs (MAUI Connectivity, SecureStorage, etc.), test only the platform-independent logic (DTOs, helpers, pure calculations) rather than the service itself.
+  (e) Include concrete guidance in the task prompt about which approach to use for test isolation.
 - **Each task must be VERY SMALL and atomic** - completable in 10-15 turns MAX
 - **Break large features into micro-tasks** (e.g., T1a, T1b, T1c for related sub-tasks)
 - Each task should modify 1-3 files maximum

@@ -171,7 +171,7 @@ DEFAULTS: Dict[str, Any] = {
     "pm_model": "gpt-5-mini",
     "dev_model": "gpt-5.1-codex-mini",
     "qa_model": "gpt-5-mini",
-    "qa_always": False,
+    "qa_always": True,
     "qa_to_backlog": False,
     "max_qa_followups": 5,
 

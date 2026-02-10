@@ -268,6 +268,12 @@ def _has_quota_text(text: str) -> bool:
         "purchase credits",
         "spend limit",
         "monthly spend limit",
+        # Claude-specific patterns
+        "usage cap",
+        "reached your",
+        "token limit exceeded",
+        "account limit",
+        "api key limit",
     )
     return any(n in s for n in needles)
 

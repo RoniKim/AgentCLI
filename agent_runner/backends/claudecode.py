@@ -468,6 +468,20 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
                     if isinstance(t, str) and t.strip():
                         text_parts.append(t)
 
+        # Capture error/system messages — Claude Code may surface quota or
+        # API errors as ErrorMessage/SystemMessage without raising an exception.
+        if msg_name in {"ErrorMessage", "SystemMessage"} or msg_type in {"error", "system"}:
+            err_text = (
+                getattr(msg, "error", None)
+                or getattr(msg, "message", None)
+                or getattr(msg, "content", None)
+                or getattr(msg, "text", None)
+                or ""
+            )
+            if isinstance(err_text, str) and err_text.strip():
+                text_parts.append(f"[SDK_ERROR] {err_text}")
+                eprint(f"  [SDK_ERROR] {err_text}")
+
     if tool_calls_made:
         eprint(f"  [TOOLS_SUMMARY] {len(tool_calls_made)} tool calls: {', '.join(tool_calls_made)}")
 
@@ -588,7 +602,16 @@ async def _run_claude_query(
                 try:
                     await asyncio.wait_for(_start_query(client, prompt), timeout=120)
                     coro = _receive_messages(client, stop_path=stop_path, debug=debug)
-                    return await asyncio.wait_for(coro, timeout=effective_timeout)
+                    text, structured = await asyncio.wait_for(coro, timeout=effective_timeout)
+                    # Post-return quota check: Claude Code subprocess may exit
+                    # normally while embedding quota/limit messages in its output
+                    # text instead of raising an exception.
+                    if has_quota_text(text or ""):
+                        raise RuntimeError(
+                            f"Quota exhaustion detected in Claude output: "
+                            f"{(text or '')[:200]}"
+                        )
+                    return text, structured
                 finally:
                     if child_pid is not None:
                         unregister_pid(child_pid)
@@ -734,6 +757,9 @@ def is_quota_exception(ex: Exception) -> bool:
         "codex/settings/usage", "user limit", "user_limit",
         "credit balance is too low", "plans & billing", "purchase credits",
         "spend limit", "insufficient credits", "usage limit", "budgetexceeded",
+        # Claude-specific patterns
+        "usage cap", "reached your", "token limit exceeded",
+        "account limit", "api key limit",
     )
     for e in _iter_exc_chain(ex):
         try:
