@@ -15,23 +15,24 @@
 2. [아키텍처 개요](#아키텍처-개요)
 3. [파이프라인 상세 로직](#파이프라인-상세-로직)
 4. [요구사항 및 설치](#요구사항-및-설치)
-5. [빠른 시작](#빠른-시작)
-6. [설정(Config) 관리](#설정config-관리)
-7. [실행 엔진(Backend) 선택](#실행-엔진backend-선택)
-8. [역할별 모델 설정](#역할별-모델-설정)
-9. [Claude 백엔드 고급 설정](#claude-백엔드-고급-설정)
-10. [파이프라인 커스터마이징](#파이프라인roles-커스터마이징)
-11. [Enterprise 프로필](#enterprise-프로필)
-12. [안전/운영 옵션](#안전운영-옵션-git-stop-no-diff)
-13. [예산 가드레일](#예산-가드레일-budget-guardrails)
-14. [빌드/테스트 게이트](#빌드테스트-게이트)
-15. [정책/시크릿 스캔](#정책시크릿-스캔옵션)
-16. [산출물 구조](#산출물artifacts-구조)
-17. [트러블슈팅 (문제 상황 및 해결)](#트러블슈팅-문제-상황-및-해결)
-18. [추천 운용 프리셋](#추천-운용-프리셋)
-19. [프롬프트/문서/스킬](#프롬프트문서스킬)
-20. [Preflight 체크 & 환경 검증](#preflight-체크--환경-검증)
-21. [보안 메모](#보안-메모)
+5. [처음부터 실행까지 (Step-by-Step)](#처음부터-실행까지-step-by-step-세팅-가이드)
+6. [빠른 시작 (요약)](#빠른-시작-요약)
+7. [설정(Config) 관리](#설정config-관리)
+8. [실행 엔진(Backend) 선택](#실행-엔진backend-선택)
+9. [역할별 모델 설정](#역할별-모델-설정)
+10. [Claude 백엔드 고급 설정](#claude-백엔드-고급-설정)
+11. [파이프라인 커스터마이징](#파이프라인roles-커스터마이징)
+12. [Enterprise 프로필](#enterprise-프로필)
+13. [안전/운영 옵션](#안전운영-옵션-git-stop-no-diff)
+14. [예산 가드레일](#예산-가드레일-budget-guardrails)
+15. [빌드/테스트 게이트](#빌드테스트-게이트)
+16. [정책/시크릿 스캔](#정책시크릿-스캔옵션)
+17. [산출물 구조](#산출물artifacts-구조)
+18. [트러블슈팅 (문제 상황 및 해결)](#트러블슈팅-문제-상황-및-해결)
+19. [추천 운용 프리셋](#추천-운용-프리셋)
+20. [프롬프트/문서/스킬](#프롬프트문서스킬)
+21. [Preflight 체크 & 환경 검증](#preflight-체크--환경-검증)
+22. [보안 메모](#보안-메모)
 
 ---
 
@@ -220,12 +221,23 @@ PM 호출 → JSON 응답 → parse_pm_output_with_errors() → 스키마 검증
 }
 ```
 
+**테스트 태스크 검증 (필수):**
+- PM이 유닛 테스트 태스크를 생성할 때, 테스트 프로젝트의 타겟 프레임워크/패키지 참조를 확인
+- 테스트에서 참조하는 타입이 테스트 프로젝트에서 접근 가능한지 검증
+- 플랫폼 API(MAUI Connectivity 등)에 의존하는 서비스는 플랫폼 독립적 로직만 테스트하도록 안내
+- 모킹 프레임워크(Moq 등) 설치 여부를 가정하지 않고 .csproj 확인
+
 **백로그 정규화:**
 - 메타 위임 방지: "백로그 생성", "분석 작성" 같은 PM 자기참조 태스크 자동 필터링
 - ID 안정성: `T1`, `T2`, ... 형식 강제
 - 스킬 검증: `SKILLS_INDEX`와 대조, 없는 스킬 ID 경고
 
 ### Dev 단계 (태스크 실행)
+
+**Dev 에이전트 핵심 규칙:**
+- **API pre-read (필수)**: 기존 메서드/속성/컴포넌트를 사용하기 전 반드시 정의를 읽어 시그니처를 확인. 이름, 파라미터 순서, 반환 타입을 가정하지 않음.
+- **Tooling**: `apply_patch` 우선, 타겟 검색(`rg`/`git ls-files`) 사용, 광범위 스캔 금지.
+- **Dependency**: 패키지 설치 금지 — 필요 시 `DEPENDENCY_REQUIRED.md` 작성 후 중단.
 
 **태스크 실행 흐름:**
 
@@ -293,7 +305,8 @@ Dev 실행 → MaxTurnsExceeded 예외 발생
 ### QA 단계 (리뷰/피드백)
 
 **실행 조건:**
-- `qa_always=true` **또는** Dev가 코드를 변경한 경우
+- 기본: 매 Cycle 실행 (`qa_always=true`가 기본값)
+- `qa_always=false`로 설정 시, Dev가 코드를 변경한 Cycle에서만 실행
 
 **QA 흐름:**
 1. Dev가 처리한 태스크들의 스킬 컨텍스트 구성
@@ -352,7 +365,192 @@ pip install -U -r requirements.txt
 
 ---
 
-## 빠른 시작
+## 처음부터 실행까지 (Step-by-Step 세팅 가이드)
+
+처음 사용하는 분을 위한 **전체 세팅 → 첫 실행 → 결과 확인** 가이드입니다.
+
+### Step 1: 사전 준비
+
+```bash
+# 1-1. Python 3.10+ 확인
+python --version   # Python 3.10 이상이어야 합니다
+
+# 1-2. Git 확인
+git --version
+
+# 1-3. AgentCLI 의존성 설치
+cd <AgentCLI 디렉토리>
+pip install -U -r requirements.txt
+```
+
+### Step 2: API 키 설정
+
+사용할 백엔드에 맞는 API 키를 준비합니다.
+
+**방법 A: `.env` 파일 생성 (권장)**
+
+AgentCLI 디렉토리(또는 `AGENTCLI_HOME`)에 `.env` 파일을 만듭니다:
+
+```env
+# Codex 백엔드 (OpenAI) 사용 시
+OPENAI_API_KEY=sk-xxxxxxxxxxxx
+
+# Claude 백엔드 사용 시 (Codex 대신 또는 failover용)
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxx
+```
+
+**방법 B: 환경변수 직접 설정**
+
+```bash
+# Windows
+set OPENAI_API_KEY=sk-xxxxxxxxxxxx
+
+# Linux/Mac
+export OPENAI_API_KEY=sk-xxxxxxxxxxxx
+```
+
+> `.env` 파일은 **AgentCLI 홈 디렉토리**에 위치해야 합니다. 대상 레포 안의 `.env`는 보안상 의도적으로 로드하지 않습니다.
+
+### Step 3: 백엔드별 추가 설치
+
+**Codex 백엔드 (기본값):**
+```bash
+# Node.js + npx 필요 (MCP 모드)
+node --version   # 확인
+npx --version    # 확인
+```
+
+**Claude 백엔드:**
+```bash
+pip install -U claude-agent-sdk
+
+# 인증 (API 키 없이 사용할 경우)
+claude auth login
+```
+
+### Step 4: 환경 검증
+
+```bash
+python agent_cli.py --repo "<대상 프로젝트 경로>"
+```
+
+Shell이 열리면:
+
+```text
+> /doctor
+```
+
+`/doctor`가 모든 항목을 통과하면 준비 완료입니다. 실패 항목이 있으면 안내에 따라 해결하세요.
+
+### Step 5: 첫 실행
+
+**방법 1: Interactive Shell (권장 — 처음에는 이 방법을 추천)**
+
+```bash
+python agent_cli.py --repo "<대상 프로젝트 경로>"
+```
+
+```text
+# 현재 설정 확인
+> /config
+
+# .NET이 아닌 프로젝트면 빌드 게이트 끄기
+> /set no_build true
+
+# 실행 시작 (PM이 백로그 생성 → Dev가 태스크 실행 → QA가 리뷰)
+> /start --autopilot --continuous
+
+# 실행 상태 확인
+> /status
+
+# 안전하게 중지 (현재 태스크 완료 후 종료)
+> /stop --wait
+
+# Shell 종료
+> /exit
+```
+
+**방법 2: 무인 실행 (CI/CD, 밤새 운용)**
+
+```bash
+python agent_cli.py --run-now --repo "<대상 프로젝트 경로>" \
+  --non-interactive --autopilot --continuous
+```
+
+### Step 6: 결과 확인
+
+실행 후 대상 레포의 `.doc/agent_runs/<timestamp>/` 디렉토리에 산출물이 생성됩니다:
+
+```
+.doc/agent_runs/20260210-143000/
+  ├─ BACKLOG.json          ← PM이 생성한 태스크 목록
+  ├─ STATE.json            ← 완료/실패 태스크 기록
+  ├─ SHUTDOWN_REPORT.md    ← 실행 종료 요약
+  └─ dev_logs/             ← 태스크별 Dev 실행 로그
+```
+
+실제 코드 변경은 `git log`로 확인:
+
+```bash
+cd <대상 프로젝트 경로>
+git log --oneline -10
+```
+
+### Step 7: 프롬프트 커스터마이징 (선택)
+
+프로젝트에 맞게 PM/Dev/QA 프롬프트를 튜닝하려면:
+
+```bash
+# 기본 프롬프트 템플릿 생성
+python agent_cli.py --run-now --repo "<경로>" --init-prompts
+```
+
+생성된 파일 위치: `<AgentCLI>/prompts/<repo-slug>-<hash>/`
+
+| 파일 | 역할 |
+|------|------|
+| `pm_instructions.md` | PM 에이전트 지시문 (어떤 태스크를 만들지) |
+| `dev_instructions.md` | Dev 에이전트 지시문 (어떻게 코딩할지) |
+| `qa_instructions.md` | QA 에이전트 지시문 (어떻게 리뷰할지) |
+| `pm_bootstrap_prompt.md` | PM 첫 실행 프롬프트 템플릿 |
+| `pm_incremental_prompt.md` | PM 반복 실행 프롬프트 템플릿 |
+| `dev_task_prompt.md` | Dev 태스크 프롬프트 템플릿 |
+| `qa_prompt.md` | QA 프롬프트 템플릿 |
+
+### 자주 쓰는 실행 시나리오
+
+| 시나리오 | 명령 |
+|----------|------|
+| 백로그만 미리보기 (코드 변경 없음) | `python agent_cli.py --run-now --repo "<경로>" --non-interactive --autopilot` |
+| 태스크 5개만 실행 | `--continuous --iterations 5` 추가 |
+| Claude로 실행 | `--execution-backend claudecode` 추가 |
+| 밤새 루프 | `--loop --loop-max-cycles 20 --loop-sleep-seconds 60` 추가 |
+| Worktree 격리 (안전) | `--worktree-isolation` 추가 |
+| 빌드 게이트 끄기 | `--no-build` 추가 |
+
+### 최소 config JSON 예시
+
+설정을 파일로 관리하려면 `<AgentCLI>/configs/<repo-slug>-<hash>.json`을 직접 만들거나, Shell에서 `/set` + `/save`를 사용합니다:
+
+```json
+{
+  "config_version": 2,
+  "repo": "C:/Dev/MyProject",
+  "execution_backend": "claudecode",
+  "no_build": true,
+  "continuous": true,
+  "autopilot": true,
+  "claudecode_dev_model": "sonnet",
+  "claudecode_dev_model_tier1": "opus",
+  "claudecode_qa_model": "haiku"
+}
+```
+
+> 전체 설정 변수 레퍼런스는 [`docs/CONFIG_REFERENCE_KO.md`](docs/CONFIG_REFERENCE_KO.md) 참고
+
+---
+
+## 빠른 시작 (요약)
 
 ### 1) Interactive Shell (권장: 설정 확인 후 시작)
 
@@ -363,11 +561,12 @@ python agent_cli.py --repo "C:/Dev/BudgetBook"
 Shell에서:
 
 ```text
-> /config
-> /start --autopilot --continuous
-> /status
-> /stop --wait
-> /exit
+> /doctor                            # 환경 점검
+> /config                            # 설정 확인
+> /start --autopilot --continuous    # 실행
+> /status                            # 상태 확인
+> /stop --wait                       # 안전 중지
+> /exit                              # 종료
 ```
 
 ### 2) 무인 운용 / 스크립트 실행 (--run-now)
@@ -649,7 +848,7 @@ python agent_cli.py --run-now --repo <path> --profile enterprise
 | **roles** | `PM,Dev,QA` | `PM,Security,Dev,QA` (Security 자동 추가) |
 | **정책 스캔** | 비활성 | **자동 활성** |
 | **보안 스캔** | 비활성 | **자동 활성** |
-| **QA 항상 실행** | `qa_always=false` | `qa_always=true` |
+| **QA 항상 실행** | `qa_always=true` | `qa_always=true` |
 | **예산 가드레일** | 사용자 설정값 | 최소값 강제 적용 (아래 참고) |
 
 ### Enterprise 예산 가드레일 강제
@@ -1512,7 +1711,8 @@ Backend #1 (codex) 실행
 **할당량 소진 감지 키워드:**
 - `insufficient_quota`, `quota exceeded`, `exceeded your current quota`
 - `billing hard limit`, `hard limit`, `payment required`
-- `usage limit`, `plan and billing`
+- `usage limit`, `plan and billing`, `spend limit`, `monthly spend limit`
+- Claude 특화: `usage cap`, `reached your`, `token limit exceeded`, `account limit`
 
 > Failover는 **환경이 사전에 준비**되어야 성공합니다. 양쪽 백엔드 모두 `/doctor`로 점검하세요.
 
