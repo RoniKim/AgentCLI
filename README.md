@@ -31,8 +31,9 @@
 18. [트러블슈팅 (문제 상황 및 해결)](#트러블슈팅-문제-상황-및-해결)
 19. [추천 운용 프리셋](#추천-운용-프리셋)
 20. [프롬프트/문서/스킬](#프롬프트문서스킬)
-21. [Preflight 체크 & 환경 검증](#preflight-체크--환경-검증)
-22. [보안 메모](#보안-메모)
+21. [TODO 기능 (사용자 우선순위 주입)](#todo-기능-사용자-우선순위-주입)
+22. [Preflight 체크 & 환경 검증](#preflight-체크--환경-검증)
+23. [보안 메모](#보안-메모)
 
 ---
 
@@ -1634,6 +1635,126 @@ config 예시(핵심):
   }
 }
 ```
+
+---
+
+## TODO 기능 (사용자 우선순위 주입)
+
+### 개요
+
+TODO는 사용자가 작성한 **오늘의 우선순위/작업 목록**을 PM 에이전트에 **최우선 컨텍스트**로 주입하는 기능입니다.
+PM이 백로그를 생성할 때 TODO 내용을 가장 먼저 반영하므로, "이번 Cycle에서 꼭 이것만 해줘"를 지정할 수 있습니다.
+
+### 저장 위치
+
+```
+REPO/.doc/todo/
+  ├─ LAST_TODO.txt            # 현재 활성 TODO 포인터
+  ├─ Today_<hash>.md          # 오늘 날짜 기반 TODO 파일 (날짜+repo 해시)
+  └─ (이전 TODO 파일들...)
+```
+
+- 파일명: `Today_<sha1(repo+날짜)[:10]>.md` — 동일 repo에서 하루 1개
+- `LAST_TODO.txt`가 현재 활성 TODO를 가리킴 (상대 경로)
+- 없으면 `.doc/todo/*.md` 중 최신 수정 파일을 자동 선택
+
+### Shell 명령어
+
+| 명령어 | 설명 |
+|--------|------|
+| `/todo` | 현재 TODO 미리보기 (상위 40줄) |
+| `/todo --save` | 오늘의 TODO 생성 + 활성화 + OS 기본 에디터로 열기 |
+| `/todo --load <path>` | 특정 TODO 파일을 활성화 |
+| `/todo --load latest` | 가장 최근 수정된 TODO를 활성화 |
+
+### 사용 흐름
+
+```
+1. /todo --save              ← 오늘의 TODO 파일 생성, 에디터 열림
+2. (에디터에서 우선순위/작업 작성 후 저장)
+3. /start                    ← 러너 실행 → PM이 TODO를 최우선으로 반영
+```
+
+### TODO 파일 기본 템플릿
+
+```markdown
+# TODO (Today)
+
+- created_at: 2026-02-10T15:00:00
+- repo: D:\MyProject
+
+## Priorities
+
+- [ ] (write the most important goal)
+
+## Tasks
+
+- [ ]
+- [ ]
+
+## Notes
+
+-
+```
+
+### PM 프롬프트 주입 방식
+
+TODO 내용은 PM의 백로그 생성 프롬프트에 다음과 같이 주입됩니다:
+
+```
+User TODO (highest priority; if present, reflect into backlog tasks):
+{todo_block}
+```
+
+- **"highest priority"** — PM은 TODO 항목을 다른 소스(repo 분석, 이전 백로그 등)보다 우선 반영
+- TODO가 없으면 `(none)`이 삽입되어 PM이 자체 판단으로 백로그 생성
+- 최대 12,000자 / 120줄까지 전달 (초과 시 자동 truncate)
+- Codex, Claude 양쪽 백엔드 모두 동일하게 지원
+
+### TODO만 돌릴 때 Config 설정
+
+"TODO에 적은 작업만 빠르게 처리"하려면 iterations를 낮추고, TODO에 집중 지시를 적습니다:
+
+```json
+{
+  "repo": "D:\\MyProject",
+  "execution_backend": "claudecode",
+  "continuous": true,
+  "iterations": 3,
+  "pm_refresh_interval": 1,
+  "qa_always": true
+}
+```
+
+| 키 | 권장값 | 이유 |
+|----|--------|------|
+| `iterations` | `1`~`5` | TODO 항목 수에 맞게 최소 Cycle만 실행 |
+| `continuous` | `true` | iterations 횟수만큼 자동 반복 |
+| `pm_refresh_interval` | `1` | 매 Cycle마다 PM이 TODO를 다시 읽어 반영 |
+| `qa_always` | `true` | 매 Cycle QA 검증 실행 |
+
+**실행 예시:**
+
+```bash
+# 1. TODO 작성
+python agent_cli.py
+> /repo D:\MyProject
+> /todo --save
+# (에디터에서 작업 목록 작성)
+
+# 2. iterations=3으로 짧게 실행
+> /set iterations 3
+> /set continuous true
+> /start
+```
+
+또는 CLI에서 직접:
+
+```bash
+python agent_cli.py --run-now --repo D:\MyProject --iterations 3 --continuous
+```
+
+> **Tip**: TODO에 `## Priorities` 섹션에 "이 작업만 처리하고 종료"처럼 명시하면 PM이 해당 작업만 백로그로 생성합니다.
 
 ---
 
