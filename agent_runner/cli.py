@@ -268,6 +268,11 @@ DEFAULTS: Dict[str, Any] = {
     # Task history (cross-run SQLite)
     "task_history_enabled": True,
     "task_history_max_items": 15,
+
+    # Project goals / completion tracking
+    "goals_enabled": True,
+    "goals_auto_generate": True,
+    "goals_auto_check": True,
 }
 
 

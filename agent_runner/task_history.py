@@ -216,3 +216,130 @@ def format_history_block(
     except Exception as exc:
         eprint(f"[WARN] task_history.format_history_block failed: {exc}")
         return "(history unavailable)"
+
+
+def format_split_history_blocks(
+    repo: Path,
+    *,
+    max_items: int = 50,
+) -> tuple[str, str]:
+    """Return (done_block, failed_block) separated for PM prompt injection.
+
+    done_block: completed tasks (PM should not re-create)
+    failed_block: failed tasks with details (PM MUST address with different approach)
+
+    Never raises.
+    """
+    try:
+        rows = query_history(repo, max_items=max_items)
+        if not rows:
+            return "(no history)", "(no failures)"
+
+        done_lines: list[str] = []
+        failed_lines: list[str] = []
+
+        for r in reversed(rows):  # oldest first
+            status = r["status"].upper()
+            date_str = (r.get("recorded_at") or "")[:10]
+
+            if status == "DONE":
+                done_lines.append(f"- [DONE] {r['task_id']}: {r['title']} ({date_str})")
+            else:
+                reason = r.get("reason") or ""
+                att = int(r.get("attempt") or 0)
+                max_att = int(r.get("max_attempts") or 0)
+                detail = (r.get("detail") or "").strip()
+
+                tag = f"{status}/{reason}" if reason else status
+                if att > 0 and max_att > 0:
+                    tag += f" {att}/{max_att}"
+
+                line = f"- [{tag}] {r['task_id']}: {r['title']} ({date_str})"
+                if detail:
+                    if len(detail) > 120:
+                        detail = detail[:117] + "..."
+                    line += f"\n  failure_detail: {detail}"
+                failed_lines.append(line)
+
+        done_block = "\n".join(done_lines) if done_lines else "(no completed tasks)"
+        failed_block = "\n".join(failed_lines) if failed_lines else "(no failures)"
+
+        return done_block, failed_block
+    except Exception as exc:
+        eprint(f"[WARN] task_history.format_split_history_blocks failed: {exc}")
+        return "(history unavailable)", "(history unavailable)"
+
+
+def count_unresolved_failures(
+    repo: Path,
+    done_ids: set[str] | None = None,
+    *,
+    max_items: int = 200,
+) -> int:
+    """Count tasks that failed and were NOT subsequently completed.
+
+    Used by the completion evaluator to determine if there are outstanding failures.
+
+    Resolution logic (handles PM task-ID recycling):
+      1. Exact task_id match: failed T03 resolved if later T03 DONE exists.
+      2. Title similarity: failed T03 "Add validation" resolved if later T01 DONE
+         has a similar title (keyword overlap ≥ 60%), since PM may assign new IDs
+         when retrying failed tasks in a fresh backlog.
+      3. done_ids from current cycle's STATE.json done set (catches same-cycle resolution).
+    """
+    try:
+        rows = query_history(repo, max_items=max_items)
+        done = done_ids or set()
+        # Deduplicate by task_id: keep latest title per ID (rows are newest-first)
+        failed_map: dict[str, str] = {}   # task_id → title (first=latest wins)
+        done_entries: list[tuple[str, str]] = []    # (task_id, title)
+        for r in rows:
+            tid = r.get("task_id", "")
+            title = r.get("title", "")
+            if r["status"].upper() == "DONE":
+                done_entries.append((tid, title))
+            else:
+                if tid not in failed_map:
+                    failed_map[tid] = title
+
+        done_id_set = {t[0] for t in done_entries}
+        done_title_corpus = " ||| ".join(t[1].lower().strip() for t in done_entries)
+
+        unresolved_count = 0
+        for ftid, ftitle in failed_map.items():
+            # 1. Exact task_id match
+            if ftid in done_id_set or ftid in done:
+                continue
+            # 2. Title similarity: check if any DONE task has similar title keywords
+            if ftitle and done_title_corpus and _title_resolved(ftitle, done_title_corpus):
+                continue
+            unresolved_count += 1
+
+        return unresolved_count
+    except Exception as exc:
+        eprint(f"[WARN] task_history.count_unresolved_failures failed: {exc}")
+        return 0
+
+
+def _title_resolved(failed_title: str, done_corpus: str) -> bool:
+    """Check if a failed task's title is semantically covered by done tasks.
+
+    Uses keyword overlap: extract significant words (3+ chars) from the failed title,
+    require ≥ 60% to appear in the done corpus. Minimum 2 keyword matches required.
+    """
+    import re as _re
+    noise = {
+        "the", "and", "for", "with", "from", "that", "this", "have", "has",
+        "been", "are", "was", "were", "will", "can", "not", "all", "but",
+        "add", "fix", "update", "implement", "create", "remove", "delete",
+        "없음", "있음", "동작", "기능", "정상", "성공", "완료", "추가", "수정",
+    }
+    words = _re.findall(r'[\w가-힣]+', failed_title.lower())
+    keywords = [w for w in words if len(w) >= 3 and w not in noise]
+
+    if len(keywords) < 2:
+        return False
+
+    match_count = sum(1 for kw in keywords if kw in done_corpus)
+    threshold = max(2, int(len(keywords) * 0.6))
+    return match_count >= threshold

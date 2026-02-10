@@ -192,6 +192,11 @@ Optional: include run-local notes in JSON field 'notes_md'.
 User TODO (highest priority; if present, reflect into backlog tasks):
 {todo_block}
 
+Project Goals (completion criteria — GOALS.md):
+{goals_block}
+
+{goals_instruction}
+
 Context:
 - Repo root: {repo}
 - Run artifacts folder: {run_dir}
@@ -208,8 +213,15 @@ Hard rules:
   Do NOT create micro-tasks (1-5 line single-file changes). Merge them with related work.
 - No questions to the user unless required for ambiguity; use open_questions in JSON.
 
-Task history (cross-run; do NOT re-create done tasks; use different approach for failed ones):
-{task_history_block}
+Completed tasks (do NOT re-create):
+{done_tasks_block}
+
+FAILED TASKS — MANDATORY RETRY (MUST address each one):
+Each failed task below MUST be addressed in the new backlog.
+For each: create a retry task with a DIFFERENT approach that avoids the failure cause.
+If genuinely impossible, add to open_questions with explanation.
+Do NOT ignore or skip any failed task.
+{failed_tasks_block}
 
 When editing files, call Codex MCP with {codex_call_hint}.
 
@@ -257,6 +269,11 @@ Optional: include run-local notes in JSON field 'notes_md'.
 User TODO (highest priority; if present, reflect into backlog tasks):
 {todo_block}
 
+Project Goals (completion criteria — GOALS.md):
+{goals_block}
+
+{goals_instruction}
+
 Rules:
 - Each task must create a git diff and be completable in one Dev iteration.
 - TASK SIZING: Aim for 3-7 tasks. Bundle related small fixes (same theme/module) into one task.
@@ -264,8 +281,15 @@ Rules:
 - Avoid broad scans: inspect changed files + direct dependencies only.
 - No questions unless required for ambiguity; use open_questions in JSON.
 
-Task history (cross-run; do NOT re-create done tasks; use different approach for failed ones):
-{task_history_block}
+Completed tasks (do NOT re-create):
+{done_tasks_block}
+
+FAILED TASKS — MANDATORY RETRY (MUST address each one):
+Each failed task below MUST be addressed in the new backlog.
+For each: create a retry task with a DIFFERENT approach that avoids the failure cause.
+If genuinely impossible, add to open_questions with explanation.
+Do NOT ignore or skip any failed task.
+{failed_tasks_block}
 
 When editing files, call Codex MCP with {codex_call_hint}.
 

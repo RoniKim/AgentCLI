@@ -18,9 +18,6 @@ Git:
 Current backlog (from run_dir; [x]=done, [ ]=pending, [F]=failed):
 {current_backlog_block}
 
-Failed tasks from previous cycles (with failure reasons):
-{failed_tasks_block}
-
 Dev change-hints (optional, run-local; use as clues):
 {hint_block}
 
@@ -96,11 +93,26 @@ Optional: include run-local notes in JSON field 'notes_md'.
 User TODO (highest priority; if present, reflect into backlog tasks):
 {todo_block}
 
+Project Goals (completion criteria — GOALS.md):
+{goals_block}
+
+{goals_instruction}
+
 Rules:
 - **FILE PATHS**: Always use FULL, EXACT paths from REPO_INVENTORY.md in task `files` field - NEVER abbreviate or guess paths
 - Keep backlog atomic; each task must create a git diff.
 - Avoid broad scans: inspect changed files + direct dependencies only.
 - No questions unless required for ambiguity; use open_questions in JSON.
+
+Completed tasks (do NOT re-create):
+{done_tasks_block}
+
+FAILED TASKS — MANDATORY RETRY (MUST address each one):
+Each failed task below MUST be addressed in the new backlog.
+For each: create a retry task with a DIFFERENT approach that avoids the failure cause.
+If genuinely impossible, add to open_questions with explanation.
+Do NOT ignore or skip any failed task.
+{failed_tasks_block}
 
 When editing files, call Codex MCP with {codex_call_hint}.
 

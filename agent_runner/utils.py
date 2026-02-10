@@ -15,6 +15,7 @@ from typing import Sequence, Tuple, Any, Optional, Iterable
 STOP_REASON_QUOTA = "quota_exhausted"
 STOP_REASON_STOP_FILE = "stop_file"
 STOP_REASON_ALL_TASKS_DONE = "all_tasks_done"
+STOP_REASON_PROJECT_COMPLETE = "project_complete"
 STOP_REASON_PREPARED_ONLY = "prepared_only"
 STOP_REASON_IDLE_EXIT = "idle_exit"
 STOP_REASON_OK = "ok"
@@ -22,6 +23,7 @@ STOP_REASON_OK = "ok"
 STOP_REASON_PRIORITY: list[str] = [
     STOP_REASON_QUOTA,
     STOP_REASON_STOP_FILE,
+    STOP_REASON_PROJECT_COMPLETE,
     STOP_REASON_ALL_TASKS_DONE,
     STOP_REASON_PREPARED_ONLY,
     STOP_REASON_IDLE_EXIT,

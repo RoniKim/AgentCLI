@@ -85,6 +85,16 @@ from .utils import (
     STOP_REASON_QUOTA,
     STOP_REASON_STOP_FILE,
     STOP_REASON_ALL_TASKS_DONE,
+    STOP_REASON_PROJECT_COMPLETE,
+)
+from .goals import (
+    read_goals,
+    format_goals_block,
+    parse_goals_completion,
+    update_goals_checkboxes,
+    write_completion_status,
+    GOALS_GENERATION_INSTRUCTION,
+    GOALS_EVALUATION_INSTRUCTION,
 )
 from .schemas import PMOutputV2
 from .structured import parse_pm_output_with_errors, dump_pretty, describe_parse_failure, parse_qa_followups
@@ -99,7 +109,7 @@ from .skills import (
 )
 from .skills.match import suggest_skills
 from .shared import load_json_if_exists as _load_json_if_exists, inline_skills_for as _inline_skills_for, format_skill_selection as _format_skill_selection
-from .task_history import record_task as _record_task_history, format_history_block as _format_history_block
+from .task_history import record_task as _record_task_history, format_history_block as _format_history_block, format_split_history_blocks as _format_split_history_blocks, count_unresolved_failures as _count_unresolved_failures
 from .progress import print_cycle_report, TokenTracker, extract_codex_tokens
 
 from .pipeline import PipelineManager, make_stages
@@ -1123,23 +1133,42 @@ async def main_async(args: argparse.Namespace) -> int:
             todo_path, todo_text = read_current_todo(repo)
             todo_block = format_todo_block(todo_path, todo_text)
 
+            # Goals context
+            _goals_enabled = bool(getattr(args, "goals_enabled", True))
+            _goals_auto_gen = bool(getattr(args, "goals_auto_generate", True))
+            if _goals_enabled:
+                _gp, _gt = read_goals(repo)
+                goals_block = format_goals_block(_gp, _gt)
+                goals_instruction = GOALS_EVALUATION_INSTRUCTION if _gp else (GOALS_GENERATION_INSTRUCTION if _goals_auto_gen else "")
+            else:
+                goals_block = "(disabled)"
+                goals_instruction = ""
+
             try:
                 if need_bootstrap:
                     metrics.event("pm_start", cycle=cycle_idx, kind="bootstrap")
                     _hist_enabled = bool(getattr(args, "task_history_enabled", True))
                     _hist_max = int(getattr(args, "task_history_max_items", 50) or 50)
+                    if _hist_enabled:
+                        _done_blk, _failed_blk = _format_split_history_blocks(repo, max_items=_hist_max)
+                    else:
+                        _done_blk, _failed_blk = "(disabled)", "(disabled)"
                     ctx = {
                         "analysis_md": str(analysis_md),
                         "inv_md": str(inv_md),
                         "repo": str(repo),
                         "run_dir": str(run_dir),
                         "todo_block": todo_block,
+                        "goals_block": goals_block,
+                        "goals_instruction": goals_instruction,
                         "docs_dir": str(docs_dir) if docs_dir else "(none)",
                         "docs_read_mode": str(args.docs_read_mode),
                         "digest_rel": str(digest_rel),
                         "skills_index_summary": skills_index_summary,
                         "codex_call_hint": codex_call_hint(autopilot),
                         "task_history_block": _format_history_block(repo, max_items=_hist_max) if _hist_enabled else "(disabled)",
+                        "done_tasks_block": _done_blk,
+                        "failed_tasks_block": _failed_blk,
                     }
                     pm_prompt = append_pm_output_contract(store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx))
                     pm_out = await _run_pm_structured(
@@ -1240,12 +1269,18 @@ async def main_async(args: argparse.Namespace) -> int:
 
                     _hist_enabled_i = bool(getattr(args, "task_history_enabled", True))
                     _hist_max_i = int(getattr(args, "task_history_max_items", 50) or 50)
+                    if _hist_enabled_i:
+                        _done_blk_i, _failed_blk_i = _format_split_history_blocks(repo, max_items=_hist_max_i)
+                    else:
+                        _done_blk_i, _failed_blk_i = "(disabled)", "(disabled)"
                     ctx = {
                         "analysis_md": str(analysis_md),
                         "inv_md": str(inv_md),
                         "repo": str(repo),
                         "run_dir": str(run_dir),
                         "todo_block": todo_block,
+                        "goals_block": goals_block,
+                        "goals_instruction": goals_instruction,
                         "docs_dir": str(docs_dir) if docs_dir else "(none)",
                         "docs_read_mode": str(args.docs_read_mode),
                         "digest_rel": str(digest_rel),
@@ -1256,8 +1291,9 @@ async def main_async(args: argparse.Namespace) -> int:
                         "changed_files_block": changed_files_block,
                         "current_backlog_block": current_backlog_block,
                         "hint_block": hint_block,
-                        "failed_tasks_block": failed_tasks_block,
+                        "failed_tasks_block": _failed_blk_i,
                         "task_history_block": _format_history_block(repo, max_items=_hist_max_i) if _hist_enabled_i else "(disabled)",
+                        "done_tasks_block": _done_blk_i,
                     }
                     pm_prompt = append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx))
                     pm_out = await _run_pm_structured(
@@ -2376,6 +2412,42 @@ async def main_async(args: argparse.Namespace) -> int:
             except Exception:
                 pass
 
+            # --- Goals auto-check: update GOALS.md checkboxes based on completed tasks ---
+            _goals_auto_chk = bool(getattr(args, "goals_auto_check", True))
+            _goals_on = bool(getattr(args, "goals_enabled", True))
+            if _goals_on and _goals_auto_chk and ran_tasks:
+                try:
+                    done_titles = [t.title for t in tasks if t.id in done_set]
+                    done_prompts = [t.prompt for t in tasks if t.id in done_set]
+                    goals_update = update_goals_checkboxes(repo, done_titles, done_prompts)
+                    if goals_update.get("updated"):
+                        checked = goals_update.get("checked_items", [])
+                        eprint(f"[GOALS] Auto-checked {len(checked)} item(s): {checked[:5]}")
+                        metrics.event("goals_updated", cycle=cycle_idx, checked_count=len(checked), items=checked[:10])
+                except Exception as goals_ex:
+                    eprint(f"[WARN] Goals auto-check failed: {goals_ex}")
+
+            # --- Completion evaluation ---
+            if _goals_on:
+                try:
+                    _gp_eval, _gt_eval = read_goals(repo)
+                    if _gt_eval:
+                        comp_status = parse_goals_completion(_gt_eval)
+                        unresolved = _count_unresolved_failures(repo, done_set)
+                        write_completion_status(run_dir, comp_status, failed_unresolved=unresolved,
+                                               stop_reason="cycle_end")
+                        if comp_status.get("project_complete") and unresolved == 0:
+                            eprint(f"[GOALS] PROJECT COMPLETE — all P0 goals met, no unresolved failures.")
+                            metrics.event("project_complete", cycle=cycle_idx, goals=comp_status)
+                            return 0, STOP_REASON_PROJECT_COMPLETE, done_delta, ran_tasks
+                        else:
+                            p0d = comp_status.get("p0_done", 0)
+                            p0t = comp_status.get("p0_total", 0)
+                            unmet = comp_status.get("unmet_p0", [])
+                            eprint(f"[GOALS] P0: {p0d}/{p0t} | unresolved failures: {unresolved} | unmet: {unmet[:3]}")
+                except Exception as comp_ex:
+                    eprint(f"[WARN] Completion evaluation failed: {comp_ex}")
+
             if total_count > 0 and done_count >= total_count:
                 return 0, STOP_REASON_ALL_TASKS_DONE, done_delta, ran_tasks
             if total_count > 0 and (done_count + skipped_count) >= total_count:
@@ -2507,6 +2579,8 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 if reason == STOP_REASON_QUOTA:
                     return StageOutcome.stop(STOP_REASON_QUOTA, rc=0)
+                if reason == STOP_REASON_PROJECT_COMPLETE:
+                    return StageOutcome.stop(STOP_REASON_PROJECT_COMPLETE, rc=0)
                 if reason == STOP_REASON_ALL_TASKS_DONE:
                     return StageOutcome.stop(STOP_REASON_ALL_TASKS_DONE, rc=0)
                 if reason == STOP_REASON_STOP_FILE:
@@ -2644,6 +2718,10 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 if reason == STOP_REASON_QUOTA:
                     break
+                if reason == STOP_REASON_PROJECT_COMPLETE:
+                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=project_complete")
+                    eprint(f"[STOP] Project complete — all P0 goals met.")
+                    break  # Always stop on project complete, even in loop mode
                 if reason == STOP_REASON_ALL_TASKS_DONE:
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
                     if not args.loop:
