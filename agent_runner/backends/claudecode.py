@@ -44,6 +44,7 @@ from ..gitops import (
     remove_worktree,
     handle_worktree_patch,
     check_and_remove_stale_git_lock,
+    ensure_clean_working_tree,
 )
 from ..inventory import build_repo_inventory, write_repo_inventory_files
 from ..todo import read_current_todo, format_todo_block
@@ -67,6 +68,7 @@ from ..prompts import (
     QA_INSTRUCTIONS_DEFAULT,
     REPORTER_INSTRUCTIONS_DEFAULT,
     PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT,
+    PM_TURN_BUDGET_WARNING,
 )
 from ..reporting import collect_shutdown_context, build_local_shutdown_report
 from ..pipeline import PipelineManager, make_stages
@@ -339,6 +341,8 @@ def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_overr
         "You have access to Claude Code built-in tools: Read, Write, Edit, Grep, Glob, Bash.\n",
         "Do NOT attempt to call Codex MCP or any external MCP tools. Use only the built-in tools.\n\n",
     ]
+    if stage_low == "pm":
+        parts.append(PM_TURN_BUDGET_WARNING + "\n")
     if stage_instructions.strip():
         parts.append(_patch_prompt_for_claude(stage_instructions.strip()) + "\n\n")
     if cfg.system_prompt_append.strip():
@@ -1406,13 +1410,18 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             try:
                 if ext_ctx:
                     ext_ctx.current_stage = "PM"
-                text, structured = await _run_claude_query(
+                pm_max_conts = int(getattr(args, "pm_max_turns_continuations", 1) or 0)
+                text, structured = await _run_with_continuations(
                     cfg, prompt, repo=repo, stage="PM",
                     stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
                     model_override=cfg.pm_model,
                     stage_instructions=pm_instructions,
                     max_turns_override=max_turns,
                     timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
+                    label="pm", max_continuations=pm_max_conts,
+                    task_id=f"pm_{kind}",
+                    budget_state=budget_state, budgets_cfg=budgets_cfg,
+                    metrics=metrics, _budget_exceeded=_budget_exceeded,
                     ext_ctx=ext_ctx,
                 )
             except StopRequested:
@@ -1552,6 +1561,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     _done_blk, _failed_blk = _format_split_history_blocks(repo, max_items=_hist_max)
                 else:
                     _done_blk, _failed_blk = "(disabled)", "(disabled)"
+                _pm_max_turns_boot = int(getattr(args, "pm_bootstrap_max_turns", 28) or 28)
                 ctx = {
                     "analysis_md": str(analysis_md), "inv_md": str(inv_md),
                     "repo": str(repo), "run_dir": str(run_dir),
@@ -1565,9 +1575,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "task_history_block": _format_history_block(repo, max_items=_hist_max) if _hist_enabled else "(disabled)",
                     "done_tasks_block": _done_blk,
                     "failed_tasks_block": _failed_blk,
+                    "turn_budget_warning": PM_TURN_BUDGET_WARNING.replace("LIMITED", f"LIMITED (max {_pm_max_turns_boot} turns)"),
                 }
                 pm_prompt = _patch_prompt_for_claude(append_pm_output_contract(store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx)))
-                pm_out = await _run_pm_structured(pm_prompt, max_turns=int(getattr(args, "pm_bootstrap_max_turns", 30) or 30), cycle_idx=cycle_idx, kind="bootstrap", output_path=pm_output_path)
+                pm_out = await _run_pm_structured(pm_prompt, max_turns=_pm_max_turns_boot, cycle_idx=cycle_idx, kind="bootstrap", output_path=pm_output_path)
                 if pm_out is None:
                     metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=1, error="structured_output_failed")
                     return False
@@ -1626,6 +1637,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     _done_blk_i, _failed_blk_i = _format_split_history_blocks(repo, max_items=_hist_max_i)
                 else:
                     _done_blk_i, _failed_blk_i = "(disabled)", "(disabled)"
+                _pm_max_turns_inc = int(getattr(args, "pm_incremental_max_turns", 18) or 18)
                 ctx = {
                     "analysis_md": str(analysis_md), "inv_md": str(inv_md),
                     "repo": str(repo), "run_dir": str(run_dir),
@@ -1643,9 +1655,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "failed_tasks_block": _failed_blk_i,
                     "task_history_block": _format_history_block(repo, max_items=_hist_max_i) if _hist_enabled_i else "(disabled)",
                     "done_tasks_block": _done_blk_i,
+                    "turn_budget_warning": PM_TURN_BUDGET_WARNING.replace("LIMITED", f"LIMITED (max {_pm_max_turns_inc} turns)"),
                 }
                 pm_prompt = _patch_prompt_for_claude(append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx)))
-                pm_out = await _run_pm_structured(pm_prompt, max_turns=int(getattr(args, "pm_incremental_max_turns", 15) or 15), cycle_idx=cycle_idx, kind="incremental" if need_incremental else "refresh", output_path=pm_output_path)
+                pm_out = await _run_pm_structured(pm_prompt, max_turns=_pm_max_turns_inc, cycle_idx=cycle_idx, kind="incremental" if need_incremental else "refresh", output_path=pm_output_path)
                 if pm_out is None:
                     metrics.event("pm_end", cycle=cycle_idx, kind="incremental" if need_incremental else "refresh", rc=1, error="structured_output_failed")
                     return False
@@ -1738,6 +1751,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         tasks_root.mkdir(parents=True, exist_ok=True)
 
         iterations = int(getattr(args, "iterations", 10) or 10)
+
+        # --- Cycle-start git health check ---
+        ensure_clean_working_tree(repo)
 
         # --- Pre-cycle build health check ---
         if build_enabled and not stop_path.exists():

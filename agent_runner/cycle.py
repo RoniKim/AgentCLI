@@ -36,6 +36,7 @@ from .gitops import (
     remove_worktree,
     handle_worktree_patch,
     check_and_remove_stale_git_lock,
+    ensure_clean_working_tree,
 )
 from .inventory import build_repo_inventory, write_repo_inventory_files
 from .todo import read_current_todo, format_todo_block
@@ -59,6 +60,7 @@ from .prompts import (
     QA_INSTRUCTIONS_DEFAULT,
     REPORTER_INSTRUCTIONS_DEFAULT,
     PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT,
+    PM_TURN_BUDGET_WARNING,
 )
 from .reporting import collect_shutdown_context, build_local_shutdown_report
 from .run_dir import make_run_dir, find_latest_run_dir
@@ -1169,6 +1171,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "task_history_block": _format_history_block(repo, max_items=_hist_max) if _hist_enabled else "(disabled)",
                         "done_tasks_block": _done_blk,
                         "failed_tasks_block": _failed_blk,
+                        "turn_budget_warning": PM_TURN_BUDGET_WARNING.replace("LIMITED", f"LIMITED (max {args.pm_bootstrap_max_turns} turns)"),
                     }
                     pm_prompt = append_pm_output_contract(store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx))
                     pm_out = await _run_pm_structured(
@@ -1294,6 +1297,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "failed_tasks_block": _failed_blk_i,
                         "task_history_block": _format_history_block(repo, max_items=_hist_max_i) if _hist_enabled_i else "(disabled)",
                         "done_tasks_block": _done_blk_i,
+                        "turn_budget_warning": PM_TURN_BUDGET_WARNING.replace("LIMITED", f"LIMITED (max {args.pm_incremental_max_turns} turns)"),
                     }
                     pm_prompt = append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx))
                     pm_out = await _run_pm_structured(
@@ -1660,6 +1664,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
             tasks_root = run_dir / "tasks"
             tasks_root.mkdir(parents=True, exist_ok=True)
+
+            # --- Cycle-start git health check ---
+            ensure_clean_working_tree(repo)
 
             # --- Pre-cycle build health check ---
             if build_enabled and not stop_path.exists():

@@ -39,6 +39,77 @@ def extract_json_object(text: str) -> Optional[str]:
     return None
 
 
+def extract_pm_json_object(text: str) -> Optional[str]:
+    """PM-specific JSON extractor using balanced brace counting.
+
+    Scans all top-level ``{...}`` blocks with balanced braces and returns
+    the **last** one that contains both ``"kind"`` and ``"tasks"`` keys —
+    the typical PM output pattern.  Falls back to ``extract_json_object``
+    if no PM-shaped block is found.
+    """
+    s = (text or "").strip()
+    if not s:
+        return None
+
+    # Try fenced code blocks first (same as extract_json_object)
+    m = _JSON_FENCE_RE.search(s)
+    if m:
+        inner = (m.group(1) or "").strip()
+        if '"kind"' in inner and '"tasks"' in inner:
+            return inner
+
+    # Balanced-brace scan: collect all top-level {...} blocks
+    candidates: list[str] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        if s[i] == '{':
+            depth = 1
+            start = i
+            i += 1
+            in_string = False
+            escape = False
+            while i < n and depth > 0:
+                ch = s[i]
+                if escape:
+                    escape = False
+                elif ch == '\\' and in_string:
+                    escape = True
+                elif ch == '"' and not escape:
+                    in_string = not in_string
+                elif not in_string:
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                i += 1
+            if depth == 0:
+                candidates.append(s[start:i])
+        else:
+            i += 1
+
+    # Prefer the last block that looks like PM output
+    pm_block: Optional[str] = None
+    for block in reversed(candidates):
+        if '"kind"' in block and '"tasks"' in block:
+            pm_block = block
+            break
+
+    if pm_block is not None:
+        return pm_block
+
+    # Any candidate that parses as JSON
+    for block in reversed(candidates):
+        try:
+            json.loads(block)
+            return block
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    # Fall back to original extractor
+    return extract_json_object(text)
+
+
 def _loose_json_repairs(raw: str) -> str:
     """Small, safe repairs for common JSON drift.
 
@@ -226,11 +297,23 @@ def normalize_pm_output_dict(data: Any, *, kind_hint: str = "") -> Optional[dict
 def parse_pm_output(text: str, *, kind_hint: str = "") -> Optional["PMOutputV2"]:
     """Parse and validate PM final output robustly.
 
-    Tries strict PMOutputV2 first, then attempts normalization of common variants.
+    Tries PM-specific extractor first, then strict PMOutputV2, then normalization.
     """
     from .schemas import PMOutputV2  # local import to avoid import cycles
 
-    data = loads_json_object(text)
+    # Try PM-specific balanced-brace extractor first
+    pm_raw = extract_pm_json_object(text)
+    data = None
+    if pm_raw:
+        try:
+            data = json.loads(pm_raw)
+        except (json.JSONDecodeError, ValueError):
+            try:
+                data = json.loads(_loose_json_repairs(pm_raw))
+            except (json.JSONDecodeError, ValueError):
+                pass
+    if data is None:
+        data = loads_json_object(text)
     if data is None:
         return None
     try:
@@ -281,7 +364,19 @@ def parse_pm_output_with_errors(text: str, *, kind_hint: str = "") -> tuple[Opti
     """
     from .schemas import PMOutputV2  # local import to avoid import cycles
 
-    data = loads_json_object(text)
+    # Try PM-specific balanced-brace extractor first
+    pm_raw = extract_pm_json_object(text)
+    data = None
+    if pm_raw:
+        try:
+            data = json.loads(pm_raw)
+        except (json.JSONDecodeError, ValueError):
+            try:
+                data = json.loads(_loose_json_repairs(pm_raw))
+            except (json.JSONDecodeError, ValueError):
+                pass
+    if data is None:
+        data = loads_json_object(text)
     if data is None:
         return None, ["<json_parse_failed>"], []
     try:

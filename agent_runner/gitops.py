@@ -40,6 +40,56 @@ def check_and_remove_stale_git_lock(repo: Path, max_age_seconds: int = 300) -> b
         return False
 
 
+def ensure_clean_working_tree(repo: Path) -> bool:
+    """Check for and resolve conflict/dirty state at cycle start.
+
+    Detects UU/AA/DD conflict markers via ``git status --porcelain`` and
+    attempts recovery via ``git merge --abort`` → ``git checkout -- .`` →
+    ``git clean -fd``.
+
+    Returns True if the tree is clean (or was cleaned), False if recovery failed.
+    """
+    check_and_remove_stale_git_lock(repo)
+    code, out = run_cmd(["git", "status", "--porcelain"], cwd=repo, timeout_sec=60)
+    if code != 0:
+        eprint(f"[WARN] ensure_clean_working_tree: git status failed (rc={code})")
+        return False
+
+    if not out.strip():
+        return True  # already clean
+
+    # Check for conflict markers (UU, AA, DD, AU, UA, DU, UD)
+    conflict_prefixes = {"UU", "AA", "DD", "AU", "UA", "DU", "UD"}
+    has_conflicts = False
+    for line in out.splitlines():
+        if len(line) >= 2 and line[:2] in conflict_prefixes:
+            has_conflicts = True
+            break
+
+    if not has_conflicts:
+        return True  # dirty but no conflicts — leave as-is
+
+    eprint("[WARN] Conflict state detected in working tree; attempting recovery...")
+
+    # Try merge --abort first (covers mid-merge conflicts)
+    run_cmd(["git", "merge", "--abort"], cwd=repo, timeout_sec=30)
+
+    # Reset tracked files and remove untracked artifacts
+    run_cmd(["git", "checkout", "--", "."], cwd=repo, timeout_sec=60)
+    run_cmd(["git", "clean", "-fd"], cwd=repo, timeout_sec=60)
+
+    # Verify recovery
+    code2, out2 = run_cmd(["git", "status", "--porcelain"], cwd=repo, timeout_sec=60)
+    if code2 == 0 and not any(
+        ln[:2] in conflict_prefixes for ln in (out2 or "").splitlines() if len(ln) >= 2
+    ):
+        eprint("[INFO] Working tree conflict state resolved.")
+        return True
+
+    eprint("[WARN] ensure_clean_working_tree: conflict recovery incomplete.")
+    return False
+
+
 def git_head(repo: Path) -> str:
     code, out = run_cmd(["git", "rev-parse", "HEAD"], cwd=repo, timeout_sec=60)
     return out.strip() if code == 0 else ""
@@ -289,6 +339,11 @@ def create_task_branch(repo: Path, task_id: str, task_title: str = "") -> TaskBr
         rc_pop, out_pop = run_cmd(["git", "stash", "pop"], cwd=repo, timeout_sec=120)
         if rc_pop != 0:
             eprint(f"[WARN] git stash pop failed (rc={rc_pop}): {out_pop[:200]}")
+            # Clean up conflict state so the branch starts clean
+            run_cmd(["git", "checkout", "--", "."], cwd=repo, timeout_sec=60)
+            run_cmd(["git", "clean", "-fd"], cwd=repo, timeout_sec=60)
+            run_cmd(["git", "stash", "drop"], cwd=repo, timeout_sec=30)
+            eprint("[INFO] Cleaned up failed stash pop; branch starts clean (stashed changes dropped).")
 
     eprint(f"[INFO] Created task branch: {branch_name} (base={base_branch}, commit={base_commit[:8]})")
     return TaskBranch(

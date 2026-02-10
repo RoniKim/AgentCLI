@@ -161,6 +161,17 @@ QA_INSTRUCTIONS_DEFAULT = (
 )
 
 
+PM_TURN_BUDGET_WARNING = (
+    "<turn_budget_warning>\n"
+    "CRITICAL — Turn Budget Management:\n"
+    "- You have a LIMITED number of tool-call turns. Do NOT spend all turns on reading/analysis.\n"
+    "- Reserve at least 3 turns for writing PROJECT_ANALYSIS.md and producing the final JSON.\n"
+    "- Prefer REPO_INVENTORY.md and digest over individual file reads.\n"
+    "- If you are running low on turns, STOP reading and produce the JSON output immediately.\n"
+    "- Your FINAL message MUST be the JSON object. If you run out of turns without outputting JSON, the entire run fails.\n"
+    "</turn_budget_warning>\n"
+)
+
 PM_BOOTSTRAP_TEMPLATE_DEFAULT = """You are Planner/PM.
 
 BOOTSTRAP MODE (first-time; expensive but must be done once):
@@ -212,6 +223,8 @@ Hard rules:
 - TASK SIZING: Aim for 3-7 tasks per cycle. Bundle related small fixes (same theme/module) into one task.
   Do NOT create micro-tasks (1-5 line single-file changes). Merge them with related work.
 - No questions to the user unless required for ambiguity; use open_questions in JSON.
+
+{turn_budget_warning}
 
 Completed tasks (do NOT re-create):
 {done_tasks_block}
@@ -280,6 +293,8 @@ Rules:
   Do NOT create micro-tasks (1-5 line single-file changes). Merge them with related work.
 - Avoid broad scans: inspect changed files + direct dependencies only.
 - No questions unless required for ambiguity; use open_questions in JSON.
+
+{turn_budget_warning}
 
 Completed tasks (do NOT re-create):
 {done_tasks_block}
