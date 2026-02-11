@@ -321,6 +321,42 @@ def count_unresolved_failures(
         return 0
 
 
+def count_consecutive_title_failures(
+    repo: Path,
+    title: str,
+    *,
+    max_lookback: int = 20,
+) -> int:
+    """Count how many times a task with the given title failed consecutively (most-recent first).
+
+    Scans the most recent ``max_lookback`` records matching *title*.
+    Counts backwards from newest: increments for each FAILED/failed status,
+    stops at the first DONE or non-failure status.
+
+    Returns 0 if no failures are found or on any error. Never raises.
+    """
+    try:
+        conn = _connect(repo)
+        try:
+            rows = conn.execute(
+                "SELECT status FROM task_history "
+                "WHERE title = ? ORDER BY id DESC LIMIT ?",
+                (str(title), int(max_lookback)),
+            ).fetchall()
+            count = 0
+            for (status,) in rows:
+                if status.upper() in ("FAILED", "FAIL"):
+                    count += 1
+                else:
+                    break
+            return count
+        finally:
+            conn.close()
+    except Exception as exc:
+        eprint(f"[WARN] task_history.count_consecutive_title_failures failed: {exc}")
+        return 0
+
+
 def _title_resolved(failed_title: str, done_corpus: str) -> bool:
     """Check if a failed task's title is semantically covered by done tasks.
 

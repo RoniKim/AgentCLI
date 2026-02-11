@@ -8,6 +8,7 @@ from pathlib import Path
 from .backends.factory import get_runner
 from .preflight import run_preflight
 from .process_guard import init_process_guard, install_signal_handlers, terminate_all_children
+from .reporting import write_emergency_shutdown_report
 from .run_dir import find_latest_run_dir, make_run_dir
 from .utils import detect_stop_reason, eprint
 
@@ -134,10 +135,18 @@ def run(args: argparse.Namespace) -> int:
     try:
         return asyncio.run(_main_async_dispatch(args))
     except KeyboardInterrupt:
+        _run_dir = str(getattr(args, "run_dir", "") or "").strip()
+        if _run_dir:
+            _repo = Path(str(getattr(args, "repo", "") or ".")).resolve()
+            write_emergency_shutdown_report(Path(_run_dir), "KeyboardInterrupt", repo=_repo)
         terminate_all_children()
         return 130
     except Exception as ex:
         eprint(f"[FATAL] {ex}")
         eprint(traceback.format_exc())
+        _run_dir = str(getattr(args, "run_dir", "") or "").strip()
+        if _run_dir:
+            _repo = Path(str(getattr(args, "repo", "") or ".")).resolve()
+            write_emergency_shutdown_report(Path(_run_dir), f"{type(ex).__name__}: {ex}", repo=_repo)
         terminate_all_children()
         return 1

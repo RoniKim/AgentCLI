@@ -97,7 +97,7 @@ from ..skills import (
 )
 from ..skills.match import suggest_skills
 from ..shared import load_json_if_exists as _load_json_if_exists, inline_skills_for as _inline_skills_for, format_skill_selection as _format_skill_selection
-from ..task_history import record_task as _record_task_history, format_history_block as _format_history_block, format_split_history_blocks as _format_split_history_blocks, count_unresolved_failures as _count_unresolved_failures
+from ..task_history import record_task as _record_task_history, format_history_block as _format_history_block, format_split_history_blocks as _format_split_history_blocks, count_unresolved_failures as _count_unresolved_failures, count_consecutive_title_failures as _count_consecutive_title_failures
 from ..progress import print_cycle_report, TokenTracker, extract_claude_tokens
 from ..tracing import TraceCtx, new_trace_id
 from ..utils import (
@@ -1456,6 +1456,17 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 metrics.event("pm_structured_parse", cycle=cycle_idx, attempt=attempt, ok=True)
                 return parsed
             metrics.event("pm_structured_parse", cycle=cycle_idx, attempt=attempt, ok=False)
+
+            # Early exit: quota or repetitive garbage — no point retrying
+            if "<quota_detected>" in missing:
+                eprint("[PM] Quota/rate-limit text detected in PM output — aborting PM structured retries.")
+                metrics.event("pm_garbage_detected", cycle=cycle_idx, kind="quota")
+                raise Exception("quota exceeded — detected in PM output")
+            if "<repetitive_output>" in missing:
+                eprint("[PM] Repetitive/garbage output detected — aborting PM structured retries.")
+                metrics.event("pm_garbage_detected", cycle=cycle_idx, kind="repetitive")
+                break
+
             if attempt < retries:
                 repair_limit = int(budgets_cfg.get("max_total_repair_attempts_per_run") or 0)
                 if _budget_exceeded("total_repairs", budget_state["total_repairs"], repair_limit):
@@ -1823,11 +1834,28 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             if stop_path.exists():
                 break
 
+            max_consecutive_failures = int(getattr(args, "max_consecutive_task_failures", 3) or 3)
             next_task: Optional[TaskItem] = None
             processed = done_set | skipped_set
             for t in tasks:
                 if t.id in processed:
                     continue
+                # Persistent failure check: skip tasks that failed too many times consecutively
+                if bool(getattr(args, "task_history_enabled", True)):
+                    consec = _count_consecutive_title_failures(repo, t.title)
+                    if consec >= max_consecutive_failures:
+                        eprint(f"[SKIP] Task {t.id} '{t.title}' failed {consec} times consecutively (>= {max_consecutive_failures}); skipping.")
+                        skipped_set.add(t.id)
+                        state.setdefault("failed", []).append({
+                            "task": t.id, "reason": "persistent_failure",
+                            "detail": f"Failed {consec} consecutive times across runs"
+                        })
+                        save_state(state_path, state)
+                        _record_history(t.id, t.title, "failed", reason="persistent_failure",
+                                        detail=f"Auto-skipped after {consec} consecutive failures", files=t.files, cycle=cycle_idx)
+                        metrics.event("task_persistent_skip", cycle=cycle_idx, task_id=t.id, consecutive_failures=consec)
+                        task_results.append({"id": t.id, "title": t.title, "status": "skipped", "reason": "persistent_failure", "duration": -1})
+                        continue
                 # Dependency check: all depends_on tasks must be in done_set
                 if t.depends_on:
                     unmet = [dep for dep in t.depends_on if dep not in done_set]

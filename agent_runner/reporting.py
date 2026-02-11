@@ -427,3 +427,49 @@ def build_local_shutdown_report(
     lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def write_emergency_shutdown_report(
+    run_dir: Path,
+    reason: str,
+    *,
+    repo: Optional[Path] = None,
+) -> Optional[Path]:
+    """Generate EMERGENCY_SHUTDOWN.md using existing report infrastructure.
+
+    Designed to be called from exception handlers — never raises.
+    Skips if SHUTDOWN_REPORT.md already exists (normal shutdown already handled).
+    Returns the path to the written file, or None on skip/error.
+    """
+    try:
+        run_dir = Path(run_dir)
+        if not run_dir.exists():
+            return None
+
+        # Skip if normal shutdown report already exists
+        if (run_dir / "SHUTDOWN_REPORT.md").exists():
+            return None
+
+        emergency_path = run_dir / "EMERGENCY_SHUTDOWN.md"
+        # Also skip if emergency report already exists
+        if emergency_path.exists():
+            return None
+
+        # Infer repo from run_dir if not provided
+        if repo is None:
+            # run_dir is typically <repo>/.agent_runs/<run_id>
+            candidate = run_dir.parent.parent
+            if candidate.exists() and (candidate / ".git").exists():
+                repo = candidate
+            else:
+                repo = run_dir
+
+        report = build_local_shutdown_report(
+            repo=repo,
+            run_dir=run_dir,
+            reason=f"EMERGENCY: {reason}",
+        )
+        emergency_path.write_text(report, encoding="utf-8", errors="replace")
+        return emergency_path
+    except Exception:
+        return None

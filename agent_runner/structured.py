@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any, Optional, Type, TypeVar
 
-from .utils import eprint
+from .utils import eprint, has_quota_text
 
 T = TypeVar("T")
 
@@ -357,12 +357,45 @@ def summarize_validation_errors(err: Exception, *, max_items: int = 6) -> tuple[
     return missing[:max_items], type_errors[:max_items]
 
 
+def _detect_garbage_output(text: str) -> Optional[str]:
+    """Detect garbage/repetitive PM output before expensive parsing.
+
+    Returns a sentinel error string if garbage is detected, None otherwise.
+    - ``<quota_detected>`` if quota/rate-limit text is found.
+    - ``<repetitive_output>`` if a single line dominates ≥50% of all lines.
+    """
+    if not text or not text.strip():
+        return None
+
+    # 1. Quota / rate-limit needle check
+    if has_quota_text(text):
+        return "<quota_detected>"
+
+    # 2. Repetitive line frequency check
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 10:
+        return None  # too few lines to judge
+
+    from collections import Counter
+    freq = Counter(lines)
+    most_common_line, most_common_count = freq.most_common(1)[0]
+    if most_common_count >= len(lines) * 0.5:
+        return "<repetitive_output>"
+
+    return None
+
+
 def parse_pm_output_with_errors(text: str, *, kind_hint: str = "") -> tuple[Optional["PMOutputV2"], list[str], list[str]]:
     """Parse PM output and return validation error summaries.
 
     Returns (model, missing_fields, type_errors).
     """
     from .schemas import PMOutputV2  # local import to avoid import cycles
+
+    # Early detection: quota text or repetitive garbage
+    garbage = _detect_garbage_output(text)
+    if garbage is not None:
+        return None, [garbage], []
 
     # Try PM-specific balanced-brace extractor first
     pm_raw = extract_pm_json_object(text)
