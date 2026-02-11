@@ -48,8 +48,14 @@
   "autopilot": true,
   "loop": true,
   "loop_sleep_seconds": 60,
-  "loop_max_cycles": 20,
+  "loop_max_cycles": 10,
   "loop_idle_exit_after": 1800,
+  "max_consecutive_failed_cycles": 3,
+  "budget_reset_per_cycle": true,
+  "quota_check_enabled": true,
+  "quota_five_hour_max_utilization": 95,
+  "quota_seven_day_max_utilization": 95,
+  "quota_wait_for_reset": true,
   "continuous": true,
   "iterations": 10,
   "max_turns_per_task": 18,
@@ -187,5 +193,11 @@
   "failover_max_switches": 1,
   "plugins_enabled": false,
   "plugins_allowlist": [],
-  "plugins_strict": true
+  "plugins_strict": true,
+  "task_history_enabled": true,
+  "task_history_max_items": 15,
+  "max_consecutive_task_failures": 3,
+  "goals_enabled": true,
+  "goals_auto_generate": true,
+  "goals_auto_check": true
 }
