@@ -506,47 +506,16 @@ async def main_async(args: argparse.Namespace) -> int:
 
 
         def is_quota_exception(ex: Exception) -> bool:
-            """Detect OpenAI/SDK quota/billing exhaustion to exit gracefully."""
-            needles = (
-                "insufficient_quota",
-                "quota exceeded",
-                "exceeded your current quota",
-                "billing hard limit",
-                "hard limit",
-                "plan and billing",
-                "payment required",
-                # Codex/CLI style usage-limit strings
-                "you've hit your usage limit",
-                "you've hit your limit",
-                "hit your limit",
-                "purchase more credits",
-                "upgrade to pro",
-                "codex/settings/usage",
-                "user limit",
-                "user_limit",
-                "credit balance is too low",
-                "plans & billing",
-                "purchase credits",
-                "spend limit",
-                "insufficient credits",
-                "usage limit",
-                "budgetexceeded",
-                # Claude Code CLI rate-limit patterns
-                "usage cap",
-                "reached your",
-                "token limit exceeded",
-                "account limit",
-                "api key limit",
-                "resets",
-            )
+            """Detect OpenAI/SDK quota/billing exhaustion to exit gracefully.
+
+            Delegates to the canonical ``has_quota_text`` in utils.py.
+            """
             for e in _iter_exc_chain(ex):
                 try:
                     msg = (str(e) or "").lower()
                 except Exception:
                     msg = ""
                 rep = (repr(e) or "").lower()
-                if any(n in msg for n in needles) or any(n in rep for n in needles):
-                    return True
                 if has_quota_text(msg) or has_quota_text(rep):
                     return True
             return False

@@ -246,16 +246,27 @@ def safe_write_text(path: Path, content: str) -> None:
 
 
 def _has_quota_text(text: str) -> bool:
+    """Canonical quota/billing/rate-limit needle list.
+
+    This is the **single source of truth** — backends should call
+    ``has_quota_text`` instead of maintaining their own needle lists.
+    """
     s = (text or "").lower()
     if not s:
         return False
     needles = (
+        # OpenAI / generic billing
         "insufficient_quota",
         "quota exceeded",
         "exceeded your current quota",
+        "quota exhausted",
         "billing hard limit",
         "hard limit",
+        "plan and billing",
+        "plans & billing",
         "payment required",
+        "budgetexceeded",
+        # Usage-limit strings (Codex / CLI)
         "you've hit your usage limit",
         "you've hit your limit",
         "hit your limit",
@@ -263,12 +274,10 @@ def _has_quota_text(text: str) -> bool:
         "upgrade to pro",
         "codex/settings/usage",
         "usage limit",
-        "quota exhausted",
         "user limit",
         "user_limit",
         "credit balance is too low",
         "insufficient credits",
-        "plans & billing",
         "purchase credits",
         "spend limit",
         "monthly spend limit",
@@ -278,7 +287,7 @@ def _has_quota_text(text: str) -> bool:
         "token limit exceeded",
         "account limit",
         "api key limit",
-        "resets",
+        "limit resets",
     )
     return any(n in s for n in needles)
 
