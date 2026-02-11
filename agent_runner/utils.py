@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Sequence, Tuple, Any, Optional, Iterable
 
 
+STOP_REASON_QUOTA_UTILIZATION = "quota_utilization"
 STOP_REASON_QUOTA = "quota_exhausted"
 STOP_REASON_STOP_FILE = "stop_file"
 STOP_REASON_ALL_TASKS_DONE = "all_tasks_done"
@@ -22,6 +23,7 @@ STOP_REASON_OK = "ok"
 
 STOP_REASON_PRIORITY: list[str] = [
     STOP_REASON_QUOTA,
+    STOP_REASON_QUOTA_UTILIZATION,
     STOP_REASON_STOP_FILE,
     STOP_REASON_PROJECT_COMPLETE,
     STOP_REASON_ALL_TASKS_DONE,
@@ -296,6 +298,157 @@ def _has_quota_text(text: str) -> bool:
 
 # Public alias (used by backends) for quota/credits text detection
 has_quota_text = _has_quota_text
+
+
+# ---------------------------------------------------------------------------
+# OAuth usage / quota check (unofficial endpoint)
+# ---------------------------------------------------------------------------
+
+def _load_oauth_token() -> Optional[str]:
+    """Load Claude Code OAuth access token from credentials file.
+
+    Looks for ``~/.claude/.credentials.json`` on all platforms.
+    Returns the access token string, or None if unavailable.
+    """
+    cred_path = Path.home() / ".claude" / ".credentials.json"
+    if not cred_path.exists():
+        return None
+    try:
+        data = json.loads(cred_path.read_text(encoding="utf-8"))
+        return data.get("claudeAiOauth", {}).get("accessToken")
+    except Exception:
+        return None
+
+
+def fetch_quota_usage() -> Optional[dict]:
+    """Fetch current quota utilization from the Claude OAuth usage endpoint.
+
+    Returns a dict like::
+
+        {
+            "five_hour": {"utilization": 30.0, "resets_at": "2026-02-11T08:59:59+00:00"},
+            "seven_day": {"utilization": 39.0, "resets_at": "2026-02-13T06:59:59+00:00"},
+            ...
+        }
+
+    Returns None on any failure (no token, network error, etc.). Never raises.
+    """
+    token = _load_oauth_token()
+    if not token:
+        return None
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+                "anthropic-beta": "oauth-2025-04-20",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        eprint(f"[WARN] fetch_quota_usage failed: {exc}")
+        return None
+
+
+def check_quota_utilization(
+    *,
+    five_hour_max: float = 95.0,
+    seven_day_max: float = 95.0,
+) -> tuple[str, dict, Optional[str]]:
+    """Check quota and return action recommendation.
+
+    Returns ``(action, usage_info, resets_at)`` where:
+
+    - *action*: ``"ok"`` | ``"wait"`` | ``"stop"`` | ``"skip"``
+    - *usage_info*: ``{"five_hour": float, "seven_day": float}``
+    - *resets_at*: ISO 8601 timestamp (for ``"wait"`` / ``"stop"``) or None
+    """
+    usage = fetch_quota_usage()
+    if usage is None:
+        return ("skip", {}, None)
+
+    info: dict[str, float] = {}
+    five_hour = usage.get("five_hour")
+    seven_day = usage.get("seven_day")
+    if five_hour and five_hour.get("utilization") is not None:
+        info["five_hour"] = float(five_hour["utilization"])
+    if seven_day and seven_day.get("utilization") is not None:
+        info["seven_day"] = float(seven_day["utilization"])
+
+    # Check 7-day first (harder limit — stopping is the only option)
+    if info.get("seven_day", 0) >= seven_day_max:
+        return ("stop", info, (seven_day or {}).get("resets_at"))
+
+    # Check 5-hour (soft limit — can wait for reset)
+    if info.get("five_hour", 0) >= five_hour_max:
+        return ("wait", info, (five_hour or {}).get("resets_at"))
+
+    return ("ok", info, None)
+
+
+def seconds_until_reset(resets_at: Optional[str]) -> int:
+    """Calculate seconds from now until the given ISO 8601 reset timestamp.
+
+    Returns 0 if *resets_at* is None, unparseable, or already in the past.
+    """
+    if not resets_at:
+        return 0
+    try:
+        from datetime import timezone
+        reset_dt: Optional[datetime] = None
+        # Try standard fromisoformat (Python 3.11+ handles timezone offsets)
+        try:
+            reset_dt = datetime.fromisoformat(resets_at)
+        except ValueError:
+            pass
+        # Fallback for Python 3.10: strip timezone and parse manually
+        if reset_dt is None:
+            from datetime import timedelta
+            clean = resets_at.replace("Z", "+00:00")
+            # Split off timezone offset (e.g. "+09:00", "-05:00")
+            tz_str = ""
+            for sep in ("+", "-"):
+                if sep in clean[19:]:
+                    sep_idx = clean.rindex(sep)
+                    dt_part = clean[:sep_idx]
+                    tz_str = clean[sep_idx:]
+                    break
+            else:
+                dt_part = clean
+            # Try with microseconds, then without
+            for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+                try:
+                    reset_dt = datetime.strptime(dt_part, fmt)
+                    break
+                except ValueError:
+                    continue
+            # Apply parsed timezone offset (default to UTC)
+            if reset_dt is not None:
+                offset = timezone.utc
+                if tz_str:
+                    try:
+                        sign = 1 if tz_str[0] == "+" else -1
+                        hm = tz_str[1:].split(":")
+                        offset = timezone(timedelta(
+                            hours=sign * int(hm[0]),
+                            minutes=sign * int(hm[1]) if len(hm) > 1 else 0,
+                        ))
+                    except (ValueError, IndexError):
+                        pass
+                reset_dt = reset_dt.replace(tzinfo=offset)
+        if reset_dt is None:
+            return 0
+        now = datetime.now(timezone.utc)
+        diff = (reset_dt - now).total_seconds()
+        return max(0, int(diff) + 60)  # +60s buffer
+    except Exception:
+        return 0
+
+
 def write_heartbeat(run_dir: Path) -> None:
     """Write a HEARTBEAT file for external monitoring."""
     try:

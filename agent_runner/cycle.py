@@ -2699,6 +2699,9 @@ async def main_async(args: argparse.Namespace) -> int:
         idle_accum = 0
         last_rc = 0
         last_reason = ""
+        consecutive_failures = 0
+        max_consecutive_failed_cycles = int(getattr(args, "max_consecutive_failed_cycles", 3) or 3)
+        budget_reset_per_cycle = bool(getattr(args, "budget_reset_per_cycle", True))
         if args.loop and (not args.loop_max_cycles or args.loop_max_cycles <= 0):
             eprint("[WARN] loop_max_cycles not set; defaulting to 1000 to prevent infinite loops.")
         cycles = 1 if not args.loop else (args.loop_max_cycles if args.loop_max_cycles and args.loop_max_cycles > 0 else 1000)
@@ -2714,14 +2717,38 @@ async def main_async(args: argparse.Namespace) -> int:
                 check_and_remove_stale_git_lock(repo)
                 write_heartbeat(run_dir)
 
+                # --- Per-cycle budget reset ---
+                if budget_reset_per_cycle and cycle_idx > 0:
+                    prev_budget = {
+                        "total_escalations": budget_state["total_escalations"],
+                        "total_continuations": budget_state["total_continuations"],
+                        "total_repairs": budget_state["total_repairs"],
+                    }
+                    budget_state["total_escalations"] = 0
+                    budget_state["total_continuations"] = 0
+                    budget_state["total_repairs"] = 0
+                    budget_state["per_task_escalations"] = {}
+                    budget_state["per_task_continuations"] = {}
+                    eprint(f"[BUDGET] Reset per-cycle (prev: esc={prev_budget['total_escalations']}, "
+                           f"cont={prev_budget['total_continuations']}, rep={prev_budget['total_repairs']})")
+
                 rc, reason, delta = await run_cycle(cycle_idx)
                 last_rc = rc
                 last_reason = reason
                 # 1-line per-cycle summary for unattended ops
                 print(f"[CYCLE] {now_iso()} idx={cycle_idx} rc={rc} reason={reason} progress_delta={delta}")
 
-                if rc != 0:
-                    break
+                # --- Consecutive failure tracking ---
+                cycle_failed = (rc != 0) or reason == "budget_exceeded"
+                if cycle_failed and delta <= 0:
+                    consecutive_failures += 1
+                    eprint(f"[WARN] Consecutive failed cycles: {consecutive_failures}/{max_consecutive_failed_cycles}")
+                    if consecutive_failures >= max_consecutive_failed_cycles:
+                        append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=consecutive_failures count={consecutive_failures}")
+                        eprint(f"[STOP] {consecutive_failures} consecutive failed cycles with no progress — stopping run.")
+                        break
+                else:
+                    consecutive_failures = 0
 
                 if reason == STOP_REASON_QUOTA:
                     break

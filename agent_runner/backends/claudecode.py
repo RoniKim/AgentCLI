@@ -110,7 +110,10 @@ from ..utils import (
     choose_stop_reason,
     detect_stop_reason,
     write_heartbeat,
+    check_quota_utilization,
+    seconds_until_reset,
     STOP_REASON_QUOTA,
+    STOP_REASON_QUOTA_UTILIZATION,
     STOP_REASON_STOP_FILE,
     STOP_REASON_ALL_TASKS_DONE,
     STOP_REASON_PROJECT_COMPLETE,
@@ -2874,6 +2877,13 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     idle_accum = 0
     last_rc = 0
     last_reason = ""
+    consecutive_failures = 0
+    max_consecutive_failed_cycles = int(getattr(args, "max_consecutive_failed_cycles", 3) or 3)
+    budget_reset_per_cycle = bool(getattr(args, "budget_reset_per_cycle", True))
+    quota_check_enabled = bool(getattr(args, "quota_check_enabled", True))
+    quota_5h_max = float(getattr(args, "quota_five_hour_max_utilization", 95) or 95)
+    quota_7d_max = float(getattr(args, "quota_seven_day_max_utilization", 95) or 95)
+    quota_wait_for_reset = bool(getattr(args, "quota_wait_for_reset", True))
     loop_mode = bool(getattr(args, "loop", False))
     loop_max_cycles = int(getattr(args, "loop_max_cycles", 0) or 0)
     loop_sleep_seconds = int(getattr(args, "loop_sleep_seconds", 60) or 60)
@@ -2890,6 +2900,57 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
             check_and_remove_stale_git_lock(repo)
             write_heartbeat(run_dir)
+
+            # --- Pre-cycle quota utilization check ---
+            if quota_check_enabled:
+                q_action, q_info, q_resets = check_quota_utilization(
+                    five_hour_max=quota_5h_max, seven_day_max=quota_7d_max,
+                )
+                _q5h = q_info.get("five_hour", "N/A")
+                _q7d = q_info.get("seven_day", "N/A")
+                if q_action == "stop":
+                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=quota_utilization_7d 5h={_q5h}% 7d={_q7d}%")
+                    eprint(f"[STOP] 7-day quota {_q7d}% >= {quota_7d_max}% — stopping run. (5h={_q5h}%)")
+                    metrics.event("quota_utilization_stop", cycle=cycle_idx, window="seven_day",
+                                  five_hour=_q5h, seven_day=_q7d, resets_at=q_resets or "")
+                    last_reason = STOP_REASON_QUOTA_UTILIZATION
+                    break
+                if q_action == "wait":
+                    wait_sec = seconds_until_reset(q_resets)
+                    if quota_wait_for_reset and wait_sec > 0:
+                        eprint(f"[WAIT] 5-hour quota {_q5h}% >= {quota_5h_max}% — "
+                               f"waiting {wait_sec}s (~{wait_sec // 60}min) until reset. (7d={_q7d}%)")
+                        metrics.event("quota_utilization_wait", cycle=cycle_idx, window="five_hour",
+                                      five_hour=_q5h, seven_day=_q7d, wait_seconds=wait_sec, resets_at=q_resets or "")
+                        await asyncio.sleep(wait_sec)
+                        eprint(f"[WAIT] Quota reset wait complete — resuming.")
+                    elif not quota_wait_for_reset:
+                        append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=quota_utilization_5h 5h={_q5h}% 7d={_q7d}%")
+                        eprint(f"[STOP] 5-hour quota {_q5h}% >= {quota_5h_max}% — "
+                               f"quota_wait_for_reset disabled, stopping. (7d={_q7d}%)")
+                        metrics.event("quota_utilization_stop", cycle=cycle_idx, window="five_hour",
+                                      five_hour=_q5h, seven_day=_q7d, resets_at=q_resets or "")
+                        last_reason = STOP_REASON_QUOTA_UTILIZATION
+                        break
+                    else:
+                        eprint(f"[QUOTA] 5-hour quota {_q5h}% high but reset imminent — proceeding. (7d={_q7d}%)")
+                if q_action == "ok":
+                    eprint(f"[QUOTA] OK (5h={_q5h}%, 7d={_q7d}%)")
+
+            # --- Per-cycle budget reset ---
+            if budget_reset_per_cycle and cycle_idx > 0:
+                prev_budget = {
+                    "total_escalations": budget_state["total_escalations"],
+                    "total_continuations": budget_state["total_continuations"],
+                    "total_repairs": budget_state["total_repairs"],
+                }
+                budget_state["total_escalations"] = 0
+                budget_state["total_continuations"] = 0
+                budget_state["total_repairs"] = 0
+                budget_state["per_task_escalations"] = {}
+                budget_state["per_task_continuations"] = {}
+                eprint(f"[BUDGET] Reset per-cycle (prev: esc={prev_budget['total_escalations']}, "
+                       f"cont={prev_budget['total_continuations']}, rep={prev_budget['total_repairs']})")
 
             rc, reason, delta = await run_cycle(cycle_idx)
             last_rc = rc
@@ -2910,6 +2971,18 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 budget_state["per_task_escalations"] = {k: v for k, v in budget_state["per_task_escalations"].items() if k not in _done_ids}
             if budget_state.get("per_task_continuations"):
                 budget_state["per_task_continuations"] = {k: v for k, v in budget_state["per_task_continuations"].items() if k not in _done_ids}
+
+            # --- Consecutive failure tracking ---
+            cycle_failed = (rc != 0) or reason == "budget_exceeded"
+            if cycle_failed and delta <= 0:
+                consecutive_failures += 1
+                eprint(f"[WARN] Consecutive failed cycles: {consecutive_failures}/{max_consecutive_failed_cycles}")
+                if consecutive_failures >= max_consecutive_failed_cycles:
+                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=consecutive_failures count={consecutive_failures}")
+                    eprint(f"[STOP] {consecutive_failures} consecutive failed cycles with no progress — stopping run.")
+                    break
+            else:
+                consecutive_failures = 0
 
             if reason == STOP_REASON_QUOTA:
                 break
