@@ -95,6 +95,14 @@ def git_head(repo: Path) -> str:
     return out.strip() if code == 0 else ""
 
 
+def has_new_commits(repo: Path, before_head: str) -> bool:
+    """Check if new commits exist since *before_head*."""
+    current = git_head(repo)
+    if not before_head or not current:
+        return False
+    return before_head != current
+
+
 def git_ls_files(repo: Path) -> list[str]:
     code, out = run_cmd(["git", "ls-files"], cwd=repo, timeout_sec=120)
     if code != 0:

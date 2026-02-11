@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from pathlib import Path
 
@@ -155,3 +156,31 @@ def dotnet_test(repo: Path, test_target: str, test_filter: str, log_path: Path, 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(out + "\n", encoding="utf-8", errors="replace")
     return code == 0
+
+
+def extract_build_warnings(log_path: Path, max_warnings: int = 20) -> list[str]:
+    """Extract compiler warning lines from build output.
+
+    Deduplicates by (file, warning code) to avoid noise from multi-TFM builds.
+    """
+    if not log_path.exists():
+        return []
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    pattern = re.compile(r"^.*:\s*warning\s+(CS|RZ|BL|NU)\d{4}:.*$", re.MULTILINE)
+    seen: set[tuple[str, str]] = set()
+    warnings: list[str] = []
+    for m in pattern.finditer(text):
+        line = m.group(0).strip()
+        key_match = re.search(r"([\w.]+)\((\d+),\d+\):\s*warning\s+(\w+\d+)", line)
+        if key_match:
+            key = (key_match.group(1), key_match.group(3))
+            if key in seen:
+                continue
+            seen.add(key)
+        warnings.append(line)
+        if len(warnings) >= max_warnings:
+            break
+    return warnings

@@ -6,6 +6,13 @@ from typing import Iterable, List, Tuple
 from .session import PipelineSession
 from .stages.base import Stage, StageOutcome
 
+# Stop reasons that should propagate through CycleResult for outer-loop handling
+# (imported lazily to avoid circular imports — matched by string value)
+_PROPAGATE_STOP_REASONS = frozenset({
+    "all_tasks_done",
+    "project_complete",
+})
+
 
 @dataclass
 class CycleResult:
@@ -99,4 +106,12 @@ class PipelineManager:
             if not continuous:
                 return CycleResult(rc=0, reason="prepared_only", done_delta=0, stages=stage_results)
 
-        return CycleResult(rc=0, reason="ok", done_delta=session.done_delta, stages=stage_results)
+        # Propagate stop reasons from stage results (e.g. all_tasks_done, project_complete)
+        # so the outer loop can handle them after all stages (including QA) have run.
+        final_reason = "ok"
+        for sr in stage_results:
+            sr_reason = sr.get("reason", "")
+            if sr_reason in _PROPAGATE_STOP_REASONS:
+                final_reason = sr_reason
+                break
+        return CycleResult(rc=0, reason=final_reason, done_delta=session.done_delta, stages=stage_results)

@@ -14,13 +14,14 @@ from typing import Optional, Any
 
 from .analysis_cache import merge_dev_hints_to_global_changelog
 from .docs import load_dotenv_best_effort, resolve_docs_dir, generate_docs_digest
-from .gates import run_build_gate_async, run_test_gate_async
+from .gates import run_build_gate_async, run_test_gate_async, extract_build_warnings
 from .gitops import (
     git_head,
     git_changed_files,
     git_worktree_changed_files,
     git_porcelain,
     has_working_tree_changes,
+    has_new_commits,
     git_untracked_files,
     repo_fingerprint,
     create_checkpoint,
@@ -627,6 +628,10 @@ async def main_async(args: argparse.Namespace) -> int:
                 res = await Runner.run(reporter, prompt, max_turns=int(getattr(args, "report_max_turns", 8)) or 8)
                 out = (res.final_output or "").strip()
                 if out:
+                    # Detect and remove duplicate report content (PM model repeating itself)
+                    half = len(out) // 2
+                    if half > 200 and out[:half].strip() == out[half:].strip():
+                        out = out[:half].strip()
                     report_path.write_text(out + "\n", encoding="utf-8", errors="replace")
                     (run_dir / "PM_SHUTDOWN_REPORT_OUTPUT.txt").write_text(out + "\n", encoding="utf-8", errors="replace")
                 metrics.event("shutdown_report", cycle=cycle, step=step, reason=stop_reason, ok=bool(out))
@@ -851,6 +856,24 @@ async def main_async(args: argparse.Namespace) -> int:
             block = "\n".join(lines) if lines else "(no backlog found)"
             return block, tasks, done_ids
 
+        def _find_latest_dev_log_for_task(task_id: str) -> list[str]:
+            """Find the latest dev log for a given task ID and return tail lines."""
+            dev_logs_dir = run_dir / "dev_logs"
+            if not dev_logs_dir.exists():
+                return []
+            matches = sorted(dev_logs_dir.glob(f"*_{task_id}_*.txt"), key=lambda x: x.stat().st_mtime)
+            if not matches:
+                # Fallback: search in task attempt dirs
+                matches = sorted(run_dir.glob(f"tasks/*_{task_id}/attempt_*/dev_log.txt"), key=lambda x: x.stat().st_mtime)
+            if not matches:
+                return []
+            try:
+                text = matches[-1].read_text(encoding="utf-8", errors="replace")
+                lines = text.strip().splitlines()
+                return lines[-15:]
+            except Exception:
+                return []
+
         def _build_failed_tasks_block() -> str:
             """Build a summary of failed tasks with reasons for PM context."""
             state_path_local = run_dir / "STATE.json"
@@ -866,7 +889,15 @@ async def main_async(args: argparse.Namespace) -> int:
                 if isinstance(f, dict):
                     tid = f.get("task", "?")
                     reason = f.get("reason", "unknown")
+                    detail = f.get("detail", "")
                     lines.append(f"- {tid}: {reason}")
+                    if detail:
+                        lines.append(f"  Detail: {detail}")
+                    dev_log = _find_latest_dev_log_for_task(tid)
+                    if dev_log:
+                        lines.append("  Last dev log (tail):")
+                        for dl in dev_log[-8:]:
+                            lines.append(f"    {dl}")
                 else:
                     lines.append(f"- {f}: unknown")
             return "\n".join(lines)
@@ -1253,6 +1284,13 @@ async def main_async(args: argparse.Namespace) -> int:
                     current_backlog_block, _, _ = _load_backlog_context_for_pm()
                     failed_tasks_block = _build_failed_tasks_block()
 
+                    # Collect build warnings from latest build log
+                    _build_warnings: list[str] = []
+                    _latest_build_logs = sorted(run_dir.glob("**/build.txt"), key=lambda x: x.stat().st_mtime)
+                    if _latest_build_logs:
+                        _build_warnings = extract_build_warnings(_latest_build_logs[-1])
+                    build_warnings_block = "\n".join(_build_warnings) if _build_warnings else "(none)"
+
                     _hist_enabled_i = bool(getattr(args, "task_history_enabled", True))
                     _hist_max_i = int(getattr(args, "task_history_max_items", 50) or 50)
                     if _hist_enabled_i:
@@ -1281,6 +1319,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "task_history_block": _format_history_block(repo, max_items=_hist_max_i) if _hist_enabled_i else "(disabled)",
                         "done_tasks_block": _done_blk_i,
                         "turn_budget_warning": PM_TURN_BUDGET_WARNING.replace("LIMITED", f"LIMITED (max {args.pm_incremental_max_turns} turns)"),
+                        "build_warnings_block": build_warnings_block,
                     }
                     pm_prompt = append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx))
                     pm_out = await _run_pm_structured(
@@ -1765,6 +1804,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 metrics.event("task_start", cycle=cycle_idx, step=step, task_id=next_task.id)
                 task_outer_t0 = time.time()
+                task_head_before = git_head(repo)
 
                 tb: Optional[TaskBranch] = None
                 cp: Optional[RepoCheckpoint] = None
@@ -2348,6 +2388,15 @@ async def main_async(args: argparse.Namespace) -> int:
                         skipped_set.add(next_task.id)
                         continue
                     return 1, "exhausted_attempts", 0, (len(done_set) > before_done)
+                # Phantom completion detection: task marked done but no git commits created
+                if not has_new_commits(repo, task_head_before):
+                    logger.warning(f"Task {next_task.id} marked complete but no commits found (phantom completion)")
+                    metrics.event("phantom_completion_detected", task_id=next_task.id, cycle=cycle_idx)
+                    state.setdefault("warnings", []).append({
+                        "task": next_task.id,
+                        "type": "phantom_completion",
+                        "detail": "Task marked done but no git commits were created",
+                    })
                 # Mark done only after gates
                 done_set.add(next_task.id)
                 # Clean up previous failure entries for this task (e.g. from earlier cycles)
@@ -2583,9 +2632,9 @@ async def main_async(args: argparse.Namespace) -> int:
                 if reason == STOP_REASON_QUOTA:
                     return StageOutcome.stop(STOP_REASON_QUOTA, rc=0)
                 if reason == STOP_REASON_PROJECT_COMPLETE:
-                    return StageOutcome.stop(STOP_REASON_PROJECT_COMPLETE, rc=0)
+                    return StageOutcome.ok(STOP_REASON_PROJECT_COMPLETE)
                 if reason == STOP_REASON_ALL_TASKS_DONE:
-                    return StageOutcome.stop(STOP_REASON_ALL_TASKS_DONE, rc=0)
+                    return StageOutcome.ok(STOP_REASON_ALL_TASKS_DONE)
                 if reason == STOP_REASON_STOP_FILE:
                     return StageOutcome.stop(STOP_REASON_STOP_FILE, rc=0)
                 if rc != 0:

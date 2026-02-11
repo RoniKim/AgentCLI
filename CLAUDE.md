@@ -177,14 +177,42 @@ run_dir/
 - `.doc/` and `configs/` directories are gitignored — don't expect them in fresh clones
 - `.claude/` directory is gitignored — session state is ephemeral
 
-## Testing
+## Code Verification (코드 검증)
 
-No formal test suite exists yet. Verify changes using:
+> **중요**: 프로젝트 코드를 수정한 후 빌드/실행 테스트를 수행하지 마시오.
+> 대신 아래의 **철저한 정적 검사 및 검증** 절차를 따르시오.
 
-1. **Preflight check**: `python agent_cli.py --preflight` (environment validation)
-2. **Smoke test**: `python -m agent_runner.backends.claude_smoke_test --prompt "test"`
-3. **Interactive shell**: Launch `python agent_cli.py` and use `/doctor` command
-4. **Build/test gates**: Configure `build_cmd` and `test_cmd` in config for target project
+코드 변경 후 반드시 다음 정적 검증 절차를 수행한다:
+
+### 1. 구문 및 import 검증
+- 수정된 파일의 Python 구문 오류 여부를 확인 (`py_compile` 수준)
+- import 경로가 실제 모듈/패키지 구조와 일치하는지 검증
+- 순환 import가 발생하지 않는지 확인
+
+### 2. 타입 및 시그니처 정합성
+- 함수/메서드 시그니처 변경 시 모든 호출부(caller)가 새 시그니처와 일치하는지 검증
+- 반환 타입이 호출부의 기대 타입과 호환되는지 확인
+- Pydantic 모델 필드 변경 시 해당 모델을 사용하는 모든 코드의 정합성 검증
+
+### 3. 인터페이스 계약 준수
+- ABC/프로토콜 변경 시 모든 하위 구현 클래스가 계약을 준수하는지 확인
+- `Stage`, `AbstractAgentRunner` 등 핵심 인터페이스의 구현 완전성 검증
+- 필수 메서드 누락, 시그니처 불일치 여부 확인
+
+### 4. 상수 및 설정 정합성
+- `DEFAULTS` dict 키 추가/변경 시 `shell.py`, `cycle.py` 양쪽 모두 반영 여부 확인
+- 설정 키 이름이 CLI args, config JSON, DEFAULTS 간에 일관성 있는지 검증
+- 문자열 상수(STOP_REASON_* 등)가 참조하는 모든 곳에서 동일한지 확인
+
+### 5. 영향 범위 분석
+- 변경된 함수/클래스/상수를 참조하는 모든 파일을 Grep으로 탐색
+- 변경이 파급되는 모든 모듈에서 논리적 정합성 확인
+- 특히 `cycle.py`(4000+ lines) 변경 시 `--run-now` 경로와 interactive shell 경로 양쪽 검증
+
+### 6. 보안 및 안전성 검토
+- OWASP Top 10 취약점 (command injection, path traversal 등) 도입 여부 점검
+- `process_guard.py` 관련 변경 시 Windows API 호환성 확인
+- Git 조작 코드 변경 시 force-push, hard-reset 등 위험 동작이 추가되지 않았는지 확인
 
 ## Directory Structure Summary
 

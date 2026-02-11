@@ -107,6 +107,12 @@ Rules:
 Completed tasks (do NOT re-create):
 {done_tasks_block}
 
+BUILD WARNINGS (from latest build):
+{build_warnings_block}
+
+If there are significant warnings (null-reference CS8602, missing await CS4014, etc.),
+consider creating a task to fix them — especially if warnings count exceeds 20.
+
 FAILED TASKS — MANDATORY RETRY (MUST address each one):
 Each failed task below MUST be addressed in the new backlog.
 For each: create a retry task with a DIFFERENT approach that avoids the failure cause.
