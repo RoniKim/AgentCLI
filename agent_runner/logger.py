@@ -13,6 +13,15 @@ from typing import Any, Dict, Optional
 from .utils import now_iso
 
 
+class _ProcessGuardFilter(logging.Filter):
+    """Filter out noisy DEBUG-level messages from process_guard."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "agent_runner.process_guard" and record.levelno <= logging.DEBUG:
+            return False
+        return True
+
+
 class StructuredLogger:
     """
     Enhanced logger that writes structured logs to multiple destinations:
@@ -37,14 +46,15 @@ class StructuredLogger:
 
         # Python logger setup
         self.logger = logging.getLogger("agent_runner")
-        self.logger.setLevel(logging.DEBUG if debug else logging.INFO)
+        self.logger.setLevel(logging.DEBUG)
         self.logger.handlers.clear()
 
         # Console handler (stderr)
         console_handler = logging.StreamHandler(sys.stderr)
         console_handler.setLevel(logging.INFO)
         console_formatter = logging.Formatter(
-            "[%(levelname)s] %(message)s"
+            "%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%H:%M:%S"
         )
         console_handler.setFormatter(console_formatter)
         self.logger.addHandler(console_handler)
@@ -53,6 +63,7 @@ class StructuredLogger:
         if debug:
             debug_handler = logging.FileHandler(self.debug_log, encoding="utf-8")
             debug_handler.setLevel(logging.DEBUG)
+            debug_handler.addFilter(_ProcessGuardFilter())
             debug_formatter = logging.Formatter(
                 "%(asctime)s [%(levelname)s] %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S"
@@ -69,6 +80,18 @@ class StructuredLogger:
         )
         error_handler.setFormatter(error_formatter)
         self.logger.addHandler(error_handler)
+
+        # Run log handler (always created, INFO+)
+        self.run_log = self.log_dir / "run.log"
+        run_handler = logging.FileHandler(self.run_log, encoding="utf-8")
+        run_handler.setLevel(logging.INFO)
+        run_handler.addFilter(_ProcessGuardFilter())
+        run_formatter = logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        run_handler.setFormatter(run_formatter)
+        self.logger.addHandler(run_handler)
 
         # Current context (for error tracing)
         self.context: Dict[str, Any] = {}
@@ -185,6 +208,95 @@ class StructuredLogger:
             duration_sec=duration_sec,
             **extra
         )
+
+    # ------------------------------------------------------------------
+    # Domain-specific structured logging methods
+    # ------------------------------------------------------------------
+
+    def cycle_start(self, cycle_idx: int, **extra: Any) -> None:
+        """Log cycle start."""
+        self.logger.info(f"Cycle {cycle_idx} started")
+        self._write_event("cycle_start", cycle=cycle_idx, **extra)
+
+    def cycle_end(
+        self, cycle_idx: int, rc: int, reason: str,
+        done: int = 0, total: int = 0, duration_sec: float = 0.0, **extra: Any,
+    ) -> None:
+        """Log cycle end with summary."""
+        self.logger.info(
+            f"Cycle {cycle_idx} ended: rc={rc} reason={reason} "
+            f"done={done}/{total} duration={duration_sec:.1f}s"
+        )
+        self._write_event(
+            "cycle_end", cycle=cycle_idx, rc=rc, reason=reason,
+            done=done, total=total, duration_sec=duration_sec, **extra,
+        )
+
+    def stage_event(self, stage: str, event: str, cycle: int = 0, **extra: Any) -> None:
+        """Log PM/QA/Security stage events."""
+        msg = f"[{stage.upper()}] {event}"
+        if extra:
+            detail_parts = [f"{k}={v}" for k, v in extra.items()]
+            msg += " " + " ".join(detail_parts)
+        level = logging.WARNING if event in ("error", "quota_detected", "quota_exhausted") else logging.INFO
+        self.logger.log(level, msg)
+        self._write_event("stage_event", stage=stage, event=event, cycle=cycle, **extra)
+
+    def quota_event(
+        self, action: str, five_hour: Any = None, seven_day: Any = None,
+        resets_at: Any = None, wait_seconds: Any = None, **extra: Any,
+    ) -> None:
+        """Log quota check results."""
+        parts = [f"action={action}"]
+        if five_hour is not None:
+            parts.append(f"5h={five_hour}%")
+        if seven_day is not None:
+            parts.append(f"7d={seven_day}%")
+        if wait_seconds is not None:
+            parts.append(f"wait={wait_seconds}s")
+        msg = "[QUOTA] " + " ".join(parts)
+        level = logging.WARNING if action in ("wait", "stop", "imminent") else logging.INFO
+        self.logger.log(level, msg)
+        self._write_event(
+            "quota_event", action=action, five_hour=five_hour,
+            seven_day=seven_day, resets_at=resets_at,
+            wait_seconds=wait_seconds, **extra,
+        )
+
+    def budget_event(self, event: str, **extra: Any) -> None:
+        """Log budget reset/exceeded events."""
+        parts = [f"event={event}"]
+        for k, v in extra.items():
+            parts.append(f"{k}={v}")
+        msg = "[BUDGET] " + " ".join(parts)
+        self.logger.info(msg)
+        self._write_event("budget_event", event=event, **extra)
+
+    def skip_event(self, task_id: str, reason: str, **extra: Any) -> None:
+        """Log task skip with reason."""
+        msg = f"[SKIP] {task_id}: {reason}"
+        self.logger.warning(msg)
+        self._write_event("skip_event", task_id=task_id, reason=reason, **extra)
+
+    def stop_event(self, reason: str, **extra: Any) -> None:
+        """Log run stop with reason."""
+        msg = f"[STOP] {reason}"
+        self.logger.warning(msg)
+        self._write_event("stop_event", reason=reason, **extra)
+
+    def retry_event(self, stage: str, task_id: str, attempt: int = 0, reason: str = "", **extra: Any) -> None:
+        """Log retry/escalation events."""
+        msg = f"[RETRY] {stage} {task_id} attempt={attempt} reason={reason}"
+        self.logger.info(msg)
+        self._write_event("retry_event", stage=stage, task_id=task_id, attempt=attempt, reason=reason, **extra)
+
+    def gate_event(self, gate: str, task_id: str, passed: bool, **extra: Any) -> None:
+        """Log build/test gate results."""
+        status = "passed" if passed else "FAILED"
+        msg = f"[{gate.upper()}] {task_id}: {status}"
+        level = logging.INFO if passed else logging.WARNING
+        self.logger.log(level, msg)
+        self._write_event("gate_event", gate=gate, task_id=task_id, passed=passed, **extra)
 
     def _write_event(self, event_type: str, **fields: Any) -> None:
         """Write structured event to events.jsonl."""

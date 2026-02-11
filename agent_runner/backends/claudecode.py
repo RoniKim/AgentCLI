@@ -1426,9 +1426,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             except Exception as ex:
                 if is_quota_exception(ex):
                     raise
-                eprint(f"[PM] Claude error: {ex}")
-                if bool(getattr(args, "debug", False)):
-                    eprint(traceback.format_exc())
+                logger.stage_event("pm", "error", cycle=cycle_idx, detail=str(ex))
                 return None
 
             if structured is not None:
@@ -1452,7 +1450,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
             # Early exit: quota or repetitive garbage — no point retrying
             if "<quota_detected>" in missing:
-                eprint("[PM] Quota/rate-limit text detected in PM output — aborting PM structured retries.")
+                logger.stage_event("pm", "quota_detected", cycle=cycle_idx)
                 metrics.event("pm_garbage_detected", cycle=cycle_idx, kind="quota")
                 raise Exception("quota exceeded — detected in PM output")
             if "<repetitive_output>" in missing:
@@ -1837,7 +1835,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 if bool(getattr(args, "task_history_enabled", True)):
                     consec = _count_consecutive_title_failures(repo, t.title)
                     if consec >= max_consecutive_failures:
-                        eprint(f"[SKIP] Task {t.id} '{t.title}' failed {consec} times consecutively (>= {max_consecutive_failures}); skipping.")
+                        logger.skip_event(t.id, f"failed {consec} times consecutively (>= {max_consecutive_failures})")
                         skipped_set.add(t.id)
                         state.setdefault("failed", []).append({
                             "task": t.id, "reason": "persistent_failure",
@@ -2079,10 +2077,6 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         task_id=next_task.id, task_title=next_task.title, attempt=attempt,
                         duration_sec=task_duration, is_max_turns=dev_is_max_turns, is_quota_exhausted=dev_quota_exhausted,
                     )
-                    eprint(f"[DEV ERROR] {ex}")
-                    if bool(getattr(args, "debug", False)):
-                        eprint(traceback.format_exc())
-
                 dev_log = dev_final or ""
                 if dev_exc:
                     exc_header = f"{type(dev_exc).__name__}: {str(dev_exc)}" if str(dev_exc) else type(dev_exc).__name__
@@ -2277,7 +2271,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         # If still no diff after retry, fall through to normal no_diff handling
 
                     if dev_is_max_turns and dev_auto_escalate and (attempt + 1) < max_attempts:
-                        eprint(f"[INFO] Max turns exceeded with no diff for {next_task.id}. Auto-retrying with escalation...")
+                        logger.retry_event("dev", next_task.id, attempt=attempt, reason="max_turns_no_diff")
                         metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="max_turns_no_diff")
                         continue
                     if dev_auto_escalate and (attempt + 1) < max_attempts and "no_diff" in dev_escalate_on:
@@ -2295,7 +2289,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                                 return 1, fail_reason, 0, (len(done_set) > before_done)
                             eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
                     if continuous:
-                        eprint(f"[SKIP] No diff produced for {next_task.id}; skipping to next task.")
+                        logger.skip_event(next_task.id, "no diff produced")
                         skipped_set.add(next_task.id)
                         break
                     else:
@@ -2341,7 +2335,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
                         save_state(state_path, state)
                         _record_history(next_task.id, next_task.title, "failed", reason="build_failed", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
-                        eprint(f"[SKIP] Build failed after {next_task.id}. See {attempt_dir / 'build.txt'}")
+                        logger.gate_event("build", next_task.id, passed=False)
                         if tb or cp:
                             ok_r, fr = _isolate_or_stop("build_failed")
                             if not ok_r:
@@ -2371,7 +2365,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": "test_failed"})
                         save_state(state_path, state)
                         _record_history(next_task.id, next_task.title, "failed", reason="test_failed", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
-                        eprint(f"[SKIP] Tests failed after {next_task.id}. See {attempt_dir / 'test.txt'}")
+                        logger.gate_event("test", next_task.id, passed=False)
                         if tb or cp:
                             ok_r, fr = _isolate_or_stop("test_failed")
                             if not ok_r:
@@ -2417,7 +2411,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": "policy_violation"})
                         save_state(state_path, state)
                         _record_history(next_task.id, next_task.title, "failed", reason="policy_violation", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
-                        eprint(f"[SKIP] Policy scan failed after {next_task.id}. See {attempt_dir / 'policy_scan.json'}")
+                        logger.gate_event("policy", next_task.id, passed=False)
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="policy_violation", violations=len(fail_hits))
                         if tb or cp:
                             ok_r, fr = _isolate_or_stop("policy_violation")
@@ -2563,7 +2557,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             return 0, STOP_REASON_ALL_TASKS_DONE, done_delta, ran_tasks
         if total_count > 0 and (done_count + skipped_count) >= total_count:
             # All tasks attempted but some were skipped — not truly "all done"
-            eprint(f"[INFO] All tasks attempted: {done_count} done, {skipped_count} skipped out of {total_count}.")
+            logger.info(f"All tasks attempted: {done_count} done, {skipped_count} skipped out of {total_count}.")
             return 0, "all_tasks_attempted", done_delta, ran_tasks
 
         return 0, "ok", done_delta, ran_tasks
@@ -2660,14 +2654,14 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0}
         except Exception as ex:
             if is_quota_exception(ex):
-                eprint(f"[QA] Quota exhausted during QA stage: {ex}")
+                logger.stage_event("qa", "quota_exhausted", cycle=cycle_idx, detail=str(ex))
                 try:
                     stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
                 except Exception:
                     pass
                 metrics.event("runner_stop", stage="qa", reason="quota_exhausted")
                 return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0, "quota_exhausted": True}
-            eprint(f"[QA] QA stage error: {ex}")
+            logger.stage_event("qa", "error", cycle=cycle_idx, detail=str(ex))
             metrics.event("qa_end", cycle=cycle_idx, rc=1, error=str(ex))
             return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0}
 
@@ -2910,7 +2904,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 _q7d = q_info.get("seven_day", "N/A")
                 if q_action == "stop":
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=quota_utilization_7d 5h={_q5h}% 7d={_q7d}%")
-                    eprint(f"[STOP] 7-day quota {_q7d}% >= {quota_7d_max}% — stopping run. (5h={_q5h}%)")
+                    logger.stop_event(f"7-day quota {_q7d}% >= {quota_7d_max}% — stopping run. (5h={_q5h}%)")
                     metrics.event("quota_utilization_stop", cycle=cycle_idx, window="seven_day",
                                   five_hour=_q5h, seven_day=_q7d, resets_at=q_resets or "")
                     last_reason = STOP_REASON_QUOTA_UTILIZATION
@@ -2918,24 +2912,22 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 if q_action == "wait":
                     wait_sec = seconds_until_reset(q_resets)
                     if quota_wait_for_reset and wait_sec > 0:
-                        eprint(f"[WAIT] 5-hour quota {_q5h}% >= {quota_5h_max}% — "
-                               f"waiting {wait_sec}s (~{wait_sec // 60}min) until reset. (7d={_q7d}%)")
+                        logger.quota_event("wait", five_hour=_q5h, seven_day=_q7d, resets_at=q_resets, wait_seconds=wait_sec)
                         metrics.event("quota_utilization_wait", cycle=cycle_idx, window="five_hour",
                                       five_hour=_q5h, seven_day=_q7d, wait_seconds=wait_sec, resets_at=q_resets or "")
                         await asyncio.sleep(wait_sec)
-                        eprint(f"[WAIT] Quota reset wait complete — resuming.")
+                        logger.quota_event("resumed")
                     elif not quota_wait_for_reset:
                         append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=quota_utilization_5h 5h={_q5h}% 7d={_q7d}%")
-                        eprint(f"[STOP] 5-hour quota {_q5h}% >= {quota_5h_max}% — "
-                               f"quota_wait_for_reset disabled, stopping. (7d={_q7d}%)")
+                        logger.stop_event(f"5-hour quota {_q5h}% >= {quota_5h_max}% — quota_wait_for_reset disabled, stopping. (7d={_q7d}%)")
                         metrics.event("quota_utilization_stop", cycle=cycle_idx, window="five_hour",
                                       five_hour=_q5h, seven_day=_q7d, resets_at=q_resets or "")
                         last_reason = STOP_REASON_QUOTA_UTILIZATION
                         break
                     else:
-                        eprint(f"[QUOTA] 5-hour quota {_q5h}% high but reset imminent — proceeding. (7d={_q7d}%)")
+                        logger.quota_event("imminent", five_hour=_q5h, seven_day=_q7d)
                 if q_action == "ok":
-                    eprint(f"[QUOTA] OK (5h={_q5h}%, 7d={_q7d}%)")
+                    logger.quota_event("ok", five_hour=_q5h, seven_day=_q7d)
 
             # --- Per-cycle budget reset ---
             if budget_reset_per_cycle and cycle_idx > 0:
@@ -2949,8 +2941,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 budget_state["total_repairs"] = 0
                 budget_state["per_task_escalations"] = {}
                 budget_state["per_task_continuations"] = {}
-                eprint(f"[BUDGET] Reset per-cycle (prev: esc={prev_budget['total_escalations']}, "
-                       f"cont={prev_budget['total_continuations']}, rep={prev_budget['total_repairs']})")
+                logger.budget_event("reset_per_cycle", prev_esc=prev_budget['total_escalations'], prev_cont=prev_budget['total_continuations'], prev_rep=prev_budget['total_repairs'])
 
             rc, reason, delta = await run_cycle(cycle_idx)
             last_rc = rc
@@ -2976,10 +2967,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             cycle_failed = (rc != 0) or reason == "budget_exceeded"
             if cycle_failed and delta <= 0:
                 consecutive_failures += 1
-                eprint(f"[WARN] Consecutive failed cycles: {consecutive_failures}/{max_consecutive_failed_cycles}")
+                logger.warning(f"Consecutive failed cycles: {consecutive_failures}/{max_consecutive_failed_cycles}")
                 if consecutive_failures >= max_consecutive_failed_cycles:
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=consecutive_failures count={consecutive_failures}")
-                    eprint(f"[STOP] {consecutive_failures} consecutive failed cycles with no progress — stopping run.")
+                    logger.stop_event(f"{consecutive_failures} consecutive failed cycles with no progress — stopping run.")
                     break
             else:
                 consecutive_failures = 0
@@ -2988,7 +2979,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 break
             if reason == STOP_REASON_PROJECT_COMPLETE:
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=project_complete")
-                eprint(f"[STOP] Project complete — all P0 goals met.")
+                logger.stop_event("Project complete — all P0 goals met.")
                 break  # Always stop on project complete, even in loop mode
             if reason == STOP_REASON_ALL_TASKS_DONE:
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")

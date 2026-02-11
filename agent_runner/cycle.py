@@ -746,7 +746,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 # Early exit: quota or repetitive garbage — no point retrying
                 if "<quota_detected>" in missing:
-                    eprint("[PM] Quota/rate-limit text detected in PM output — aborting PM structured retries.")
+                    logger.stage_event("pm", "quota_detected", cycle=cycle_idx)
                     metrics.event("pm_garbage_detected", cycle=cycle_idx, kind="quota")
                     raise Exception("quota exceeded — detected in PM output")
                 if "<repetitive_output>" in missing:
@@ -1724,7 +1724,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     if bool(getattr(args, "task_history_enabled", True)):
                         consec = _count_consecutive_title_failures(repo, t.title)
                         if consec >= max_consecutive_failures:
-                            eprint(f"[SKIP] Task {t.id} '{t.title}' failed {consec} times consecutively (>= {max_consecutive_failures}); skipping.")
+                            logger.skip_event(t.id, f"failed {consec} times consecutively (>= {max_consecutive_failures})")
                             skipped_set.add(t.id)
                             state.setdefault("failed", []).append({
                                 "task": t.id, "reason": "persistent_failure",
@@ -1994,10 +1994,6 @@ async def main_async(args: argparse.Namespace) -> int:
                             is_quota_exhausted=dev_quota_exhausted
                         )
 
-                        eprint(f"[DEV ERROR] {ex}")
-                        if bool(getattr(args, "debug", False)):
-                            eprint(traceback.format_exc())
-
                     # Always persist whatever we have (even on exceptions)
                     dev_log = (dev_final or "")
                     if dev_exc:
@@ -2136,7 +2132,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         # Special case: if max_turns was hit and no diff, auto-retry instead of immediate failure
                         # This prevents wasting 30+ minutes on incomplete work
                         if dev_is_max_turns and dev_auto_escalate and (attempt + 1) < max_attempts:
-                            eprint(f"[INFO] Max turns exceeded with no diff for {next_task.id}. Auto-retrying with escalation...")
+                            logger.retry_event("dev", next_task.id, attempt=attempt, reason="max_turns_no_diff")
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="max_turns_no_diff")
                             continue
                         if dev_auto_escalate and (attempt + 1) < max_attempts and "no_diff" in dev_escalate_on:
@@ -2147,7 +2143,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         _record_history(next_task.id, next_task.title, "failed", reason="no_diff", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="no_diff")
                         logger.task_end(task_id=next_task.id, success=False, reason="no_diff", was_max_turns=dev_is_max_turns)
-                        eprint(f"[{'SKIP' if continuous else 'STOP'}] No diff produced for {next_task.id}.")
+                        logger.skip_event(next_task.id, "no diff produced")
                         if tb or cp:
                             ok, fail_reason = _isolate_or_stop("no_diff")
                             if not ok:
@@ -2200,7 +2196,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
                             save_state(state_path, state)
                             _record_history(next_task.id, next_task.title, "failed", reason="build_failed", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
-                            eprint(f"[{'SKIP' if continuous else 'STOP'}] Build failed after {next_task.id}. See {attempt_dir / 'build.txt'}")
+                            logger.gate_event("build", next_task.id, passed=False)
                             if tb or cp:
                                 ok_restore, fail_reason = _isolate_or_stop("build_failed")
                                 if not ok_restore:
@@ -2230,7 +2226,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "test_failed"})
                             save_state(state_path, state)
                             _record_history(next_task.id, next_task.title, "failed", reason="test_failed", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
-                            eprint(f"[{'SKIP' if continuous else 'STOP'}] Tests failed after {next_task.id}. See {attempt_dir / 'test.txt'}")
+                            logger.gate_event("test", next_task.id, passed=False)
                             if tb or cp:
                                 ok_restore, fail_reason = _isolate_or_stop("test_failed")
                                 if not ok_restore:
@@ -2298,7 +2294,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "policy_violation"})
                             save_state(state_path, state)
                             _record_history(next_task.id, next_task.title, "failed", reason="policy_violation", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
-                            eprint(f"[{'SKIP' if continuous else 'STOP'}] Policy scan failed after {next_task.id}. See {attempt_dir / 'policy_scan.json'}")
+                            logger.gate_event("policy", next_task.id, passed=False)
                             metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="policy_violation",
                                           violations=len(scan_result.get("fail_violations", [])))
                             if tb or cp:
@@ -2459,7 +2455,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 return 0, STOP_REASON_ALL_TASKS_DONE, done_delta, ran_tasks
             if total_count > 0 and (done_count + skipped_count) >= total_count:
                 # All tasks attempted but some were skipped — not truly "all done"
-                eprint(f"[INFO] All tasks attempted: {done_count} done, {skipped_count} skipped out of {total_count}.")
+                logger.info(f"All tasks attempted: {done_count} done, {skipped_count} skipped out of {total_count}.")
                 return 0, "all_tasks_attempted", done_delta, ran_tasks
 
             return 0, "ok", done_delta, ran_tasks
@@ -2729,8 +2725,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     budget_state["total_repairs"] = 0
                     budget_state["per_task_escalations"] = {}
                     budget_state["per_task_continuations"] = {}
-                    eprint(f"[BUDGET] Reset per-cycle (prev: esc={prev_budget['total_escalations']}, "
-                           f"cont={prev_budget['total_continuations']}, rep={prev_budget['total_repairs']})")
+                    logger.budget_event("reset_per_cycle", prev_esc=prev_budget['total_escalations'], prev_cont=prev_budget['total_continuations'], prev_rep=prev_budget['total_repairs'])
 
                 rc, reason, delta = await run_cycle(cycle_idx)
                 last_rc = rc
@@ -2742,10 +2737,10 @@ async def main_async(args: argparse.Namespace) -> int:
                 cycle_failed = (rc != 0) or reason == "budget_exceeded"
                 if cycle_failed and delta <= 0:
                     consecutive_failures += 1
-                    eprint(f"[WARN] Consecutive failed cycles: {consecutive_failures}/{max_consecutive_failed_cycles}")
+                    logger.warning(f"Consecutive failed cycles: {consecutive_failures}/{max_consecutive_failed_cycles}")
                     if consecutive_failures >= max_consecutive_failed_cycles:
                         append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=consecutive_failures count={consecutive_failures}")
-                        eprint(f"[STOP] {consecutive_failures} consecutive failed cycles with no progress — stopping run.")
+                        logger.stop_event(f"{consecutive_failures} consecutive failed cycles with no progress — stopping run.")
                         break
                 else:
                     consecutive_failures = 0
@@ -2754,7 +2749,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     break
                 if reason == STOP_REASON_PROJECT_COMPLETE:
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=project_complete")
-                    eprint(f"[STOP] Project complete — all P0 goals met.")
+                    logger.stop_event("Project complete — all P0 goals met.")
                     break  # Always stop on project complete, even in loop mode
                 if reason == STOP_REASON_ALL_TASKS_DONE:
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
