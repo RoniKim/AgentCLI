@@ -350,7 +350,10 @@ def fetch_quota_usage() -> Optional[dict]:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
-        eprint(f"[WARN] fetch_quota_usage failed: {exc}")
+        hint = ""
+        if "401" in str(exc):
+            hint = " (OAuth 토큰이 만료되었을 수 있습니다. Claude Code를 실행하면 토큰이 자동 갱신됩니다)"
+        eprint(f"[WARN] fetch_quota_usage failed: {exc}{hint}")
         return None
 
 
