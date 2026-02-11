@@ -517,6 +517,8 @@ async def main_async(args: argparse.Namespace) -> int:
                 "payment required",
                 # Codex/CLI style usage-limit strings
                 "you've hit your usage limit",
+                "you've hit your limit",
+                "hit your limit",
                 "purchase more credits",
                 "upgrade to pro",
                 "codex/settings/usage",
@@ -529,12 +531,13 @@ async def main_async(args: argparse.Namespace) -> int:
                 "insufficient credits",
                 "usage limit",
                 "budgetexceeded",
-                # Claude-specific patterns
+                # Claude Code CLI rate-limit patterns
                 "usage cap",
                 "reached your",
                 "token limit exceeded",
                 "account limit",
                 "api key limit",
+                "resets",
             )
             for e in _iter_exc_chain(ex):
                 try:

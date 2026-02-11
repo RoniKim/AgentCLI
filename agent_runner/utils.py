@@ -257,6 +257,8 @@ def _has_quota_text(text: str) -> bool:
         "hard limit",
         "payment required",
         "you've hit your usage limit",
+        "you've hit your limit",
+        "hit your limit",
         "purchase more credits",
         "upgrade to pro",
         "codex/settings/usage",
@@ -270,12 +272,13 @@ def _has_quota_text(text: str) -> bool:
         "purchase credits",
         "spend limit",
         "monthly spend limit",
-        # Claude-specific patterns
+        # Claude Code CLI rate-limit patterns
         "usage cap",
         "reached your",
         "token limit exceeded",
         "account limit",
         "api key limit",
+        "resets",
     )
     return any(n in s for n in needles)
 

@@ -767,13 +767,14 @@ def is_quota_exception(ex: Exception) -> bool:
     needles = (
         "insufficient_quota", "quota exceeded", "exceeded your current quota",
         "billing hard limit", "hard limit", "plan and billing", "payment required",
-        "you've hit your usage limit", "purchase more credits", "upgrade to pro",
+        "you've hit your usage limit", "you've hit your limit", "hit your limit",
+        "purchase more credits", "upgrade to pro",
         "codex/settings/usage", "user limit", "user_limit",
         "credit balance is too low", "plans & billing", "purchase credits",
         "spend limit", "insufficient credits", "usage limit", "budgetexceeded",
-        # Claude-specific patterns
+        # Claude Code CLI rate-limit patterns
         "usage cap", "reached your", "token limit exceeded",
-        "account limit", "api key limit",
+        "account limit", "api key limit", "resets",
     )
     for e in _iter_exc_chain(ex):
         try:
