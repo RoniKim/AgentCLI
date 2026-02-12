@@ -35,6 +35,14 @@
 22. [GOALS 기능 (프로젝트 완성 기준)](#goals-기능-프로젝트-완성-기준)
 23. [Preflight 체크 & 환경 검증](#preflight-체크--환경-검증)
 24. [보안 메모](#보안-메모)
+25. [외부 프롬프트 작성 가이드](#외부-프롬프트-작성-가이드)
+26. [스킬 파일 작성법](#스킬-파일-작성법)
+27. [태스크 히스토리 (Cross-Run)](#태스크-히스토리-cross-run)
+28. [메트릭스 & 로깅](#메트릭스--로깅)
+29. [프로세스 안전 (Process Guard)](#프로세스-안전-process-guard)
+30. [QA 후속 태스크 시스템](#qa-후속-태스크-시스템)
+31. [Shutdown Report 시스템](#shutdown-report-시스템)
+32. [개발자 가이드 (확장)](#개발자-가이드-확장)
 
 ---
 
@@ -2005,6 +2013,685 @@ Shell에서 `/doctor`를 실행하면 run_dir에 진단 보고서(`DOCTOR.md`)�
 
 - 시크릿/토큰은 절대 README/config/prompt에 하드코딩하지 말고 **환경변수 또는 .env**로만 주입하세요.
 - worktree 패치(`worktree.patch`)는 변경 내용을 포함합니다. 외부 공유 전 민감정보 포함 여부를 점검하세요.
+
+---
+
+## 외부 프롬프트 작성 가이드
+
+AgentCLI의 프롬프트는 **기본 내장 템플릿**과 **프로젝트별 외부 오버라이드**로 구성됩니다. 이 섹션은 외부 프롬프트를 작성하는 방법을 상세히 설명합니다.
+
+### PromptStore 동작 원리
+
+```
+PromptStore.render(name, default, ctx)
+  │
+  ├─ 1) prompts_dir/{name}.md 파일이 존재하고 비어있지 않으면 → 파일 내용 사용
+  │
+  └─ 2) 없으면 → default (코드 내장 템플릿) 사용
+       │
+       ▼
+  format_map(ctx) → {variable} 치환
+       │
+       ▼
+  append_pm_output_contract() → JSON 스키마 계약 자동 추가 (PM만)
+       │
+       ▼
+  append_pm_essential_context() → 필수 런타임 블록 자동 추가 (PM만)
+```
+
+**핵심 규칙:**
+- 외부 파일은 **완전 대체** — 기본 템플릿과 합치지(merge) 않음
+- 누락된 `{variable}`은 경고만 출력하고 리터럴 그대로 남음 (`_SafeDict`)
+- 필수 런타임 블록(done/failed tasks, goals, build warnings)은 **프로그래밍적으로 자동 주입** — 외부 템플릿에서 빼먹어도 러너가 자동으로 붙여줌
+
+### 오버라이드 가능 파일 목록
+
+| 파일명 | 역할 | 적용 대상 |
+|--------|------|-----------|
+| `pm_instructions.md` | PM 에이전트 시스템 지시문 | 모든 PM 호출 |
+| `pm_bootstrap_prompt.md` | PM 첫 실행 프롬프트 | Bootstrap 모드 |
+| `pm_incremental_prompt.md` | PM 반복 실행 프롬프트 | Incremental/Refresh 모드 |
+| `dev_instructions.md` | Dev 에이전트 시스템 지시문 | 모든 Dev 호출 |
+| `dev_task_prompt.md` | Dev 태스크 실행 프롬프트 | 태스크별 |
+| `qa_instructions.md` | QA 에이전트 시스템 지시문 | 모든 QA 호출 |
+| `qa_prompt.md` | QA 검증 프롬프트 | Cycle별 |
+
+### 외부 프롬프트 생성/위치
+
+```bash
+# 기본 템플릿을 외부 파일로 복사 (1회)
+python agent_cli.py --run-now --repo "<경로>" --init-prompts
+```
+
+생성 위치: `{AGENTCLI_HOME}/prompts/<repo-slug>-<hash>/`
+
+```
+prompts/
+├── BudgetBook-69084820/
+│   ├── pm_instructions.md
+│   ├── pm_bootstrap_prompt.md
+│   ├── pm_incremental_prompt.md
+│   ├── dev_instructions.md
+│   ├── dev_task_prompt.md
+│   ├── qa_instructions.md
+│   └── qa_prompt.md
+└── argos_ai-cdc5165b/
+    └── ...
+```
+
+### 템플릿 변수 레퍼런스
+
+#### PM Bootstrap 프롬프트 변수
+
+| 변수 | 설명 | 예시 값 |
+|------|------|---------|
+| `{analysis_md}` | PROJECT_ANALYSIS.md 경로 | `.doc/PM_CACHE/PROJECT_ANALYSIS.md` |
+| `{inv_md}` | REPO_INVENTORY.md 경로 | `.doc/PM_CACHE/REPO_INVENTORY.md` |
+| `{repo}` | 레포 루트 경로 | `D:\Dev\BudgetBook` |
+| `{run_dir}` | 실행 산출물 폴더 경로 | `.doc/agent_runs/20260212-140000` |
+| `{todo_block}` | 사용자 TODO 내용 | `## Priorities\n- 로그인 구현` 또는 `(none)` |
+| `{docs_dir}` | Docs 폴더 경로 | `.doc/Docs` 또는 `(none)` |
+| `{docs_read_mode}` | Docs 읽기 모드 | `digest` |
+| `{digest_rel}` | Docs 다이제스트 상대 경로 | `.doc/DOCS_DIGEST.md` |
+| `{skills_index_summary}` | 스킬 인덱스 요약 | `- blazor_ui: Blazor UI 패턴 [blazor, ui]` |
+| `{codex_call_hint}` | Codex MCP 호출 힌트 | `{"approval_policy": "..."}` |
+| `{task_history_block}` | 이전 실행 태스크 이력 | `- [DONE] T01: CRUD 구현 (2026-02-10)` |
+
+#### PM Incremental 프롬프트 변수 (Bootstrap 변수 + 아래 추가)
+
+| 변수 | 설명 |
+|------|------|
+| `{prev_head}` | 이전 Git HEAD SHA |
+| `{curr_head}` | 현재 Git HEAD SHA |
+| `{changed_files_block}` | 변경된 파일 목록 (`git diff --name-only`) |
+| `{current_backlog_block}` | 현재 백로그 상태 (`[x]=완료, [ ]=대기, [F]=실패`) |
+| `{hint_block}` | Dev 분석 힌트 (dev_hints/*.md 내용) |
+
+#### Dev 태스크 프롬프트 변수
+
+| 변수 | 설명 |
+|------|------|
+| `{repo}` | 레포 루트 경로 |
+| `{run_dir}` | 실행 산출물 폴더 경로 |
+| `{task_id}` | 태스크 ID (T1, T2, ...) |
+| `{task_title}` | 태스크 제목 |
+| `{task_prompt}` | 태스크 구현 지침 |
+| `{files_hint}` | 변경 대상 파일 목록 (시작점) |
+| `{skills_context}` | 선택된 스킬 발췌문 |
+| `{done_when}` | 완료 조건 |
+| `{docs_read_mode}` | Docs 읽기 모드 |
+| `{digest_rel}` | Docs 다이제스트 경로 |
+| `{analysis_hint_out}` | 분석 힌트 출력 경로 |
+| `{codex_call_hint}` | Codex MCP 호출 힌트 |
+
+#### QA 프롬프트 변수
+
+| 변수 | 설명 |
+|------|------|
+| `{repo}` | 레포 루트 경로 |
+| `{run_dir}` | 실행 산출물 폴더 경로 |
+| `{skills_context}` | 태스크별 스킬 컨텍스트 |
+
+### 자동 주입 블록 (프로그래밍적)
+
+외부 템플릿에 아래 블록이 없어도 러너가 **자동으로 프롬프트 끝에 추가**합니다. 중복 방지를 위해 HTML 마커로 체크합니다.
+
+| 블록 | 마커 | 대상 | 설명 |
+|------|------|------|------|
+| **턴 예산 경고** | `<turn_budget_warning>` | PM | PM이 JSON 출력 없이 턴을 소진하지 않도록 경고 |
+| **프로젝트 Goals** | `<pm_goals>` | PM | GOALS.md 내용 + 완성 기준 평가 지침 |
+| **완료 태스크** | `<pm_done_tasks>` | PM | 이미 완료된 태스크 목록 (중복 생성 방지) |
+| **빌드 경고** | `<pm_build_warnings>` | PM | 최신 빌드 경고 (CS8602, CS4014 등) |
+| **실패 태스크** | `<pm_failed_tasks>` | PM | MANDATORY RETRY — 실패 태스크 + Dev 로그 tail |
+| **출력 계약** | `<pm_output_contract>` | PM | JSON 스키마 계약 (PMOutputV2) |
+| **태스크 사이징** | `<pm_task_sizing_rules>` | PM | 3-7 태스크 규칙, 번들링 지침 |
+
+**중요**: 이 블록들은 ctx dict에 넣는 템플릿 변수(`{variable}`)가 아닙니다. 러너가 템플릿 렌더링 **이후에** 프로그래밍적으로 append합니다. 외부 프롬프트에서 해당 내용을 직접 작성할 필요가 없습니다.
+
+### 실전 예제: 프로젝트별 PM 프롬프트
+
+**`pm_incremental_prompt.md` 예시 (BudgetBook 프로젝트):**
+
+```markdown
+You are Planner/PM.
+
+INCREMENTAL MODE (token-saving):
+- Global analysis already exists at: {analysis_md}
+- Do NOT redo full analysis.
+
+Reference file list: {inv_md}
+
+Git:
+- prev_head: {prev_head}
+- curr_head: {curr_head}
+- changed files: {changed_files_block}
+
+Current backlog: {current_backlog_block}
+
+Dev hints: {hint_block}
+
+SKILLS_INDEX summary:
+{skills_index_summary}
+
+## 프로젝트 특화 지침
+
+- BudgetBook은 .NET MAUI Blazor Hybrid 앱입니다
+- Razor 컴포넌트의 CancellationToken 패턴을 항상 확인하세요
+- 안드로이드/Windows 동시 빌드 호환성 유지
+
+User TODO:
+{todo_block}
+
+Rules:
+- FILE PATHS: REPO_INVENTORY.md의 전체 경로만 사용
+- 태스크는 atomic하게, 각각 git diff를 생산해야 함
+- 질문이 있으면 open_questions에 기재
+
+When editing files, call Codex MCP with {codex_call_hint}.
+
+Now execute: update PROJECT_ANALYSIS.md, then respond ONLY with the JSON schema object.
+```
+
+**주의사항:**
+- `{goals_block}`, `{done_tasks_block}`, `{failed_tasks_block}`, `{turn_budget_warning}`, `{build_warnings_block}` — 이 변수들은 **사용하지 마세요**. ctx에 포함되지 않으며 자동 주입됩니다.
+- `{codex_call_hint}`는 Codex 백엔드에서 JSON 승인 정책을 주입합니다. Claude 백엔드에서는 자동으로 Claude 도구 지침으로 대체됩니다.
+
+### 프롬프트 작성 시 주의사항
+
+1. **ctx에 없는 변수를 쓰면**: 리터럴 그대로 남음 (예: `{my_custom_var}` → 출력에 `{my_custom_var}` 표시). `_SafeDict`가 stderr에 경고만 출력.
+
+2. **JSON 중괄호 이스케이프**: 프롬프트에 JSON 예시를 넣을 때 `{{`, `}}`로 이스케이프해야 합니다.
+   ```
+   올바른 예: {{"kind": "pm_output_v2", "tasks": [...]}}
+   잘못된 예: {"kind": "pm_output_v2"} → kind를 변수로 인식 시도
+   ```
+
+3. **외부 프롬프트는 완전 대체**: 기본 템플릿의 일부만 수정하려면, `--init-prompts`로 전체 복사 후 원하는 부분만 수정하세요.
+
+4. **PM 출력 스키마는 자동 보장**: `pm_instructions.md`에 JSON 스키마를 직접 넣지 않아도, `ensure_pm_instructions_have_output_schema()`가 자동으로 추가합니다.
+
+5. **Claude 백엔드 차이**: Claude 백엔드에서는 `_patch_prompt_for_claude()` 함수가 Codex 특화 지시문(예: `apply_patch` 참조)을 Claude 도구 참조(Read, Write, Edit, Grep, Glob, Bash)로 자동 변환합니다.
+
+---
+
+## 스킬 파일 작성법
+
+### 스킬 파일 구조
+
+스킬은 **Markdown 파일 (`SKILL.md`)**로 작성합니다. 파일명은 반드시 `SKILL.md`여야 합니다.
+
+```
+~/.agents/skills/
+├── blazor/
+│   └── SKILL.md        ← blazor/SKILL.md
+├── dotnet-test/
+│   └── SKILL.md        ← dotnet-test/SKILL.md
+└── react/
+    ├── hooks/
+    │   └── SKILL.md    ← react/hooks/SKILL.md
+    └── SKILL.md        ← react/SKILL.md
+```
+
+### Frontmatter 형식
+
+```markdown
+---
+name: Blazor State Management
+description: Blazor Hybrid 앱의 상태 관리 패턴
+tags: [blazor, state, maui, dependency-injection]
+---
+
+# Blazor State Management
+
+## 핵심 패턴
+
+1. Scoped Service 사용
+...
+```
+
+**지원 필드:**
+
+| 필드 | 필수 | 설명 | 폴백 |
+|------|------|------|------|
+| `name` (또는 `title`) | 아니오 | 스킬 이름 | 디렉토리명 사용 |
+| `description` (또는 `desc`) | 아니오 | 한 줄 설명 | 첫 번째 heading 또는 첫 비어있지 않은 줄 |
+| `tags` | 아니오 | 태그 배열 | 빈 배열 |
+
+**태그 형식 (두 가지 모두 지원):**
+```yaml
+# 인라인
+tags: [blazor, state, maui]
+
+# 리스트
+tags:
+  - blazor
+  - state
+  - maui
+```
+
+### 스킬 ID 생성 규칙
+
+```
+skill_id = "{relative_path}#{sha1(source_root::relative_path)[:10]}"
+```
+
+예: `blazor/SKILL.md#a1b2c3d4e5`
+
+### 인덱싱 및 PM 연동
+
+1. **인덱싱**: 러너 시작 시 `skills_index.json` 자동 생성
+2. **PM 요약**: PM 프롬프트에 `{skills_index_summary}` 변수로 요약 전달
+3. **PM 선택**: PM이 태스크별로 `skills` 필드에 skill_id를 지정
+4. **Dev/QA 발췌**: 선택된 스킬의 본문을 발췌(최대 `max_excerpt_lines`줄)하여 프롬프트에 인라인
+
+### 퍼지 매칭 (Auto-fix)
+
+PM이 존재하지 않는 skill_id를 참조하면:
+- `difflib.SequenceMatcher`로 유사도 비교 (skill_id, name, path 3가지 대상)
+- 상위 3개 후보를 자동 제안
+- `skill_match_autofix=true` + `skill_match_autofix_threshold` 초과 시 자동 교정
+
+### Config 참조
+
+```json
+{
+  "skills": {
+    "enabled": true,
+    "roots": ["~/.agents/skills", "{repo}/Skills"],
+    "snapshot_dir": ".doc/skills",
+    "inline_mode": "qa",
+    "max_excerpt_lines": 12,
+    "pm_summary_max_items": 30,
+    "pm_summary_max_chars": 4000,
+    "qa_max_total_chars": 8000,
+    "skill_match_autofix": true,
+    "skill_match_autofix_threshold": 0.5
+  }
+}
+```
+
+| 설정 | 기본값 | 설명 |
+|------|--------|------|
+| `inline_mode` | `"qa"` | 스킬 발췌 인라인 대상: `qa`, `pm`, `both`, `none` |
+| `max_excerpt_lines` | 12 | 스킬 발췌 최대 줄 수 |
+| `qa_max_total_chars` | 8000 | QA 스킬 컨텍스트 총 글자 수 상한 |
+
+---
+
+## 태스크 히스토리 (Cross-Run)
+
+### 개요
+
+태스크 히스토리는 **실행(run)을 넘어 SQLite로 영구 보존**되는 태스크 결과 기록입니다. PM이 이전 실행에서의 성공/실패를 참고하여 더 나은 백로그를 생성할 수 있게 합니다.
+
+### 저장 위치
+
+```
+{AGENTCLI_HOME}/databases/{repo-slug}.db
+```
+
+SQLite WAL 모드, `busy_timeout=5000ms`.
+
+### 스키마
+
+```sql
+CREATE TABLE task_history (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL,       -- T1, T2, ...
+    title        TEXT NOT NULL,       -- 태스크 제목
+    status       TEXT NOT NULL,       -- DONE / FAIL
+    reason       TEXT DEFAULT '',     -- 실패 사유 (no_diff, build_failed, ...)
+    detail       TEXT DEFAULT '',     -- 상세 (최대 500자)
+    files        TEXT DEFAULT '[]',   -- 관련 파일 JSON 배열
+    cycle_idx    INTEGER DEFAULT 0,   -- 사이클 번호
+    attempt      INTEGER DEFAULT 0,   -- 시도 번호
+    max_attempts INTEGER DEFAULT 1,   -- 최대 시도 횟수
+    run_id       TEXT DEFAULT '',     -- 실행 ID (타임스탬프)
+    backend      TEXT DEFAULT '',     -- codex / claudecode
+    recorded_at  TEXT NOT NULL        -- ISO 기록 시각
+);
+```
+
+### PM 프롬프트 주입
+
+히스토리는 두 형태로 PM에 전달됩니다:
+
+**1) `{task_history_block}` (통합 이력):**
+```
+- [DONE] T01: CRUD 구현 (2026-02-10)
+- [FAIL/build_failed 2/3] T03: validation 추가 (2026-02-10) — CS1061 에러
+```
+
+**2) 분리 블록 (자동 주입):**
+- `<pm_done_tasks>` — 완료 태스크만
+- `<pm_failed_tasks>` — 실패 태스크 + 마지막 Dev 로그 tail (8줄)
+
+### Config
+
+| 설정 | 기본값 | 설명 |
+|------|--------|------|
+| `task_history_enabled` | `true` | 히스토리 기능 활성화 |
+| `task_history_max_items` | `50` | PM에 전달할 최대 항목 수 |
+
+---
+
+## 메트릭스 & 로깅
+
+### 로그 파일 구조
+
+```
+run_dir/
+└── logs/
+    ├── run.log           # INFO+ 메시지 (항상 생성)
+    ├── debug.log         # DEBUG+ 메시지 (debug=true일 때)
+    ├── error.log         # ERROR만
+    └── events.jsonl      # 구조화 이벤트 (JSONL)
+```
+
+### events.jsonl 형식
+
+```json
+{"ts": "2026-02-12T14:00:00.000Z", "type": "cycle_start", "cycle": 1}
+{"ts": "2026-02-12T14:00:05.000Z", "type": "pm_start", "cycle": 1, "kind": "bootstrap"}
+{"ts": "2026-02-12T14:01:00.000Z", "type": "pm_end", "cycle": 1, "kind": "bootstrap", "rc": 0}
+{"ts": "2026-02-12T14:01:01.000Z", "type": "task_start", "task_id": "T1", "attempt": 0}
+{"ts": "2026-02-12T14:03:00.000Z", "type": "gate_result", "gate": "build", "task_id": "T1", "passed": true}
+{"ts": "2026-02-12T14:03:30.000Z", "type": "task_end", "task_id": "T1", "success": true}
+{"ts": "2026-02-12T14:03:31.000Z", "type": "phantom_completion_detected", "task_id": "T2"}
+{"ts": "2026-02-12T14:05:00.000Z", "type": "runner_stop", "reason": "all_tasks_done"}
+```
+
+### metrics.jsonl 형식
+
+```
+run_dir/metrics.jsonl
+```
+
+별도의 메트릭스 파일로, 이벤트 단위로 기록:
+
+```json
+{"ts": "...", "type": "pm_start", "cycle": 1, "kind": "bootstrap"}
+{"ts": "...", "type": "pm_end", "cycle": 1, "rc": 0}
+{"ts": "...", "type": "dev_attempt", "task_id": "T1", "attempt": 0, "model": "sonnet"}
+{"ts": "...", "type": "escalation", "task_id": "T1", "from": "sonnet", "to": "opus"}
+```
+
+### StructuredLogger 주요 메서드
+
+| 메서드 | 설명 |
+|--------|------|
+| `info(msg)` | 정보 로그 |
+| `error(msg, exc=, context=)` | 에러 로그 (traceback 포함) |
+| `task_start(task_id, title, attempt)` | 태스크 시작 이벤트 |
+| `task_end(task_id, success, reason)` | 태스크 종료 이벤트 |
+| `cycle_start(cycle_idx)` | 사이클 시작 |
+| `cycle_end(cycle_idx, rc, reason, done, total)` | 사이클 종료 |
+| `stage_event(stage, event, cycle)` | PM/Dev/QA 단계 이벤트 |
+| `gate_event(gate, task_id, passed)` | 빌드/테스트 게이트 결과 |
+| `budget_event(event)` | 예산 이벤트 |
+| `quota_event(action)` | 할당량 이벤트 |
+
+---
+
+## 프로세스 안전 (Process Guard)
+
+### 4-Layer 보호 체계
+
+AgentCLI는 자식 프로세스(Codex CLI, Claude Code CLI 등)가 **부모 종료 후에도 남아있는 문제(orphan process)**를 방지하기 위해 4층 보호 체계를 사용합니다.
+
+```
+┌─ Layer 1: Windows Job Object (KILL_ON_JOB_CLOSE) ─────────┐
+│  OS 레벨 자동 정리. 부모 프로세스 종료 시 모든 자식 즉시 종료 │
+│  Job 핸들은 프로세스 수명 동안 유지                          │
+└────────────────────────────────────────────────────────────┘
+┌─ Layer 2: PID 추적 + atexit ──────────────────────────────┐
+│  정상 종료/미처리 예외 시 graceful cleanup                  │
+│  _tracked_pids (set) + RLock 보호                          │
+└────────────────────────────────────────────────────────────┘
+┌─ Layer 3: Signal Handlers ─────────────────────────────────┐
+│  SIGINT / SIGTERM / SIGBREAK 수신 시 자식 프로세스 종료     │
+│  terminate_all_children() 호출                              │
+└────────────────────────────────────────────────────────────┘
+┌─ Layer 4: Startup Orphan Cleanup ──────────────────────────┐
+│  이전 실행에서 남은 고아 프로세스 감지/정리                  │
+│  tasklist 기반 (signal handler에서는 호출되지 않음)          │
+└────────────────────────────────────────────────────────────┘
+```
+
+### 주요 함수
+
+| 함수 | 설명 |
+|------|------|
+| `init_process_guard()` | Layer 1~4 초기화 (runner_entry.py에서 호출) |
+| `register_pid(pid)` | 자식 프로세스 PID 등록 |
+| `unregister_pid(pid)` | 자식 프로세스 PID 해제 |
+| `terminate_all_children()` | 등록된 모든 자식 프로세스 종료 |
+
+### 스레드 안전성
+
+- 모든 변경 가능 상태는 `RLock`으로 보호 (재진입 안전)
+- Signal handler에서도 `terminate_all_children()` 안전 호출 가능
+- Job Object 핸들은 의도적으로 프로세스 수명 동안 열려있음 (조기 닫힘 방지)
+
+---
+
+## QA 후속 태스크 시스템
+
+### 개요
+
+QA가 코드 리뷰 후 발견한 문제를 **자동으로 백로그 태스크로 변환**하는 기능입니다.
+
+### 활성화
+
+```json
+{
+  "qa_to_backlog": true,
+  "max_qa_followups": 5
+}
+```
+
+### 동작 흐름
+
+```
+QA 에이전트 실행
+  │
+  ├─ 리뷰 결과 텍스트 생성
+  │
+  └─ qa_to_backlog=true 일 때:
+       │
+       ├─ QA_FOLLOWUPS_OUTPUT_CONTRACT 스키마에 따라 JSON 출력 요구
+       │
+       ├─ 파싱 성공:
+       │    followups → 백로그에 QA-FU-{hash} ID로 병합
+       │    (중복 방지: 동일 title + files 조합 → 기존 항목 유지)
+       │
+       └─ 파싱 실패:
+            텍스트 리뷰만 저장, 백로그 변경 없음
+```
+
+### QA 후속 태스크 스키마
+
+```json
+{
+  "kind": "qa_followups_v1",
+  "cycle": 3,
+  "followups": [
+    {
+      "title": "TransactionEntry null check 추가",
+      "prompt": "SaveAsync()에서 SelectedAccount null 체크 추가 (line 234)",
+      "files": ["Pages/TransactionEntry.razor"],
+      "severity": "high"
+    }
+  ],
+  "notes": "전반적으로 안정적이나 null-safety 보강 필요"
+}
+```
+
+### PM과의 연동
+
+QA 후속 태스크는 다음 사이클의 PM이 백로그를 생성할 때 자동으로 포함됩니다. PM이 새 태스크 목록을 생성해도 기존 `QA-FU-*` 태스크는 완료되지 않은 한 유지됩니다.
+
+---
+
+## Shutdown Report 시스템
+
+### 보고서 생성 흐름
+
+```
+파이프라인 종료 감지
+  │
+  ├─ 1) SHUTDOWN_CONTEXT 수집 (collect_shutdown_context)
+  │    └─ repo 상태, 백로그 진행률, 마지막 태스크, 로그 tail 등
+  │
+  ├─ 2) 로컬 폴백 보고서 생성 (build_local_shutdown_report)
+  │    └─ 토큰 소비 없이 즉시 생성 (항상 성공)
+  │    └─ SHUTDOWN_REPORT.md에 기록
+  │
+  ├─ 3) Reporter 에이전트로 보고서 작성 시도 (best-effort)
+  │    └─ 성공 시: 폴백 보고서 덮어쓰기
+  │    └─ 실패 시: 폴백 보고서 유지 (토큰 부족 등)
+  │
+  └─ 4) 중복 감지 (Fix 4)
+       └─ PM이 보고서를 반복 생성하는 경우, half-content 비교로 중복 제거
+```
+
+### SHUTDOWN_CONTEXT 수집 항목
+
+| 항목 | 설명 |
+|------|------|
+| `git_head` | 현재 HEAD SHA |
+| `git_porcelain` | `git status --porcelain` 출력 |
+| `state` | STATE.json (done/failed/warnings) |
+| `tasks_total` / `tasks_done` | 태스크 진행률 |
+| `backlog_lines` | 백로그 미리보기 ([x]/[ ] 표시) |
+| `latest_dev_log_tail` | 마지막 Dev 로그 120줄 |
+| `build_log_tail` | 마지막 빌드 로그 120줄 |
+| `test_log_tail` | 마지막 테스트 로그 120줄 |
+| `policy_scan_summary` | 정책 스캔 결과 요약 |
+| `todo_text` | 현재 TODO 내용 |
+
+### 비상 보고서 (Emergency)
+
+예기치 않은 예외로 정상 종료가 불가능한 경우:
+
+```
+EMERGENCY_SHUTDOWN.md 생성
+  ├─ 기존 SHUTDOWN_REPORT.md가 있으면 → 건너뜀
+  └─ 없으면 → 최소한의 상태 정보로 보고서 생성
+```
+
+---
+
+## 개발자 가이드 (확장)
+
+### 커스텀 Stage 추가
+
+1. `Stage` ABC를 상속:
+
+```python
+from agent_runner.pipeline.stages.base import Stage, StageOutcome
+
+class MyCustomStage(Stage):
+    name = "MyCustom"
+
+    async def run(self, session, cycle_idx: int) -> StageOutcome:
+        # session.repo, session.run_dir, session.args 접근 가능
+        # session.data (dict) 로 다른 Stage와 데이터 공유
+
+        try:
+            # 커스텀 로직
+            result = await my_custom_logic(session.repo)
+
+            if result.success:
+                return StageOutcome.ok("custom_done")
+            else:
+                return StageOutcome.fail("custom_failed", rc=1, detail=str(result.error))
+
+        except Exception as ex:
+            return StageOutcome.fail("custom_error", rc=1, detail=str(ex))
+```
+
+2. Config에 등록:
+
+```json
+{
+  "plugins_enabled": true,
+  "plugins_allowlist": ["my_stages.*"],
+  "roles": "PM,Dev,my_stages:MyCustomStage,QA"
+}
+```
+
+### StageOutcome 반환값
+
+| 메서드 | 의미 | 파이프라인 동작 |
+|--------|------|----------------|
+| `StageOutcome.ok(reason)` | 성공 | 다음 Stage 진행 |
+| `StageOutcome.skip(reason)` | 건너뜀 | 다음 Stage 진행 |
+| `StageOutcome.stop(reason, rc)` | 즉시 중단 | 파이프라인 종료 |
+| `StageOutcome.fail(reason, rc)` | 실패 | 파이프라인 종료 |
+
+> `STOP_REASON_ALL_TASKS_DONE`, `STOP_REASON_PROJECT_COMPLETE`는 `StageOutcome.ok()`로 반환하여 QA Stage까지 실행 후 종료합니다. `STOP_REASON_QUOTA`, `STOP_REASON_STOP_FILE`은 `StageOutcome.stop()`으로 즉시 종료합니다.
+
+### 커스텀 Backend 추가
+
+1. `AbstractAgentRunner` 상속:
+
+```python
+from agent_runner.backends.base import AbstractAgentRunner
+
+class MyRunner(AbstractAgentRunner):
+    name = "my_backend"
+
+    async def run(self, args, repo) -> int:
+        # 0: 성공, 1: 실패
+        ...
+        return 0
+```
+
+2. `backends/factory.py`에 등록:
+
+```python
+def get_runner(backend: str) -> AbstractAgentRunner:
+    if backend == "my_backend":
+        from .my_runner import MyRunner
+        return MyRunner()
+    ...
+```
+
+### PM 분석 캐시
+
+**위치**: `REPO/.doc/PM_CACHE/`
+
+| 파일 | 설명 |
+|------|------|
+| `PROJECT_ANALYSIS.md` | 프로젝트 구조/기술스택 분석 (PM이 유지) |
+| `REPO_INVENTORY.json` | 파일 목록 메타데이터 |
+| `REPO_INVENTORY.md` | 사람이 읽을 수 있는 파일 트리 |
+| `REPO_SNAPSHOT.json` | repo fingerprint (변경 감지용) |
+
+**변경 감지 (fingerprint)**:
+```
+repo_fingerprint = git_head + working_tree_hash
+                    │
+├─ fingerprint 동일 → PM Skip (백로그 재사용)
+├─ fingerprint 다름 → PM Incremental (변경분만 업데이트)
+└─ PROJECT_ANALYSIS.md 없음 → PM Bootstrap (전체 분석)
+```
+
+**ChangeLog 자동 축적**:
+
+Dev가 태스크를 완료하면 분석 힌트(`dev_hints/*.md`)가 생성됩니다. 이 힌트들은 `PROJECT_ANALYSIS.md`의 `## ChangeLog` 섹션에 자동으로 merge됩니다:
+
+```markdown
+## ChangeLog (auto-appended)
+
+- [2026-02-12T14:00:00] HEAD=abc1234
+  - hint: dev_hints/T1_crud_impl.md
+    ```
+    Added CRUD operations to TransactionService.cs
+    New files: Pages/TransactionEntry.razor
+    ```
+```
 
 ---
 

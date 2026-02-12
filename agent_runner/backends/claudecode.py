@@ -58,6 +58,7 @@ from ..prompts import (
     PromptStore,
     ensure_pm_instructions_have_output_schema,
     append_pm_output_contract,
+    append_pm_essential_context,
     codex_call_hint,
     PM_BOOTSTRAP_TEMPLATE_DEFAULT,
     PM_INCREMENTAL_TEMPLATE_DEFAULT,
@@ -1596,18 +1597,20 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "analysis_md": str(analysis_md), "inv_md": str(inv_md),
                     "repo": str(repo), "run_dir": str(run_dir),
                     "todo_block": todo_block,
-                    "goals_block": goals_block,
-                    "goals_instruction": goals_instruction,
                     "docs_dir": str(docs_dir) if docs_dir else "(none)",
                     "docs_read_mode": docs_read_mode, "digest_rel": str(digest_rel),
                     "skills_index_summary": skills_index_summary,
                     "codex_call_hint": "Use Claude Code built-in tools (Read, Write, Edit, Grep, Glob, Bash) directly. Do NOT call Codex MCP.",
                     "task_history_block": _format_history_block(repo, max_items=_hist_max) if _hist_enabled else "(disabled)",
-                    "done_tasks_block": _done_blk,
-                    "failed_tasks_block": _failed_blk,
-                    "turn_budget_warning": PM_TURN_BUDGET_WARNING.replace("LIMITED", f"LIMITED (max {_pm_max_turns_boot} turns)"),
                 }
-                pm_prompt = _patch_prompt_for_claude(append_pm_output_contract(store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx)))
+                pm_prompt = _patch_prompt_for_claude(append_pm_essential_context(
+                    append_pm_output_contract(store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx)),
+                    turn_budget_warning=PM_TURN_BUDGET_WARNING.replace("LIMITED", f"LIMITED (max {_pm_max_turns_boot} turns)"),
+                    done_tasks_block=_done_blk,
+                    failed_tasks_block=_failed_blk,
+                    goals_block=goals_block,
+                    goals_instruction=goals_instruction,
+                ))
                 pm_out = await _run_pm_structured(pm_prompt, max_turns=_pm_max_turns_boot, cycle_idx=cycle_idx, kind="bootstrap", output_path=pm_output_path)
                 if pm_out is None:
                     metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=1, error="structured_output_failed")
@@ -1679,8 +1682,6 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "analysis_md": str(analysis_md), "inv_md": str(inv_md),
                     "repo": str(repo), "run_dir": str(run_dir),
                     "todo_block": todo_block,
-                    "goals_block": goals_block,
-                    "goals_instruction": goals_instruction,
                     "docs_dir": str(docs_dir) if docs_dir else "(none)",
                     "docs_read_mode": docs_read_mode, "digest_rel": str(digest_rel),
                     "skills_index_summary": skills_index_summary,
@@ -1689,13 +1690,17 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "changed_files_block": changed_files_block,
                     "current_backlog_block": current_backlog_block,
                     "hint_block": hint_block,
-                    "failed_tasks_block": _failed_blk_i,
                     "task_history_block": _format_history_block(repo, max_items=_hist_max_i) if _hist_enabled_i else "(disabled)",
-                    "done_tasks_block": _done_blk_i,
-                    "turn_budget_warning": PM_TURN_BUDGET_WARNING.replace("LIMITED", f"LIMITED (max {_pm_max_turns_inc} turns)"),
-                    "build_warnings_block": build_warnings_block,
                 }
-                pm_prompt = _patch_prompt_for_claude(append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx)))
+                pm_prompt = _patch_prompt_for_claude(append_pm_essential_context(
+                    append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx)),
+                    turn_budget_warning=PM_TURN_BUDGET_WARNING.replace("LIMITED", f"LIMITED (max {_pm_max_turns_inc} turns)"),
+                    done_tasks_block=_done_blk_i,
+                    failed_tasks_block=_failed_blk_i,
+                    goals_block=goals_block,
+                    goals_instruction=goals_instruction,
+                    build_warnings_block=build_warnings_block,
+                ))
                 pm_out = await _run_pm_structured(pm_prompt, max_turns=_pm_max_turns_inc, cycle_idx=cycle_idx, kind="incremental" if need_incremental else "refresh", output_path=pm_output_path)
                 if pm_out is None:
                     metrics.event("pm_end", cycle=cycle_idx, kind="incremental" if need_incremental else "refresh", rc=1, error="structured_output_failed")

@@ -18,9 +18,6 @@ Git:
 Current backlog (from run_dir; [x]=done, [ ]=pending, [F]=failed):
 {current_backlog_block}
 
-Failed tasks from previous cycles (with failure reasons):
-{failed_tasks_block}
-
 Dev change-hints (optional, run-local; use as clues):
 {hint_block}
 

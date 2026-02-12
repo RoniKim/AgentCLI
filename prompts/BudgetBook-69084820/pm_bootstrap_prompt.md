@@ -77,11 +77,6 @@ Optional: include run-local notes in JSON field 'notes_md'.
 User TODO (highest priority; if present, reflect into backlog tasks):
 {todo_block}
 
-Project Goals (completion criteria — GOALS.md):
-{goals_block}
-
-{goals_instruction}
-
 Context:
 - Repo root: {repo}
 - Run artifacts folder: {run_dir}
@@ -97,16 +92,6 @@ Hard rules:
 - Backlog tasks MUST be atomic and implementable within one Dev iteration.
 - Each task MUST be expected to produce a git diff.
 - No questions to the user unless required for ambiguity; use open_questions in JSON.
-
-Completed tasks (do NOT re-create):
-{done_tasks_block}
-
-FAILED TASKS — MANDATORY RETRY (MUST address each one):
-Each failed task below MUST be addressed in the new backlog.
-For each: create a retry task with a DIFFERENT approach that avoids the failure cause.
-If genuinely impossible, add to open_questions with explanation.
-Do NOT ignore or skip any failed task.
-{failed_tasks_block}
 
 When editing files, call Codex MCP with {codex_call_hint}.
 

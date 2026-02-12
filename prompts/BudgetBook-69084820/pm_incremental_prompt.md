@@ -93,32 +93,11 @@ Optional: include run-local notes in JSON field 'notes_md'.
 User TODO (highest priority; if present, reflect into backlog tasks):
 {todo_block}
 
-Project Goals (completion criteria — GOALS.md):
-{goals_block}
-
-{goals_instruction}
-
 Rules:
 - **FILE PATHS**: Always use FULL, EXACT paths from REPO_INVENTORY.md in task `files` field - NEVER abbreviate or guess paths
 - Keep backlog atomic; each task must create a git diff.
 - Avoid broad scans: inspect changed files + direct dependencies only.
 - No questions unless required for ambiguity; use open_questions in JSON.
-
-Completed tasks (do NOT re-create):
-{done_tasks_block}
-
-BUILD WARNINGS (from latest build):
-{build_warnings_block}
-
-If there are significant warnings (null-reference CS8602, missing await CS4014, etc.),
-consider creating a task to fix them — especially if warnings count exceeds 20.
-
-FAILED TASKS — MANDATORY RETRY (MUST address each one):
-Each failed task below MUST be addressed in the new backlog.
-For each: create a retry task with a DIFFERENT approach that avoids the failure cause.
-If genuinely impossible, add to open_questions with explanation.
-Do NOT ignore or skip any failed task.
-{failed_tasks_block}
 
 When editing files, call Codex MCP with {codex_call_hint}.
 

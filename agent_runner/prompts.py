@@ -114,6 +114,87 @@ def ensure_pm_instructions_have_output_schema(text: str) -> str:
     return (s + "\n\n" + PM_OUTPUT_CONTRACT_SUFFIX).strip() + "\n"
 
 
+def append_pm_essential_context(
+    prompt_text: str,
+    *,
+    turn_budget_warning: str = "",
+    done_tasks_block: str = "",
+    failed_tasks_block: str = "",
+    goals_block: str = "",
+    goals_instruction: str = "",
+    build_warnings_block: str = "",
+) -> str:
+    """Programmatically append essential runtime context to a PM prompt.
+
+    These blocks are injected by the runner (not the template) so that
+    external prompt overrides automatically receive critical feedback
+    without needing to include the corresponding ``{variable}`` placeholders.
+
+    Each section uses a unique HTML-style marker for dedup detection —
+    if the rendered template already contains the marker (because the
+    external prompt DID include the variable and it was substituted),
+    that section is skipped.
+    """
+    s = (prompt_text or "").rstrip()
+
+    # --- Turn budget warning (CRITICAL: prevents JSON non-output) ---
+    if turn_budget_warning and "<turn_budget_warning>" not in s:
+        s += "\n\n" + turn_budget_warning
+
+    # --- Goals ---
+    if goals_block and goals_block.strip() != "(disabled)" and "<pm_goals>" not in s:
+        section = (
+            "\n\n<pm_goals>\n"
+            "## Project Goals (completion criteria — GOALS.md)\n"
+            f"{goals_block}\n"
+        )
+        if goals_instruction:
+            section += f"\n{goals_instruction}\n"
+        section += "</pm_goals>"
+        s += section
+
+    # --- Done tasks (CRITICAL: prevents duplicate task creation) ---
+    if done_tasks_block and "<pm_done_tasks>" not in s:
+        s += (
+            "\n\n<pm_done_tasks>\n"
+            "## Completed tasks (do NOT re-create)\n"
+            f"{done_tasks_block}\n"
+            "</pm_done_tasks>"
+        )
+
+    # --- Build warnings ---
+    if build_warnings_block and build_warnings_block.strip() != "(none)" and "<pm_build_warnings>" not in s:
+        s += (
+            "\n\n<pm_build_warnings>\n"
+            "## BUILD WARNINGS (from latest build)\n"
+            f"{build_warnings_block}\n\n"
+            "If there are significant warnings (null-reference CS8602, missing await CS4014, etc.),\n"
+            "consider creating a task to fix them — especially if warnings count exceeds 20.\n"
+            "</pm_build_warnings>"
+        )
+
+    # --- Failed tasks (CRITICAL: ensures retry of failed work) ---
+    if failed_tasks_block and failed_tasks_block.strip() != "(none)" and "<pm_failed_tasks>" not in s:
+        s += (
+            "\n\n<pm_failed_tasks>\n"
+            "## FAILED TASKS — MANDATORY RETRY (MUST address each one)\n"
+            "Each failed task below MUST be addressed in the new backlog.\n"
+            "For each: create a retry task with a DIFFERENT approach that avoids the failure cause.\n"
+            "If genuinely impossible, add to open_questions with explanation.\n"
+            "Do NOT ignore or skip any failed task.\n\n"
+            f"{failed_tasks_block}\n"
+            "</pm_failed_tasks>"
+        )
+
+    return s.strip() + "\n"
+
+
+# Keep backward-compat alias (used until callers migrate to append_pm_essential_context)
+def append_pm_build_warnings(prompt_text: str, warnings_block: str) -> str:
+    """Append build warnings. Prefer ``append_pm_essential_context`` for new code."""
+    return append_pm_essential_context(prompt_text, build_warnings_block=warnings_block)
+
+
 def append_pm_output_contract(prompt_text: str) -> str:
     """Always append the output contract and task sizing rules to the end of a PM prompt template."""
     s = (prompt_text or "").rstrip()
@@ -203,11 +284,6 @@ Optional: include run-local notes in JSON field 'notes_md'.
 User TODO (highest priority; if present, reflect into backlog tasks):
 {todo_block}
 
-Project Goals (completion criteria — GOALS.md):
-{goals_block}
-
-{goals_instruction}
-
 Context:
 - Repo root: {repo}
 - Run artifacts folder: {run_dir}
@@ -223,18 +299,6 @@ Hard rules:
 - TASK SIZING: Aim for 3-7 tasks per cycle. Bundle related small fixes (same theme/module) into one task.
   Do NOT create micro-tasks (1-5 line single-file changes). Merge them with related work.
 - No questions to the user unless required for ambiguity; use open_questions in JSON.
-
-{turn_budget_warning}
-
-Completed tasks (do NOT re-create):
-{done_tasks_block}
-
-FAILED TASKS — MANDATORY RETRY (MUST address each one):
-Each failed task below MUST be addressed in the new backlog.
-For each: create a retry task with a DIFFERENT approach that avoids the failure cause.
-If genuinely impossible, add to open_questions with explanation.
-Do NOT ignore or skip any failed task.
-{failed_tasks_block}
 
 When editing files, call Codex MCP with {codex_call_hint}.
 
@@ -282,35 +346,12 @@ Optional: include run-local notes in JSON field 'notes_md'.
 User TODO (highest priority; if present, reflect into backlog tasks):
 {todo_block}
 
-Project Goals (completion criteria — GOALS.md):
-{goals_block}
-
-{goals_instruction}
-
 Rules:
 - Each task must create a git diff and be completable in one Dev iteration.
 - TASK SIZING: Aim for 3-7 tasks. Bundle related small fixes (same theme/module) into one task.
   Do NOT create micro-tasks (1-5 line single-file changes). Merge them with related work.
 - Avoid broad scans: inspect changed files + direct dependencies only.
 - No questions unless required for ambiguity; use open_questions in JSON.
-
-{turn_budget_warning}
-
-Completed tasks (do NOT re-create):
-{done_tasks_block}
-
-BUILD WARNINGS (from latest build):
-{build_warnings_block}
-
-If there are significant warnings (null-reference CS8602, missing await CS4014, etc.),
-consider creating a task to fix them — especially if warnings count exceeds 20.
-
-FAILED TASKS — MANDATORY RETRY (MUST address each one):
-Each failed task below MUST be addressed in the new backlog.
-For each: create a retry task with a DIFFERENT approach that avoids the failure cause.
-If genuinely impossible, add to open_questions with explanation.
-Do NOT ignore or skip any failed task.
-{failed_tasks_block}
 
 When editing files, call Codex MCP with {codex_call_hint}.
 

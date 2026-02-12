@@ -50,6 +50,7 @@ from .prompts import (
     PromptStore,
     ensure_pm_instructions_have_output_schema,
     append_pm_output_contract,
+    append_pm_essential_context,
     codex_call_hint,
     PM_BOOTSTRAP_TEMPLATE_DEFAULT,
     PM_INCREMENTAL_TEMPLATE_DEFAULT,
@@ -1175,19 +1176,21 @@ async def main_async(args: argparse.Namespace) -> int:
                         "repo": str(repo),
                         "run_dir": str(run_dir),
                         "todo_block": todo_block,
-                        "goals_block": goals_block,
-                        "goals_instruction": goals_instruction,
                         "docs_dir": str(docs_dir) if docs_dir else "(none)",
                         "docs_read_mode": str(args.docs_read_mode),
                         "digest_rel": str(digest_rel),
                         "skills_index_summary": skills_index_summary,
                         "codex_call_hint": codex_call_hint(autopilot),
                         "task_history_block": _format_history_block(repo, max_items=_hist_max) if _hist_enabled else "(disabled)",
-                        "done_tasks_block": _done_blk,
-                        "failed_tasks_block": _failed_blk,
-                        "turn_budget_warning": PM_TURN_BUDGET_WARNING.replace("LIMITED", f"LIMITED (max {args.pm_bootstrap_max_turns} turns)"),
                     }
-                    pm_prompt = append_pm_output_contract(store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx))
+                    pm_prompt = append_pm_essential_context(
+                        append_pm_output_contract(store.render("pm_bootstrap_prompt", PM_BOOTSTRAP_TEMPLATE_DEFAULT, ctx)),
+                        turn_budget_warning=PM_TURN_BUDGET_WARNING.replace("LIMITED", f"LIMITED (max {args.pm_bootstrap_max_turns} turns)"),
+                        done_tasks_block=_done_blk,
+                        failed_tasks_block=_failed_blk,
+                        goals_block=goals_block,
+                        goals_instruction=goals_instruction,
+                    )
                     pm_out = await _run_pm_structured(
                         pm_prompt,
                         max_turns=args.pm_bootstrap_max_turns,
@@ -1303,8 +1306,6 @@ async def main_async(args: argparse.Namespace) -> int:
                         "repo": str(repo),
                         "run_dir": str(run_dir),
                         "todo_block": todo_block,
-                        "goals_block": goals_block,
-                        "goals_instruction": goals_instruction,
                         "docs_dir": str(docs_dir) if docs_dir else "(none)",
                         "docs_read_mode": str(args.docs_read_mode),
                         "digest_rel": str(digest_rel),
@@ -1315,13 +1316,17 @@ async def main_async(args: argparse.Namespace) -> int:
                         "changed_files_block": changed_files_block,
                         "current_backlog_block": current_backlog_block,
                         "hint_block": hint_block,
-                        "failed_tasks_block": _failed_blk_i,
                         "task_history_block": _format_history_block(repo, max_items=_hist_max_i) if _hist_enabled_i else "(disabled)",
-                        "done_tasks_block": _done_blk_i,
-                        "turn_budget_warning": PM_TURN_BUDGET_WARNING.replace("LIMITED", f"LIMITED (max {args.pm_incremental_max_turns} turns)"),
-                        "build_warnings_block": build_warnings_block,
                     }
-                    pm_prompt = append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx))
+                    pm_prompt = append_pm_essential_context(
+                        append_pm_output_contract(store.render("pm_incremental_prompt", PM_INCREMENTAL_TEMPLATE_DEFAULT, ctx)),
+                        turn_budget_warning=PM_TURN_BUDGET_WARNING.replace("LIMITED", f"LIMITED (max {args.pm_incremental_max_turns} turns)"),
+                        done_tasks_block=_done_blk_i,
+                        failed_tasks_block=_failed_blk_i,
+                        goals_block=goals_block,
+                        goals_instruction=goals_instruction,
+                        build_warnings_block=build_warnings_block,
+                    )
                     pm_out = await _run_pm_structured(
                         pm_prompt,
                         max_turns=args.pm_incremental_max_turns,
