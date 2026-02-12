@@ -2613,6 +2613,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
             check_and_remove_stale_git_lock(repo)
             write_heartbeat(run_dir)
+            quota_waited_this_cycle = False
 
             # --- Pre-cycle quota utilization check ---
             if quota_check_enabled:
@@ -2631,10 +2632,14 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 if q_action == "wait":
                     wait_sec = seconds_until_reset(q_resets)
                     if quota_wait_for_reset and wait_sec > 0:
+                        quota_waited_this_cycle = True
+                        wait_min = wait_sec / 60
+                        logger.info(f"[QUOTA-WAIT] 5h quota {_q5h}% >= {quota_5h_max}% — waiting {wait_min:.1f}min for reset (resets_at={q_resets})")
                         logger.quota_event("wait", five_hour=_q5h, seven_day=_q7d, resets_at=q_resets, wait_seconds=wait_sec)
                         metrics.event("quota_utilization_wait", cycle=cycle_idx, window="five_hour",
                                       five_hour=_q5h, seven_day=_q7d, wait_seconds=wait_sec, resets_at=q_resets or "")
                         await asyncio.sleep(wait_sec)
+                        logger.info(f"[QUOTA-WAIT] Resumed after {wait_min:.1f}min wait — continuing cycle {cycle_idx}")
                         logger.quota_event("resumed")
                     elif not quota_wait_for_reset:
                         append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=quota_utilization_5h 5h={_q5h}% 7d={_q7d}%")
@@ -2716,7 +2721,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 break
 
             if loop_mode:
-                if delta <= 0:
+                if quota_waited_this_cycle:
+                    # Quota wait is active waiting (work pending, rate-limited) — not idle
+                    idle_accum = 0
+                elif delta <= 0:
                     idle_accum += loop_sleep_seconds
                 else:
                     idle_accum = 0
