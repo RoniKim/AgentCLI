@@ -99,7 +99,12 @@ CLI 인자 (--flag)  >  설정 파일 (JSON)  >  DEFAULTS (코드 내 기본값)
 | `cli.py` | DEFAULTS 정의, CLI 파싱, 설정 병합 (`_merge_effective`) |
 | `cycle.py` | Codex 백엔드 전체 파이프라인 (PM→Dev→QA→Reporter) |
 | `backends/claudecode.py` | Claude 백엔드 전체 파이프라인 |
+| `exceptions.py` | 공유 예외 클래스 (`BudgetExceeded`, `StopRequested`) |
+| `exc_detect.py` | 예외 감지 (`is_quota_exception`, `is_transient_exception` 등) |
+| `backlog_utils.py` | 백로그 정규화/검증/컨텍스트 (`normalize_backlog_tasks`, `validate_skill_ids`) |
+| `qa_utils.py` | QA followup 추출/병합 (`extract_qa_followups`, `merge_qa_followups`) |
 | `state.py` | `BACKLOG.json`, `STATE.json` 읽기/쓰기, TaskItem 정의 |
+| `utils.py` | Stop reason 상수, `has_quota_text()`, `budget_exceeded()`, 공용 헬퍼 |
 | `gitops.py` | 체크포인트 생성/복원, worktree 격리, 변경 감지 |
 | `gates.py` | 빌드/테스트 게이트 실행 |
 | `prompts.py` | 프롬프트 템플릿 로딩, PM 출력 스키마 정의 |
