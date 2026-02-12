@@ -649,6 +649,124 @@ class RunnerShell:
         report_lines.append(f"- build command executable: {build_exe} -> {shutil.which(build_exe) is not None}")
         report_lines.append(f"- test command executable: {test_exe} -> {shutil.which(test_exe) is not None}")
 
+        # ── Prompts directory ──
+        prompts_dir = resolve_prompts_dir(self.repo, eff.get("prompts_dir", ""))
+        if prompts_dir.exists():
+            override_files = [f.name for f in prompts_dir.iterdir() if f.suffix == ".md"]
+            report_lines.append(f"- prompts_dir: OK ({prompts_dir}, {len(override_files)} overrides)")
+        else:
+            report_lines.append(f"- prompts_dir: not found ({prompts_dir})")
+
+        # ── Skills system ──
+        skills_cfg = eff.get("skills") or {}
+        skills_enabled = skills_cfg.get("enabled", False)
+        report_lines.append(f"- skills.enabled: {skills_enabled}")
+        if skills_enabled:
+            try:
+                from .skills import resolve_skills_roots, build_skills_index
+                roots_raw = skills_cfg.get("roots") or []
+                roots = resolve_skills_roots(self.repo, roots_raw)
+                existing = [r for r in roots if r.exists()]
+                idx = build_skills_index(self.repo, roots_raw)
+                report_lines.append(f"  - roots configured: {len(roots)}, existing: {len(existing)}")
+                report_lines.append(f"  - skills discovered: {len(idx)}")
+                if not idx:
+                    report_lines.append("  - WARNING: enabled but no SKILL.md files found")
+            except Exception as ex:
+                report_lines.append(f"  - ERROR: {ex}")
+
+        # ── Task history ──
+        task_hist_enabled = eff.get("task_history_enabled", True)
+        report_lines.append(f"- task_history_enabled: {task_hist_enabled}")
+        if task_hist_enabled:
+            try:
+                from .task_history import query_history
+                rows = query_history(self.repo, max_items=1)
+                # query_history never raises; empty list = no records or DB issue
+                report_lines.append(f"  - db query: OK (history accessible)")
+            except Exception as ex:
+                report_lines.append(f"  - db query: ERROR ({ex})")
+
+        # ── Goals system ──
+        goals_enabled = eff.get("goals_enabled", True)
+        report_lines.append(f"- goals_enabled: {goals_enabled}")
+        if goals_enabled:
+            try:
+                from .goals import goals_path, read_goals, parse_goals_completion
+                gp = goals_path(self.repo)
+                if gp.exists():
+                    _, txt = read_goals(self.repo)
+                    comp = parse_goals_completion(txt)
+                    p0_info = f"P0: {comp.get('p0_done', 0)}/{comp.get('p0_total', 0)}"
+                    p1_info = f"P1: {comp.get('p1_done', 0)}/{comp.get('p1_total', 0)}"
+                    report_lines.append(f"  - GOALS.md: found ({p0_info}, {p1_info})")
+                else:
+                    report_lines.append(f"  - GOALS.md: not found (will auto-generate on first cycle)")
+            except Exception as ex:
+                report_lines.append(f"  - GOALS.md: ERROR ({ex})")
+
+        # ── TODO system ──
+        try:
+            todo_dir = self.repo / ".doc" / "todo"
+            if todo_dir.exists():
+                todo_content = read_current_todo(self.repo)
+                status = "has content" if todo_content and todo_content.strip() else "empty"
+                report_lines.append(f"- todo: OK ({status})")
+            else:
+                report_lines.append(f"- todo: dir not found (.doc/todo)")
+        except Exception as ex:
+            report_lines.append(f"- todo: ERROR ({ex})")
+
+        # ── Docs digest ──
+        docs_read_mode = eff.get("docs_read_mode", "digest")
+        docs_dir_raw = eff.get("docs_dir", ".doc/Docs")
+        report_lines.append(f"- docs_read_mode: {docs_read_mode}")
+        try:
+            from .docs import resolve_docs_dir
+            docs_dir_resolved = resolve_docs_dir(self.repo, docs_dir_raw)
+            if docs_dir_resolved:
+                md_count = len(list(docs_dir_resolved.glob("**/*.md")))
+                report_lines.append(f"  - docs_dir: OK ({docs_dir_resolved}, {md_count} .md files)")
+            else:
+                report_lines.append(f"  - docs_dir: not found")
+            if docs_read_mode == "digest":
+                digest_file = eff.get("docs_digest_file", ".doc/DOCS_DIGEST.md")
+                dp = Path(digest_file)
+                dp = dp if dp.is_absolute() else (self.repo / dp)
+                if dp.exists():
+                    size = dp.stat().st_size
+                    report_lines.append(f"  - digest file: OK ({dp.name}, {size} bytes)")
+                else:
+                    report_lines.append(f"  - digest file: not found ({dp})")
+        except Exception as ex:
+            report_lines.append(f"  - docs: ERROR ({ex})")
+
+        # ── Process guard ──
+        import sys as _sys
+        if _sys.platform == "win32":
+            try:
+                from .process_guard import _job_handle, _initialized
+                if _initialized:
+                    job_status = "Job Object active" if _job_handle else "initialized (no Job Object)"
+                    report_lines.append(f"- process_guard: {job_status}")
+                else:
+                    report_lines.append(f"- process_guard: not yet initialized")
+            except Exception as ex:
+                report_lines.append(f"- process_guard: ERROR ({ex})")
+        else:
+            report_lines.append(f"- process_guard: N/A (non-Windows)")
+
+        # ── Claude SDK (if backend is claudecode) ──
+        backend = eff.get("execution_backend") or "codex"
+        failover = eff.get("failover_backends") or []
+        if backend == "claudecode" or "claudecode" in failover:
+            try:
+                import claude_code_sdk  # noqa: F401
+                ver = getattr(claude_code_sdk, "__version__", "unknown")
+                report_lines.append(f"- claude_code_sdk: OK (v{ver})")
+            except ImportError:
+                report_lines.append(f"- claude_code_sdk: NOT INSTALLED")
+
         report = "\n".join(report_lines) + "\n"
         (run_dir / "DOCTOR.md").write_text(report, encoding="utf-8", errors="replace")
         print(report)

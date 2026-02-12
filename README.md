@@ -621,7 +621,7 @@ python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --aut
 | `/start [--flags]` | 백그라운드로 러너 시작 |
 | `/stop [--wait]` | STOP 파일 생성, 선택적 대기 |
 | `/status` | 러너 상태/실행시간/종료코드 확인 |
-| `/doctor` | 환경 진단 (API 키, SDK, 빌드 도구 등) |
+| `/doctor` | 환경 진단 (Git, API 키, Backend, Skills, DB, Goals, Docs 등 15개 항목) |
 | `/help` | 명령어 도움말 |
 | `/exit` | Shell 종료 |
 
@@ -1996,16 +1996,64 @@ Shell에서 `/doctor`를 실행하면 run_dir에 진단 보고서(`DOCTOR.md`)�
 > /doctor
 ```
 
-**진단 항목:**
+**진단 항목 (14개):**
 
-| 카테고리 | 검사 내용 |
-|----------|-----------|
-| **런타임** | Python 버전, Node.js/npx 설치, .NET SDK |
-| **API 인증** | OPENAI_API_KEY, ANTHROPIC_API_KEY, claude 로그인 |
-| **SDK** | openai-agents, claude-agent-sdk 설치 여부 |
-| **경로** | repo, config, prompts_dir, run_dir 유효성 |
-| **빌드 도구** | build_cmd/test_cmd 실행 가능 여부 |
-| **Git** | 저장소 상태, worktree 지원 여부 |
+| # | 카테고리 | 검사 내용 | 상세 |
+|---|----------|-----------|------|
+| 1 | **Git** | `git --version`, 레포 `is-inside-work-tree` | 버전 출력, git 레포 여부 |
+| 2 | **Config** | config JSON 로드 | 경로 + 파싱 성공 여부 |
+| 3 | **run_dir** | 쓰기 테스트 (임시파일 생성→삭제) | 경로 + 쓰기 가능 여부 |
+| 4 | **API 인증** | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` 환경변수 | set 여부 (True/False) |
+| 5 | **프로필/정책** | profile, policy enabled, security enabled | 현재 설정값 |
+| 6 | **Backend Preflight** | 각 백엔드별 `run_preflight()` | OK/FAIL + 이슈 상세 |
+| 7 | **빌드 도구** | `build_cmd`, `test_cmd` 첫 실행파일 | `shutil.which()` 검증 |
+| 8 | **Prompts 디렉토리** | `resolve_prompts_dir()` 경로 존재 여부 | override .md 파일 개수 |
+| 9 | **Skills 시스템** | `skills.enabled` 시 roots 존재, SKILL.md 발견 수 | 경고: enabled인데 0개 |
+| 10 | **Task History** | `task_history_enabled` 시 SQLite DB 접근 | `query_history()` 호출 |
+| 11 | **Goals** | `goals_enabled` 시 GOALS.md 존재/파싱 | P0/P1 완료 현황 (done/total) |
+| 12 | **TODO** | `.doc/todo` 디렉토리 + 오늘 TODO 내용 | has content / empty |
+| 13 | **Docs Digest** | `docs_read_mode`, docs_dir .md 파일 수 | digest 파일 존재/크기 |
+| 14 | **Process Guard** | Windows Job Object 활성 상태 | 초기화 여부 (비-Windows: N/A) |
+| 15 | **Claude SDK** | `claudecode` 백엔드 사용 시 import 검증 | `claude_code_sdk` 버전 |
+
+> **참고**: 항목 9-15는 해당 기능이 활성화되었거나 관련 백엔드를 사용할 때만 표시됩니다.
+
+**출력 예시:**
+
+```text
+# Doctor report
+
+- git version: git version 2.43.0.windows.1
+- repo is git: True
+- config load: OK (C:\Users\USER\.agentcli\configs\MyProject-a1b2c3d4.json)
+- run_dir writable: OK (D:\MyProject\runs\20260212-143000)
+- OPENAI_API_KEY set: True
+- ANTHROPIC_API_KEY set: True
+- profile: personal
+- policy enabled: False
+- security enabled: False
+- backend preflight:
+  - codex: OK
+  - claudecode: OK
+- build command executable: dotnet -> True
+- test command executable: dotnet -> True
+- prompts_dir: OK (C:\Users\USER\.agentcli\prompts\MyProject-a1b2c3d4, 3 overrides)
+- skills.enabled: True
+  - roots configured: 3, existing: 1
+  - skills discovered: 12
+- task_history_enabled: True
+  - db query: OK (history accessible)
+- goals_enabled: True
+  - GOALS.md: found (P0: 3/5, P1: 2/8)
+- todo: OK (has content)
+- docs_read_mode: digest
+  - docs_dir: OK (D:\MyProject\.doc\Docs, 7 .md files)
+  - digest file: OK (DOCS_DIGEST.md, 4521 bytes)
+- process_guard: Job Object active
+- claude_code_sdk: OK (v0.1.12)
+```
+
+보고서는 `{run_dir}/DOCTOR.md`에도 저장됩니다.
 
 ---
 
