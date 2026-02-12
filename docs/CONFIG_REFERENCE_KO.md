@@ -60,7 +60,32 @@
 | `claudecode_qa_allowed_tools` | string | `"Read,Grep,Glob,Bash"` | QA 단계에서 허용할 도구 목록. |
 | `claudecode_qa_disallowed_tools` | string | `""` | QA 단계에서 차단할 도구 목록. |
 
-### 3-4. 역할별 모델 오버라이드
+### 3-4. Claude Agent SDK 확장 기능
+
+모두 opt-in이며 기본적으로 비활성입니다. `claude_extensions.py`에서 구현.
+
+| 변수 | 타입 | 기본값 | 설명 |
+|------|------|--------|------|
+| `claudecode_mcp_tools_enabled` | bool | `false` | 커스텀 MCP 도구 활성화 (`check_state`, `run_build` 등). |
+| `claudecode_hooks_enabled` | bool | `false` | PreToolUse/PostToolUse 안전 훅 활성화. 위험 도구 차단, 경로 제한. |
+| `claudecode_can_use_tool_enabled` | bool | `false` | 동적 도구 권한 제어 활성화. 역할별 도구 허용/차단 강제. |
+| `claudecode_can_use_tool_strict_isolation` | bool | `false` | Dev 단계에서 태스크 대상 파일만 수정 허용 (엄격 격리). |
+
+### 3-5. 서브에이전트 (Subagents)
+
+서브에이전트 마스터 스위치(`claudecode_subagents_enabled`)가 `true`일 때만 동작.
+
+| 변수 | 타입 | 기본값 | 설명 |
+|------|------|--------|------|
+| `claudecode_subagents_enabled` | bool | `false` | 서브에이전트 시스템 전체 활성화. |
+| `claudecode_subagent_reviewer_enabled` | bool | `true` | code-reviewer 서브에이전트 활성화. 마스터가 `true`일 때만 동작. |
+| `claudecode_subagent_runner_enabled` | bool | `true` | test-runner 서브에이전트 활성화. |
+| `claudecode_subagent_auditor_enabled` | bool | `true` | security-auditor 서브에이전트 활성화. |
+| `claudecode_subagent_reviewer_model` | string | `""` | code-reviewer 전용 모델. 비어있으면 `claudecode_model` 폴백. |
+| `claudecode_subagent_runner_model` | string | `""` | test-runner 전용 모델. |
+| `claudecode_subagent_auditor_model` | string | `""` | security-auditor 전용 모델. |
+
+### 3-6. 역할별 모델 오버라이드
 
 비어있으면 `claudecode_model` 값으로 폴백.
 
@@ -98,6 +123,8 @@
 | `loop_sleep_seconds` | int | `60` | 루프 사이클 간 대기 시간 (초). |
 | `loop_max_cycles` | int | `0` | 최대 루프 횟수. `0`이면 무제한. |
 | `loop_idle_exit_after` | int | `0` | 할 일이 없을 때 자동 종료까지 대기 시간 (초). `0`이면 종료 안 함. |
+| `max_consecutive_failed_cycles` | int | `3` | 연속 실패 사이클 허용 횟수. 초과 시 파이프라인 자동 중단. |
+| `budget_reset_per_cycle` | bool | `true` | `true`면 매 사이클 시작 시 예산 카운터(에스컬레이션, continuation 등)를 초기화. |
 | `continuous` | bool | `false` | `true`면 한 사이클에서 여러 태스크를 연속 처리. |
 | `iterations` | int | `30` | 한 사이클에서 처리할 최대 반복(태스크) 수. |
 | `max_turns_per_task` | int | `12` | 태스크당 최대 LLM 턴 수. |
@@ -182,7 +209,7 @@
 | `pm_model` | string | `"gpt-5-mini"` | PM 단계 GPT 모델. |
 | `dev_model` | string | `"gpt-5.1-codex-mini"` | Dev 단계 GPT 모델 (기본 티어). |
 | `qa_model` | string | `"gpt-5-mini"` | QA 단계 GPT 모델. |
-| `qa_always` | bool | `false` | `true`면 코드 변경 없어도 항상 QA 실행. |
+| `qa_always` | bool | `true` | `true`면 코드 변경 없어도 항상 QA 실행. enterprise 프로필에서는 항상 `true` 강제. |
 | `qa_to_backlog` | bool | `false` | `true`면 QA 결과를 백로그에 후속 태스크로 추가. |
 | `max_qa_followups` | int | `5` | QA에서 백로그에 추가할 최대 후속 태스크 수. |
 | `reporter_model` | string | `"gpt-5-nano"` | Reporter(종료 보고서) GPT 모델. |
@@ -326,6 +353,53 @@ dev_model → dev_model_tier1 → dev_model_tier2
 | `plugins_enabled` | bool | `false` | 플러그인 스테이지 로딩 활성화. |
 | `plugins_allowlist` | list | `[]` | 허용할 플러그인 패턴 목록. 비어있으면 모두 차단. |
 | `plugins_strict` | bool | `true` | `true`면 플러그인 로드 실패/차단 시 파이프라인 중단. |
+
+---
+
+## 21. 할당량 관리 (Quota)
+
+API 사용량 제한으로 인한 장애를 선제적으로 방지합니다.
+
+| 변수 | 타입 | 기본값 | 설명 |
+|------|------|--------|------|
+| `quota_check_enabled` | bool | `true` | API 할당량 사전 체크 활성화. 태스크 실행 전 남은 할당량을 확인. |
+| `quota_five_hour_max_utilization` | int | `95` | 5시간 롤링 윈도우 최대 사용률 (%). 초과 시 실행 보류 또는 페일오버. |
+| `quota_seven_day_max_utilization` | int | `95` | 7일 롤링 윈도우 최대 사용률 (%). |
+| `quota_wait_for_reset` | bool | `true` | `true`면 할당량 초과 시 리셋까지 대기. `false`면 즉시 실패 처리. |
+
+---
+
+## 22. 태스크 이력 (Task History)
+
+SQLite 기반 크로스-런 태스크 이력 추적. PM이 이전 실행에서의 완료/실패 이력을 참조하여 중복 작업을 방지합니다.
+
+| 변수 | 타입 | 기본값 | 설명 |
+|------|------|--------|------|
+| `task_history_enabled` | bool | `true` | 태스크 이력 DB 활성화. |
+| `task_history_max_items` | int | `15` | PM 프롬프트에 주입할 최대 이력 항목 수. |
+| `max_consecutive_task_failures` | int | `3` | 연속 태스크 실패 허용 횟수. 초과 시 사이클 중단. |
+
+**DB 위치**: `{AGENTCLI_HOME}/databases/{repo-slug}.db`
+
+**스키마 주요 컬럼**: `task_id`, `title`, `status`, `reason`, `detail`, `files`, `cycle_idx`, `attempt`, `max_attempts`, `run_id`, `backend`, `recorded_at`
+
+---
+
+## 23. 프로젝트 목표 (Goals)
+
+GOALS.md 기반 프로젝트 완료 추적 시스템. P0(필수)와 P1(선택) 체크박스로 완료 여부를 판단합니다.
+
+| 변수 | 타입 | 기본값 | 설명 |
+|------|------|--------|------|
+| `goals_enabled` | bool | `true` | Goals 시스템 활성화. |
+| `goals_auto_generate` | bool | `true` | `true`면 GOALS.md가 없을 때 PM이 첫 사이클에서 자동 생성. |
+| `goals_auto_check` | bool | `true` | `true`면 매 사이클마다 목표 달성률을 자동 검사하여 프로젝트 완료 여부 판단. |
+
+**파일 위치**: `{repo}/.doc/GOALS.md`
+
+**완료 판정 로직**:
+- P0 항목이 모두 체크(`[x]`)되면 `project_complete = true` → 파이프라인이 `STOP_REASON_PROJECT_COMPLETE`로 종료
+- P1 항목은 완료 판정에 영향 없음 (nice-to-have)
 
 ---
 
