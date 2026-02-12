@@ -47,6 +47,11 @@ class StructuredLogger:
         # Python logger setup
         self.logger = logging.getLogger("agent_runner")
         self.logger.setLevel(logging.DEBUG)
+        for _h in self.logger.handlers[:]:
+            try:
+                _h.close()
+            except Exception:
+                pass
         self.logger.handlers.clear()
 
         # Console handler (stderr)

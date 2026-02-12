@@ -5,12 +5,13 @@ from typing import Iterable, List, Tuple
 
 from .session import PipelineSession
 from .stages.base import Stage, StageOutcome
+from ..utils import STOP_REASON_ALL_TASKS_DONE, STOP_REASON_ALL_TASKS_ATTEMPTED, STOP_REASON_PROJECT_COMPLETE
 
 # Stop reasons that should propagate through CycleResult for outer-loop handling
-# (imported lazily to avoid circular imports — matched by string value)
 _PROPAGATE_STOP_REASONS = frozenset({
-    "all_tasks_done",
-    "project_complete",
+    STOP_REASON_ALL_TASKS_DONE,
+    STOP_REASON_ALL_TASKS_ATTEMPTED,
+    STOP_REASON_PROJECT_COMPLETE,
 })
 
 

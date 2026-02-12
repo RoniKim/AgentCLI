@@ -308,11 +308,11 @@ def build_local_shutdown_report(
         if failed:
             lines.append("")
             lines.append("### Failed")
-            for f in failed[:20]:
-                if isinstance(f, dict):
-                    lines.append(f"- {f.get('task')} ({f.get('reason')})")
+            for item in failed[:20]:
+                if isinstance(item, dict):
+                    lines.append(f"- {item.get('task')} ({item.get('reason')})")
                 else:
-                    lines.append(f"- {str(f)}")
+                    lines.append(f"- {str(item)}")
         if warnings:
             lines.append("")
             lines.append("### Warnings")

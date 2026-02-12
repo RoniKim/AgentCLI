@@ -667,7 +667,7 @@ class RunnerShell:
                 roots_raw = skills_cfg.get("roots") or []
                 roots = resolve_skills_roots(self.repo, roots_raw)
                 existing = [r for r in roots if r.exists()]
-                idx = build_skills_index(self.repo, roots_raw)
+                idx = build_skills_index(roots)
                 report_lines.append(f"  - roots configured: {len(roots)}, existing: {len(existing)}")
                 report_lines.append(f"  - skills discovered: {len(idx)}")
                 if not idx:
@@ -709,8 +709,8 @@ class RunnerShell:
         try:
             todo_dir = self.repo / ".doc" / "todo"
             if todo_dir.exists():
-                todo_content = read_current_todo(self.repo)
-                status = "has content" if todo_content and todo_content.strip() else "empty"
+                _todo_path, todo_text = read_current_todo(self.repo)
+                status = "has content" if todo_text and todo_text.strip() else "empty"
                 report_lines.append(f"- todo: OK ({status})")
             else:
                 report_lines.append(f"- todo: dir not found (.doc/todo)")
@@ -761,11 +761,11 @@ class RunnerShell:
         failover = eff.get("failover_backends") or []
         if backend == "claudecode" or "claudecode" in failover:
             try:
-                import claude_code_sdk  # noqa: F401
-                ver = getattr(claude_code_sdk, "__version__", "unknown")
-                report_lines.append(f"- claude_code_sdk: OK (v{ver})")
+                import claude_agent_sdk  # noqa: F401
+                ver = getattr(claude_agent_sdk, "__version__", "unknown")
+                report_lines.append(f"- claude_agent_sdk: OK (v{ver})")
             except ImportError:
-                report_lines.append(f"- claude_code_sdk: NOT INSTALLED")
+                report_lines.append(f"- claude_agent_sdk: NOT INSTALLED")
 
         report = "\n".join(report_lines) + "\n"
         (run_dir / "DOCTOR.md").write_text(report, encoding="utf-8", errors="replace")
@@ -912,7 +912,13 @@ def shell_main(argv: list[str] | None = None) -> int:
 
 
 def _dispatch(sh: RunnerShell, line: str) -> bool:
-    parts = shlex.split(line)
+    try:
+        parts = shlex.split(line)
+    except ValueError as e:
+        print(f"[ERR] Invalid input: {e}")
+        return False
+    if not parts:
+        return False
     cmd = parts[0].lower()
     args = parts[1:]
 

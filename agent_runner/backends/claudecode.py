@@ -83,7 +83,6 @@ from ..state import (
     save_state,
     write_backlog_files,
     mark_backlog_done,
-    write_default_p0_backlog,
     TaskItem,
 )
 from ..structured import parse_pm_output_with_errors, dump_pretty, describe_parse_failure, parse_qa_followups
@@ -95,7 +94,6 @@ from ..skills import (
     summarize_skills_index_capped,
     write_skills_snapshot,
 )
-from ..skills.match import suggest_skills
 from ..shared import load_json_if_exists as _load_json_if_exists, inline_skills_for as _inline_skills_for, format_skill_selection as _format_skill_selection
 from ..task_history import format_history_block as _format_history_block, format_split_history_blocks as _format_split_history_blocks, count_unresolved_failures as _count_unresolved_failures, count_consecutive_title_failures as _count_consecutive_title_failures
 from ..progress import print_cycle_report, TokenTracker, extract_claude_tokens
@@ -114,23 +112,21 @@ from ..utils import (
     severity_at_or_above,
     budget_exceeded,
     is_unsafe_path,
-    hash_prompt,
     STOP_REASON_QUOTA,
     STOP_REASON_QUOTA_UTILIZATION,
     STOP_REASON_STOP_FILE,
     STOP_REASON_ALL_TASKS_DONE,
+    STOP_REASON_ALL_TASKS_ATTEMPTED,
     STOP_REASON_PROJECT_COMPLETE,
 )
 from ..exceptions import BudgetExceeded, StopRequested
 from ..exc_detect import (
-    iter_exc_chain,
     is_max_turns_exception,
     is_quota_exception,
     is_model_invalid_exception,
     is_transient_exception,
 )
 from ..qa_utils import (
-    normalize_followup_prompt,
     extract_qa_followups,
     followups_from_structured,
     merge_qa_followups,
@@ -139,7 +135,6 @@ from ..backlog_utils import (
     normalize_backlog_tasks,
     validate_skill_ids,
     load_backlog_context_for_pm,
-    find_latest_dev_log_for_task,
     build_failed_tasks_block,
     record_history,
 )
@@ -345,7 +340,7 @@ def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_overr
                 allowed.append(t)
         disallowed = cfg.pm_disallowed_tools
         output_format = {"type": "json_schema", "schema": pm_output_json_schema()}
-    elif stage_low == "dev":
+    elif stage_low in ("dev", "buildfix", "reporter"):
         allowed = cfg.dev_allowed_tools
         disallowed = cfg.dev_disallowed_tools
         output_format = None
@@ -427,24 +422,30 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
     if hasattr(stream, "__aiter__"):
         iterator = stream
     elif hasattr(stream, "__iter__"):
-        import queue
+        import queue, threading
         _q: queue.Queue = queue.Queue()
         _SENTINEL = object()
+        _stop_event = threading.Event()
         async def _threaded_sync_iter():
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             def _consume():
                 try:
                     for msg in stream:
+                        if _stop_event.is_set():
+                            break
                         _q.put(msg)
                 finally:
                     _q.put(_SENTINEL)
             fut = loop.run_in_executor(None, _consume)
-            while True:
-                item = await loop.run_in_executor(None, _q.get)
-                if item is _SENTINEL:
-                    break
-                yield item
-            await fut
+            try:
+                while True:
+                    item = await loop.run_in_executor(None, _q.get)
+                    if item is _SENTINEL:
+                        break
+                    yield item
+            finally:
+                _stop_event.set()
+                await fut
         iterator = _threaded_sync_iter()
     else:
         raise RuntimeError("ClaudeSDKClient did not provide a message stream")
@@ -1099,7 +1100,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     label="pm", max_continuations=pm_max_conts,
                     task_id=f"pm_{kind}",
                     budget_state=budget_state, budgets_cfg=budgets_cfg,
-                    metrics=metrics, _budget_exceeded=_budget_exceeded,
+                    metrics=metrics, _budget_exceeded=budget_exceeded,
                     ext_ctx=ext_ctx,
                 )
             except StopRequested:
@@ -1434,7 +1435,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     detected = detect_stop_reason([stop_path])
                     return 0, (detected or STOP_REASON_STOP_FILE), 0, (len(done_set) > before_done)
                 return 1, "pm_failed", 0, (len(done_set) > before_done)
-            ensure_backlog()
+            if not ensure_backlog():
+                return 1, "pm_refresh_no_backlog", 0, (len(done_set) > before_done)
             tasks = load_tasks()
             task_ids = {t.id for t in tasks}
             # Clear done_set for IDs that appear in the new backlog — PM recycled these IDs for new tasks
@@ -1495,7 +1497,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         label="build_fix", max_continuations=int(getattr(args, "dev_max_turns_continuations", 0) or 0),
                         task_id="__build_fix__",
                         budget_state=budget_state, budgets_cfg=budgets_cfg,
-                        metrics=metrics, _budget_exceeded=_budget_exceeded,
+                        metrics=metrics, _budget_exceeded=budget_exceeded,
                         ext_ctx=ext_ctx,
                     )
                 except Exception as bfx:
@@ -1749,7 +1751,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         label="dev", max_continuations=dev_max_conts,
                         task_id=next_task.id,
                         budget_state=budget_state, budgets_cfg=budgets_cfg,
-                        metrics=metrics, _budget_exceeded=_budget_exceeded,
+                        metrics=metrics, _budget_exceeded=budget_exceeded,
                         ext_ctx=ext_ctx,
                     )
                     dev_final = text or ""
@@ -1911,6 +1913,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         eprint(f"[INFO] Task {next_task.id} reports already implemented; marking as done (no diff expected).")
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0, reason="already_implemented")
                         logger.task_end(task_id=next_task.id, success=True, reason="already_implemented")
+                        task_results.append({"id": next_task.id, "title": next_task.title, "status": "done", "reason": "already_implemented", "duration": time.time() - task_outer_t0})
                         task_completed = True
                         break
 
@@ -1963,6 +1966,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                             eprint(f"[INFO] Phantom edit retry succeeded for {next_task.id} — diff now exists.")
                             metrics.event("dev_attempt_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0, reason="phantom_retry_success")
                             logger.task_end(task_id=next_task.id, success=True, reason="completed_after_retry", attempt=attempt)
+                            task_results.append({"id": next_task.id, "title": next_task.title, "status": "done", "reason": "phantom_retry_success", "duration": time.time() - task_outer_t0})
                             task_completed = True
                             break
                         # If still no diff after retry, fall through to normal no_diff handling
@@ -2137,6 +2141,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     metrics.event("task_branch_merge_failed", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name)
                     state.setdefault("failed", []).append({"task": next_task.id, "reason": "merge_conflict", "branch": tb.branch_name})
                     save_state(state_path, state)
+                    _record_history(next_task.id, next_task.title, "failed", reason="merge_conflict",
+                                    detail=f"Merge conflict on branch {tb.branch_name}", files=next_task.files,
+                                    cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
+                    skipped_set.add(next_task.id)
                     tb = None
                     continue  # skip marking as done
                 tb = None
@@ -2264,7 +2272,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         if total_count > 0 and (done_count + skipped_count) >= total_count:
             # All tasks attempted but some were skipped — not truly "all done"
             logger.info(f"All tasks attempted: {done_count} done, {skipped_count} skipped out of {total_count}.")
-            return 0, "all_tasks_attempted", done_delta, ran_tasks
+            return 0, STOP_REASON_ALL_TASKS_ATTEMPTED, done_delta, ran_tasks
 
         return 0, "ok", done_delta, ran_tasks
 
@@ -2392,10 +2400,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             except Exception:
                 pass
         try:
-            local_md = build_local_shutdown_report(repo, run_dir, reason=stop_reason, last_task_id=last_task_id)
+            local_md = build_local_shutdown_report(repo=repo, run_dir=run_dir, reason=stop_reason, last_task_id=last_task_id)
             report_path.write_text(local_md, encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as _report_ex:
+            eprint(f"[WARN] Failed to write local shutdown report: {_report_ex}")
         # Try PM-authored report via Claude SDK
         reporter_instructions = store.get("reporter_instructions", REPORTER_INSTRUCTIONS_DEFAULT)
         try:
@@ -2697,7 +2705,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 if not loop_mode:
                     break
                 # In loop mode, fall through — PM refresh may generate new tasks
-            if reason == "all_tasks_attempted":
+            if reason == STOP_REASON_ALL_TASKS_ATTEMPTED:
                 # All tasks tried but some skipped — in loop mode, next cycle may get new tasks from PM
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_attempted")
                 if not loop_mode:
@@ -2765,5 +2773,6 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             print(f"[SHUTDOWN] reason={final_reason or 'ok'} cycles={len(run_summary['cycles'])} tasks={tasks_done}/{tasks_total} changes={change_count} run_dir={run_dir}{policy_part}")
         except Exception:
             print(f"[SHUTDOWN] reason={final_reason or last_reason or 'ok'} run_dir={run_dir}")
+        logger.close()
 
     return last_rc

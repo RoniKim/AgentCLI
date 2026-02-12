@@ -58,6 +58,10 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
         tid = str(x.get("id") or x.get("task_id") or x.get("key") or "").strip()
         if not tid:
             tid = f"T{auto_i:02d}"
+        # Sanitize task ID to prevent path traversal (task IDs become directory names)
+        tid = re.sub(r'[^A-Za-z0-9_\-]', '_', tid)[:64]
+        if not tid:
+            tid = f"T{auto_i:02d}"
         auto_i += 1
 
         title = str(x.get("title") or x.get("name") or "").strip() or tid
@@ -168,7 +172,14 @@ def parse_backlog_md(path: Path) -> list[TaskItem]:
 def load_state(path: Path) -> dict[str, Any]:
     if path.exists():
         try:
-            return json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
+            state = json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
+            if not isinstance(state, dict):
+                state = {"done": [], "failed": []}
+            # Normalize null/non-list → [] to prevent TypeError/AttributeError at call sites
+            for key in ("done", "failed", "warnings"):
+                if not isinstance(state.get(key), list):
+                    state[key] = []
+            return state
         except (json.JSONDecodeError, ValueError) as exc:
             eprint(f"[WARN] STATE.json is corrupt ({exc}); backing up and resetting.")
             try:
@@ -177,17 +188,24 @@ def load_state(path: Path) -> dict[str, Any]:
                 shutil.copy2(path, corrupt_path)
             except Exception:
                 pass
-    return {"done": [], "failed": []}
+    return {"done": [], "failed": [], "warnings": []}
 
 
 _MAX_FAILED_ENTRIES = 200
+_MAX_WARNING_ENTRIES = 200
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
-    # Cap failed list to prevent unbounded growth in long-running sessions
+    # Cap failed/warnings lists to prevent unbounded growth in long-running sessions
     state = dict(state)
-    if len(state.get("failed", [])) > _MAX_FAILED_ENTRIES:
+    # Defensive: normalize null/non-list fields before length checks
+    for key in ("done", "failed", "warnings"):
+        if not isinstance(state.get(key), list):
+            state[key] = []
+    if len(state["failed"]) > _MAX_FAILED_ENTRIES:
         state["failed"] = state["failed"][-_MAX_FAILED_ENTRIES:]
+    if len(state["warnings"]) > _MAX_WARNING_ENTRIES:
+        state["warnings"] = state["warnings"][-_MAX_WARNING_ENTRIES:]
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         atomic_write_json(path, state)

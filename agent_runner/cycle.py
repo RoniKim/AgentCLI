@@ -88,23 +88,20 @@ from .utils import (
     severity_at_or_above,
     budget_exceeded,
     is_unsafe_path,
-    hash_prompt,
     STOP_REASON_QUOTA,
-    STOP_REASON_QUOTA_UTILIZATION,
     STOP_REASON_STOP_FILE,
     STOP_REASON_ALL_TASKS_DONE,
+    STOP_REASON_ALL_TASKS_ATTEMPTED,
     STOP_REASON_PROJECT_COMPLETE,
 )
-from .exceptions import BudgetExceeded, StopRequested
+from .exceptions import BudgetExceeded
 from .exc_detect import (
-    iter_exc_chain,
     is_max_turns_exception,
     is_quota_exception,
     is_model_invalid_exception,
     is_transient_exception,
 )
 from .qa_utils import (
-    normalize_followup_prompt,
     extract_qa_followups,
     followups_from_structured,
     merge_qa_followups,
@@ -113,7 +110,6 @@ from .backlog_utils import (
     normalize_backlog_tasks,
     validate_skill_ids,
     load_backlog_context_for_pm,
-    find_latest_dev_log_for_task,
     build_failed_tasks_block,
     record_history,
 )
@@ -128,7 +124,6 @@ from .goals import (
 )
 from .schemas import PMOutputV2
 from .structured import parse_pm_output_with_errors, dump_pretty, describe_parse_failure, parse_qa_followups
-from .tracing import TraceCtx, new_trace_id
 from .skills import (
     build_skills_index,
     resolve_skills_roots,
@@ -265,7 +260,6 @@ async def main_async(args: argparse.Namespace) -> int:
     # Observability
     metrics = MetricsLogger(run_dir / "metrics.jsonl")
     logger = create_logger(run_dir, debug=bool(getattr(args, "debug", False)))
-    trace_ctx = TraceCtx(trace_id=new_trace_id(), parent_span_id=None)
     stop_path = run_dir / str(getattr(args, "stop_file", "STOP"))
     cycle_summary_path = run_dir / "cycle_summary.log"
     last_run_summary_path = run_dir / "last_run_summary.json"
@@ -515,10 +509,10 @@ async def main_async(args: argparse.Namespace) -> int:
 
             # Always write a local fallback first.
             try:
-                local_md = build_local_shutdown_report(repo, run_dir, reason=stop_reason, last_task_id=last_task_id)
+                local_md = build_local_shutdown_report(repo=repo, run_dir=run_dir, reason=stop_reason, last_task_id=last_task_id)
                 report_path.write_text(local_md, encoding="utf-8", errors="replace")
-            except Exception:
-                pass
+            except Exception as _report_ex:
+                eprint(f"[WARN] Failed to write local shutdown report: {_report_ex}")
 
             # Try to have PM author a concise report, overwriting the fallback.
             try:
@@ -906,8 +900,8 @@ async def main_async(args: argparse.Namespace) -> int:
                                 ]
                                 if qa_followups:
                                     merged_tasks = _merge_qa_followups(merged_tasks, qa_followups, done_ids)
-                            except Exception:
-                                pass
+                            except Exception as _qa_merge_ex:
+                                eprint(f"[WARN] QA followup merge during PM bootstrap failed: {_qa_merge_ex}")
                             write_backlog_files(run_dir, merged_tasks)
 
                     last_pm_fp = repo_fp or last_pm_fp
@@ -1247,7 +1241,8 @@ async def main_async(args: argparse.Namespace) -> int:
                         detected = detect_stop_reason([stop_path])
                         return 0, (detected or STOP_REASON_STOP_FILE), 0, (len(done_set) > before_done)
                     return 1, "pm_failed", 0, (len(done_set) > before_done)
-                ensure_backlog()
+                if not ensure_backlog():
+                    return 1, "pm_refresh_no_backlog", 0, (len(done_set) > before_done)
                 tasks = load_tasks()
                 task_ids = {t.id for t in tasks}
                 # Clear done_set for IDs that appear in the new backlog — PM recycled these IDs for new tasks
@@ -1512,6 +1507,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                     return 1, fail_reason, 0, (len(done_set) > before_done)
                                 eprint(f"[WARN] Rollback {fail_reason} during retry for {next_task.id}; skipping task.")
                                 skipped_set.add(next_task.id)
+                                task_blocked = True
                                 break
 
                     model_name = tiers[attempt]
@@ -1624,7 +1620,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     )
 
                     # Quota/credits exhausted: graceful stop with artifacts preserved.
-                    dev_quota_exhausted = dev_quota_exhausted or is_quota_text(dev_log)
+                    dev_quota_exhausted = dev_quota_exhausted or has_quota_text(dev_log)
                     if isinstance(dev_exc, BudgetExceeded):
                         metrics.event("budget_exceeded", cycle=cycle_idx, step=step, task_id=next_task.id, reason=str(dev_exc))
                         return 1, "budget_exceeded", 0, (len(done_set) > before_done)
@@ -1704,6 +1700,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             dep_req_path.unlink()
                         except Exception:
                             pass
+                        task_blocked = True
                         break
 
                     # Escalate conditions: retry same task with a higher tier model.
@@ -1901,7 +1898,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         )
                         try:
                             with (run_dir / "policy_scan_history.jsonl").open("a", encoding="utf-8", errors="replace") as f:
-                                f.write(json.dumps({"ts": now_iso(), "cycle": cycle_idx, "step": step, "task_id": next_task.id, **scan_result}, ensure_ascii=False) + "\n")
+                                f.write(json.dumps({"ts": now_iso(), "cycle": cycle_idx, "step": step, "task_id": next_task.id, **scan_result}, ensure_ascii=False, default=str) + "\n")
                         except Exception:
                             pass
 
@@ -1941,7 +1938,10 @@ async def main_async(args: argparse.Namespace) -> int:
                 if task_blocked:
                     # Blocked tasks: skip to next task instead of stopping
                     if tb:
-                        abandon_task_branch(repo, tb)
+                        try:
+                            abandon_task_branch(repo, tb)
+                        except Exception as _ab_ex:
+                            eprint(f"[WARN] abandon_task_branch failed for blocked task: {_ab_ex}")
                         tb = None
                     skipped_set.add(next_task.id)
                     eprint(f"[INFO] Skipped blocked task {next_task.id}, continuing to next task...")
@@ -1949,8 +1949,11 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 if not task_completed:
                     if tb:
-                        abandon_task_branch(repo, tb)
-                        metrics.event("task_branch_abandoned", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name, reason="exhausted_attempts")
+                        try:
+                            abandon_task_branch(repo, tb)
+                            metrics.event("task_branch_abandoned", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name, reason="exhausted_attempts")
+                        except Exception as _ab_ex:
+                            eprint(f"[WARN] abandon_task_branch failed: {_ab_ex}")
                         tb = None
                     # No success after attempts and not otherwise returned: treat as failure.
                     state.setdefault("failed", []).append({"task": next_task.id, "reason": "exhausted_attempts"})
@@ -2080,7 +2083,7 @@ async def main_async(args: argparse.Namespace) -> int:
             if total_count > 0 and (done_count + skipped_count) >= total_count:
                 # All tasks attempted but some were skipped — not truly "all done"
                 logger.info(f"All tasks attempted: {done_count} done, {skipped_count} skipped out of {total_count}.")
-                return 0, "all_tasks_attempted", done_delta, ran_tasks
+                return 0, STOP_REASON_ALL_TASKS_ATTEMPTED, done_delta, ran_tasks
 
             return 0, "ok", done_delta, ran_tasks
 
@@ -2380,7 +2383,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     if not args.loop:
                         break
                     # In loop mode, fall through — PM refresh may generate new tasks
-                if reason == "all_tasks_attempted":
+                if reason == STOP_REASON_ALL_TASKS_ATTEMPTED:
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_attempted")
                     if not args.loop:
                         break
@@ -2455,6 +2458,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 )
             except Exception:
                 print(f"[SHUTDOWN] reason={final_reason or last_reason or 'ok'} run_dir={run_dir}")
+            logger.close()
 
     return last_rc
 

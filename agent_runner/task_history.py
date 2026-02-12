@@ -61,16 +61,20 @@ def _connect(repo: Path) -> sqlite3.Connection:
     db = _db_path(repo)
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db), timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
-    conn.execute(_SCHEMA_SQL)
-    # best-effort migration for DBs created before attempt/max_attempts columns
-    for sql in _MIGRATIONS:
-        try:
-            conn.execute(sql)
-        except sqlite3.OperationalError:
-            pass  # column already exists
-    conn.commit()
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        conn.execute(_SCHEMA_SQL)
+        # best-effort migration for DBs created before attempt/max_attempts columns
+        for sql in _MIGRATIONS:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        conn.commit()
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 

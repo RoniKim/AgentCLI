@@ -136,6 +136,7 @@ def _setup_job_object() -> Optional[int]:
     """Create a Windows Job Object with KILL_ON_JOB_CLOSE and assign current process."""
     if sys.platform != "win32":
         return None
+    job = None
     try:
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
 
@@ -173,6 +174,11 @@ def _setup_job_object() -> Optional[int]:
         return job
     except Exception as ex:
         logger.warning(f"[ProcessGuard] L1 setup failed: {ex}")
+        try:
+            if job:
+                kernel32.CloseHandle(job)
+        except Exception:
+            pass
         return None
 
 

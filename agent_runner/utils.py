@@ -17,6 +17,7 @@ STOP_REASON_QUOTA = "quota_exhausted"
 STOP_REASON_STOP_FILE = "stop_file"
 STOP_REASON_ALL_TASKS_DONE = "all_tasks_done"
 STOP_REASON_PROJECT_COMPLETE = "project_complete"
+STOP_REASON_ALL_TASKS_ATTEMPTED = "all_tasks_attempted"
 STOP_REASON_PREPARED_ONLY = "prepared_only"
 STOP_REASON_IDLE_EXIT = "idle_exit"
 STOP_REASON_OK = "ok"
@@ -27,6 +28,7 @@ STOP_REASON_PRIORITY: list[str] = [
     STOP_REASON_STOP_FILE,
     STOP_REASON_PROJECT_COMPLETE,
     STOP_REASON_ALL_TASKS_DONE,
+    STOP_REASON_ALL_TASKS_ATTEMPTED,
     STOP_REASON_PREPARED_ONLY,
     STOP_REASON_IDLE_EXIT,
     STOP_REASON_OK,
@@ -127,36 +129,37 @@ async def run_cmd_async(
     truncated = False
     written = 0
     log_fh = log_path.open("ab")
+    reader_tasks: list[asyncio.Task] = []
 
-    async def _reader(stream: asyncio.StreamReader, label: str) -> None:
-        nonlocal written, truncated
-        if stream is None:
-            return
-        while True:
-            chunk = await stream.read(8192)
-            if not chunk:
-                break
-            if written >= max_output_bytes:
-                if truncated:
-                    return
-                log_fh.write(b"\n[TRUNCATED OUTPUT]\n")
-                truncated = True
-                continue
-            remaining = max_output_bytes - written
-            data = chunk[:remaining]
-            log_fh.write(data)
-            written += len(data)
-            if len(chunk) > remaining and not truncated:
-                log_fh.write(b"\n[TRUNCATED OUTPUT]\n")
-                truncated = True
-
-    reader_tasks = [
-        asyncio.create_task(_reader(proc.stdout, "stdout")),
-        asyncio.create_task(_reader(proc.stderr, "stderr")),
-    ]
-
-    summary = ""
     try:
+        async def _reader(stream: asyncio.StreamReader, label: str) -> None:
+            nonlocal written, truncated
+            if stream is None:
+                return
+            while True:
+                chunk = await stream.read(8192)
+                if not chunk:
+                    break
+                if written >= max_output_bytes:
+                    if truncated:
+                        return
+                    log_fh.write(b"\n[TRUNCATED OUTPUT]\n")
+                    truncated = True
+                    continue
+                remaining = max_output_bytes - written
+                data = chunk[:remaining]
+                log_fh.write(data)
+                written += len(data)
+                if len(chunk) > remaining and not truncated:
+                    log_fh.write(b"\n[TRUNCATED OUTPUT]\n")
+                    truncated = True
+
+        reader_tasks = [
+            asyncio.create_task(_reader(proc.stdout, "stdout")),
+            asyncio.create_task(_reader(proc.stderr, "stderr")),
+        ]
+
+        summary = ""
         while True:
             if stop_path is not None and stop_path.exists():
                 proc.terminate()
@@ -179,6 +182,19 @@ async def run_cmd_async(
             await asyncio.sleep(0.2)
         rc = await proc.wait()
     finally:
+        # Ensure subprocess is terminated on any exit path (CancelledError, etc.)
+        if proc.returncode is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
         await asyncio.gather(*reader_tasks, return_exceptions=True)
         log_fh.close()
 
