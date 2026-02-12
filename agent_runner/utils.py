@@ -460,6 +460,33 @@ def write_heartbeat(run_dir: Path) -> None:
         pass
 
 
+def severity_at_or_above(found: str, threshold: str) -> bool:
+    """Return True if *found* severity is at or above *threshold*."""
+    order = {"low": 0, "medium": 1, "high": 2}
+    return order.get(found, 1) >= order.get(threshold, 1)
+
+
+def budget_exceeded(key: str, current: int, limit: int) -> bool:
+    """Return True if *current* has reached or exceeded *limit* (0 means unlimited)."""
+    if limit <= 0:
+        return False
+    return current >= limit
+
+
+def is_unsafe_path(raw: str) -> bool:
+    """Return True if *raw* contains path-traversal patterns."""
+    try:
+        return ".." in Path(raw).parts
+    except Exception:
+        return True
+
+
+def hash_prompt(text: str) -> str:
+    """Return a short SHA-256 digest of *text* (10 hex chars)."""
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:10]
+
+
 def detect_stop_reason(stop_paths: Sequence[Path]) -> str:
     """Detect stop reason from one of the provided stop files."""
     for path in stop_paths:

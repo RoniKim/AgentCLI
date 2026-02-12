@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List
 
-from .utils import now_iso, atomic_write_json, atomic_write_text, eprint
+from .utils import now_iso, atomic_write_json, atomic_write_text, safe_write_text, eprint
 
 
 @dataclass
@@ -125,7 +125,7 @@ def write_backlog_files(run_dir: Path, tasks: List[dict[str, Any]]) -> tuple[Pat
         atomic_write_json(bj, backlog)
     except Exception as ex:
         eprint(f"[WARN] Failed to write BACKLOG.json atomically: {ex}")
-        bj.write_text(json.dumps(backlog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+        safe_write_text(bj, json.dumps(backlog, ensure_ascii=False, indent=2) + "\n")
 
     md_lines = ["# BACKLOG", ""]
     for t in tasks:
@@ -136,7 +136,7 @@ def write_backlog_files(run_dir: Path, tasks: List[dict[str, Any]]) -> tuple[Pat
         atomic_write_text(bm, "\n".join(md_lines) + "\n")
     except Exception as ex:
         eprint(f"[WARN] Failed to write BACKLOG.md atomically: {ex}")
-        bm.write_text("\n".join(md_lines) + "\n", encoding="utf-8", errors="replace")
+        safe_write_text(bm, "\n".join(md_lines) + "\n")
     return bj, bm
 
 
@@ -193,7 +193,7 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
         atomic_write_json(path, state)
     except Exception as ex:
         eprint(f"[WARN] Failed to write state atomically: {ex}")
-        path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+        safe_write_text(path, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
 
 
 def mark_backlog_done(backlog_md: Path, task_id: str) -> None:
@@ -245,7 +245,7 @@ def write_default_p0_backlog(run_dir: Path) -> None:
         atomic_write_json(run_dir / "BACKLOG.json", backlog)
     except Exception as ex:
         eprint(f"[WARN] Failed to write default BACKLOG.json atomically: {ex}")
-        (run_dir / "BACKLOG.json").write_text(json.dumps(backlog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+        safe_write_text(run_dir / "BACKLOG.json", json.dumps(backlog, ensure_ascii=False, indent=2) + "\n")
 
     md_lines = ["# BACKLOG", ""]
     for t in backlog["tasks"]:
@@ -255,4 +255,4 @@ def write_default_p0_backlog(run_dir: Path) -> None:
         atomic_write_text(run_dir / "BACKLOG.md", "\n".join(md_lines) + "\n")
     except Exception as ex:
         eprint(f"[WARN] Failed to write default BACKLOG.md atomically: {ex}")
-        (run_dir / "BACKLOG.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8", errors="replace")
+        safe_write_text(run_dir / "BACKLOG.md", "\n".join(md_lines) + "\n")

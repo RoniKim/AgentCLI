@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 import re
@@ -59,7 +58,6 @@ from ..prompts import (
     ensure_pm_instructions_have_output_schema,
     append_pm_output_contract,
     append_pm_essential_context,
-    codex_call_hint,
     PM_BOOTSTRAP_TEMPLATE_DEFAULT,
     PM_INCREMENTAL_TEMPLATE_DEFAULT,
     DEV_TASK_TEMPLATE_DEFAULT,
@@ -99,9 +97,8 @@ from ..skills import (
 )
 from ..skills.match import suggest_skills
 from ..shared import load_json_if_exists as _load_json_if_exists, inline_skills_for as _inline_skills_for, format_skill_selection as _format_skill_selection
-from ..task_history import record_task as _record_task_history, format_history_block as _format_history_block, format_split_history_blocks as _format_split_history_blocks, count_unresolved_failures as _count_unresolved_failures, count_consecutive_title_failures as _count_consecutive_title_failures
+from ..task_history import format_history_block as _format_history_block, format_split_history_blocks as _format_split_history_blocks, count_unresolved_failures as _count_unresolved_failures, count_consecutive_title_failures as _count_consecutive_title_failures
 from ..progress import print_cycle_report, TokenTracker, extract_claude_tokens
-from ..tracing import TraceCtx, new_trace_id
 from ..utils import (
     force_utf8_stdio,
     eprint,
@@ -114,11 +111,37 @@ from ..utils import (
     write_heartbeat,
     check_quota_utilization,
     seconds_until_reset,
+    severity_at_or_above,
+    budget_exceeded,
+    is_unsafe_path,
+    hash_prompt,
     STOP_REASON_QUOTA,
     STOP_REASON_QUOTA_UTILIZATION,
     STOP_REASON_STOP_FILE,
     STOP_REASON_ALL_TASKS_DONE,
     STOP_REASON_PROJECT_COMPLETE,
+)
+from ..exceptions import BudgetExceeded, StopRequested
+from ..exc_detect import (
+    iter_exc_chain,
+    is_max_turns_exception,
+    is_quota_exception,
+    is_model_invalid_exception,
+    is_transient_exception,
+)
+from ..qa_utils import (
+    normalize_followup_prompt,
+    extract_qa_followups,
+    followups_from_structured,
+    merge_qa_followups,
+)
+from ..backlog_utils import (
+    normalize_backlog_tasks,
+    validate_skill_ids,
+    load_backlog_context_for_pm,
+    find_latest_dev_log_for_task,
+    build_failed_tasks_block,
+    record_history,
 )
 from ..goals import (
     read_goals,
@@ -163,14 +186,6 @@ def _patch_prompt_for_claude(prompt: str) -> str:
 # ---------------------------------------------------------------------------
 # Claude SDK adapter helpers (SDK-specific, not shared with Codex)
 # ---------------------------------------------------------------------------
-
-class StopRequested(Exception):
-    pass
-
-
-class BudgetExceeded(Exception):
-    pass
-
 
 def _as_str_list(v: object) -> list[str]:
     if v is None:
@@ -704,13 +719,13 @@ async def _run_with_continuations(
             if cont_left > 0 and is_max_turns_exception(ex):
                 # Budget checks
                 if _budget_exceeded and callable(_budget_exceeded):
-                    if _budget_exceeded("total_continuations", bs.get("total_continuations", 0),
+                    if budget_exceeded("total_continuations", bs.get("total_continuations", 0),
                                         int(bc.get("max_total_continuations_per_run") or 0)):
                         if metrics:
                             metrics.event("budget_exceeded", cycle=-1, reason="total_continuations")
                         raise BudgetExceeded("total_continuations")
                     per_task.setdefault(task_key, 0)
-                    if _budget_exceeded("dev_continuations_per_task", per_task[task_key],
+                    if budget_exceeded("dev_continuations_per_task", per_task[task_key],
                                         int(bc.get("max_dev_continuations_per_task") or 0)):
                         if metrics:
                             metrics.event("budget_exceeded", cycle=-1, reason="dev_continuations_per_task", task_id=task_id)
@@ -730,101 +745,6 @@ async def _run_with_continuations(
                     prompt = prompt + continuation_msg
                 continue
             raise
-
-
-# ---------------------------------------------------------------------------
-# Exception detection helpers (ported from cycle.py)
-# ---------------------------------------------------------------------------
-
-def _iter_exc_chain(ex: Exception, max_depth: int = 6):
-    cur = ex
-    seen: set[int] = set()
-    for _ in range(max_depth):
-        if cur is None or id(cur) in seen:
-            break
-        seen.add(id(cur))
-        yield cur
-        nxt = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
-        if nxt is None or not isinstance(nxt, BaseException):
-            break
-        cur = nxt  # type: ignore[assignment]
-
-
-def is_max_turns_exception(ex: Exception) -> bool:
-    for e in _iter_exc_chain(ex):
-        try:
-            msg = (str(e) or "").lower()
-        except Exception:
-            msg = ""
-        name = type(e).__name__.lower()
-        rep = (repr(e) or "").lower()
-        if (
-            "max turns" in msg or "max_turn" in msg or "maxturn" in msg
-            or "maxturn" in name or "max_turn" in name
-            or ("turn" in name and "max" in name)
-            or "maxturnsexceeded" in rep
-        ):
-            return True
-    return False
-
-
-def is_quota_exception(ex: Exception) -> bool:
-    """Detect quota/billing/rate-limit exhaustion.
-
-    Delegates to the canonical ``has_quota_text`` in utils.py.
-    """
-    for e in _iter_exc_chain(ex):
-        try:
-            msg = (str(e) or "").lower()
-        except Exception:
-            msg = ""
-        rep = (repr(e) or "").lower()
-        if has_quota_text(msg) or has_quota_text(rep):
-            return True
-    return False
-
-
-def is_model_invalid_exception(ex: Exception) -> bool:
-    needles = (
-        "model_not_found", "model not found", "does not exist",
-        "unknown model", "invalid model", "is not available",
-    )
-    for e in _iter_exc_chain(ex):
-        try:
-            msg = (str(e) or "").lower()
-        except Exception:
-            msg = ""
-        rep = (repr(e) or "").lower()
-        if ("model" in msg or "model" in rep) and (any(n in msg for n in needles) or any(n in rep for n in needles)):
-            return True
-    return False
-
-
-def is_transient_exception(ex: Exception) -> bool:
-    """Detect transient / retryable API errors (rate-limit, 5xx, timeout)."""
-    # NOTE: "500" removed from needles to avoid false positives on port numbers
-    # (e.g. "localhost:5000"). HTTP 500 is caught by the status_code check below.
-    needles = (
-        "rate_limit", " 429", " 503", " 502",
-        "overloaded", "connection", "timeout", "timed out",
-        "internal server error",
-    )
-    for e in _iter_exc_chain(ex):
-        try:
-            msg = (str(e) or "").lower()
-        except Exception:
-            msg = ""
-        rep = (repr(e) or "").lower()
-        if any(n in msg for n in needles) or any(n in rep for n in needles):
-            return True
-        status = getattr(e, "status_code", None) or getattr(e, "status", None)
-        if status is not None:
-            try:
-                if int(status) in (429, 500, 502, 503):
-                    return True
-            except (ValueError, TypeError):
-                pass
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -882,12 +802,6 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         except Exception as ex:
             eprint(f"[WARN] Failed to write run_summary.json: {ex}")
 
-    def _is_unsafe_path(raw: str) -> bool:
-        try:
-            return ".." in Path(raw).parts
-        except Exception:
-            return True
-
     def _fail_validation(name: str, value: str) -> None:
         msg = (
             "# Validation failure\n\n"
@@ -897,7 +811,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         safe_write_text(run_dir / "VALIDATION_FAILURE.md", msg)
 
     for _name, _value in (("env_file", getattr(args, "env_file", "") or ""), ("prompts_dir", getattr(args, "prompts_dir", "") or "")):
-        if str(_value).strip() and _is_unsafe_path(str(_value)):
+        if str(_value).strip() and is_unsafe_path(str(_value)):
             _fail_validation(_name, str(_value))
             eprint(f"[STOP] Validation failure for {_name}: {_value}")
             return 2
@@ -1030,15 +944,6 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         "per_task_continuations": {},
     }
 
-    def _severity_at_or_above(found: str, threshold: str) -> bool:
-        order = {"low": 0, "medium": 1, "high": 2}
-        return order.get(found, 1) >= order.get(threshold, 1)
-
-    def _budget_exceeded(key: str, current: int, limit: int) -> bool:
-        if limit <= 0:
-            return False
-        return current >= limit
-
     # PM state
     pm_fp_path = pm_cache_dir / "PM_LAST_FINGERPRINT.json"
     pm_fp_obj = _load_json_if_exists(pm_fp_path, default={"fingerprint": "", "updated_at": ""})
@@ -1113,201 +1018,21 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             include_untracked_in_full=scan_include_untracked_in_full,
         )
 
-    def _hash_prompt(text: str) -> str:
-        return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:10]
-
-    def _normalize_followup_prompt(text: str) -> str:
-        s = str(text or "").strip()
-        if len(s) > 1000:
-            s = s[:1000].rstrip()
-        return s
-
-    def _extract_qa_followups(text: str, *, max_items: int) -> list[dict[str, Any]]:
-        items: list[str] = []
-        for line in (text or "").splitlines():
-            s = line.strip()
-            if not s:
-                continue
-            if re.match(r"^[-*•]\s+", s) or re.match(r"^\d+[\.\)]\s+", s):
-                s = re.sub(r"^[-*•]\s+", "", s)
-                s = re.sub(r"^\d+[\.\)]\s+", "", s)
-                if len(s) >= 10:
-                    items.append(s)
-            if len(items) >= max_items:
-                break
-        tasks: list[dict[str, Any]] = []
-        for s in items:
-            prompt = _normalize_followup_prompt(s)
-            if not prompt:
-                continue
-            tid = f"QA-FU-{_hash_prompt(prompt)}"
-            title = f"QA Follow-up: {s[:60]}".strip()
-            tasks.append({
-                "id": tid, "title": title, "prompt": prompt, "files": [],
-                "done_when": "QA follow-up addressed and relevant tests/builds pass.",
-                "skills": [], "skills_rationale": None, "depends_on": [],
-            })
-        return tasks
-
-    def _followups_from_structured(model: Any, *, max_items: int) -> list[dict[str, Any]]:
-        tasks: list[dict[str, Any]] = []
-        if not model or not getattr(model, "followups", None):
-            return tasks
-        for item in list(model.followups)[:max_items]:
-            prompt = _normalize_followup_prompt(getattr(item, "prompt", ""))
-            if not prompt:
-                continue
-            tid = f"QA-FU-{_hash_prompt(prompt)}"
-            title = str(getattr(item, "title", "") or f"QA Follow-up: {prompt[:60]}").strip()
-            severity = str(getattr(item, "severity", "") or "").strip()
-            if severity:
-                title = f"[{severity}] {title}"
-            files = list(getattr(item, "files", []) or [])
-            tasks.append({
-                "id": tid, "title": title, "prompt": prompt, "files": files,
-                "done_when": "QA follow-up addressed and relevant tests/builds pass.",
-                "skills": [], "skills_rationale": None, "depends_on": [],
-            })
-        return tasks
-
-    def _merge_qa_followups(
-        base_tasks: list[dict[str, Any]],
-        followups: list[dict[str, Any]],
-        done_ids: set[str],
-    ) -> list[dict[str, Any]]:
-        existing_ids = {str(t.get("id") or "") for t in base_tasks if str(t.get("id") or "")}
-        merged = list(base_tasks)
-        for t in followups:
-            tid = str(t.get("id") or "")
-            if not tid or tid in existing_ids or tid in done_ids:
-                continue
-            merged.append(t)
-        return merged
+    _extract_qa_followups = extract_qa_followups
+    _followups_from_structured = followups_from_structured
+    _merge_qa_followups = merge_qa_followups
 
     def _normalize_backlog_tasks(raw_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        def _looks_like_pm_work(t: dict[str, Any]) -> bool:
-            txt = f"{t.get('title','')}\n{t.get('prompt','')}".lower()
-            forbidden = (
-                "create backlog", "generate backlog", "backlog.json", "backlog.md",
-                "backlog", "triage", "prioritize", "roadmap", "plan", "planning",
-                "analysis", "review", "audit", "repo_inventory", "repo inventory",
-                "inventory", "prompt engineering", "update prompts", "pm instructions",
-                "status report", "progress report", "shutdown report", "postmortem",
-                "project_analysis.md", "project analysis", "pm_cache", "pm cache",
-                "agent_runs", "run_dir", "state.json", "notes_pm.md", "requirements.md",
-                "agent_tasks.md", "notes.md",
-                "백로그", "분석", "검토", "리포트", "보고서", "인벤토리", "프롬프트", "계획", "정리",
-            )
-            if any(k in txt for k in forbidden):
-                positive = ("implement", "fix", "build", "test", "ui", "screen", "page", "component", "refactor")
-                if any(p in txt for p in positive):
-                    return False
-                return True
-            files = t.get("files") or []
-            if isinstance(files, list) and files:
-                fl = [str(x).replace("\\", "/").lower().strip() for x in files if str(x).strip()]
-                if all((p.startswith(".doc/") or "/.doc/" in p) for p in fl):
-                    return True
-                if any("agent_runs" in p or "pm_cache" in p or "project_analysis" in p or "repo_inventory" in p for p in fl):
-                    return True
-            return False
-
-        filtered: list[dict[str, Any]] = []
-        removed: list[dict[str, Any]] = []
-        for t in raw_tasks:
-            if not isinstance(t, dict):
-                continue
-            if _looks_like_pm_work(t):
-                removed.append(t)
-            else:
-                filtered.append(t)
-
-        if removed:
-            try:
-                notes_path = run_dir / "NOTES_PM.md"
-                existing = ""
-                if notes_path.exists():
-                    existing = notes_path.read_text(encoding="utf-8-sig", errors="replace")
-                extra = ["\n\n## Removed PM-only tasks (auto-filter)", "(These were removed to avoid PM delegating planning artifacts to Dev.)", ""]
-                for t in removed[:20]:
-                    extra.append(f"- {t.get('id','(no id)')} {t.get('title','')}")
-                notes_path.write_text((existing.rstrip() + "\n" + "\n".join(extra)).strip() + "\n", encoding="utf-8", errors="replace")
-            except Exception:
-                pass
-
-        used: set[str] = set()
-        next_num = 1
-        out: list[dict[str, Any]] = []
-        for t in filtered:
-            tid = str(t.get("id") or "").strip()
-            m = re.match(r"^T(\d+)$", tid)
-            n = int(m.group(1)) if m else 0
-
-            if n >= 1 and tid and tid not in used:
-                fixed_id = tid
-            else:
-                while True:
-                    cand = f"T{next_num}"
-                    next_num += 1
-                    if cand not in used:
-                        fixed_id = cand
-                        break
-
-            used.add(fixed_id)
-            skills_val = t.get("skills") or []
-            if isinstance(skills_val, list):
-                skills = [str(s).strip() for s in skills_val if str(s).strip()]
-            elif isinstance(skills_val, str):
-                skills = [s.strip() for s in skills_val.split(",") if s.strip()]
-            else:
-                skills = []
-            depends_on_val = t.get("depends_on") or []
-            if isinstance(depends_on_val, list):
-                depends_on = [str(d).strip() for d in depends_on_val if str(d).strip()]
-            else:
-                depends_on = []
-            out.append({
-                "id": fixed_id,
-                "title": str(t.get("title") or fixed_id).strip() or fixed_id,
-                "prompt": str(t.get("prompt") or "").strip() or f"Implement {fixed_id}.",
-                "files": t.get("files") if isinstance(t.get("files"), list) else [],
-                "done_when": str(t.get("done_when") or "Git diff exists and build passes.").strip(),
-                "skills": skills,
-                "skills_rationale": None if t.get("skills_rationale") is None else str(t.get("skills_rationale")),
-                "depends_on": depends_on,
-            })
-        return out
+        return normalize_backlog_tasks(raw_tasks, run_dir)
 
     def _validate_skill_ids(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if not skills_enabled or not tasks:
-            return tasks
-        autofix = bool(skills_cfg.get("skill_match_autofix", False))
-        threshold = float(skills_cfg.get("skill_match_autofix_threshold") or 0)
-        updated: list[dict[str, Any]] = []
-        for task in tasks:
-            skills_list = [str(s).strip() for s in (task.get("skills") or []) if str(s).strip()]
-            new_skills: list[str] = []
-            for sid in skills_list:
-                if sid in skills_by_id:
-                    new_skills.append(sid)
-                    continue
-                suggestions = suggest_skills(sid, skills_records, max_results=3)
-                if suggestions:
-                    top = suggestions[0]
-                    suggestion_msg = ", ".join([f"{s.skill_id}({s.name}, {s.score:.2f})" for s in suggestions])
-                    eprint(f"[SKILLS] Unknown skill_id '{sid}'. Suggestions: {suggestion_msg}")
-                    if autofix and top.score >= threshold:
-                        eprint(f"[SKILLS] Auto-fix: '{sid}' -> '{top.skill_id}' (score {top.score:.2f})")
-                        new_skills.append(top.skill_id)
-                    else:
-                        new_skills.append(sid)
-                else:
-                    eprint(f"[SKILLS] Unknown skill_id '{sid}' (no suggestions)")
-                    new_skills.append(sid)
-            new_task = dict(task)
-            new_task["skills"] = new_skills
-            updated.append(new_task)
-        return updated
+        return validate_skill_ids(
+            tasks,
+            skills_enabled=skills_enabled,
+            skills_by_id=skills_by_id,
+            skills_records=skills_records,
+            skills_cfg=skills_cfg,
+        )
 
     def ensure_backlog() -> bool:
         if backlog_json_path.exists() or backlog_md_path.exists():
@@ -1332,90 +1057,21 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         return tasks
 
     def _load_backlog_context_for_pm() -> tuple[str, list[TaskItem], set[str]]:
-        tasks: list[TaskItem] = []
-        if backlog_json_path.exists():
-            try:
-                tasks = load_backlog_json(backlog_json_path)
-            except Exception:
-                pass
-        if not tasks and backlog_md_path.exists():
-            try:
-                tasks = parse_backlog_md(backlog_md_path)
-            except Exception:
-                pass
-        try:
-            state_obj = load_state(state_path)
-        except Exception:
-            state_obj = {"done": [], "failed": []}
-        done_ids = set(state_obj.get("done", []) or [])
-        failed_list = state_obj.get("failed", []) or []
-        failed_ids = {(f.get("task", "") if isinstance(f, dict) else f) for f in failed_list}
-        lines: list[str] = []
-        for t in tasks:
-            if t.id in done_ids:
-                mark = "x"
-            elif t.id in failed_ids:
-                mark = "F"
-            else:
-                mark = " "
-            lines.append(f"- [{mark}] {t.id} {t.title}")
-        block = "\n".join(lines) if lines else "(no backlog found)"
-        return block, tasks, done_ids
-
-    def _find_latest_dev_log_for_task(task_id: str) -> list[str]:
-        """Find the latest dev log for a given task ID and return tail lines."""
-        dev_logs_dir = run_dir / "dev_logs"
-        if not dev_logs_dir.exists():
-            return []
-        matches = sorted(dev_logs_dir.glob(f"*_{task_id}_*.txt"), key=lambda x: x.stat().st_mtime)
-        if not matches:
-            # Fallback: search in task attempt dirs
-            matches = sorted(run_dir.glob(f"tasks/*_{task_id}/attempt_*/dev_log.txt"), key=lambda x: x.stat().st_mtime)
-        if not matches:
-            return []
-        try:
-            text = matches[-1].read_text(encoding="utf-8", errors="replace")
-            lines = text.strip().splitlines()
-            return lines[-15:]
-        except Exception:
-            return []
+        return load_backlog_context_for_pm(backlog_json_path, backlog_md_path, state_path)
 
     def _build_failed_tasks_block() -> str:
-        """Build a summary of failed tasks with reasons for PM context."""
-        try:
-            state_obj = load_state(state_path)
-        except Exception:
-            state_obj = {"failed": []}
-        failed_list = state_obj.get("failed", []) or []
-        if not failed_list:
-            return "(none)"
-        lines: list[str] = []
-        for f in failed_list:
-            if isinstance(f, dict):
-                tid = f.get("task", "?")
-                reason = f.get("reason", "unknown")
-                detail = f.get("detail", "")
-                lines.append(f"- {tid}: {reason}")
-                if detail:
-                    lines.append(f"  Detail: {detail}")
-                dev_log = _find_latest_dev_log_for_task(tid)
-                if dev_log:
-                    lines.append("  Last dev log (tail):")
-                    for dl in dev_log[-8:]:
-                        lines.append(f"    {dl}")
-            else:
-                lines.append(f"- {f}: unknown")
-        return "\n".join(lines)
+        return build_failed_tasks_block(state_path, run_dir)
 
     def _record_history(task_id: str, title: str, status: str, reason: str = "",
                         detail: str = "", files: list[str] | None = None, cycle: int = 0,
                         attempt: int = 0, max_attempts: int = 1) -> None:
-        if not bool(getattr(args, "task_history_enabled", True)):
-            return
-        _record_task_history(repo, task_id=task_id, title=title, status=status,
-                             reason=reason, detail=detail, files=files,
-                             cycle_idx=cycle, attempt=attempt, max_attempts=max_attempts,
-                             run_id=run_dir.name, backend="claudecode")
+        record_history(
+            repo, run_dir, "claudecode",
+            task_id=task_id, title=title, status=status,
+            reason=reason, detail=detail, files=files,
+            cycle=cycle, attempt=attempt, max_attempts=max_attempts,
+            task_history_enabled=bool(getattr(args, "task_history_enabled", True)),
+        )
 
     # ---------------------------------------------------------------------------
     # PM phase (structured output with repair — same as Codex)
@@ -1488,7 +1144,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
             if attempt < retries:
                 repair_limit = int(budgets_cfg.get("max_total_repair_attempts_per_run") or 0)
-                if _budget_exceeded("total_repairs", budget_state["total_repairs"], repair_limit):
+                if budget_exceeded("total_repairs", budget_state["total_repairs"], repair_limit):
                     metrics.event("budget_exceeded", cycle=cycle_idx, reason="total_repairs")
                     break
                 budget_state["total_repairs"] += 1
@@ -2011,7 +1667,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     break
 
                 if attempt > 0 and dev_auto_escalate:
-                    if _budget_exceeded("total_escalations", budget_state["total_escalations"], int(budgets_cfg.get("max_total_escalations_per_run") or 0)):
+                    if budget_exceeded("total_escalations", budget_state["total_escalations"], int(budgets_cfg.get("max_total_escalations_per_run") or 0)):
                         metrics.event("budget_exceeded", cycle=cycle_idx, step=step, task_id=next_task.id, reason="total_escalations")
                         return 1, "budget_exceeded", 0, (len(done_set) > before_done)
                     budget_state["total_escalations"] += 1
@@ -2426,7 +2082,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     scan_files, scan_stats = _collect_scan(policy_scan_scope, ignore_paths=policy_scan_ignore)
                     scan_result = policy_scan_files(scan_files, policy_rules, allow_patterns=policy_allow_patterns, ignore_paths=policy_scan_ignore)
                     violations = scan_result.get("violations", [])
-                    fail_hits = [v for v in violations if _severity_at_or_above(str(v.get("severity", "")), policy_fail_severity)]
+                    fail_hits = [v for v in violations if severity_at_or_above(str(v.get("severity", "")), policy_fail_severity)]
                     scan_result["stats"] = scan_stats
                     scan_result["ok"] = len(fail_hits) == 0
                     scan_result["fail_severity"] = policy_fail_severity
@@ -2783,7 +2439,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         scan_files, scan_stats = _collect_scan(security_scan_scope)
         scan_result = security_scan_files(scan_files, security_rules, ignore_paths=scan_ignore_paths)
         findings = scan_result.get("findings", [])
-        fail_hits = [f for f in findings if _severity_at_or_above(str(f.get("severity", "")), security_fail_severity)]
+        fail_hits = [f for f in findings if severity_at_or_above(str(f.get("severity", "")), security_fail_severity)]
         ok = len(fail_hits) == 0
         security_scan_summary = {
             "scope": scan_stats.get("scope", security_scan_scope),
