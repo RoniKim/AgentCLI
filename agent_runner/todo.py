@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 
+from .config import AGENT_WORK_DIR, ensure_work_dir
+
 LAST_TODO_POINTER = "LAST_TODO.txt"
 
 
@@ -19,11 +21,11 @@ def _sha1_hex(s: str) -> str:
 def todo_dir(repo: Path) -> Path:
     """Todo storage directory under the *target repo*.
 
-    We intentionally store todos in the target repo's .doc tree so:
+    Stored in the repo's .AgentCLI tree so:
     - They are colocated with agent runs
     - They survive AgentCLI restarts
     """
-    return repo / ".doc" / "todo"
+    return repo / AGENT_WORK_DIR / "todo"
 
 
 def last_pointer_path(repo: Path) -> Path:
@@ -63,6 +65,7 @@ DEFAULT_TODO_TEMPLATE = """# TODO (Today)
 
 def ensure_todo_file(repo: Path) -> Path:
     """Create today's todo file if missing, and update LAST_TODO pointer."""
+    ensure_work_dir(repo)
     td = todo_dir(repo)
     td.mkdir(parents=True, exist_ok=True)
 
@@ -90,8 +93,8 @@ def get_current_todo_path(repo: Path) -> Optional[Path]:
     """Return currently selected todo path.
 
     Selection order:
-    1) .doc/todo/LAST_TODO.txt
-    2) latest modified *.md under .doc/todo
+    1) .AgentCLI/todo/LAST_TODO.txt
+    2) latest modified *.md under .AgentCLI/todo
     """
     try:
         ptr = last_pointer_path(repo)

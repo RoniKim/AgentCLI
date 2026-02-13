@@ -841,7 +841,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     last_run_summary_path = run_dir / "last_run_summary.json"
 
     # Global PM cache
-    pm_cache_dir = repo / ".doc" / "PM_CACHE"
+    from ..config import AGENT_WORK_DIR
+    pm_cache_dir = repo / AGENT_WORK_DIR / "PM_CACHE"
     pm_cache_dir.mkdir(parents=True, exist_ok=True)
     analysis_md = pm_cache_dir / "PROJECT_ANALYSIS.md"
 

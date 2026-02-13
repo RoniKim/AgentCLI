@@ -242,13 +242,18 @@ run_dir/
   ├─ databases/<slug>.db       # Task history SQLite
   └─ prompts/<slug>/           # External prompt overrides
 
-{repo}/.doc/
+{repo}/.doc/                    # Design documents (gitignored)
   ├─ GOALS.md                  # Project completion goals (P0/P1)
+  ├─ Docs/                     # Design/reference documents
   ├─ DOCS_DIGEST.md            # Docs heading index digest
+  └─ REPO_INVENTORY.md         # Git-tracked file listing
+
+{repo}/.AgentCLI/              # Runtime artifacts (gitignored)
+  ├─ agent_runs/               # Per-run directories (timestamps)
   ├─ PM_CACHE/                 # PM analysis cache (fingerprinted)
-  ├─ REPO_INVENTORY.md         # Git-tracked file listing
   ├─ todo/                     # Daily TODO files
-  └─ skills/                   # Skills snapshot
+  ├─ skills/                   # Skills snapshot
+  └─ agent_cli_history.txt     # CLI history (prompt_toolkit)
 ```
 
 ## Important Warnings
@@ -259,8 +264,9 @@ run_dir/
 - **Config JSON paths** may be absolute or relative; always resolve through `config.py` helpers
 - **prompts.py**: 외부 프롬프트 변경 시 `append_pm_essential_context()`가 자동 주입하는 블록을 고려 — 템플릿에서 빠진 `{variable}`은 `_SafeDict`가 경고만 출력하고 리터럴 유지
 - **Stop reason 상수**: 반드시 `utils.py`의 상수를 import해서 사용 — 문자열 리터럴 직접 사용 금지
-- `.doc/` and `configs/` directories are gitignored — don't expect them in fresh clones
+- `.doc/` and `.AgentCLI/` and `configs/` directories are gitignored — don't expect them in fresh clones
 - `.claude/` directory is gitignored — session state is ephemeral
+- Runtime artifacts (agent_runs, PM_CACHE, todo, skills snapshot, CLI history) are in `.AgentCLI/`; design docs (GOALS.md, Docs/, DOCS_DIGEST.md) stay in `.doc/`
 
 ## Known Code Improvement Opportunities
 

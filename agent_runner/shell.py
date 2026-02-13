@@ -566,7 +566,7 @@ class RunnerShell:
             "  /start [--flags...]        러너 백그라운드 시작 (예: /start --autopilot --loop)",
             "  /stop [--wait]             중지 요청(STOP 파일 생성). --wait로 종료 대기",
             "  /status                    러너 상태 확인",
-            "  /todo [--save|--load ...]   TODO 파일 생성/선택(.doc/todo)",
+            "  /todo [--save|--load ...]   TODO 파일 생성/선택(.AgentCLI/todo)",
             "  /exit                      종료",
             "",
             "Tips:",
@@ -707,13 +707,14 @@ class RunnerShell:
 
         # ── TODO system ──
         try:
-            todo_dir = self.repo / ".doc" / "todo"
-            if todo_dir.exists():
+            from .todo import todo_dir as _todo_dir_fn
+            _td = _todo_dir_fn(self.repo)
+            if _td.exists():
                 _todo_path, todo_text = read_current_todo(self.repo)
                 status = "has content" if todo_text and todo_text.strip() else "empty"
                 report_lines.append(f"- todo: OK ({status})")
             else:
-                report_lines.append(f"- todo: dir not found (.doc/todo)")
+                report_lines.append(f"- todo: dir not found ({_td.relative_to(self.repo).as_posix()})")
         except Exception as ex:
             report_lines.append(f"- todo: ERROR ({ex})")
 
@@ -857,7 +858,9 @@ def shell_main(argv: list[str] | None = None) -> int:
         # Keep history under repo if possible, else in home.
         hist_path = None
         if sh.repo:
-            hist_path = (sh.repo / ".doc" / "agent_cli_history.txt").resolve()
+            from .config import AGENT_WORK_DIR, ensure_work_dir
+            ensure_work_dir(sh.repo)
+            hist_path = (sh.repo / AGENT_WORK_DIR / "agent_cli_history.txt").resolve()
             hist_path.parent.mkdir(parents=True, exist_ok=True)
         else:
             hist_path = (Path.home() / ".agent_cli_history.txt").resolve()

@@ -41,6 +41,7 @@ def build_repo_inventory(repo: Path, max_file_size: int = 2_000_000) -> list[Inv
         IGNORE_DIRS = {
             ".git",
             ".doc",
+            ".AgentCLI",
             ".venv",
             "venv",
             "__pycache__",

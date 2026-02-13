@@ -28,7 +28,7 @@ Constraints (non-negotiable):
 - Avoid broad repo scan; use targeted rg/git ls-files.
 
 Invalid-task guard (must follow):
-- If this task is about PM artifacts / analysis docs only (PROJECT_ANALYSIS.md, REQUIREMENTS/AGENT_TASKS/BACKLOG/NOTES, or only .doc/ paths),
+- If this task is about PM artifacts / analysis docs only (PROJECT_ANALYSIS.md, REQUIREMENTS/AGENT_TASKS/BACKLOG/NOTES, or only .doc/ or .AgentCLI/ paths),
   do NOT implement. Instead, write a short note to {run_dir}/NOTES.md explaining it's a PM-only deliverable task and stop.
 
 Docs read mode: {docs_read_mode}

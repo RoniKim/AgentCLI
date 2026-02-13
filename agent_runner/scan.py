@@ -11,6 +11,8 @@ from .utils import run_cmd
 DEFAULT_SCAN_IGNORE_GLOBS = [
     ".doc/**",
     ".doc",
+    ".AgentCLI/**",
+    ".AgentCLI",
     ".agent_runs/**",
     ".agent_runs",
     "worktree/**",

@@ -58,7 +58,7 @@ def normalize_backlog_tasks(
         files = t.get("files") or []
         if isinstance(files, list) and files:
             fl = [str(x).replace("\\", "/").lower().strip() for x in files if str(x).strip()]
-            if all((p.startswith(".doc/") or "/.doc/" in p) for p in fl):
+            if all((p.startswith(".doc/") or "/.doc/" in p or p.startswith(".agentcli/") or "/.agentcli/" in p) for p in fl):
                 return True
             if any("agent_runs" in p or "pm_cache" in p or "project_analysis" in p or "repo_inventory" in p for p in fl):
                 return True

@@ -61,7 +61,8 @@ def resolve_skills_roots(repo: Path, roots: Iterable[str]) -> list[Path]:
 def resolve_snapshot_dir(run_dir: Path, snapshot_dir: str) -> Path:
     s = str(snapshot_dir or "").strip()
     if not s:
-        return run_dir / ".doc" / "skills"
+        from ..config import AGENT_WORK_DIR
+        return run_dir / AGENT_WORK_DIR / "skills"
     p = Path(s).expanduser()
     return p.resolve() if p.is_absolute() else (run_dir / p).resolve()
 

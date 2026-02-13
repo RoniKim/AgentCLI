@@ -67,7 +67,7 @@ DEFAULTS: Dict[str, Any] = {
     "claudecode_max_thinking_tokens": 0,
 
     # Tool allow/deny lists are comma-separated strings (or JSON arrays when saved via wizard).
-    # PM may need to update .doc/PM_CACHE/PROJECT_ANALYSIS.md to keep parity with Codex backend.
+    # PM may need to update .AgentCLI/PM_CACHE/PROJECT_ANALYSIS.md to keep parity with Codex backend.
     "claudecode_pm_allowed_tools": "Read,Grep,Glob,Write,Edit",
     "claudecode_pm_disallowed_tools": "",
     "claudecode_dev_allowed_tools": "Read,Write,Edit,Grep,Glob,Bash",
@@ -123,7 +123,7 @@ DEFAULTS: Dict[str, Any] = {
 
     # Gitops defaults
     "gitops": {
-        "untracked_exclude_globs": [".doc/**", ".doc", ".agent_runs/**", ".agent_runs", "*.log"],
+        "untracked_exclude_globs": [".doc/**", ".doc", ".AgentCLI/**", ".AgentCLI", ".agent_runs/**", ".agent_runs", "*.log"],
     },
 
     # Safety / gates
@@ -137,7 +137,7 @@ DEFAULTS: Dict[str, Any] = {
     "scan_max_bytes_per_file": 200_000,
     "scan_max_total_bytes": 20_000_000,
     "scan_timeout_seconds": 60,
-    "scan_ignore_globs": [".doc/**", ".doc", ".agent_runs/**", ".agent_runs", "worktree/**", "**/*.log"],
+    "scan_ignore_globs": [".doc/**", ".doc", ".AgentCLI/**", ".AgentCLI", ".agent_runs/**", ".agent_runs", "worktree/**", "**/*.log"],
     "scan_ignore_paths": [],
     "scan_include_untracked_in_full": False,
 

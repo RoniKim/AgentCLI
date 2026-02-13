@@ -9,6 +9,10 @@ from typing import Any, Dict, Optional
 
 from .utils import atomic_write_json, eprint
 
+# Runtime artifacts directory name (under target repo root).
+# Design documents stay in ".doc/"; runtime outputs go here.
+AGENT_WORK_DIR = ".AgentCLI"
+
 def app_home() -> Path:
     """
     AgentCLI 홈 디렉토리(파이썬쪽 저장 기준점).
@@ -42,11 +46,25 @@ def _repo_slug(repo: Path) -> str:
 # ---- legacy paths (호환용: repo 내부) ----
 
 def legacy_config_path(repo: Path) -> Path:
-    return (repo / ".doc" / "agent_config.json").resolve()
+    # Prefer .AgentCLI; fall back to old .doc location for existing repos.
+    new = repo / AGENT_WORK_DIR / "agent_config.json"
+    if new.exists():
+        return new.resolve()
+    old = repo / ".doc" / "agent_config.json"
+    if old.exists():
+        return old.resolve()
+    return new.resolve()  # default to new location
 
 
 def legacy_prompts_dir(repo: Path) -> Path:
-    return (repo / ".doc" / "agent_prompts").resolve()
+    # Prefer .AgentCLI; fall back to old .doc location for existing repos.
+    new = repo / AGENT_WORK_DIR / "agent_prompts"
+    if new.exists():
+        return new.resolve()
+    old = repo / ".doc" / "agent_prompts"
+    if old.exists():
+        return old.resolve()
+    return new.resolve()  # default to new location
 
 
 # ---- new defaults (python-side: AgentCLI 내부) ----
@@ -110,11 +128,53 @@ def resolve_prompts_dir(repo: Path, explicit: Optional[str]) -> Path:
     """
     if explicit and str(explicit).strip():
         s = str(explicit).strip()
-        if s.replace("\\", "/") == ".doc/agent_prompts":
+        norm = s.replace("\\", "/")
+        if norm in (".doc/agent_prompts", f"{AGENT_WORK_DIR}/agent_prompts"):
             return default_prompts_dir(repo)
         p = Path(s).expanduser()
         return p.resolve() if p.is_absolute() else (app_home() / p).resolve()
     return default_prompts_dir(repo)
+
+
+def ensure_gitignore_entry(repo: Path, entry: str = AGENT_WORK_DIR) -> None:
+    """Ensure *entry* is listed in repo/.gitignore (idempotent, best-effort).
+
+    Called once when the runtime directory is first created so that the
+    user doesn't accidentally commit runtime artifacts.
+    """
+    gi = repo / ".gitignore"
+    try:
+        if gi.exists():
+            text = gi.read_text(encoding="utf-8", errors="replace")
+            # Check if the entry already appears on its own line.
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped == entry or stripped == f"/{entry}" or stripped == f"{entry}/":
+                    return  # already present
+            # Append at the end with a blank separator line.
+            if not text.endswith("\n"):
+                text += "\n"
+            text += f"\n# AgentCLI runtime artifacts\n{entry}\n"
+            gi.write_text(text, encoding="utf-8", errors="replace")
+        else:
+            # Create a minimal .gitignore with the entry.
+            gi.write_text(f"# AgentCLI runtime artifacts\n{entry}\n", encoding="utf-8", errors="replace")
+    except Exception:
+        pass  # best-effort; never fail the run because of this
+
+
+def ensure_work_dir(repo: Path) -> Path:
+    """Create *repo/.AgentCLI/* if needed and ensure .gitignore entry.
+
+    All code that writes under .AgentCLI/ should call this first.
+    Idempotent and cheap on subsequent calls.
+    """
+    work_root = repo / AGENT_WORK_DIR
+    first_time = not work_root.exists()
+    work_root.mkdir(parents=True, exist_ok=True)
+    if first_time:
+        ensure_gitignore_entry(repo)
+    return work_root
 
 
 def resolve_env_file(explicit: Optional[str]) -> Optional[Path]:
