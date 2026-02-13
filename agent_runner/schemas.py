@@ -66,6 +66,7 @@ class QAFollowupItem(BaseModel):
     prompt: str = Field(..., max_length=1000, description="Executable QA follow-up prompt (<=1000 chars)")
     files: List[str] = Field(default_factory=list, description="Optional files to inspect/update")
     severity: Optional[str] = Field(default=None, description="Optional severity (low/medium/high)")
+    type: str = Field(default="code_fix", description="Followup type: code_fix (needs code change) or manual_test (needs human verification)")
 
 
 class QAFollowupsV1(BaseModel):

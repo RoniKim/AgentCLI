@@ -5,6 +5,7 @@ All functions are pure — no closure dependencies.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 from .utils import hash_prompt
@@ -48,6 +49,7 @@ def extract_qa_followups(text: str, *, max_items: int) -> list[dict[str, Any]]:
             "skills": [],
             "skills_rationale": None,
             "depends_on": [],
+            "type": "code_fix",
         })
     return tasks
 
@@ -67,6 +69,7 @@ def followups_from_structured(model: Any, *, max_items: int) -> list[dict[str, A
         if severity:
             title = f"[{severity}] {title}"
         files = list(getattr(item, "files", []) or [])
+        followup_type = str(getattr(item, "type", "") or "").strip() or "code_fix"
         tasks.append({
             "id": tid,
             "title": title,
@@ -76,6 +79,7 @@ def followups_from_structured(model: Any, *, max_items: int) -> list[dict[str, A
             "skills": [],
             "skills_rationale": None,
             "depends_on": [],
+            "type": followup_type,
         })
     return tasks
 
@@ -94,3 +98,61 @@ def merge_qa_followups(
             continue
         merged.append(t)
     return merged
+
+
+def split_followups_by_type(
+    followups: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split followups into (code_fix, manual_test) lists."""
+    code_fix: list[dict[str, Any]] = []
+    manual_test: list[dict[str, Any]] = []
+    for f in followups:
+        if f.get("type", "code_fix") == "manual_test":
+            manual_test.append(f)
+        else:
+            code_fix.append(f)
+    return code_fix, manual_test
+
+
+def write_manual_checks(
+    run_dir: Path,
+    cycle_idx: int,
+    checks: list[dict[str, Any]],
+) -> None:
+    """Append manual test items to QA_MANUAL_CHECKS.md."""
+    if not checks:
+        return
+    lines: list[str] = []
+    lines.append(f"\n## Cycle {cycle_idx} — Manual Verification Items\n")
+    for item in checks:
+        severity = ""
+        title = str(item.get("title") or "Untitled")
+        # Extract severity from title if present (e.g. "[HIGH] title")
+        if title.startswith("["):
+            end = title.find("]")
+            if end > 0:
+                severity = title[1:end].strip().upper()
+                title = title[end + 1:].strip()  # strip prefix to avoid duplication
+        if not severity:
+            severity = str(item.get("severity") or "").strip().upper()
+        prefix = f"[{severity}] " if severity else ""
+        lines.append(f"- [ ] {prefix}{title}")
+        files = item.get("files") or []
+        if files:
+            lines.append(f"  - Files: {', '.join(str(f) for f in files)}")
+        prompt = str(item.get("prompt") or "").strip()
+        if prompt:
+            short = prompt[:200].replace("\n", " ")
+            lines.append(f"  - {short}")
+    lines.append("")
+    md_path = run_dir / "QA_MANUAL_CHECKS.md"
+    existing = ""
+    if md_path.exists():
+        try:
+            existing = md_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if not existing.strip():
+        existing = "# QA Manual Checks\n\nItems below require human verification (no code change needed).\n"
+    content = existing.rstrip() + "\n" + "\n".join(lines)
+    md_path.write_text(content, encoding="utf-8", errors="replace")

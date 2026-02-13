@@ -130,6 +130,8 @@ from ..qa_utils import (
     extract_qa_followups,
     followups_from_structured,
     merge_qa_followups,
+    split_followups_by_type,
+    write_manual_checks,
 )
 from ..backlog_utils import (
     normalize_backlog_tasks,
@@ -2283,11 +2285,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
     async def run_qa_if_needed(cycle_idx: int, ran_tasks: bool) -> dict[str, Any]:
         if stop_path.exists():
-            return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0}
+            return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0}
         qa_always = bool(getattr(args, "qa_always", False))
         if not (qa_always or ran_tasks):
             metrics.event("qa_skip", cycle=cycle_idx, reason="no_progress")
-            return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0}
+            return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0}
         try:
             metrics.event("qa_start", cycle=cycle_idx)
             skills_context = "(skills disabled)"
@@ -2333,6 +2335,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             followups_added = 0
             followups_candidates = 0
             followups_skipped = 0
+            manual_test_count = 0
             parse_ok: Optional[bool] = None
             followups: list = []
 
@@ -2351,22 +2354,27 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     metrics.event("qa_followups_parse", cycle=cycle_idx, parse_ok=True)
                 if followups:
                     followups_candidates = len(followups)
-                    state_obj = load_state(state_path)
-                    done_ids = set(state_obj.get("done", []) or [])
-                    existing = load_tasks()
-                    base_tasks = [{"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files, "done_when": t.done_when, "skills": t.skills, "skills_rationale": t.skills_rationale, "depends_on": t.depends_on} for t in existing]
-                    merged = _merge_qa_followups(base_tasks, followups, done_ids)
-                    followups_added = max(0, len(merged) - len(base_tasks))
-                    followups_skipped = max(0, followups_candidates - followups_added)
-                    write_backlog_files(run_dir, merged)
+                    code_fix_items, manual_test_items = split_followups_by_type(followups)
+                    manual_test_count = len(manual_test_items)
+                    if manual_test_items:
+                        write_manual_checks(run_dir, cycle_idx, manual_test_items)
+                    if code_fix_items:
+                        state_obj = load_state(state_path)
+                        done_ids = set(state_obj.get("done", []) or [])
+                        existing = load_tasks()
+                        base_tasks = [{"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files, "done_when": t.done_when, "skills": t.skills, "skills_rationale": t.skills_rationale, "depends_on": t.depends_on} for t in existing]
+                        merged = _merge_qa_followups(base_tasks, code_fix_items, done_ids)
+                        followups_added = max(0, len(merged) - len(base_tasks))
+                        followups_skipped = max(0, len(code_fix_items) - followups_added)
+                        write_backlog_files(run_dir, merged)
                 (run_dir / f"qa_followups_cycle_{cycle_idx:03d}.json").write_text(
-                    json.dumps({"cycle": cycle_idx, "parse_ok": parse_ok, "candidates_count": followups_candidates, "added_count": followups_added, "skipped_count": followups_skipped, "tasks": followups}, ensure_ascii=False, indent=2),
+                    json.dumps({"cycle": cycle_idx, "parse_ok": parse_ok, "candidates_count": followups_candidates, "added_count": followups_added, "skipped_count": followups_skipped, "manual_test_count": manual_test_count, "tasks": followups}, ensure_ascii=False, indent=2),
                     encoding="utf-8", errors="replace",
                 )
             metrics.event("qa_end", cycle=cycle_idx, rc=0)
-            return {"parse_ok": parse_ok, "candidates": followups_candidates, "added": followups_added, "skipped": followups_skipped}
+            return {"parse_ok": parse_ok, "candidates": followups_candidates, "added": followups_added, "skipped": followups_skipped, "manual_test_count": manual_test_count}
         except StopRequested:
-            return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0}
+            return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0}
         except Exception as ex:
             if is_quota_exception(ex):
                 logger.stage_event("qa", "quota_exhausted", cycle=cycle_idx, detail=str(ex))
@@ -2375,10 +2383,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 except Exception:
                     pass
                 metrics.event("runner_stop", stage="qa", reason="quota_exhausted")
-                return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0, "quota_exhausted": True}
+                return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0, "quota_exhausted": True}
             logger.stage_event("qa", "error", cycle=cycle_idx, detail=str(ex))
             metrics.event("qa_end", cycle=cycle_idx, rc=1, error=str(ex))
-            return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0}
+            return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0}
 
     # ---------------------------------------------------------------------------
     # Shutdown report
@@ -2559,7 +2567,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             },
             "policy_scan": policy_scan_summary or {"scope": policy_scan_scope, "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "violations_total": 0, "violations_fail": 0},
             "security_scan": security_scan_summary or {"scope": security_scan_scope, "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "findings_total": 0, "findings_fail": 0},
-            "qa_followups": session.data.get("qa_followups_summary") or {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0},
+            "qa_followups": session.data.get("qa_followups_summary") or {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0},
         }
         for st in res.stages:
             entry = dict(st)

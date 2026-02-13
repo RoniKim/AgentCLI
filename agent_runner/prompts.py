@@ -424,11 +424,17 @@ QA_FOLLOWUPS_OUTPUT_CONTRACT = (
     '      "title": string,\n'
     '      "prompt": string (<=1000 chars),\n'
     '      "files": string[],\n'
-    '      "severity": string|null\n'
+    '      "severity": string|null,\n'
+    '      "type": "code_fix" | "manual_test"\n'
     "    }\n"
     "  ],\n"
     '  "notes": string|null\n'
-    "}\n"
+    "}\n\n"
+    "type field rules:\n"
+    '- "code_fix": Bug fix, feature correction, or any issue that requires code changes.\n'
+    '- "manual_test": Verification or validation that requires human testing (no code change needed).\n'
+    "- If unsure, default to code_fix.\n"
+    "- manual_test items will NOT be added to the Dev backlog; they are recorded as a checklist for human review.\n"
     "Do NOT include extra keys.\n"
 )
 

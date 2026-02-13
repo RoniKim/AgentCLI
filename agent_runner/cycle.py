@@ -105,6 +105,8 @@ from .qa_utils import (
     extract_qa_followups,
     followups_from_structured,
     merge_qa_followups,
+    split_followups_by_type,
+    write_manual_checks,
 )
 from .backlog_utils import (
     normalize_backlog_tasks,
@@ -1102,10 +1104,10 @@ async def main_async(args: argparse.Namespace) -> int:
 
         async def run_qa_if_needed(cycle_idx: int, ran_tasks: bool) -> dict[str, Any]:
             if stop_path.exists():
-                return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0}
+                return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0}
             if not (args.qa_always or ran_tasks):
                 metrics.event("qa_skip", cycle=cycle_idx, reason="no_progress")
-                return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0}
+                return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0}
             try:
                 metrics.event("qa_start", cycle=cycle_idx)
                 skills_context = "(skills disabled)"
@@ -1138,6 +1140,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 followups_added = 0
                 followups_candidates = 0
                 followups_skipped = 0
+                manual_test_count = 0
                 parse_ok: Optional[bool] = None
                 if bool(getattr(args, "qa_to_backlog", False)):
                     qa_text = qa_output_path.read_text(encoding="utf-8", errors="replace")
@@ -1154,27 +1157,32 @@ async def main_async(args: argparse.Namespace) -> int:
                         metrics.event("qa_followups_parse", cycle=cycle_idx, parse_ok=True)
                     if followups:
                         followups_candidates = len(followups)
-                        state_path = run_dir / "STATE.json"
-                        state_obj = load_state(state_path)
-                        done_ids = set(state_obj.get("done", []) or [])
-                        existing = load_tasks()
-                        base_tasks = [
-                            {
-                                "id": t.id,
-                                "title": t.title,
-                                "prompt": t.prompt,
-                                "files": t.files,
-                                "done_when": t.done_when,
-                                "skills": t.skills,
-                                "skills_rationale": t.skills_rationale,
-                                "depends_on": t.depends_on,
-                            }
-                            for t in existing
-                        ]
-                        merged = _merge_qa_followups(base_tasks, followups, done_ids)
-                        followups_added = max(0, len(merged) - len(base_tasks))
-                        followups_skipped = max(0, followups_candidates - followups_added)
-                        write_backlog_files(run_dir, merged)
+                        code_fix_items, manual_test_items = split_followups_by_type(followups)
+                        manual_test_count = len(manual_test_items)
+                        if manual_test_items:
+                            write_manual_checks(run_dir, cycle_idx, manual_test_items)
+                        if code_fix_items:
+                            state_path = run_dir / "STATE.json"
+                            state_obj = load_state(state_path)
+                            done_ids = set(state_obj.get("done", []) or [])
+                            existing = load_tasks()
+                            base_tasks = [
+                                {
+                                    "id": t.id,
+                                    "title": t.title,
+                                    "prompt": t.prompt,
+                                    "files": t.files,
+                                    "done_when": t.done_when,
+                                    "skills": t.skills,
+                                    "skills_rationale": t.skills_rationale,
+                                    "depends_on": t.depends_on,
+                                }
+                                for t in existing
+                            ]
+                            merged = _merge_qa_followups(base_tasks, code_fix_items, done_ids)
+                            followups_added = max(0, len(merged) - len(base_tasks))
+                            followups_skipped = max(0, len(code_fix_items) - followups_added)
+                            write_backlog_files(run_dir, merged)
                     (run_dir / f"qa_followups_cycle_{cycle_idx:03d}.json").write_text(
                         json.dumps(
                             {
@@ -1183,6 +1191,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 "candidates_count": followups_candidates,
                                 "added_count": followups_added,
                                 "skipped_count": followups_skipped,
+                                "manual_test_count": manual_test_count,
                                 "tasks": followups,
                             },
                             ensure_ascii=False,
@@ -1197,13 +1206,14 @@ async def main_async(args: argparse.Namespace) -> int:
                     "candidates": followups_candidates,
                     "added": followups_added,
                     "skipped": followups_skipped,
+                    "manual_test_count": manual_test_count,
                 }
             except Exception as ex:
                 metrics.event("qa_end", cycle=cycle_idx, rc=1, error=str(ex))
                 if is_quota_exception(ex):
                     stop_path.write_text(STOP_REASON_QUOTA, encoding="utf-8")
-                    return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0, "quota_exhausted": True}
-                return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0}
+                    return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0, "quota_exhausted": True}
+                return {"parse_ok": False, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0}
 
         policy_scan_summary: Optional[dict[str, Any]] = None
         security_scan_summary: Optional[dict[str, Any]] = None
@@ -2277,6 +2287,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     "candidates": 0,
                     "added": 0,
                     "skipped": 0,
+                    "manual_test_count": 0,
                 },
             }
             for st in res.stages:
