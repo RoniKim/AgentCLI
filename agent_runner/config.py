@@ -66,17 +66,49 @@ def _repo_identity(repo: Path) -> str:
     return _git_remote_url(repo) or str(repo)
 
 
+def _project_name_from_url(url: str) -> Optional[str]:
+    """Extract project name from git remote URL.
+
+    ``https://github.com/RoniKim/BudgetBook`` → ``BudgetBook``
+    ``git@github.com:RoniKim/BudgetBook.git`` → ``BudgetBook``
+    """
+    # Strip trailing / and .git (already done in _git_remote_url, but be safe)
+    u = url.rstrip("/")
+    if u.endswith(".git"):
+        u = u[:-4]
+    # Last path segment is the project name
+    last = u.rsplit("/", 1)[-1] if "/" in u else u.rsplit(":", 1)[-1] if ":" in u else u
+    last = last.strip()
+    return last if last else None
+
+
 def _safe_name(repo: Path) -> str:
+    """Human-readable prefix for the slug.
+
+    Priority:
+      1) Project name from git remote URL (folder-name independent)
+      2) Local folder name (fallback for non-git repos)
+    """
+    url = _git_remote_url(repo)
+    if url:
+        name = _project_name_from_url(url)
+        if name:
+            return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "repo"
+    name = repo.name or "repo"
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "repo"
+
+
+def _local_safe_name(repo: Path) -> str:
+    """Safe name from local folder name only (for legacy fallback)."""
     name = repo.name or "repo"
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "repo"
 
 
 def _repo_slug(repo: Path) -> str:
-    """Portable slug: ``{folder_name}-{hash}``.
+    """Fully portable slug: ``{project_name}-{hash}``.
 
-    Hash source priority:
-      1) git remote origin URL → same hash on any PC
-      2) local path (non-git repos or no remote)
+    Both prefix and hash are derived from git remote URL when available,
+    making the slug completely independent of local folder name.
     """
     safe = _safe_name(repo)
     h = hashlib.sha1(_repo_identity(repo).encode("utf-8", errors="ignore")).hexdigest()[:8]
@@ -84,23 +116,29 @@ def _repo_slug(repo: Path) -> str:
 
 
 def _path_based_slug(repo: Path) -> str:
-    """Legacy slug using local path only (for migration fallback)."""
-    safe = _safe_name(repo)
+    """Legacy slug using local folder name + path hash (for migration)."""
+    safe = _local_safe_name(repo)
     h = hashlib.sha1(str(repo).encode("utf-8", errors="ignore")).hexdigest()[:8]
     return f"{safe}-{h}"
 
 
-def _find_legacy_slug_file(directory: Path, safe: str, suffix: str) -> Optional[Path]:
-    """Search *directory* for a file/dir matching ``{safe}-*.{suffix}`` pattern.
+def _find_legacy_slug_file(directory: Path, prefixes: List[str], suffix: str) -> Optional[Path]:
+    """Search *directory* for a file/dir matching any of ``{prefix}-*{suffix}``.
 
-    Returns the match if **exactly one** candidate is found; None otherwise.
-    This enables automatic discovery of config/db files created with the
-    old path-based slug when the new remote-URL-based slug differs.
+    *prefixes* should include both the remote-derived name and the local
+    folder name so that renames (``006. Budgetbook`` → ``BudgetBook``) are
+    still discovered.
+
+    Returns the match if **exactly one** candidate is found across all
+    prefixes combined; None otherwise (ambiguous or missing).
     """
     if not directory.exists():
         return None
-    pattern = f"{safe}-*{suffix}"
-    candidates: List[Path] = list(directory.glob(pattern))
+    seen: dict[Path, None] = {}
+    for prefix in prefixes:
+        for p in directory.glob(f"{prefix}-*{suffix}"):
+            seen[p] = None
+    candidates = list(seen)
     if len(candidates) == 1:
         return candidates[0]
     return None
@@ -132,12 +170,26 @@ def legacy_prompts_dir(repo: Path) -> Path:
 
 # ---- new defaults (python-side: AgentCLI 내부) ----
 
+def _fallback_prefixes(repo: Path) -> List[str]:
+    """Return deduplicated list of prefixes for legacy file discovery.
+
+    Includes both remote-derived name and local folder name so that
+    folder renames (e.g. ``006. Budgetbook`` → ``BudgetBook``) are handled.
+    """
+    remote_safe = _safe_name(repo)
+    local_safe = _local_safe_name(repo)
+    seen: list[str] = [remote_safe]
+    if local_safe != remote_safe:
+        seen.append(local_safe)
+    return seen
+
+
 def default_config_path(repo: Path) -> Path:
     """Config JSON path with migration fallback.
 
     1) ``configs/{new_slug}.json`` exists → use it
     2) ``configs/{old_path_slug}.json`` exists → use it (legacy migration)
-    3) Prefix scan: exactly 1 match for ``{safe}-*.json`` → use it
+    3) Prefix scan: exactly 1 match across all known prefixes → use it
     4) Otherwise → new slug path (will be created on first /save)
     """
     home = app_home()
@@ -151,8 +203,8 @@ def default_config_path(repo: Path) -> Path:
         old = (home / "configs" / f"{old_slug}.json").resolve()
         if old.exists():
             return old
-    # Prefix scan fallback (config from another PC with different path)
-    found = _find_legacy_slug_file(home / "configs", _safe_name(repo), ".json")
+    # Prefix scan fallback (handles folder rename + different PC path)
+    found = _find_legacy_slug_file(home / "configs", _fallback_prefixes(repo), ".json")
     if found:
         return found.resolve()
     return primary
@@ -170,12 +222,13 @@ def default_prompts_dir(repo: Path) -> Path:
         old = (home / "prompts" / old_slug).resolve()
         if old.exists():
             return old
-    # Prefix scan: look for directory
+    # Prefix scan: look for directory with any known prefix
     prompts_root = home / "prompts"
     if prompts_root.exists():
-        safe = _safe_name(repo)
+        prefixes = _fallback_prefixes(repo)
         candidates = [d for d in prompts_root.iterdir()
-                      if d.is_dir() and d.name.startswith(f"{safe}-")]
+                      if d.is_dir()
+                      and any(d.name.startswith(f"{pfx}-") for pfx in prefixes)]
         if len(candidates) == 1:
             return candidates[0].resolve()
     return primary
@@ -193,7 +246,7 @@ def default_database_path(repo: Path) -> Path:
         old = (home / "databases" / f"{old_slug}.db").resolve()
         if old.exists():
             return old
-    found = _find_legacy_slug_file(home / "databases", _safe_name(repo), ".db")
+    found = _find_legacy_slug_file(home / "databases", _fallback_prefixes(repo), ".db")
     if found:
         return found.resolve()
     return primary
