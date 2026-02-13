@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional, Any
 
 from .analysis_cache import merge_dev_hints_to_global_changelog
-from .docs import load_dotenv_best_effort, resolve_docs_dir, generate_docs_digest
+from .docs import resolve_docs_dir, generate_docs_digest
 from .gates import run_build_gate_async, run_test_gate_async, extract_build_warnings
 from .gitops import (
     git_head,
@@ -96,10 +96,8 @@ from .utils import (
 )
 from .exceptions import BudgetExceeded
 from .exc_detect import (
-    is_max_turns_exception,
     is_quota_exception,
     is_model_invalid_exception,
-    is_transient_exception,
 )
 from .qa_utils import (
     extract_qa_followups,
@@ -137,7 +135,8 @@ from .skills import (
 from .skills.match import suggest_skills
 from .shared import load_json_if_exists as _load_json_if_exists, inline_skills_for as _inline_skills_for, format_skill_selection as _format_skill_selection
 from .task_history import format_history_block as _format_history_block, format_split_history_blocks as _format_split_history_blocks, count_unresolved_failures as _count_unresolved_failures, count_consecutive_title_failures as _count_consecutive_title_failures
-from .progress import print_cycle_report, TokenTracker, extract_codex_tokens
+from .progress import print_cycle_report, TokenTracker
+from .codex_exec import codex_exec, CodexExecResult
 
 from .pipeline import PipelineManager, make_stages
 from .pipeline.session import PipelineSession
@@ -158,41 +157,11 @@ async def main_async(args: argparse.Namespace) -> int:
         from .backends.claudecode import main_async_claudecode
         return await main_async_claudecode(args, repo)
 
-    # Load env (.env) BEFORE importing agents so OPENAI_API_KEY is visible even if
-    # the SDK reads environment variables at import time.
-    env_debug = load_dotenv_best_effort(repo, explicit_env_file=getattr(args, "env_file", ""), override=True)
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        eprint("ERROR: OPENAI_API_KEY is not set.")
-        eprint("Tried loading .env from:")
-        for pth in env_debug.get("tried", []):
-            eprint(f" - {pth}")
-        eprint("Loaded from:")
-        for pth in env_debug.get("loaded", []):
-            eprint(f" - {pth}")
-        eprint(r"Fix: set OPENAI_API_KEY env var, or pass --env-file C:\path\to\.env")
-        return 2
-
-    try:
-        from agents import Agent, Runner
-        try:
-            from agents import ModelSettings  # type: ignore
-        except Exception:
-            ModelSettings = None  # type: ignore
-
-        # Optional helper (newer SDKs): explicitly set the API key in-process.
-        try:
-            from agents import set_default_openai_key  # type: ignore
-        except Exception:
-            set_default_openai_key = None  # type: ignore
-
-        from agents.mcp import MCPServerStdio
-        from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
-
-        if set_default_openai_key is not None:
-            set_default_openai_key(api_key)
-    except ImportError:
-        eprint("Missing dependency: openai-agents. Install: pip install -U openai-agents openai")
+    # Verify codex CLI is available (login-based auth — no API key needed)
+    import shutil
+    if shutil.which("codex") is None:
+        eprint("ERROR: 'codex' CLI not found in PATH.")
+        eprint("Install: npm install -g @openai/codex")
         return 2
 
     # Run dir (resume or new). In --loop mode, run_dir must be reused for the whole session.
@@ -238,7 +207,7 @@ async def main_async(args: argparse.Namespace) -> int:
         )
         safe_write_text(run_dir / "VALIDATION_FAILURE.md", msg)
 
-    for _name, _value in (("env_file", getattr(args, "env_file", "") or ""), ("prompts_dir", getattr(args, "prompts_dir", "") or "")):
+    for _name, _value in (("prompts_dir", getattr(args, "prompts_dir", "") or ""),):
         if str(_value).strip() and is_unsafe_path(str(_value)):
             _fail_validation(_name, str(_value))
             eprint(f"[STOP] Validation failure for {_name}: {_value}")
@@ -309,11 +278,7 @@ async def main_async(args: argparse.Namespace) -> int:
     prompts_dir = (repo / args.prompts_dir).resolve() if not Path(args.prompts_dir).is_absolute() else Path(args.prompts_dir).resolve()
     store = PromptStore(prompts_dir=prompts_dir)
 
-    # MCP server params
-    if args.mcp_mode == "npx":
-        mcp_params = {"command": "npx", "args": ["-y", args.codex_package, "mcp-server"]}
-    else:
-        mcp_params = {"command": "codex", "args": ["mcp-server"]}
+    # MCP server params (retained for reference; codex exec handles tools internally)
 
     # Gates configuration
     build_enabled = (not bool(getattr(args, "no_build", False))) or bool(getattr(args, "require_build", False))
@@ -417,62 +382,13 @@ async def main_async(args: argparse.Namespace) -> int:
         except Exception:
             pass
 
-    async with MCPServerStdio(
-        name="Codex_CLI",
-        params=mcp_params,
-        client_session_timeout_seconds=args.mcp_timeout_seconds,
-    ) as codex_mcp_server:
-
+    # --- Begin pipeline scope (was: async with MCPServerStdio) ---
+    # codex exec handles MCP/tools internally; no SDK agent objects needed.
+    if True:  # preserve indent level for minimal diff
         pm_instructions = ensure_pm_instructions_have_output_schema(store.get("pm_instructions", PM_INSTRUCTIONS_DEFAULT))
         dev_instructions = store.get("dev_instructions", DEV_INSTRUCTIONS_DEFAULT)
         qa_instructions = store.get("qa_instructions", QA_INSTRUCTIONS_DEFAULT)
-
-        # Enable parallel tool calls when supported by the SDK/model.
-        _ms = None
-        if ModelSettings is not None:
-            try:
-                _ms = ModelSettings(parallel_tool_calls=True)
-            except Exception:
-                _ms = None
-
-        def _agent_kwargs() -> dict:
-            return {"model_settings": _ms} if _ms is not None else {}
-
-
-        pm = Agent(
-            name="Project_Manager",
-            model=args.pm_model,
-            mcp_servers=[codex_mcp_server],
-            instructions=f"{RECOMMENDED_PROMPT_PREFIX}\n{pm_instructions}".strip(),
-            **_agent_kwargs(),
-        )
-
-        def make_dev_agent(model_name: str):
-            return Agent(
-                name="MAUI_Developer",
-                model=model_name,
-                mcp_servers=[codex_mcp_server],
-                instructions=f"{RECOMMENDED_PROMPT_PREFIX}\n{dev_instructions}".strip(),
-                **_agent_kwargs(),
-            )
-
-        dev = make_dev_agent(args.dev_model)
-
-        qa = Agent(
-            name="QA",
-            model=args.qa_model,
-            mcp_servers=[codex_mcp_server],
-            instructions=f"{RECOMMENDED_PROMPT_PREFIX}\n{qa_instructions}".strip(),
-            **_agent_kwargs(),
-        )
-
         reporter_instructions = store.get("reporter_instructions", REPORTER_INSTRUCTIONS_DEFAULT)
-        reporter = Agent(
-            name="PM_Reporter",
-            model=getattr(args, "reporter_model", None) or args.pm_model,
-            instructions=f"{RECOMMENDED_PROMPT_PREFIX}\n{reporter_instructions}".strip(),
-            **_agent_kwargs(),
-        )
 
 
 
@@ -527,7 +443,13 @@ async def main_async(args: argparse.Namespace) -> int:
                         "context_json": json.dumps(ctx_obj, ensure_ascii=False, indent=2),
                     },
                 )
-                res = await Runner.run(reporter, prompt, max_turns=int(getattr(args, "report_max_turns", 8)) or 8)
+                res = await codex_exec(
+                    prompt,
+                    instructions=reporter_instructions,
+                    model=getattr(args, "reporter_model", None) or args.pm_model,
+                    cwd=repo,
+                    timeout_seconds=300,
+                )
                 out = (res.final_output or "").strip()
                 if out:
                     # Detect and remove duplicate report content (PM model repeating itself)
@@ -541,21 +463,21 @@ async def main_async(args: argparse.Namespace) -> int:
                 metrics.event("shutdown_report", cycle=cycle, step=step, reason=stop_reason, ok=False, error=str(ex))
 
 
-        async def _run_with_continuations(
-            agent_obj,
+        async def _run_codex_with_continuations(
             prompt: str,
-            max_turns: int,
             *,
+            instructions: str = "",
+            model: str = "",
+            full_auto: bool = False,
             label: str,
             timeout_sec: int = 0,
             max_continuations: int = 0,
             task_id: str = "",
-        ) -> Any:
-            """Run an agent, optionally continuing if a max-turns exception occurs.
+        ) -> CodexExecResult:
+            """Run ``codex exec``, optionally continuing on timeout.
 
-            Notes:
-            - max_continuations controls how many *additional* Runner.run calls we will attempt after a MaxTurnsExceeded-style failure.
-            - We detect turn-caps both by exception message and by exception class name (for SDK variations).
+            Returns a :class:`CodexExecResult`. Raises :class:`BudgetExceeded`
+            if continuation or quota budgets are blown.
             """
             cont_left = int(max_continuations or 0)
             per_task = budget_state["per_task_continuations"]
@@ -563,59 +485,80 @@ async def main_async(args: argparse.Namespace) -> int:
             per_task.setdefault(task_key, 0)
 
             continuation_msg = (
-                f"\n\n[CONTINUE] You hit a turn limit previously while running '{label}'. Continue EXACTLY from where you left off.\n"
-                "- Do NOT restate a plan.\n"
-                "- Do NOT summarize.\n"
-                "- Apply changes now (call tools / edit files).\n"
+                f"\n\n[CONTINUE] The previous '{label}' session was terminated due to a timeout. "
+                "The repository is in the exact state left by the previous run — some files may have been partially modified.\n"
+                "- Inspect the current state of files (read them) before making changes.\n"
+                "- Continue EXACTLY from where the previous session left off.\n"
+                "- Do NOT restate a plan or summarize.\n"
+                "- Apply remaining changes now (edit files / run commands).\n"
                 "- End with only the required output."
             )
 
             _MAX_RETRIES = 3
             _INITIAL_BACKOFF = 5.0
 
-            async def _run_once_with_retry(p: str) -> Any:
-                for attempt in range(_MAX_RETRIES + 1):
-                    try:
-                        if timeout_sec and timeout_sec > 0:
-                            return await asyncio.wait_for(Runner.run(agent_obj, p, max_turns=max_turns), timeout=timeout_sec)
-                        return await Runner.run(agent_obj, p, max_turns=max_turns)
-                    except Exception as ex:
-                        if is_quota_exception(ex) or isinstance(ex, BudgetExceeded):
-                            raise
-                        if is_transient_exception(ex) and attempt < _MAX_RETRIES:
-                            wait = _INITIAL_BACKOFF * (2 ** attempt)
-                            eprint(f"[RETRY] {label} transient error (attempt {attempt + 1}/{_MAX_RETRIES}): {ex}; retrying in {wait:.0f}s")
-                            await asyncio.sleep(wait)
-                            continue
-                        raise
-                raise RuntimeError("unreachable")  # pragma: no cover
+            effective_timeout = timeout_sec if (timeout_sec and timeout_sec > 0) else 900
 
             while True:
-                try:
-                    return await _run_once_with_retry(prompt)
-                except Exception as ex:
-                    if cont_left > 0 and is_max_turns_exception(ex):
-                        if budget_exceeded("total_continuations", budget_state["total_continuations"], int(budgets_cfg.get("max_total_continuations_per_run") or 0)):
-                            metrics.event("budget_exceeded", cycle=-1, reason="total_continuations")
-                            raise BudgetExceeded("total_continuations")
-                        if budget_exceeded(
-                            "dev_continuations_per_task",
-                            per_task[task_key],
-                            int(budgets_cfg.get("max_dev_continuations_per_task") or 0),
-                        ):
-                            metrics.event("budget_exceeded", cycle=-1, reason="dev_continuations_per_task", task_id=task_id)
-                            raise BudgetExceeded("dev_continuations_per_task")
-                        budget_state["total_continuations"] += 1
-                        per_task[task_key] += 1
-                        metrics.event("continuation_attempt", stage=label, task_id=task_id, count=budget_state["total_continuations"])
-                        cont_left -= 1
-                        # Replace continuation message instead of appending to avoid prompt bloat
-                        if "[CONTINUE]" in prompt:
-                            prompt = prompt.split("[CONTINUE]")[0] + continuation_msg
-                        else:
-                            prompt = prompt + continuation_msg
+                # Retry loop for transient errors
+                last_result: CodexExecResult | None = None
+                for retry_attempt in range(_MAX_RETRIES + 1):
+                    result = await codex_exec(
+                        prompt,
+                        instructions=instructions,
+                        model=model,
+                        full_auto=full_auto,
+                        cwd=repo,
+                        timeout_seconds=effective_timeout,
+                    )
+                    last_result = result
+
+                    if result.is_quota_exhausted:
+                        raise Exception("quota exhausted — detected in codex exec output")
+                    if result.exit_code == 0 or result.is_timeout:
+                        break  # success or timeout → exit retry loop
+                    # Transient error detection
+                    err_text = result.error or ""
+                    if retry_attempt < _MAX_RETRIES and (
+                        "ECONNRESET" in err_text
+                        or "ETIMEDOUT" in err_text
+                        or "rate limit" in err_text.lower()
+                        or "503" in err_text
+                        or "502" in err_text
+                    ):
+                        wait = _INITIAL_BACKOFF * (2 ** retry_attempt)
+                        eprint(f"[RETRY] {label} transient error (attempt {retry_attempt + 1}/{_MAX_RETRIES}): {err_text[:200]}; retrying in {wait:.0f}s")
+                        await asyncio.sleep(wait)
                         continue
-                    raise
+                    break  # non-transient error → exit retry loop
+
+                assert last_result is not None
+                result = last_result
+
+                # Continuation on timeout
+                if result.is_timeout and cont_left > 0:
+                    if budget_exceeded("total_continuations", budget_state["total_continuations"], int(budgets_cfg.get("max_total_continuations_per_run") or 0)):
+                        metrics.event("budget_exceeded", cycle=-1, reason="total_continuations")
+                        raise BudgetExceeded("total_continuations")
+                    if budget_exceeded(
+                        "dev_continuations_per_task",
+                        per_task[task_key],
+                        int(budgets_cfg.get("max_dev_continuations_per_task") or 0),
+                    ):
+                        metrics.event("budget_exceeded", cycle=-1, reason="dev_continuations_per_task", task_id=task_id)
+                        raise BudgetExceeded("dev_continuations_per_task")
+                    budget_state["total_continuations"] += 1
+                    per_task[task_key] += 1
+                    metrics.event("continuation_attempt", stage=label, task_id=task_id, count=budget_state["total_continuations"])
+                    cont_left -= 1
+                    # Replace continuation message instead of appending to avoid prompt bloat
+                    if "[CONTINUE]" in prompt:
+                        prompt = prompt.split("[CONTINUE]")[0] + continuation_msg
+                    else:
+                        prompt = prompt + continuation_msg
+                    continue
+
+                return result
         async def _run_pm_structured(pm_prompt: str, *, max_turns: int, cycle_idx: int, kind: str, output_path: Path) -> PMOutputV2 | None:
             """Run PM and validate its final output against PMOutputV2 schema."""
             retries = int(getattr(args, "pm_structured_retries", 2))
@@ -627,10 +570,11 @@ async def main_async(args: argparse.Namespace) -> int:
             for attempt in range(retries + 1):
                 prompt = pm_prompt if attempt == 0 else repair_prompt
                 try:
-                    res = await _run_with_continuations(
-                        pm,
+                    res = await _run_codex_with_continuations(
                         prompt,
-                        max_turns=max_turns,
+                        instructions=pm_instructions,
+                        model=args.pm_model,
+                        full_auto=False,
                         label=f"pm_{kind}",
                         timeout_sec=int(getattr(args, "pm_timeout_seconds", 0)) or 0,
                         max_continuations=max_cont,
@@ -639,7 +583,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 except BudgetExceeded as ex:
                     metrics.event("budget_exceeded", cycle=cycle_idx, reason=str(ex))
                     return None
-                last_raw = (getattr(res, "final_output", "") or "").strip()
+                last_raw = (res.final_output or "").strip()
                 try:
                     output_path.write_text(last_raw + "\n", encoding="utf-8", errors="replace")
                 except Exception:
@@ -1132,7 +1076,13 @@ async def main_async(args: argparse.Namespace) -> int:
                 qa_prompt = store.render("qa_prompt", QA_TEMPLATE_DEFAULT, ctx)
                 if bool(getattr(args, "qa_to_backlog", False)):
                     qa_prompt = qa_prompt.rstrip() + "\n\n" + QA_FOLLOWUPS_OUTPUT_CONTRACT + "\n"
-                qa_result = await Runner.run(qa, qa_prompt, max_turns=10)
+                qa_result = await codex_exec(
+                    qa_prompt,
+                    instructions=qa_instructions,
+                    model=args.qa_model,
+                    cwd=repo,
+                    timeout_seconds=600,
+                )
                 qa_output_path = run_dir / f"qa_final_output_cycle_{cycle_idx:03d}.txt"
                 qa_output_path.write_text(
                     (qa_result.final_output or "") + "\n", encoding="utf-8", errors="replace"
@@ -1299,13 +1249,12 @@ async def main_async(args: argparse.Namespace) -> int:
                         "4. Do NOT add new features — only fix build errors\n"
                     )
 
-                    build_fix_max_turns = int(getattr(args, "max_turns_per_task", 12) or 12) * 2
-                    build_fix_agent = make_dev_agent(str(args.dev_model))
                     try:
-                        await _run_with_continuations(
-                            build_fix_agent,
+                        await _run_codex_with_continuations(
                             build_fix_prompt,
-                            max_turns=build_fix_max_turns,
+                            instructions=dev_instructions,
+                            model=str(args.dev_model),
+                            full_auto=True,
                             label="build_fix",
                             timeout_sec=int(getattr(args, "dev_timeout_seconds", 0)) or 0,
                             max_continuations=int(getattr(args, "dev_max_turns_continuations", 0)) or 0,
@@ -1522,7 +1471,6 @@ async def main_async(args: argparse.Namespace) -> int:
                                 break
 
                     model_name = tiers[attempt]
-                    dev_agent = dev if attempt == 0 else make_dev_agent(model_name)
 
                     attempt_dir = task_dir / f"attempt_{attempt:02d}"
                     attempt_dir.mkdir(parents=True, exist_ok=True)
@@ -1577,29 +1525,36 @@ async def main_async(args: argparse.Namespace) -> int:
 
                     task_start_time = time.time()
                     dev_exc: Optional[Exception] = None
+                    dev_result: CodexExecResult | None = None
                     dev_is_max_turns = False
                     dev_quota_exhausted = False
                     dev_final = ""
 
                     try:
-                        dev_result = await _run_with_continuations(
-                            dev_agent,
+                        dev_result = await _run_codex_with_continuations(
                             dev_prompt,
-                            max_turns=args.max_turns_per_task,
+                            instructions=dev_instructions,
+                            model=model_name,
+                            full_auto=True,
                             label="dev",
                             timeout_sec=int(getattr(args, "dev_timeout_seconds", 0)) or 0,
                             max_continuations=int(getattr(args, "dev_max_turns_continuations", 0)) or 0,
                             task_id=next_task.id,
                         )
                         dev_final = (dev_result.final_output or "")
-                        _inp, _out = extract_codex_tokens(dev_result)
+                        _inp, _out = dev_result.input_tokens, dev_result.output_tokens
                         token_tracker.add("Dev", _inp, _out)
                         task_duration = time.time() - task_start_time
                         logger.timing("dev_task_execution", task_duration, task_id=next_task.id, attempt=attempt)
+                        # Check result-based error signals (codex exec returns errors in result, not exceptions)
+                        dev_is_max_turns = dev_result.is_timeout
+                        dev_quota_exhausted = dev_result.is_quota_exhausted
+                        if dev_result.exit_code != 0 and dev_result.error:
+                            dev_exc = RuntimeError(dev_result.error)
                     except Exception as ex:
                         dev_exc = ex
                         dev_final = ""
-                        dev_is_max_turns = is_max_turns_exception(ex)
+                        dev_is_max_turns = False
                         dev_quota_exhausted = is_quota_exception(ex)
                         task_duration = time.time() - task_start_time
 
@@ -1651,7 +1606,11 @@ async def main_async(args: argparse.Namespace) -> int:
                             pass
                         return 0, STOP_REASON_QUOTA, 0, (len(done_set) > before_done)
                     # Invalid/unknown model: allow escalation fallback when available.
-                    if dev_exc and is_model_invalid_exception(dev_exc):
+                    _model_invalid = (dev_exc and is_model_invalid_exception(dev_exc)) or (
+                        not dev_exc and dev_result is not None and dev_result.exit_code != 0
+                        and dev_result.error and ("model" in dev_result.error.lower() and ("invalid" in dev_result.error.lower() or "not found" in dev_result.error.lower()))
+                    )
+                    if _model_invalid:
                         if (attempt + 1) < max_attempts:
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="model_invalid")
                             continue

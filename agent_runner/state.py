@@ -246,7 +246,7 @@ def write_default_p0_backlog(run_dir: Path) -> None:
                     "PM 단계가 BACKLOG를 생성하지 못했습니다. 레포의 실제 코드는 수정하지 마세요. "
                     "현재 run_dir(이번 실행 폴더)에 `PM_FAILURE.md`를 생성하고 다음 내용을 기록하세요: "
                     "(1) 어떤 에러/원인으로 PM이 실패했는지 추정, (2) 재현/재시도 방법(예: --debug, --pm-model, --pm-timeout-seconds), "
-                    "(3) 사용자가 확인해야 할 설정(execution_backend, OPENAI_API_KEY/ANTHROPIC_API_KEY, docs_dir 등). "
+                    "(3) 사용자가 확인해야 할 설정(execution_backend, CLI 로그인 상태, docs_dir 등). "
                     "작성 후 작업을 종료(추가 코드 변경 없이)하세요."
                 ),
                 "files": ["(run_dir)/PM_FAILURE.md"],

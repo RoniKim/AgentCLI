@@ -20,7 +20,7 @@ import inspect
 
 from ..process_guard import register_pid, unregister_pid
 from ..analysis_cache import merge_dev_hints_to_global_changelog
-from ..docs import load_dotenv_best_effort, resolve_docs_dir, generate_docs_digest
+from ..docs import resolve_docs_dir, generate_docs_digest
 from ..gates import run_build_gate_async, run_test_gate_async, extract_build_warnings
 from ..gitops import (
     git_head,
@@ -764,14 +764,6 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         eprint(f"Repo not found: {repo}")
         return 2
 
-    load_dotenv_best_effort(repo, getattr(args, "env_file", ""))
-
-    if not (os.getenv("ANTHROPIC_API_KEY") or "").strip():
-        eprint(
-            "[WARN] ANTHROPIC_API_KEY is not set. "
-            "Claude Agent SDK will use Claude Code authentication if available."
-        )
-
     cfg = _load_claudecode_cfg(args)
 
     # Run dir
@@ -813,7 +805,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         )
         safe_write_text(run_dir / "VALIDATION_FAILURE.md", msg)
 
-    for _name, _value in (("env_file", getattr(args, "env_file", "") or ""), ("prompts_dir", getattr(args, "prompts_dir", "") or "")):
+    for _name, _value in (("prompts_dir", getattr(args, "prompts_dir", "") or ""),):
         if str(_value).strip() and is_unsafe_path(str(_value)):
             _fail_validation(_name, str(_value))
             eprint(f"[STOP] Validation failure for {_name}: {_value}")

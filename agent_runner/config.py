@@ -348,14 +348,3 @@ def ensure_work_dir(repo: Path) -> Path:
     return work_root
 
 
-def resolve_env_file(explicit: Optional[str]) -> Optional[Path]:
-    """
-    env_file도 python-side 기준으로 해석한다.
-    - absolute: 그대로
-    - relative: app_home 기준
-    - empty: None
-    """
-    if explicit and str(explicit).strip():
-        p = Path(str(explicit)).expanduser()
-        return p.resolve() if p.is_absolute() else (app_home() / p).resolve()
-    return None

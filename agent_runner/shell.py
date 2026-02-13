@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import shlex
 import shutil
 import subprocess
@@ -21,7 +20,6 @@ from .config import (
     legacy_config_path,
     resolve_prompts_dir,
 )
-from .docs import load_dotenv_best_effort
 from .runner_entry import run as run_runner
 from .run_dir import make_run_dir
 from .run_dir import find_latest_run_dir
@@ -233,17 +231,10 @@ class RunnerShell:
         repo = self.repo
         cfgp = self.config_path or (default_config_path(repo) if repo else None)
 
-        # Ensure .env is loaded so env sanity reflects reality even in shell mode.
-        try:
-            _ = load_dotenv_best_effort(repo or Path.cwd(), explicit_env_file=str(eff.get("env_file") or ""), override=True)
-        except Exception:
-            pass
-
         print("\n=== AgentCLI Shell: Current Settings ===")
         print(f"repo:       {_shorten(repo)}")
         print(f"config:     {_shorten(cfgp)}")
         print(f"run_dir:    {eff.get('run_dir') or '(auto)'}")
-        print(f"env_file:   {eff.get('env_file') or '(auto)'}")
         print(f"autopilot:  {bool(eff.get('autopilot'))}")
         print(f"loop:       {bool(eff.get('loop'))} (sleep={eff.get('loop_sleep_seconds')}s, max_cycles={eff.get('loop_max_cycles')})")
         print(f"continuous: {bool(eff.get('continuous'))} (iterations={eff.get('iterations')}, max_turns_per_task={eff.get('max_turns_per_task')})")
@@ -284,8 +275,7 @@ class RunnerShell:
         print(f"roles:      {eff.get('roles')}")
         print(f"plugins_enabled: {bool(eff.get('plugins_enabled'))} (allowlist={eff.get('plugins_allowlist')}, strict={bool(eff.get('plugins_strict'))})")
         print(f"debug:      {bool(eff.get('debug', False))}")
-        print(f"OPENAI_API_KEY set: {_yesno(bool(os.getenv('OPENAI_API_KEY', '').strip()))}")
-        print(f"ANTHROPIC_API_KEY set: {_yesno(bool(os.getenv('ANTHROPIC_API_KEY', '').strip()))}")
+        print(f"auth:       login-based (codex login / claude auth login)")
         print("======================================\n")
 
         if show_all:
@@ -571,7 +561,7 @@ class RunnerShell:
             "",
             "Tips:",
             "  - 시작 전 /config로 설정을 확인하세요.",
-            "  - backend=claudecode 사용 시 ANTHROPIC_API_KEY 또는 Claude Code 인증이 필요하며, claude-agent-sdk가 필요합니다.",
+            "  - backend=claudecode 사용 시 Claude Code 로그인(claude auth login)과 claude-agent-sdk가 필요합니다.",
         ]
         print("\n".join(lines))
 
@@ -621,9 +611,10 @@ class RunnerShell:
         except Exception as ex:
             report_lines.append(f"- run_dir writable: ERROR ({run_dir}) ({ex})")
 
-        # API keys
-        report_lines.append(f"- OPENAI_API_KEY set: {bool(os.getenv('OPENAI_API_KEY', '').strip())}")
-        report_lines.append(f"- ANTHROPIC_API_KEY set: {bool(os.getenv('ANTHROPIC_API_KEY', '').strip())}")
+        # Auth (login-based — no API keys needed)
+        import shutil
+        report_lines.append(f"- codex CLI: {'found' if shutil.which('codex') else 'NOT found'}")
+        report_lines.append(f"- claude CLI: {'found' if shutil.which('claude') else 'NOT found'}")
         report_lines.append(f"- profile: {eff.get('profile', 'personal')}")
         report_lines.append(f"- policy enabled: {bool((eff.get('policy') or {}).get('enabled', False))}")
         report_lines.append(f"- security enabled: {bool((eff.get('security') or {}).get('enabled', False))}")

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import os
 import shutil
 from dataclasses import dataclass
 from typing import Iterable
@@ -41,16 +40,8 @@ def _check_command(cmd: str, issues: list[str]) -> None:
 
 def preflight_codex(args: argparse.Namespace) -> PreflightResult:
     issues: list[str] = []
-    if not (os.getenv("OPENAI_API_KEY") or "").strip():
-        issues.append("missing OPENAI_API_KEY")
-
-    _check_import("agents", "openai-agents (agents)", issues)
-
-    mcp_mode = str(getattr(args, "mcp_mode", "npx") or "npx").strip().lower()
-    if mcp_mode == "npx":
-        _check_command("npx", issues)
-    elif mcp_mode == "codex":
-        _check_command("codex", issues)
+    # codex exec uses Codex credits (ChatGPT subscription) — no OPENAI_API_KEY needed.
+    _check_command("codex", issues)
 
     return PreflightResult(backend="codex", ok=not issues, issues=issues)
 

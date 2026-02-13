@@ -8,8 +8,7 @@ from typing import Any
 def _print_help_on_failure() -> None:
     print("\n[Claude SDK Smoke Test] 실패 시 점검 사항:")
     print("- claude-agent-sdk 설치: pip install -U claude-agent-sdk")
-    print("- Claude Code 인증 또는 ANTHROPIC_API_KEY 설정")
-    print("- Claude Code CLI가 설치되어 있다면 `claude auth login` 상태 확인")
+    print("- Claude Code 로그인: `claude auth login`")
 
 
 async def _run(prompt: str, model: str) -> int:

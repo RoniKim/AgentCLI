@@ -10,7 +10,6 @@ from .config import (
     legacy_config_path,
     load_config,
     resolve_config_path,
-    resolve_env_file,
     resolve_prompts_dir,
     save_config,
 )
@@ -44,8 +43,6 @@ DEFAULTS: Dict[str, Any] = {
     "config_version": 2,
     "run_dir": "",            # empty => auto
     "resume_latest": False,
-    "env_file": "",           # empty => auto (python-side .env is still loaded)
-
     # Execution backend engine (default: codex)
     "execution_backend": "codex",
 
@@ -173,16 +170,16 @@ DEFAULTS: Dict[str, Any] = {
     "test_cmd": [],
     "build_timeout_seconds": 1800,
 
-    # Models
-    "pm_model": "gpt-5-mini",
+    # Models (all Codex — single billing)
+    "pm_model": "gpt-5.1-codex-mini",
     "dev_model": "gpt-5.1-codex-mini",
-    "qa_model": "gpt-5-mini",
+    "qa_model": "gpt-5.1-codex-mini",
     "qa_always": True,
     "qa_to_backlog": False,
     "max_qa_followups": 5,
 
     # Reporter / shutdown report
-    "reporter_model": "gpt-5-nano",
+    "reporter_model": "gpt-5.1-codex-mini",
     "report_max_turns": 8,
 
     # Dev cost controls
@@ -283,55 +280,6 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 
-# ---- python-side .env loader (no repo .env) ----
-def _parse_env_lines(text: str) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for line in text.splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        if "=" not in s:
-            continue
-        k, v = s.split("=", 1)
-        k = k.strip()
-        v = v.strip().strip('"').strip("'")
-        if k:
-            out[k] = v
-    return out
-
-
-def load_python_side_env(explicit_env_file: Optional[str] = None, override: bool = False) -> None:
-    """
-    우선순위:
-      1) --env-file (absolute or relative to AgentCLI home)
-      2) AgentCLI 홈/.env
-    repo 쪽 .env는 의도적으로 로드하지 않는다(요청 사항).
-    """
-    paths: list[Path] = []
-    if explicit_env_file and str(explicit_env_file).strip():
-        p = resolve_env_file(explicit_env_file)
-        if p:
-            paths.append(p)
-    paths.append(app_home() / ".env")
-
-    for p in paths:
-        try:
-            if not p.exists():
-                continue
-            data = _parse_env_lines(p.read_text(encoding="utf-8", errors="replace"))
-            for k, v in data.items():
-                if override or not os.getenv(k):
-                    os.environ[k] = v
-        except Exception:
-            # env 로딩 실패는 치명적이지 않게
-            pass
-
-
-# 모듈 import 시점에 python-side .env 한번 로드(override=False)
-# Disabled: causes side-effects on import. The call already exists inside parse_args().
-# load_python_side_env(explicit_env_file=None, override=False)
-
-
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(add_help=True)
 
@@ -352,7 +300,6 @@ def _build_parser() -> argparse.ArgumentParser:
     # Paths
     p.add_argument("--run-dir", default=None, help="Fixed run_dir to reuse. Empty/None = auto")
     p.add_argument("--resume-latest", action=argparse.BooleanOptionalAction, default=None, help="Resume latest run_dir")
-    p.add_argument("--env-file", default=None, help="Path to .env (absolute or relative to AgentCLI home)")
 
     # Execution backend
     p.add_argument(
@@ -953,12 +900,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     repo = Path(args.repo).expanduser().resolve()
     args.repo = str(repo)
 
-    # Load python-side env first (explicit env_file wins)
-    if args.env_file:
-        load_python_side_env(explicit_env_file=str(args.env_file), override=False)
-    else:
-        load_python_side_env(explicit_env_file=None, override=False)
-
     # Resolve config path (python-side default)
     cfg_path = resolve_config_path(repo, args.config)
     legacy_path = legacy_config_path(repo)
@@ -994,11 +935,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     # Normalize prompts_dir to absolute python-side folder
     eff_prompts_dir = resolve_prompts_dir(repo, str(eff.get("prompts_dir", "")))
     eff["prompts_dir"] = str(eff_prompts_dir)
-
-    # Normalize env_file if provided (string)
-    if eff.get("env_file"):
-        p = resolve_env_file(str(eff["env_file"]))
-        eff["env_file"] = str(p) if p else ""
 
     # If init-prompts requested: create templates and exit
     if bool(eff.get("init_prompts", False)):
