@@ -116,12 +116,11 @@ python -m agent_runner.backends.claude_smoke_test --prompt "hi"
 ```
 openai>=1.0.0
 openai-agents>=0.0.0
-python-dotenv>=1.0.0
 pydantic>=2.0.0
 prompt_toolkit>=3.0.0
 ```
 
-Optional: `claude-code-sdk` (for Claude backend)
+Optional: `claude-agent-sdk` (for Claude backend)
 
 ## Configuration System
 
@@ -129,7 +128,7 @@ Optional: `claude-code-sdk` (for Claude backend)
 
 - **Config location**: `{AGENTCLI_HOME}/configs/<repo-slug>-<hash>.json`
 - **Legacy fallback**: `.AgentCLI/agent_config.json` → `.doc/agent_config.json` (dual fallback, read-only)
-- **Environment**: `.env` file (loaded via python-dotenv)
+- **Auth**: Login-based only (codex login / claude auth login — no API keys or .env needed)
 - **Full reference**: `docs/CONFIG_REFERENCE_KO.md` (23개 섹션, ~124개 설정 변수)
 
 ## Code Conventions
