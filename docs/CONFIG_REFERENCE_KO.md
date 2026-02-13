@@ -137,7 +137,7 @@
 
 | 변수 | 타입 | 기본값 | 설명 |
 |------|------|--------|------|
-| `gitops.untracked_exclude_globs` | list | `[".doc/**", ...]` | git untracked 파일 감지 시 제외할 glob 패턴. |
+| `gitops.untracked_exclude_globs` | list | `[".doc/**", ".AgentCLI/**", ...]` | git untracked 파일 감지 시 제외할 glob 패턴. |
 
 ---
 
@@ -162,7 +162,7 @@
 | `scan_max_bytes_per_file` | int | `200000` | 파일당 최대 스캔 바이트 (~200KB). |
 | `scan_max_total_bytes` | int | `20000000` | 전체 최대 스캔 바이트 (~20MB). |
 | `scan_timeout_seconds` | int | `60` | 스캔 타임아웃 (초). |
-| `scan_ignore_globs` | list | `[".doc/**", ...]` | 스캔 시 무시할 glob 패턴. |
+| `scan_ignore_globs` | list | `[".doc/**", ".AgentCLI/**", ...]` | 스캔 시 무시할 glob 패턴. |
 | `scan_ignore_paths` | list | `[]` | 스캔 시 무시할 경로 목록. |
 | `scan_include_untracked_in_full` | bool | `false` | `full` 스캔 시 untracked 파일 포함 여부. |
 

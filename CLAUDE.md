@@ -128,7 +128,7 @@ Optional: `claude-code-sdk` (for Claude backend)
 **Priority chain**: CLI args > Config JSON > DEFAULTS (in `cli.py`)
 
 - **Config location**: `{AGENTCLI_HOME}/configs/<repo-slug>-<hash>.json`
-- **Legacy fallback**: `.doc/agent_config.json` (read-only)
+- **Legacy fallback**: `.AgentCLI/agent_config.json` → `.doc/agent_config.json` (dual fallback, read-only)
 - **Environment**: `.env` file (loaded via python-dotenv)
 - **Full reference**: `docs/CONFIG_REFERENCE_KO.md` (23개 섹션, ~124개 설정 변수)
 

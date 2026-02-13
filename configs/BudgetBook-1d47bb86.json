@@ -1,5 +1,5 @@
 {
-  "repo": "C:\\Dev\\BudgetBook",
+  "repo": "D:\\000.Work\\001.Private\\000.API\\BudgetBook",
   "config": "",
   "config_version": 2,
   "run_dir": "",
@@ -30,7 +30,6 @@
   "claudecode_dev_model_tier2": "",
   "claudecode_qa_model": "sonnet",
   "claudecode_reporter_model": "haiku",
-
   "claudecode_mcp_tools_enabled": true,
   "claudecode_hooks_enabled": true,
   "claudecode_can_use_tool_enabled": true,
@@ -42,7 +41,6 @@
   "claudecode_subagent_reviewer_model": "",
   "claudecode_subagent_runner_model": "",
   "claudecode_subagent_auditor_model": "",
-
   "roles": "PM,Dev,QA",
   "profile": "personal",
   "autopilot": true,
@@ -54,7 +52,7 @@
   "budget_reset_per_cycle": true,
   "quota_check_enabled": true,
   "quota_five_hour_max_utilization": 95,
-  "quota_seven_day_max_utilization": 95,
+  "quota_seven_day_max_utilization": 80,
   "quota_wait_for_reset": true,
   "continuous": true,
   "iterations": 10,
@@ -67,6 +65,8 @@
     "untracked_exclude_globs": [
       ".doc/**",
       ".doc",
+      ".AgentCLI/**",
+      ".AgentCLI",
       ".agent_runs/**",
       ".agent_runs",
       "*.log"
@@ -85,6 +85,8 @@
   "scan_ignore_globs": [
     ".doc/**",
     ".doc",
+    ".AgentCLI/**",
+    ".AgentCLI",
     ".agent_runs/**",
     ".agent_runs",
     "worktree/**",

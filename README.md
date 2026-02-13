@@ -494,10 +494,10 @@ python agent_cli.py --run-now --repo "<대상 프로젝트 경로>" \
 
 ### Step 6: 결과 확인
 
-실행 후 대상 레포의 `.doc/agent_runs/<timestamp>/` 디렉토리에 산출물이 생성됩니다:
+실행 후 대상 레포의 `.AgentCLI/agent_runs/<timestamp>/` 디렉토리에 산출물이 생성됩니다:
 
 ```
-.doc/agent_runs/20260210-143000/
+.AgentCLI/agent_runs/20260210-143000/
   ├─ BACKLOG.json          ← PM이 생성한 태스크 목록
   ├─ STATE.json            ← 완료/실패 태스크 기록
   ├─ SHUTDOWN_REPORT.md    ← 실행 종료 요약
@@ -608,7 +608,7 @@ python agent_cli.py --run-now --repo "C:/Dev/BudgetBook" --non-interactive --aut
 
 - `AGENTCLI_HOME=<path>` 를 설정하면 `configs/`, `prompts/`의 기준 디렉토리가 바뀝니다.
 
-> 레거시 호환: 레포에 `REPO/.doc/agent_config.json`이 있으면 **읽기용으로 폴백 로드**할 수 있으며, 이후 `/save`하면 새 경로로 마이그레이션됩니다.
+> 레거시 호환: 레포에 `REPO/.AgentCLI/agent_config.json` 또는 `REPO/.doc/agent_config.json`이 있으면 **읽기용으로 폴백 로드**할 수 있으며, 이후 `/save`하면 새 경로로 마이그레이션됩니다.
 
 ### Shell에서 자주 쓰는 명령
 
@@ -1077,7 +1077,7 @@ Dev 완료 → git diff 확인 → 빌드 게이트 → 테스트 게이트 → 
 ### run_dir (실행 단위)
 
 기본:
-- `REPO/.doc/agent_runs/<YYYYMMDD-HHMMSS>/`
+- `REPO/.AgentCLI/agent_runs/<YYYYMMDD-HHMMSS>/`
 
 ```
 run_dir/
@@ -1117,7 +1117,7 @@ run_dir/
 ### PM_CACHE (지속 분석 아티팩트)
 
 기본:
-- `REPO/.doc/PM_CACHE/`
+- `REPO/.AgentCLI/PM_CACHE/`
 
 대표 파일:
 - `PROJECT_ANALYSIS.md` — 프로젝트 구조/기술스택/현황 분석
@@ -1643,7 +1643,7 @@ config 예시(핵심):
       "~/.claude/skills",
       "{repo}/Skills"
     ],
-    "snapshot_dir": ".doc/skills",
+    "snapshot_dir": ".AgentCLI/skills",
     "inline_mode": "qa",
     "max_excerpt_lines": 12
   }
@@ -1662,7 +1662,7 @@ PM이 백로그를 생성할 때 TODO 내용을 가장 먼저 반영하므로, "
 ### 저장 위치
 
 ```
-REPO/.doc/todo/
+REPO/.AgentCLI/todo/
   ├─ LAST_TODO.txt            # 현재 활성 TODO 포인터
   ├─ Today_<hash>.md          # 오늘 날짜 기반 TODO 파일 (날짜+repo 해시)
   └─ (이전 TODO 파일들...)
@@ -1670,7 +1670,7 @@ REPO/.doc/todo/
 
 - 파일명: `Today_<sha1(repo+날짜)[:10]>.md` — 동일 repo에서 하루 1개
 - `LAST_TODO.txt`가 현재 활성 TODO를 가리킴 (상대 경로)
-- 없으면 `.doc/todo/*.md` 중 최신 수정 파일을 자동 선택
+- 없으면 `.AgentCLI/todo/*.md` 중 최신 수정 파일을 자동 선택
 
 ### Shell 명령어
 
@@ -1941,7 +1941,7 @@ PM은 실패 태스크를 **반드시** 다른 접근법으로 재생성하거�
 │     └─ test_cmd 실행 가능 (run_tests=true일 때)           │
 │                                                           │
 │  4. run_dir 준비                                          │
-│     ├─ 신규 생성: REPO/.doc/agent_runs/<timestamp>/       │
+│     ├─ 신규 생성: REPO/.AgentCLI/agent_runs/<timestamp>/   │
 │     └─ resume_latest: 가장 최근 run_dir 재사용            │
 │                                                           │
 │  5. .env 로딩                                             │
@@ -2016,7 +2016,7 @@ Shell에서 `/doctor`를 실행하면 run_dir에 진단 보고서(`DOCTOR.md`)�
 | 9 | **Skills 시스템** | `skills.enabled` 시 roots 존재, SKILL.md 발견 수 | 경고: enabled인데 0개 |
 | 10 | **Task History** | `task_history_enabled` 시 SQLite DB 접근 | `query_history()` 호출 |
 | 11 | **Goals** | `goals_enabled` 시 GOALS.md 존재/파싱 | P0/P1 완료 현황 (done/total) |
-| 12 | **TODO** | `.doc/todo` 디렉토리 + 오늘 TODO 내용 | has content / empty |
+| 12 | **TODO** | `.AgentCLI/todo` 디렉토리 + 오늘 TODO 내용 | has content / empty |
 | 13 | **Docs Digest** | `docs_read_mode`, docs_dir .md 파일 수 | digest 파일 존재/크기 |
 | 14 | **Process Guard** | Windows Job Object 활성 상태 | 초기화 여부 (비-Windows: N/A) |
 | 15 | **Claude SDK** | `claudecode` 백엔드 사용 시 import 검증 | `claude_code_sdk` 버전 |
@@ -2138,10 +2138,10 @@ prompts/
 
 | 변수 | 설명 | 예시 값 |
 |------|------|---------|
-| `{analysis_md}` | PROJECT_ANALYSIS.md 경로 | `.doc/PM_CACHE/PROJECT_ANALYSIS.md` |
-| `{inv_md}` | REPO_INVENTORY.md 경로 | `.doc/PM_CACHE/REPO_INVENTORY.md` |
+| `{analysis_md}` | PROJECT_ANALYSIS.md 경로 | `.AgentCLI/PM_CACHE/PROJECT_ANALYSIS.md` |
+| `{inv_md}` | REPO_INVENTORY.md 경로 | `.AgentCLI/PM_CACHE/REPO_INVENTORY.md` |
 | `{repo}` | 레포 루트 경로 | `D:\Dev\BudgetBook` |
-| `{run_dir}` | 실행 산출물 폴더 경로 | `.doc/agent_runs/20260212-140000` |
+| `{run_dir}` | 실행 산출물 폴더 경로 | `.AgentCLI/agent_runs/20260212-140000` |
 | `{todo_block}` | 사용자 TODO 내용 | `## Priorities\n- 로그인 구현` 또는 `(none)` |
 | `{docs_dir}` | Docs 폴더 경로 | `.doc/Docs` 또는 `(none)` |
 | `{docs_read_mode}` | Docs 읽기 모드 | `digest` |
@@ -2351,7 +2351,7 @@ PM이 존재하지 않는 skill_id를 참조하면:
   "skills": {
     "enabled": true,
     "roots": ["~/.agents/skills", "{repo}/Skills"],
-    "snapshot_dir": ".doc/skills",
+    "snapshot_dir": ".AgentCLI/skills",
     "inline_mode": "qa",
     "max_excerpt_lines": 12,
     "pm_summary_max_items": 30,
@@ -2713,7 +2713,7 @@ def get_runner(backend: str) -> AbstractAgentRunner:
 
 ### PM 분석 캐시
 
-**위치**: `REPO/.doc/PM_CACHE/`
+**위치**: `REPO/.AgentCLI/PM_CACHE/`
 
 | 파일 | 설명 |
 |------|------|

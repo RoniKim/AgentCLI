@@ -64,6 +64,8 @@
     "untracked_exclude_globs": [
       ".doc/**",
       ".doc",
+      ".AgentCLI/**",
+      ".AgentCLI",
       ".agent_runs/**",
       ".agent_runs",
       "*.log",
@@ -90,6 +92,8 @@
   "scan_ignore_globs": [
     ".doc/**",
     ".doc",
+    ".AgentCLI/**",
+    ".AgentCLI",
     ".agent_runs/**",
     ".agent_runs",
     "worktree/**",

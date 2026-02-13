@@ -4,8 +4,9 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .utils import atomic_write_json, eprint
 
@@ -32,15 +33,77 @@ def app_home() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _repo_slug(repo: Path) -> str:
+def _git_remote_url(repo: Path) -> Optional[str]:
+    """Return normalised git remote origin URL, or None.
+
+    Used to generate a **portable** slug that stays the same across PCs
+    as long as the repo is cloned from the same remote.
     """
-    repo 경로 기반으로 충돌 적은 slug를 만든다.
-    같은 폴더명이라도 경로가 다르면 해시로 구분됨.
-    """
+    try:
+        r = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if r.returncode == 0:
+            url = r.stdout.strip()
+            if url:
+                # Normalise: strip trailing '/' and '.git' so
+                # https://github.com/foo/bar.git == https://github.com/foo/bar
+                url = url.rstrip("/")
+                if url.endswith(".git"):
+                    url = url[:-4]
+                return url
+    except Exception:
+        pass
+    return None
+
+
+def _repo_identity(repo: Path) -> str:
+    """git remote URL (portable) or local path (fallback)."""
+    return _git_remote_url(repo) or str(repo)
+
+
+def _safe_name(repo: Path) -> str:
     name = repo.name or "repo"
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "repo"
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "repo"
+
+
+def _repo_slug(repo: Path) -> str:
+    """Portable slug: ``{folder_name}-{hash}``.
+
+    Hash source priority:
+      1) git remote origin URL → same hash on any PC
+      2) local path (non-git repos or no remote)
+    """
+    safe = _safe_name(repo)
+    h = hashlib.sha1(_repo_identity(repo).encode("utf-8", errors="ignore")).hexdigest()[:8]
+    return f"{safe}-{h}"
+
+
+def _path_based_slug(repo: Path) -> str:
+    """Legacy slug using local path only (for migration fallback)."""
+    safe = _safe_name(repo)
     h = hashlib.sha1(str(repo).encode("utf-8", errors="ignore")).hexdigest()[:8]
     return f"{safe}-{h}"
+
+
+def _find_legacy_slug_file(directory: Path, safe: str, suffix: str) -> Optional[Path]:
+    """Search *directory* for a file/dir matching ``{safe}-*.{suffix}`` pattern.
+
+    Returns the match if **exactly one** candidate is found; None otherwise.
+    This enables automatic discovery of config/db files created with the
+    old path-based slug when the new remote-URL-based slug differs.
+    """
+    if not directory.exists():
+        return None
+    pattern = f"{safe}-*{suffix}"
+    candidates: List[Path] = list(directory.glob(pattern))
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
 
 
 # ---- legacy paths (호환용: repo 내부) ----
@@ -70,15 +133,70 @@ def legacy_prompts_dir(repo: Path) -> Path:
 # ---- new defaults (python-side: AgentCLI 내부) ----
 
 def default_config_path(repo: Path) -> Path:
-    return (app_home() / "configs" / f"{_repo_slug(repo)}.json").resolve()
+    """Config JSON path with migration fallback.
+
+    1) ``configs/{new_slug}.json`` exists → use it
+    2) ``configs/{old_path_slug}.json`` exists → use it (legacy migration)
+    3) Prefix scan: exactly 1 match for ``{safe}-*.json`` → use it
+    4) Otherwise → new slug path (will be created on first /save)
+    """
+    home = app_home()
+    slug = _repo_slug(repo)
+    primary = (home / "configs" / f"{slug}.json").resolve()
+    if primary.exists():
+        return primary
+    # Legacy path-based slug fallback
+    old_slug = _path_based_slug(repo)
+    if old_slug != slug:
+        old = (home / "configs" / f"{old_slug}.json").resolve()
+        if old.exists():
+            return old
+    # Prefix scan fallback (config from another PC with different path)
+    found = _find_legacy_slug_file(home / "configs", _safe_name(repo), ".json")
+    if found:
+        return found.resolve()
+    return primary
 
 
 def default_prompts_dir(repo: Path) -> Path:
-    return (app_home() / "prompts" / _repo_slug(repo)).resolve()
+    """Prompts directory with migration fallback."""
+    home = app_home()
+    slug = _repo_slug(repo)
+    primary = (home / "prompts" / slug).resolve()
+    if primary.exists():
+        return primary
+    old_slug = _path_based_slug(repo)
+    if old_slug != slug:
+        old = (home / "prompts" / old_slug).resolve()
+        if old.exists():
+            return old
+    # Prefix scan: look for directory
+    prompts_root = home / "prompts"
+    if prompts_root.exists():
+        safe = _safe_name(repo)
+        candidates = [d for d in prompts_root.iterdir()
+                      if d.is_dir() and d.name.startswith(f"{safe}-")]
+        if len(candidates) == 1:
+            return candidates[0].resolve()
+    return primary
 
 
 def default_database_path(repo: Path) -> Path:
-    return (app_home() / "databases" / f"{_repo_slug(repo)}.db").resolve()
+    """Database path with migration fallback."""
+    home = app_home()
+    slug = _repo_slug(repo)
+    primary = (home / "databases" / f"{slug}.db").resolve()
+    if primary.exists():
+        return primary
+    old_slug = _path_based_slug(repo)
+    if old_slug != slug:
+        old = (home / "databases" / f"{old_slug}.db").resolve()
+        if old.exists():
+            return old
+    found = _find_legacy_slug_file(home / "databases", _safe_name(repo), ".db")
+    if found:
+        return found.resolve()
+    return primary
 
 
 # ---- config io ----

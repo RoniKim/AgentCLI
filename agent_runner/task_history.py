@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
-from .config import app_home, _repo_slug
+from .config import default_database_path
 from .utils import eprint
 
 # ---------------------------------------------------------------------------
@@ -54,7 +54,7 @@ _MAX_DETAIL_LEN = 500
 # ---------------------------------------------------------------------------
 
 def _db_path(repo: Path) -> Path:
-    return (app_home() / "databases" / f"{_repo_slug(repo)}.db").resolve()
+    return default_database_path(repo)
 
 
 def _connect(repo: Path) -> sqlite3.Connection:
