@@ -364,8 +364,11 @@ def count_consecutive_title_failures(
 def _title_resolved(failed_title: str, done_corpus: str) -> bool:
     """Check if a failed task's title is semantically covered by done tasks.
 
-    Uses keyword overlap: extract significant words (3+ chars) from the failed title,
-    require ≥ 60% to appear in the done corpus. Minimum 2 keyword matches required.
+    Uses keyword overlap: extract significant words from the failed title,
+    require ≥ 40% to appear in the done corpus. Minimum 2 keyword matches required.
+
+    Korean words use a 2-char minimum (Korean words are commonly 2 chars).
+    ASCII/English words use a 3-char minimum.
     """
     import re as _re
     noise = {
@@ -373,13 +376,19 @@ def _title_resolved(failed_title: str, done_corpus: str) -> bool:
         "been", "are", "was", "were", "will", "can", "not", "all", "but",
         "add", "fix", "update", "implement", "create", "remove", "delete",
         "없음", "있음", "동작", "기능", "정상", "성공", "완료", "추가", "수정",
+        "항목", "필요", "처리", "사용", "적용", "구현",
     }
     words = _re.findall(r'[\w가-힣]+', failed_title.lower())
-    keywords = [w for w in words if len(w) >= 3 and w not in noise]
+    # Korean 2+ chars, ASCII/English 3+ chars
+    def _sig(w: str) -> bool:
+        if _re.search(r'[가-힣]', w):
+            return len(w) >= 2 and w not in noise
+        return len(w) >= 3 and w not in noise
+    keywords = [w for w in words if _sig(w)]
 
     if len(keywords) < 2:
         return False
 
     match_count = sum(1 for kw in keywords if kw in done_corpus)
-    threshold = max(2, int(len(keywords) * 0.6))
+    threshold = max(2, int(len(keywords) * 0.4))
     return match_count >= threshold

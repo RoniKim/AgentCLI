@@ -1436,15 +1436,26 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 return 1, "pm_failed", 0, (len(done_set) > before_done)
             if not ensure_backlog():
                 return 1, "pm_refresh_no_backlog", 0, (len(done_set) > before_done)
+            old_task_map = {t.id: (t.title, t.prompt) for t in tasks}
             tasks = load_tasks()
             task_ids = {t.id for t in tasks}
-            # Clear done_set for IDs that appear in the new backlog — PM recycled these IDs for new tasks
+            # Only clear done_set for IDs where PM actually changed the task content.
+            # If the task has the same title+prompt, PM just preserved the old backlog
+            # (e.g. returned "skip") and we should NOT re-run already-done tasks.
             recycled_ids = done_set & task_ids
-            if recycled_ids:
-                eprint(f"[PM-REFRESH] Clearing {len(recycled_ids)} recycled task IDs from done set: {sorted(recycled_ids)}")
-                done_set -= recycled_ids
+            truly_new = set()
+            for t in tasks:
+                if t.id in recycled_ids:
+                    old = old_task_map.get(t.id)
+                    if old is None or old != (t.title, t.prompt):
+                        truly_new.add(t.id)
+            if truly_new:
+                eprint(f"[PM-REFRESH] Clearing {len(truly_new)} recycled task IDs with new content: {sorted(truly_new)}")
+                done_set -= truly_new
                 state["done"] = sorted(done_set)
                 save_state(state_path, state)
+            elif recycled_ids:
+                eprint(f"[PM-REFRESH] {len(recycled_ids)} task IDs unchanged — keeping done status.")
             before_done = len(done_set.intersection(task_ids))
 
         tasks_root = run_dir / "tasks"
@@ -2742,7 +2753,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
                 if not loop_mode:
                     break
-                # In loop mode, fall through — PM refresh may generate new tasks
+                # In loop mode: allow ONE more cycle for PM to generate new tasks.
+                # If delta==0 (no progress), next cycle's idle detection will trigger.
+                if delta <= 0:
+                    # PM refresh already ran and produced no new work — stop now.
+                    logger.stop_event("All tasks done and PM produced no new work — stopping loop.")
+                    break
             if reason == STOP_REASON_ALL_TASKS_ATTEMPTED:
                 # All tasks tried but some skipped — in loop mode, next cycle may get new tasks from PM
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_attempted")
