@@ -106,6 +106,9 @@ DEFAULTS: Dict[str, Any] = {
     "loop_sleep_seconds": 60,
     "loop_max_cycles": 0,
     "loop_idle_exit_after": 0,
+    "idle_exit_cycles": 3,
+    # Goals completion level: "p0" (P0 only), "p1" (P0+P1), "all" (every checkbox)
+    "goals_completion_level": "all",
     "max_consecutive_failed_cycles": 3,
     "budget_reset_per_cycle": True,
     "quota_check_enabled": True,
@@ -187,7 +190,7 @@ DEFAULTS: Dict[str, Any] = {
     "dev_max_escalations": 2,
     "dev_model_tier1": "gpt-5.1-codex",
     "dev_model_tier2": "gpt-5.2-codex",
-    "dev_escalate_on": ["no_diff", "build_failed", "test_failed"],
+    "dev_escalate_on": ["no_diff", "build_failed", "test_failed", "no_commits"],
 
     # Timeouts (seconds) - referenced by cycle.py
     "pm_timeout_seconds": 900,

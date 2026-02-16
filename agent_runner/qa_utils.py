@@ -11,6 +11,9 @@ from typing import Any
 from .utils import hash_prompt
 
 
+MIN_FOLLOWUP_PROMPT_LENGTH = 150
+
+
 def normalize_followup_prompt(text: str) -> str:
     """Trim and cap a QA follow-up prompt to a safe length."""
     s = str(text or "").strip()
@@ -19,24 +22,74 @@ def normalize_followup_prompt(text: str) -> str:
     return s
 
 
-def extract_qa_followups(text: str, *, max_items: int) -> list[dict[str, Any]]:
-    """Parse free-form QA output text into structured followup tasks."""
+def _parse_bullet_items(text: str, *, max_items: int = 50) -> list[str]:
+    """Extract actionable items from free-form text.
+
+    Supports: bullet lists (-, *, •), numbered lists (1. / 1)),
+    markdown checklists (- [ ] / - [x]), and heading lines (### ...).
+    """
     items: list[str] = []
     for line in (text or "").splitlines():
         s = line.strip()
         if not s:
             continue
+        # Markdown checklist: - [ ] item / - [x] item
+        m_check = re.match(r"^-\s*\[[ xX]\]\s+(.+)", s)
+        if m_check:
+            item = m_check.group(1).strip()
+            if len(item) >= 10:
+                items.append(item)
+            if len(items) >= max_items:
+                break
+            continue
+        # Bullet / numbered list
         if re.match(r"^[-*•]\s+", s) or re.match(r"^\d+[\.\)]\s+", s):
             s = re.sub(r"^[-*•]\s+", "", s)
             s = re.sub(r"^\d+[\.\)]\s+", "", s)
             if len(s) >= 10:
                 items.append(s)
-        if len(items) >= max_items:
-            break
+            if len(items) >= max_items:
+                break
+            continue
+        # Heading line: ### Title
+        m_heading = re.match(r"^#{1,4}\s+(.+)", s)
+        if m_heading:
+            item = m_heading.group(1).strip()
+            if len(item) >= 10:
+                items.append(item)
+            if len(items) >= max_items:
+                break
+            continue
+    return items
+
+
+def extract_qa_followups(
+    text: str, *, max_items: int, run_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Parse free-form QA output text into structured followup tasks.
+
+    Falls back to reading TEST_PLAN.md if text parsing yields nothing.
+    """
+    items = _parse_bullet_items(text, max_items=max_items)
+
+    # Fallback: read TEST_PLAN.md if available and text parsing found nothing
+    if not items and run_dir:
+        test_plan = run_dir / "qa" / "TEST_PLAN.md"
+        if test_plan.exists():
+            try:
+                plan_text = test_plan.read_text(encoding="utf-8", errors="replace")
+                items = _parse_bullet_items(plan_text, max_items=max_items)
+            except Exception:
+                pass
+
     tasks: list[dict[str, Any]] = []
-    for s in items:
+    skipped = 0
+    for s in items[:max_items]:
         prompt = normalize_followup_prompt(s)
         if not prompt:
+            continue
+        if len(prompt) < MIN_FOLLOWUP_PROMPT_LENGTH:
+            skipped += 1
             continue
         tid = f"QA-FU-{hash_prompt(prompt)}"
         title = f"QA Follow-up: {s[:60]}".strip()
@@ -51,6 +104,9 @@ def extract_qa_followups(text: str, *, max_items: int) -> list[dict[str, Any]]:
             "depends_on": [],
             "type": "code_fix",
         })
+    if skipped:
+        import sys
+        print(f"[WARN] Skipped {skipped} QA followup(s): prompt < {MIN_FOLLOWUP_PROMPT_LENGTH} chars", file=sys.stderr)
     return tasks
 
 
@@ -59,9 +115,13 @@ def followups_from_structured(model: Any, *, max_items: int) -> list[dict[str, A
     tasks: list[dict[str, Any]] = []
     if not model or not getattr(model, "followups", None):
         return tasks
+    skipped = 0
     for item in list(model.followups)[:max_items]:
         prompt = normalize_followup_prompt(getattr(item, "prompt", ""))
         if not prompt:
+            continue
+        if len(prompt) < MIN_FOLLOWUP_PROMPT_LENGTH:
+            skipped += 1
             continue
         tid = f"QA-FU-{hash_prompt(prompt)}"
         title = str(getattr(item, "title", "") or f"QA Follow-up: {prompt[:60]}").strip()
@@ -81,6 +141,9 @@ def followups_from_structured(model: Any, *, max_items: int) -> list[dict[str, A
             "depends_on": [],
             "type": followup_type,
         })
+    if skipped:
+        import sys
+        print(f"[WARN] Skipped {skipped} structured QA followup(s): prompt < {MIN_FOLLOWUP_PROMPT_LENGTH} chars", file=sys.stderr)
     return tasks
 
 

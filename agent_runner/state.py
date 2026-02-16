@@ -133,7 +133,9 @@ def write_backlog_files(run_dir: Path, tasks: List[dict[str, Any]]) -> tuple[Pat
 
     md_lines = ["# BACKLOG", ""]
     for t in tasks:
-        md_lines.append(f"- [ ] {t.get('id','')} {t.get('title','')}")
+        deps = t.get("depends_on") or []
+        dep_str = f"  (depends_on: {deps})" if deps else ""
+        md_lines.append(f"- [ ] {t.get('id','')} {t.get('title','')}{dep_str}")
     md_lines.append("")
     bm = run_dir / "BACKLOG.md"
     try:

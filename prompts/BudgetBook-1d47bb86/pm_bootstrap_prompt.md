@@ -15,11 +15,10 @@ What to write in PROJECT_ANALYSIS.md (required structure):
 3) Supabase policy constraints (RPC for writes, Views/RPC for reads, no secrets in client)
 4) File-by-file analysis (MANDATORY; every file in REPO_INVENTORY.md; keep entries short)
    - **Use FULL, EXACT file paths from REPO_INVENTORY.md** - do NOT abbreviate (e.g., use "Components/Pages/Foo.razor", NOT "Pages/Foo.razor")
-5) **Stability audit** (MANDATORY for all .razor files):
-   - For each page component, check: CancellationToken usage, IDisposable, try-catch in OnInitializedAsync, StateHasChanged safety
-   - Flag any crash-prone patterns (see Crash Pattern Checklist in pm_instructions)
-   - Mark severity: CRASH (P0), LEAK (P1), RISK (P2)
-6) P0 gap list (what is missing vs docs) — **include stability issues alongside feature gaps**
+5) **GOALS.md 매칭 분석** (MANDATORY):
+   - GOALS.md의 각 미완료([ ]) P0 항목을 읽고, 해당 기능이 코드에 존재하는지 확인
+   - 이미 구현된 항목: warnings에 "이미 구현됨" 기재 (시스템이 자동 체크)
+   - 미구현 항목: 태스크로 변환
 
 Backlog generation (v2.0):
 - DO NOT create BACKLOG.json/md by editing files.
@@ -30,47 +29,17 @@ Hard constraint on tasks (important):
 - Tasks MUST be development work only (features, UI/screens, bugfixes, tests, required in-repo docs).
 - Do NOT include PM/meta work as tasks (planning, analysis/review/triage, inventory, prompt/backlog/report creation, run artifacts).
 
-**IMPORTANT - Task Generation Policy:**
-- **Minimum 5-10 tasks per bootstrap** - distributed across priority levels
-- If User TODO provided → convert to P0 tasks first
-- **STABILITY FIRST:** Before ANY feature tasks, scan ALL .razor pages for crash patterns:
-
-  **P0 (Critical) - Crash/Stability Fixes (MUST be first tasks in backlog):**
-  - Missing CancellationToken in OnInitializedAsync API calls → ObjectDisposedException on navigation
-  - CancellationTokenSource not disposed before reassignment → memory leak + zombie tasks
-  - StateHasChanged called without disposal check → crash after navigating away
-  - Missing try-catch in OnInitializedAsync → white screen crash on page load
-  - Missing IDisposable on components with CTS/timers/subscriptions → resource leak
-  - Async operations continuing after Dispose → ObjectDisposedException
-  - Direct StateHasChanged without InvokeAsync from non-UI thread → rendering crash
-  - Null reference in OnParametersSet/OnAfterRender → NullReferenceException
-
-  **P0 Example tasks:**
-  - "Add CancellationToken to all API calls in Dashboard.razor OnInitializedAsync (line 189)"
-  - "Dispose old _cts before creating new in Transactions.razor LoadAsync (line 156)"
-  - "Add _disposed check before StateHasChanged in ErrorToast.razor (line 70)"
-  - "Wrap Accounts.razor OnInitializedAsync in try-catch with error state (line 64)"
-  - "Add IDisposable with CTS cleanup to Portfolio.razor"
-
-- Then scan for feature improvements:
-
-  **P1 (High Priority) - User-Facing Improvements:**
-  - Loading states: Add spinners to all async buttons/operations
-  - Error handling: Toast notifications for API failures with retry option
-  - Confirmations: Dialogs for destructive actions (delete, reverse)
-  - Empty states: Helpful messages with action prompts
-  - Mobile UX: Pull-to-refresh, responsive layouts, touch-friendly buttons
-  - Performance: Virtualize long lists (1000+ items), cache data, debounce inputs
-
-  **P2 (Medium Priority) - Quality & Maintainability:**
-  - Extract reusable components (LoadingButton, ErrorToast, ConfirmDialog)
-  - Add unit tests for business logic (calculations, validations)
-  - Reduce complexity: Split methods >100 lines, reduce nesting >4 levels
-  - Add XML docs for public APIs and complex methods
-  - Remove code duplication (>10 lines repeated 3+ times)
+**GOALS.md 기반 태스크 생성 (CRITICAL):**
+- **GOALS.md의 미완료 P0 항목이 유일한 태스크 소스입니다.**
+- 각 미완료 P0 항목마다 1-3개 구현 태스크를 생성하세요.
+- 태스크 title에 GOALS 항목 원문을 반드시 포함하세요.
+- 태스크 prompt 첫 줄에 "GOALS: <항목 원문>" 형식으로 인용하세요.
+- GOALS.md에 없는 버그픽스, 리팩토링, 테스트는 생성하지 마세요.
+  유일한 예외: 빌드를 깨뜨리는 긴급 버그.
+- Task IDs: T1, T2, T3, ... (NOT T1a, T1b, T5a)
 
 - **Be specific:** Reference exact files and line numbers from PROJECT_ANALYSIS.md
-- **NEVER return empty task list** - if analysis shows "complete", look for stability/P1/P2 polish!
+- **NEVER return empty task list** - GOALS.md에 미완료 항목이 있는 한 태스크가 있습니다.
 
 Optional: include run-local notes in JSON field 'notes_md'.
 

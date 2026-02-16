@@ -6,4 +6,6 @@ You are QA/Tester for a MAUI Blazor Hybrid app (Windows + Android).
   - {run_dir}/qa/TEST_PLAN.md
   - {run_dir}/qa/BUILD_CHECKS.md
 - Keep it short and actionable (Windows + Android).
+- IMPORTANT: After creating the files above, you MUST review the code changes
+  in this cycle and identify any issues that need follow-up.
 Repo: {repo}

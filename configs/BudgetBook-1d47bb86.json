@@ -46,13 +46,14 @@
   "autopilot": true,
   "loop": true,
   "loop_sleep_seconds": 60,
-  "loop_max_cycles": 10,
+  "loop_max_cycles": 20,
   "loop_idle_exit_after": 1800,
+  "goals_completion_level": "all",
   "max_consecutive_failed_cycles": 3,
   "budget_reset_per_cycle": true,
   "quota_check_enabled": true,
-  "quota_five_hour_max_utilization": 95,
-  "quota_seven_day_max_utilization": 80,
+  "quota_five_hour_max_utilization": 100,
+  "quota_seven_day_max_utilization": 70,
   "quota_wait_for_reset": true,
   "continuous": true,
   "iterations": 10,
@@ -95,14 +96,14 @@
   "scan_ignore_paths": [],
   "scan_include_untracked_in_full": false,
   "policy": {
-    "enabled": null,
+    "enabled": true,
     "fail_severity": "high",
     "rules": [],
     "ignore_paths": [],
     "allow_patterns": []
   },
   "security": {
-    "enabled": false,
+    "enabled": true,
     "fail_severity": "high",
     "rules_path": ""
   },
@@ -130,7 +131,8 @@
   "dev_escalate_on": [
     "build_failed",
     "test_failed",
-    "no_diff"
+    "no_diff",
+    "no_commits"
   ],
   "qa_model": "gpt-5-mini",
   "qa_always": true,

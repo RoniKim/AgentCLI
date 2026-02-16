@@ -35,58 +35,25 @@ Hard constraint on tasks (important):
 - If a task failed 2+ times across cycles, it likely means the feature is already implemented or the task spec is ambiguous. Read the actual file before recreating.
 - Tasks marked [F] in the backlog MUST NOT be blindly recreated with the same title/description.
 
-**IMPORTANT - Task Generation Policy:**
-- **Minimum 3-5 tasks per incremental cycle**
-- If User TODO provided → convert to P0 tasks first
-- **STABILITY SCAN FIRST (every cycle):** Check changed files + related .razor pages for crash patterns:
-  - Missing CancellationToken in async API calls → P0 task
-  - CancellationTokenSource not disposed before reassignment → P0 task
-  - StateHasChanged without disposal check → P0 task
-  - Missing try-catch in OnInitializedAsync → P0 task
-  - Missing IDisposable on components with async resources → P1 task
+**GOALS.md 기반 태스크 생성 (CRITICAL — 최우선):**
+- **GOALS.md의 미완료 P0 항목이 유일한 태스크 소스입니다.**
+- 이전 사이클에서 완료된 태스크가 GOALS 항목을 구현했는지 확인하세요.
+- 아직 미완료인 P0 항목에 대해 1-3개 구현 태스크를 생성하세요.
+- 태스크 title에 GOALS 항목 원문을 반드시 포함하세요.
+- 태스크 prompt 첫 줄에 "GOALS: <항목 원문>" 형식으로 인용하세요.
+- GOALS.md에 없는 버그픽스, 리팩토링, 테스트, 코드품질 개선은 생성하지 마세요.
+  유일한 예외: 빌드를 깨뜨리는 긴급 버그.
+- P0 항목이 남아있으면 P1 태스크를 생성하지 마세요.
+- Task IDs: T1, T2, T3, ... (NOT T1a, T1b, T5a, T6a)
 
-- Review completed tasks → identify follow-up work:
-  - Verify completed stability fix didn't break other components
-  - Add tests for newly implemented features
-  - Polish UI for recent changes
-  - Improve error handling in modified code
-
-- If no stability issues → scan for new opportunities:
-
-  **Mining Techniques:**
-  1. Search changed files for TODO/FIXME/HACK comments
-  2. Look for code duplication (>10 lines, 3+ times) → extract component
-  3. Find long methods (>50 lines) → refactoring candidate
-  4. Check for missing tests → add coverage
-  5. Look for hardcoded values → move to constants/config
-  6. Find UI without loading states → add spinners
-  7. Check forms without validation → add input checks
-
-  **BudgetBook-Specific P1 Tasks:**
-  - Dashboard: Add skeleton loaders while fetching data
-  - Transactions: Implement bulk delete with checkboxes
-  - Portfolio: Add CSV export button with download dialog
-  - Sync: Show progress bar (0-100%) during sync operation
-  - Settings: Add dark mode toggle (persist to preferences)
-  - All forms: Add "unsaved changes" warning before navigation
-
-  **P2 Quality Tasks:**
-  - Extract LoadingButton component (used in 8+ places)
-  - Add ErrorBoundary component for graceful error handling
-  - Write integration tests for critical flows (login, transaction create)
-  - Add XML docs for all Services/*.cs public methods
-  - Refactor Dashboard.razor (currently 450+ lines) into smaller components
+- **Be specific:** "GOALS: Dashboard 데이터 최신성 표시 — 각 카드별 N분 전 갱신 타임스탬프\n\n구현: Dashboard.razor의 각 섹션 카드 아래에 _loadedAt 타임스탬프 표시 추가 (line 94, 107, 122)"
+  NOT generic: "Improve dashboard UX"
 
 - **Priority distribution:**
-  - If stability issues found: **100% P0 stability tasks first**, then P1/P2
-  - If critical issues: 80% P0/P1, 20% P2
-  - If no critical issues: 50% P1, 50% P2
-  - Always include at least 1 stability or user-facing P1 task
+  - 미완료 P0 항목이 있는 한 100% GOALS 태스크.
+  - P0 전부 완료 시에만 P1 항목으로 이동.
 
-- **Be specific:** "Add try-catch to TransactionEntry.razor SaveAsync() (line 234)"
-  NOT generic: "Improve error handling"
-
-- **Empty backlog = incomplete analysis** - there's ALWAYS room for improvement!
+- **Empty backlog = 분석 미완료** - GOALS.md에 미완료 항목이 있는 한 태스크가 있습니다.
 
 Optional: include run-local notes in JSON field 'notes_md'.
 

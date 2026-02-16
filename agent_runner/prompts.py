@@ -43,6 +43,14 @@ PM_INSTRUCTIONS_DEFAULT = (
     "  (d) If a service depends on platform APIs (MAUI Connectivity, SecureStorage, etc.), test only the\n"
     "      platform-independent logic (DTOs, helpers, pure calculations) rather than the service itself.\n"
     "  (e) Include concrete guidance in the task prompt about which approach to use for test isolation.\n"
+    "- Test task quality standards (critical): When generating test tasks:\n"
+    "  (a) Each test task MUST specify concrete test scenarios (minimum 3 distinct cases).\n"
+    "  (b) Do NOT create tests that only check default/null values or property accessors — "
+    "these are trivial and waste cycles.\n"
+    "  (c) Tests MUST exercise actual logic (branching, calculations, state transitions, error paths).\n"
+    "  (d) Prefer fewer, meaningful test tasks over many trivial ones.\n"
+    "  (e) Test task prompt MUST be >= 150 chars with specific arrange-act-assert guidance.\n"
+    "  (f) done_when MUST specify measurable outcomes (e.g., 'N new tests covering X,Y,Z scenarios pass').\n"
     "- Bundle related small changes into ONE task (e.g., group all null-safety fixes, or all UI polish for a module).\n"
     "- Do NOT include tasks whose deliverable is planning/analysis/review/triage, inventory generation, prompt changes, backlog/report creation, or run-artifact maintenance.\n"
     "- 'UI design' means implement UI in code (Blazor/XAML/CSS), NOT external mockups (Figma etc.).\n"
@@ -59,7 +67,12 @@ PM_INSTRUCTIONS_DEFAULT = (
     "- kind: one of ['bootstrap','incremental','refresh','skip']\n"
     "- summary: string (1-3 sentences)\n"
     "- tasks: array of task objects, each: {id,title,prompt,files,done_when,skills,skills_rationale,depends_on}\n"
-    "- depends_on: array of task ID strings (e.g. ['T1']); use [] if no dependencies\n"
+    "- depends_on: array of task ID strings (e.g. ['T1']); use [] if no dependencies.\n"
+    "  **depends_on rules:**\n"
+    "  - If task B modifies code that task A creates or changes, set depends_on: ['A's ID'].\n"
+    "  - If a task changes existing function behavior, include related test updates IN THE SAME TASK\n"
+    "    (not as a separate task) to avoid test failures.\n"
+    "  - Circular dependencies (A→B→A) are forbidden and will be auto-removed.\n"
     "- task fields must include: skills (array of skill_id strings) and skills_rationale (string|null)\n"
     "- notes_md: string|null (optional run notes in markdown)\n"
     "- warnings: string[]\n"
@@ -230,6 +243,13 @@ DEV_INSTRUCTIONS_DEFAULT = (
     "  - Reason: <why it's needed>\n"
     "  - Install command: <exact command>\n"
     "  Then do NOT attempt the implementation.\n\n"
+    "Test sync rules (critical):\n"
+    "- When you change the behavior of an existing function/method, ALWAYS search for\n"
+    "  existing tests that assert the OLD behavior and UPDATE them to match the new behavior.\n"
+    "- Search pattern: `rg 'FunctionName' --type cs` in the test project directory.\n"
+    "- If existing tests expect old return values, old error messages, or old formats,\n"
+    "  update their Assert statements to match the new behavior.\n"
+    "- Failing to update existing tests will cause the build/test gate to fail.\n\n"
     "Quality rules:\n"
     "- Must be compilation-safe and incremental.\n"
     "- MUST produce a real git diff.\n"
@@ -407,6 +427,8 @@ QA_TEMPLATE_DEFAULT = """You are QA/Tester.
   - {run_dir}/qa/TEST_PLAN.md
   - {run_dir}/qa/BUILD_CHECKS.md
 - Keep it short and actionable (Windows + Android).
+- IMPORTANT: After creating the files above, you MUST review the code changes
+  in this cycle and identify any issues that need follow-up.
 Skills context:
 {skills_context}
 Repo: {repo}
@@ -414,8 +436,10 @@ Repo: {repo}
 
 
 QA_FOLLOWUPS_OUTPUT_CONTRACT = (
-    "When qa_to_backlog is enabled, your FINAL response MUST be ONLY a single JSON object "
-    "(no markdown, no prose) with the following schema:\n"
+    "CRITICAL INSTRUCTION — After creating TEST_PLAN.md and BUILD_CHECKS.md, "
+    "your FINAL response text MUST be ONLY a single JSON object (no markdown fences, no prose before/after).\n"
+    "If you have no follow-ups, return: {\"kind\": \"qa_followups_v1\", \"followups\": [], \"notes\": null}\n\n"
+    "Schema:\n"
     "{\n"
     '  "kind": "qa_followups_v1",\n'
     '  "cycle": number|null,\n'
@@ -435,7 +459,8 @@ QA_FOLLOWUPS_OUTPUT_CONTRACT = (
     '- "manual_test": Verification or validation that requires human testing (no code change needed).\n'
     "- If unsure, default to code_fix.\n"
     "- manual_test items will NOT be added to the Dev backlog; they are recorded as a checklist for human review.\n"
-    "Do NOT include extra keys.\n"
+    "- Do NOT include extra keys.\n"
+    "- Do NOT output ANY text before or after the JSON object.\n"
 )
 
 

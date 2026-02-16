@@ -90,6 +90,7 @@ def normalize_backlog_tasks(
     used: set[str] = set()
     next_num = 1
     out: list[dict[str, Any]] = []
+    id_remap: dict[str, str] = {}  # old_id -> new_id for dependency fixup
     for t in filtered:
         tid = str(t.get("id") or "").strip()
         m = re.match(r"^T(\d+)$", tid)
@@ -105,6 +106,8 @@ def normalize_backlog_tasks(
                     fixed_id = cand
                     break
 
+        if tid and tid != fixed_id:
+            id_remap[tid] = fixed_id
         used.add(fixed_id)
         skills_val = t.get("skills") or []
         if isinstance(skills_val, list):
@@ -128,7 +131,91 @@ def normalize_backlog_tasks(
             "skills_rationale": None if t.get("skills_rationale") is None else str(t.get("skills_rationale")),
             "depends_on": depends_on,
         })
+
+    # Remap depends_on references when task IDs were normalized
+    if id_remap:
+        valid_ids = {t["id"] for t in out}
+        for t in out:
+            t["depends_on"] = [
+                id_remap.get(d, d) for d in t["depends_on"]
+                if id_remap.get(d, d) in valid_ids
+            ]
+        remapped_str = ", ".join(f"{k}->{v}" for k, v in id_remap.items())
+        eprint(f"[BACKLOG] Remapped task IDs: {remapped_str}")
+
+    # Detect and break circular dependencies
+    _break_circular_deps(out)
+
+    # Check test task quality and emit warnings
+    quality_warnings = _check_test_task_quality(out)
+    for w in quality_warnings:
+        eprint(f"[WARN] {w}")
+
     return out
+
+
+def _break_circular_deps(tasks: list[dict[str, Any]]) -> None:
+    """Detect and break circular dependencies in-place.
+
+    Uses DFS cycle detection. When a cycle is found, the back-edge
+    dependency is removed and a warning is emitted.
+    """
+    graph: dict[str, list[str]] = {}
+    valid_ids = {t["id"] for t in tasks}
+    for t in tasks:
+        graph[t["id"]] = [d for d in t.get("depends_on", []) if d in valid_ids]
+
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: dict[str, int] = {tid: WHITE for tid in graph}
+    edges_to_remove: list[tuple[str, str]] = []
+
+    def dfs(node: str, path: list[str]) -> None:
+        color[node] = GRAY
+        for dep in graph.get(node, []):
+            if color.get(dep) == GRAY:
+                # Back edge found → cycle
+                edges_to_remove.append((node, dep))
+            elif color.get(dep) == WHITE:
+                dfs(dep, path + [node])
+        color[node] = BLACK
+
+    for tid in graph:
+        if color[tid] == WHITE:
+            dfs(tid, [])
+
+    if edges_to_remove:
+        for src, dep in edges_to_remove:
+            for t in tasks:
+                if t["id"] == src and dep in t.get("depends_on", []):
+                    t["depends_on"].remove(dep)
+                    eprint(f"[WARN] Circular dependency detected: {src} -> {dep}; removed {dep} from {src}.depends_on")
+
+
+def _check_test_task_quality(tasks: list[dict[str, Any]]) -> list[str]:
+    """Return warnings for potentially trivial test tasks."""
+    warnings: list[str] = []
+    for t in tasks:
+        title = str(t.get("title", "")).lower()
+        prompt = str(t.get("prompt", ""))
+        if "test" not in title:
+            continue
+        if len(prompt) < 150:
+            warnings.append(
+                f"Task {t.get('id')}: test prompt may be underspecified "
+                f"({len(prompt)} chars < 150 minimum)"
+            )
+        # Detect trivial default/null-check only patterns
+        trivial_keywords = ["_defaults()", "assert.null", "assert.equal(default"]
+        prompt_lower = prompt.lower()
+        logic_keywords = ["if ", "switch", "throw", "catch", "loop", "boundary", "edge", "error", "invalid"]
+        has_logic_test = any(k in prompt_lower for k in logic_keywords)
+        has_trivial_only = any(k in prompt_lower for k in trivial_keywords) and not has_logic_test
+        if has_trivial_only:
+            warnings.append(
+                f"Task {t.get('id')}: test appears to only check defaults/nulls — "
+                f"consider testing actual logic instead"
+            )
+    return warnings
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +304,8 @@ def load_backlog_context_for_pm(
             mark = "F"
         else:
             mark = " "
-        lines.append(f"- [{mark}] {t.id} {t.title}")
+        dep_suffix = f"  (depends_on: {t.depends_on})" if t.depends_on else ""
+        lines.append(f"- [{mark}] {t.id} {t.title}{dep_suffix}")
 
     block = "\n".join(lines) if lines else "(no backlog found)"
     return block, tasks, done_ids

@@ -1,8 +1,13 @@
 """GOALS.md management for project completion tracking.
 
 GOALS.md defines what "done" means for a project.
-- P0 (Must-Have): All must be checked for project completion.
-- P1 (Should-Have): Nice-to-have; not required for completion.
+- P0 (Must-Have): Critical items.
+- P1 (Should-Have): Important but secondary.
+
+Completion level is configurable via `goals_completion_level`:
+  "p0"  — P0 all checked → project_complete  (legacy default)
+  "p1"  — P0 + P1 all checked → project_complete
+  "all" — Every checkbox in the file checked → project_complete
 
 When GOALS.md is absent, PM auto-generates a draft on the first cycle.
 The user reviews/edits, and subsequent cycles converge toward those goals.
@@ -21,8 +26,12 @@ def goals_path(repo: Path) -> Path:
     return repo / ".doc" / "GOALS.md"
 
 
-def read_goals(repo: Path, max_chars: int = 12000) -> Tuple[Optional[Path], Optional[str]]:
-    """Read GOALS.md. Returns (path, text) or (None, None) if missing."""
+def read_goals(repo: Path, max_chars: int = 0) -> Tuple[Optional[Path], Optional[str]]:
+    """Read GOALS.md. Returns (path, text) or (None, None) if missing.
+
+    Args:
+        max_chars: Truncate after this many chars. 0 = no limit (default).
+    """
     p = goals_path(repo)
     if not p.exists():
         return None, None
@@ -38,22 +47,40 @@ def read_goals(repo: Path, max_chars: int = 12000) -> Tuple[Optional[Path], Opti
     return p, txt
 
 
-def format_goals_block(goals_path_: Optional[Path], goals_text: Optional[str]) -> str:
-    """Format goals for PM prompt injection."""
+def format_goals_block(goals_path_: Optional[Path], goals_text: Optional[str],
+                       max_lines: int = 800) -> str:
+    """Format goals for PM prompt injection.
+
+    Args:
+        max_lines: Maximum lines to include. 0 = no limit. Default 800
+                   (enough for ~400 goal items with section headers).
+    """
     if not goals_path_ or not goals_text:
         return "(none — GOALS.md가 없습니다. 첫 Cycle에서 자동 생성합니다.)"
     lines = goals_text.strip().splitlines()
-    head = lines[:150]
-    return f"# GOALS SOURCE: {goals_path_.as_posix()}\n" + "\n".join(head)
+    if max_lines and len(lines) > max_lines:
+        head = lines[:max_lines]
+        return (f"# GOALS SOURCE: {goals_path_.as_posix()}\n"
+                + "\n".join(head)
+                + f"\n\n...(truncated — {len(lines) - max_lines} lines omitted)")
+    return f"# GOALS SOURCE: {goals_path_.as_posix()}\n" + "\n".join(lines)
 
 
-def parse_goals_completion(goals_text: Optional[str]) -> Dict[str, Any]:
+def parse_goals_completion(goals_text: Optional[str], *,
+                           completion_level: str = "all") -> Dict[str, Any]:
     """Parse GOALS.md checkboxes and evaluate completion status.
+
+    Args:
+        goals_text: Raw GOALS.md content.
+        completion_level: When to declare project_complete.
+            "p0"  — P0 all checked (legacy).
+            "p1"  — P0 + P1 all checked.
+            "all" — Every checkbox checked (default).
 
     Returns dict with:
       has_goals, p0_total, p0_done, p1_total, p1_done,
-      all_total, all_done, p0_complete, project_complete,
-      unmet_p0 (list of unchecked P0 items)
+      all_total, all_done, p0_complete, p1_complete, project_complete,
+      unmet_p0, unmet_p1
     """
     if not goals_text or not goals_text.strip():
         return {"has_goals": False, "project_complete": False}
@@ -113,12 +140,20 @@ def parse_goals_completion(goals_text: Optional[str]) -> Dict[str, Any]:
                 else:
                     result["unmet_p1"].append(item_text)
 
-    # P0 complete: either all P0 items are checked, or no P0 items exist (nothing to do)
+    # Per-level completion flags
     result["p0_complete"] = (result["p0_total"] == 0) or (result["p0_done"] >= result["p0_total"])
     result["p1_complete"] = (result["p1_total"] == 0) or (result["p1_done"] >= result["p1_total"])
-    # Project is complete when all P0 goals are met (including vacuously true when p0_total=0)
-    # However, if there are NO goals at all, we require at least some items to exist
-    result["project_complete"] = result["p0_complete"] and result["all_total"] > 0
+
+    # Project completion depends on configured level
+    level = completion_level.lower().strip() if completion_level else "all"
+    if result["all_total"] == 0:
+        result["project_complete"] = False
+    elif level == "p0":
+        result["project_complete"] = result["p0_complete"]
+    elif level == "p1":
+        result["project_complete"] = result["p0_complete"] and result["p1_complete"]
+    else:  # "all" (default)
+        result["project_complete"] = result["all_done"] >= result["all_total"]
 
     return result
 
@@ -171,11 +206,18 @@ GOALS_GENERATION_INSTRUCTION = (
 )
 
 GOALS_EVALUATION_INSTRUCTION = (
-    "Project Goals가 존재합니다. 백로그 생성 시 다음을 따르세요:\n"
-    "1. GOALS.md의 미완료 P0 항목을 우선적으로 태스크로 변환하세요.\n"
-    "2. P0 항목이 모두 달성되었으면 P1 항목을 태스크로 변환하세요.\n"
-    "3. 새로운 P0/P1 이슈를 발견하면 GOALS.md에 추가하는 지시를 태스크에 포함하세요.\n"
-    "4. GOALS.md 체크박스는 시스템이 자동 업데이트합니다. 직접 수정하지 마세요.\n"
+    "**GOALS.md는 최우선 지시사항입니다. 반드시 아래 규칙을 따르세요:**\n\n"
+    "1. **미완료 P0 항목이 최고 우선순위입니다.** 모든 태스크는 미완료 P0 항목을 직접 구현해야 합니다.\n"
+    "2. **GOALS 외 작업 금지.** GOALS.md에 없는 버그픽스, 리팩토링, 테스트는 생성하지 마세요.\n"
+    "   예외: 빌드 실패를 유발하는 긴급 버그만 허용.\n"
+    "3. **P0 전부 완료 시에만 P1로 이동.** P0가 남아 있으면 P1 태스크를 생성하지 마세요.\n"
+    "4. **태스크 제목에 GOALS 항목 원문을 반드시 포함하세요.**\n"
+    "   예: title=\"Dashboard 데이터 최신성 표시 — 각 카드별 N분 전 갱신 타임스탬프\"\n"
+    "   이유: 시스템이 키워드 매칭으로 GOALS 체크박스를 자동 업데이트합니다.\n"
+    "5. **태스크 prompt 첫 줄에 GOALS 항목을 인용하세요.**\n"
+    "   예: prompt=\"GOALS: Dashboard 데이터 최신성 표시 — 각 카드별 N분 전 갱신 타임스탬프\\n\\n구현: ...\"\n"
+    "6. GOALS.md 체크박스는 시스템이 자동 업데이트합니다. 직접 수정하지 마세요.\n"
+    "7. 새로운 P0/P1 이슈를 발견하면 open_questions에 기재하세요 (태스크로 만들지 마세요).\n"
 )
 
 
@@ -251,24 +293,44 @@ def update_goals_checkboxes(repo: Path, done_task_titles: list[str],
 def _goal_matches_corpus(goal_item: str, corpus: str) -> bool:
     """Check if a goal item is semantically matched by done task corpus.
 
-    Strategy: extract significant keywords (3+ chars) from the goal item
-    and check if a threshold of them appear in the corpus.
+    Strategy:
+    1. Check for GOALS: prefix exact match (highest confidence)
+    2. Check Korean substring matches (phrase-level)
+    3. Fuzzy keyword matching (word-level, lower threshold)
     """
-    # Strip common generic words
+    goal_lower = goal_item.lower().strip()
+    corpus_lower = corpus.lower()
+
+    # --- Strategy 1: exact GOALS: prefix match ---
+    # PM is instructed to include "GOALS: {item text}" in task prompts
+    if goal_lower in corpus_lower:
+        return True
+
+    # --- Strategy 2: Korean phrase substring matching ---
+    # Extract Korean phrases (2+ chars) and check substring presence
+    ko_phrases = re.findall(r'[가-힣]{2,}', goal_item)
+    if ko_phrases:
+        ko_match = sum(1 for p in ko_phrases if p in corpus)
+        if len(ko_phrases) >= 2 and ko_match >= max(2, len(ko_phrases) // 2):
+            return True
+        if len(ko_phrases) == 1 and ko_match >= 1:
+            return True
+
+    # --- Strategy 3: mixed keyword matching (original, relaxed threshold) ---
     noise = {
         "the", "and", "for", "with", "from", "that", "this", "have", "has",
         "been", "are", "was", "were", "will", "can", "not", "all", "but",
         "없음", "있음", "동작", "기능", "정상", "성공", "완료", "추가",
+        "항목", "필요", "처리", "사용", "적용", "구현",
     }
-    # Extract keywords from goal item
-    words = re.findall(r'[\w가-힣]+', goal_item.lower())
-    keywords = [w for w in words if len(w) >= 3 and w not in noise]
+    words = re.findall(r'[\w가-힣]+', goal_lower)
+    keywords = [w for w in words if len(w) >= 2 and w not in noise]
 
     if not keywords:
         return False
 
-    # Require at least 60% of keywords to match, minimum 2
-    match_count = sum(1 for kw in keywords if kw in corpus)
-    threshold = max(2, int(len(keywords) * 0.6))
+    match_count = sum(1 for kw in keywords if kw in corpus_lower)
+    # Relaxed: 40% threshold, minimum 2
+    threshold = max(2, int(len(keywords) * 0.4))
 
     return match_count >= threshold

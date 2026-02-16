@@ -888,7 +888,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
     # Policy
     policy_cfg = getattr(args, "policy", {}) if isinstance(getattr(args, "policy", {}), dict) else {}
-    policy_scan_enabled = bool(policy_cfg.get("enabled", not bool(getattr(args, "no_policy_scan", False))))
+    _policy_enabled_raw = policy_cfg.get("enabled")
+    if _policy_enabled_raw is None:
+        policy_scan_enabled = not bool(getattr(args, "no_policy_scan", False))
+    else:
+        policy_scan_enabled = bool(_policy_enabled_raw)
     policy_fail_severity = str(policy_cfg.get("fail_severity") or "high")
     policy_rules = load_policy_rules(getattr(args, "policy_rules_file", ""), list(getattr(args, "policy_rule", []) or []))
     policy_rules.extend(list(policy_cfg.get("rules", []) or []))
@@ -1545,18 +1549,21 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     unmet = [dep for dep in t.depends_on if dep not in done_set]
                     if unmet:
                         failed_ids = {f.get("task") for f in state.get("failed", []) if isinstance(f, dict)}
-                        permanently_blocked = [dep for dep in unmet if dep in (skipped_set | failed_ids)]
+                        all_known_ids = {bt.id for bt in tasks} | done_set | failed_ids | skipped_set
+                        orphaned = [dep for dep in unmet if dep not in all_known_ids]
+                        permanently_blocked = [dep for dep in unmet if dep in (skipped_set | failed_ids)] + orphaned
                         if permanently_blocked:
-                            eprint(f"[SKIP] Task {t.id} depends on failed tasks {permanently_blocked}; skipping.")
+                            reason = "dependency_orphaned" if orphaned else "dependency_failed"
+                            eprint(f"[SKIP] Task {t.id} depends on unresolvable tasks {permanently_blocked}; skipping.")
                             skipped_set.add(t.id)
                             state.setdefault("failed", []).append({
-                                "task": t.id, "reason": "dependency_failed",
+                                "task": t.id, "reason": reason,
                                 "detail": f"Depends on: {permanently_blocked}"
                             })
                             save_state(state_path, state)
-                            _record_history(t.id, t.title, "failed", reason="dependency_failed",
+                            _record_history(t.id, t.title, "failed", reason=reason,
                                             detail=f"Depends on: {permanently_blocked}", files=t.files, cycle=cycle_idx)
-                            task_results.append({"id": t.id, "title": t.title, "status": "skipped", "reason": "dependency_failed", "duration": -1})
+                            task_results.append({"id": t.id, "title": t.title, "status": "skipped", "reason": reason, "duration": -1})
                             continue
                         continue  # pending dependencies — try later
                 next_task = t
@@ -1570,6 +1577,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             metrics.event("task_start", cycle=cycle_idx, step=step, task_id=next_task.id)
             task_outer_t0 = time.time()
             task_head_before = git_head(repo)
+            task_already_implemented = False
 
             tb: Optional[TaskBranch] = None
             cp: Optional[RepoCheckpoint] = None
@@ -1910,6 +1918,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         logger.task_end(task_id=next_task.id, success=True, reason="already_implemented")
                         task_results.append({"id": next_task.id, "title": next_task.title, "status": "done", "reason": "already_implemented", "duration": time.time() - task_outer_t0})
                         task_completed = True
+                        task_already_implemented = True
                         break
 
                     # Detect phantom edits: agent claims success but no diff exists.
@@ -2163,14 +2172,26 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 continue
 
             # Phantom completion detection: task marked done but no git commits created
-            if not has_new_commits(repo, task_head_before):
-                logger.warning(f"Task {next_task.id} marked complete but no commits found (phantom completion)")
+            # Skip check if task was legitimately already implemented (no commits expected)
+            if not task_already_implemented and not has_new_commits(repo, task_head_before):
+                logger.warning(f"Task {next_task.id} passed gates but no commits found (phantom completion)")
                 metrics.event("phantom_completion_detected", task_id=next_task.id, cycle=cycle_idx)
-                state.setdefault("warnings", []).append({
+                state.setdefault("failed", []).append({
                     "task": next_task.id,
-                    "type": "phantom_completion",
-                    "detail": "Task marked done but no git commits were created",
+                    "reason": "no_commits",
+                    "detail": "Task passed all gates but no git commits were created (phantom completion)",
                 })
+                save_state(state_path, state)
+                _record_history(next_task.id, next_task.title, "failed",
+                                reason="no_commits", files=next_task.files, cycle=cycle_idx)
+                task_results.append({
+                    "id": next_task.id, "title": next_task.title,
+                    "status": "failed", "reason": "no_commits",
+                    "duration": time.time() - task_outer_t0,
+                })
+                logger.task_end(task_id=next_task.id, success=False, reason="no_commits")
+                skipped_set.add(next_task.id)
+                continue
             done_set.add(next_task.id)
             # Clean up previous failure entries for this task (e.g. from earlier cycles)
             if state.get("failed"):
@@ -2246,12 +2267,13 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             try:
                 _gp_eval, _gt_eval = read_goals(repo)
                 if _gt_eval:
-                    comp_status = parse_goals_completion(_gt_eval)
+                    _completion_level = str(getattr(args, "goals_completion_level", "all") or "all")
+                    comp_status = parse_goals_completion(_gt_eval, completion_level=_completion_level)
                     unresolved = _count_unresolved_failures(repo, done_set)
                     write_completion_status(run_dir, comp_status, failed_unresolved=unresolved,
                                            stop_reason="cycle_end")
                     if comp_status.get("project_complete") and unresolved == 0:
-                        eprint(f"[GOALS] PROJECT COMPLETE — all P0 goals met, no unresolved failures.")
+                        eprint(f"[GOALS] PROJECT COMPLETE — all goals met (level={_completion_level}), no unresolved failures.")
                         metrics.event("project_complete", cycle=cycle_idx, goals=comp_status)
                         return 0, STOP_REASON_PROJECT_COMPLETE, done_delta, ran_tasks
                     else:
@@ -2340,7 +2362,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     followups = _followups_from_structured(parsed_qa, max_items=max_items)
                 else:
                     parse_ok = False
-                    followups = _extract_qa_followups(qa_text, max_items=max_items)
+                    followups = _extract_qa_followups(qa_text, max_items=max_items, run_dir=run_dir)
                     metrics.event("qa_followups_parse", cycle=cycle_idx, parse_ok=False, error=str(parse_err or "parse_failed"))
                 if parse_ok:
                     metrics.event("qa_followups_parse", cycle=cycle_idx, parse_ok=True)
@@ -2557,8 +2579,16 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 "total_continuations": budget_state["total_continuations"],
                 "total_repairs": budget_state["total_repairs"],
             },
-            "policy_scan": policy_scan_summary or {"scope": policy_scan_scope, "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "violations_total": 0, "violations_fail": 0},
-            "security_scan": security_scan_summary or {"scope": security_scan_scope, "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "findings_total": 0, "findings_fail": 0},
+            "policy_scan": policy_scan_summary or (
+                {"scope": "disabled", "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "violations_total": 0, "violations_fail": 0}
+                if not policy_scan_enabled
+                else {"scope": policy_scan_scope, "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "violations_total": 0, "violations_fail": 0}
+            ),
+            "security_scan": security_scan_summary or (
+                {"scope": "disabled", "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "findings_total": 0, "findings_fail": 0}
+                if not security_enabled
+                else {"scope": security_scan_scope, "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "findings_total": 0, "findings_fail": 0}
+            ),
             "qa_followups": session.data.get("qa_followups_summary") or {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0},
         }
         for st in res.stages:
@@ -2589,6 +2619,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     # ---------------------------------------------------------------------------
 
     idle_accum = 0
+    idle_cycle_count = 0
+    idle_exit_cycles = int(getattr(args, "idle_exit_cycles", 3) or 3)
     last_rc = 0
     last_reason = ""
     consecutive_failures = 0
@@ -2719,6 +2751,16 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 # In loop mode, fall through to loop sleep — PM refresh may add new tasks
             if rc != 0 and not (loop_mode and continuous):
                 # In continuous loop mode, non-critical failures don't stop the run
+                break
+
+            # --- Idle cycle tracking (cycle-count based) ---
+            if delta <= 0:
+                idle_cycle_count += 1
+            else:
+                idle_cycle_count = 0
+            if idle_exit_cycles > 0 and idle_cycle_count >= idle_exit_cycles:
+                append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=idle_exit idle_cycles={idle_cycle_count}")
+                logger.stop_event(f"{idle_cycle_count} consecutive zero-progress cycles — idle exit.")
                 break
 
             if loop_mode:
