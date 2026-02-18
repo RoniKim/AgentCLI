@@ -2323,7 +2323,8 @@ async def main_async(args: argparse.Namespace) -> int:
                 except Exception as ex:
                     eprint(f"[WARN] snapshot update failed: {ex}")
 
-            return res.rc, res.reason, res.done_delta
+            qa_added = int(session.data.get("qa_followups_added", 0) or 0)
+            return res.rc, res.reason, res.done_delta, qa_added
 
         idle_accum = 0
         idle_cycle_count = 0
@@ -2397,7 +2398,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     budget_state["per_task_continuations"] = {}
                     logger.budget_event("reset_per_cycle", prev_esc=prev_budget['total_escalations'], prev_cont=prev_budget['total_continuations'], prev_rep=prev_budget['total_repairs'])
 
-                rc, reason, delta = await run_cycle(cycle_idx)
+                rc, reason, delta, qa_followups = await run_cycle(cycle_idx)
                 last_rc = rc
                 last_reason = reason
                 # 1-line per-cycle summary for unattended ops
@@ -2437,6 +2438,11 @@ async def main_async(args: argparse.Namespace) -> int:
 
                     # Refresh 불가/실패 → reason별 기존 중단 동작
                     if reason == STOP_REASON_PROJECT_COMPLETE:
+                        if qa_followups > 0:
+                            eprint(f"[GOALS] project_complete deferred — QA added {qa_followups} followup task(s), continuing next cycle.")
+                            append_cycle_summary(f"{now_iso()} cycle={cycle_idx} project_complete_deferred qa_followups={qa_followups}")
+                            consecutive_failures = 0
+                            continue
                         append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=project_complete")
                         logger.stop_event("Project complete — all goals met.")
                         break

@@ -1,5 +1,5 @@
 {
-  "repo": "D:\\000.Work\\001.Private\\000.API\\BudgetBook",
+  "repo": "C:\\Dev\\BudgetBook",
   "config": "",
   "config_version": 2,
   "run_dir": "",
@@ -54,7 +54,7 @@
   "budget_reset_per_cycle": true,
   "quota_check_enabled": true,
   "quota_five_hour_max_utilization": 100,
-  "quota_seven_day_max_utilization": 70,
+  "quota_seven_day_max_utilization": 50,
   "quota_wait_for_reset": true,
   "continuous": true,
   "iterations": 10,

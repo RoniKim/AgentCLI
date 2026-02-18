@@ -14,6 +14,7 @@ The user reviews/edits, and subsequent cycles converge toward those goals.
 """
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -448,20 +449,28 @@ def update_goals_checkboxes(repo: Path, done_task_titles: list[str],
     new_lines: list[str] = []
     checked_items: list[str] = []
 
+    checked_strategies: list[tuple[str, str]] = []  # (item_text, strategy)
+
     for line in lines:
         # Only process unchecked checkboxes
         m = re.match(r'^(\s*-\s*)\[\s\]\s*(.+)$', line)
         if m:
             prefix = m.group(1)
             item_text = m.group(2).strip()
-            if _goal_matches_corpus(item_text, corpus):
+            matched, strategy = _goal_match_detail(item_text, corpus)
+            if matched:
                 new_lines.append(f"{prefix}[x] {item_text}")
                 checked_items.append(item_text)
+                checked_strategies.append((item_text, strategy))
                 continue
         new_lines.append(line)
 
     if not checked_items:
         return {"updated": False, "checked_items": [], "new_status": parse_goals_completion(original)}
+
+    # Log with strategy detail for transparency
+    detail_parts = [f"{t}({s})" for t, s in checked_strategies]
+    eprint(f"[GOALS] Auto-checked {len(checked_items)} item(s): {', '.join(detail_parts)}")
 
     updated_text = "\n".join(new_lines)
     # Preserve trailing newline if original had one
@@ -478,13 +487,16 @@ def update_goals_checkboxes(repo: Path, done_task_titles: list[str],
     return {"updated": True, "checked_items": checked_items, "new_status": new_status}
 
 
-def _goal_matches_corpus(goal_item: str, corpus: str) -> bool:
+def _goal_match_detail(goal_item: str, corpus: str) -> tuple[bool, str]:
     """Check if a goal item is semantically matched by done task corpus.
+
+    Returns (matched, strategy) where strategy is one of:
+      "exact", "korean_phrase", "keyword", "none"
 
     Strategy:
     1. Check for GOALS: prefix exact match (highest confidence)
-    2. Check Korean substring matches (phrase-level)
-    3. Fuzzy keyword matching (word-level, lower threshold)
+    2. Check Korean substring matches (phrase-level, >=60% threshold)
+    3. Fuzzy keyword matching (word-level, 60% threshold, min 3)
     """
     goal_lower = goal_item.lower().strip()
     corpus_lower = corpus.lower()
@@ -492,19 +504,17 @@ def _goal_matches_corpus(goal_item: str, corpus: str) -> bool:
     # --- Strategy 1: exact GOALS: prefix match ---
     # PM is instructed to include "GOALS: {item text}" in task prompts
     if goal_lower in corpus_lower:
-        return True
+        return True, "exact"
 
     # --- Strategy 2: Korean phrase substring matching ---
     # Extract Korean phrases (2+ chars) and check substring presence
     ko_phrases = re.findall(r'[가-힣]{2,}', goal_item)
     if ko_phrases:
         ko_match = sum(1 for p in ko_phrases if p in corpus)
-        if len(ko_phrases) >= 2 and ko_match >= max(2, len(ko_phrases) // 2):
-            return True
-        if len(ko_phrases) == 1 and ko_match >= 1:
-            return True
+        if len(ko_phrases) >= 2 and ko_match >= max(2, math.ceil(len(ko_phrases) * 0.6)):
+            return True, "korean_phrase"
 
-    # --- Strategy 3: mixed keyword matching (original, relaxed threshold) ---
+    # --- Strategy 3: mixed keyword matching (strict threshold) ---
     noise = {
         "the", "and", "for", "with", "from", "that", "this", "have", "has",
         "been", "are", "was", "were", "will", "can", "not", "all", "but",
@@ -515,10 +525,12 @@ def _goal_matches_corpus(goal_item: str, corpus: str) -> bool:
     keywords = [w for w in words if len(w) >= 2 and w not in noise]
 
     if not keywords:
-        return False
+        return False, "none"
 
     match_count = sum(1 for kw in keywords if kw in corpus_lower)
-    # Relaxed: 40% threshold, minimum 2
-    threshold = max(2, int(len(keywords) * 0.4))
+    # Strict: 60% threshold, minimum 3
+    threshold = max(3, math.ceil(len(keywords) * 0.6))
 
-    return match_count >= threshold
+    if match_count >= threshold:
+        return True, "keyword"
+    return False, "none"
