@@ -85,6 +85,8 @@ from .utils import (
     choose_stop_reason,
     detect_stop_reason,
     write_heartbeat,
+    check_quota_utilization,
+    seconds_until_reset,
     severity_at_or_above,
     budget_exceeded,
     is_unsafe_path,
@@ -2334,6 +2336,8 @@ async def main_async(args: argparse.Namespace) -> int:
         consecutive_failures = 0
         max_consecutive_failed_cycles = int(getattr(args, "max_consecutive_failed_cycles", 3) or 3)
         budget_reset_per_cycle = bool(getattr(args, "budget_reset_per_cycle", True))
+        quota_wait_for_reset = bool(getattr(args, "quota_wait_for_reset", True))
+        loop_sleep_seconds = int(getattr(args, "loop_sleep_seconds", 60) or 60)
         if args.loop and (not args.loop_max_cycles or args.loop_max_cycles <= 0):
             eprint("[WARN] loop_max_cycles not set; defaulting to 1000 to prevent infinite loops.")
         cycles = 1 if not args.loop else (args.loop_max_cycles if args.loop_max_cycles and args.loop_max_cycles > 0 else 1000)
@@ -2417,6 +2421,36 @@ async def main_async(args: argparse.Namespace) -> int:
                     consecutive_failures = 0
 
                 if reason == STOP_REASON_QUOTA:
+                    if quota_wait_for_reset:
+                        # Mid-cycle quota exhaustion: wait for reset then continue
+                        wait_sec = 0
+                        try:
+                            _q_action, _q_info, _q_resets = check_quota_utilization(
+                                five_hour_max=float(getattr(args, "quota_five_hour_max_utilization", 95) or 95),
+                                seven_day_max=float(getattr(args, "quota_seven_day_max_utilization", 95) or 95),
+                            )
+                            if _q_resets:
+                                wait_sec = seconds_until_reset(_q_resets)
+                        except Exception:
+                            pass
+                        if wait_sec <= 0:
+                            # Fallback: 5 minutes minimum wait
+                            wait_sec = max(300, loop_sleep_seconds * 5)
+                        wait_min = wait_sec / 60
+                        append_cycle_summary(f"{now_iso()} cycle={cycle_idx} quota_exhausted_wait wait_min={wait_min:.1f}")
+                        eprint(f"[QUOTA-WAIT] quota_exhausted — waiting {wait_min:.1f}min for reset (quota_wait_for_reset=true)")
+                        logger.quota_event("exhausted_wait", wait_seconds=wait_sec)
+                        metrics.event("quota_exhausted_wait", cycle=cycle_idx, wait_seconds=wait_sec)
+                        if stop_path.exists():
+                            try:
+                                stop_path.unlink()
+                            except Exception:
+                                pass
+                        await asyncio.sleep(wait_sec)
+                        eprint(f"[QUOTA-WAIT] Resumed after {wait_min:.1f}min wait — continuing next cycle")
+                        logger.quota_event("exhausted_resumed")
+                        consecutive_failures = 0
+                        continue
                     break
 
                 # --- Goals auto-refresh rescue (frozenset dispatch) ---

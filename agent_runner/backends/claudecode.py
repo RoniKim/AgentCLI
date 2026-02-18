@@ -2787,6 +2787,35 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 consecutive_failures = 0
 
             if reason == STOP_REASON_QUOTA:
+                if quota_wait_for_reset:
+                    # Mid-cycle quota exhaustion: wait for reset then continue
+                    wait_sec = 0
+                    try:
+                        _q_action, _q_info, _q_resets = check_quota_utilization(
+                            five_hour_max=quota_5h_max, seven_day_max=quota_7d_max,
+                        )
+                        if _q_resets:
+                            wait_sec = seconds_until_reset(_q_resets)
+                    except Exception:
+                        pass
+                    if wait_sec <= 0:
+                        # Fallback: 5 minutes minimum wait
+                        wait_sec = max(300, loop_sleep_seconds * 5)
+                    wait_min = wait_sec / 60
+                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} quota_exhausted_wait wait_min={wait_min:.1f}")
+                    eprint(f"[QUOTA-WAIT] quota_exhausted — waiting {wait_min:.1f}min for reset (quota_wait_for_reset=true)")
+                    logger.quota_event("exhausted_wait", wait_seconds=wait_sec)
+                    metrics.event("quota_exhausted_wait", cycle=cycle_idx, wait_seconds=wait_sec)
+                    if stop_path.exists():
+                        try:
+                            stop_path.unlink()
+                        except Exception:
+                            pass
+                    await asyncio.sleep(wait_sec)
+                    eprint(f"[QUOTA-WAIT] Resumed after {wait_min:.1f}min wait — continuing next cycle")
+                    logger.quota_event("exhausted_resumed")
+                    consecutive_failures = 0
+                    continue
                 break
 
             # --- Goals auto-refresh rescue (frozenset dispatch) ---
