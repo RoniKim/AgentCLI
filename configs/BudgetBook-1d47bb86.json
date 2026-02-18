@@ -17,7 +17,7 @@
   "claudecode_user": "",
   "claudecode_include_partial_messages": false,
   "claudecode_fork_session": false,
-  "claudecode_max_thinking_tokens": 0,
+  "claudecode_max_thinking_tokens": 10000,
   "claudecode_pm_allowed_tools": "Read,Grep,Glob,Write,Edit",
   "claudecode_pm_disallowed_tools": "",
   "claudecode_dev_allowed_tools": "Read,Write,Edit,Grep,Glob,Bash",
@@ -50,7 +50,7 @@
   "loop_idle_exit_after": 3600,
   "idle_exit_cycles": 5,
   "goals_completion_level": "all",
-  "max_consecutive_failed_cycles": 5,
+  "max_consecutive_failed_cycles": 7,
   "budget_reset_per_cycle": true,
   "quota_check_enabled": true,
   "quota_five_hour_max_utilization": 100,
@@ -142,7 +142,7 @@
   "reporter_model": "gpt-5-nano",
   "report_max_turns": 8,
   "pm_timeout_seconds": 1800,
-  "dev_timeout_seconds": 600,
+  "dev_timeout_seconds": 900,
   "mcp_timeout_seconds": 3600,
   "test_timeout_seconds": 3600,
   "pm_structured_retries": 2,
@@ -205,5 +205,5 @@
   "goals_auto_generate": true,
   "goals_auto_check": true,
   "goals_auto_refresh": true,
-  "goals_refresh_max_per_run": 3
+  "goals_refresh_max_per_run": 5
 }
