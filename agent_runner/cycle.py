@@ -123,6 +123,8 @@ from .goals import (
     parse_and_append_refreshed_goals,
     GOALS_GENERATION_INSTRUCTION,
     GOALS_EVALUATION_INSTRUCTION,
+    GOALS_REFRESH_RESCUABLE_REASONS,
+    should_attempt_goals_refresh,
 )
 from .schemas import PMOutputV2
 from .structured import parse_pm_output_with_errors, dump_pretty, describe_parse_failure, parse_qa_followups
@@ -2336,6 +2338,37 @@ async def main_async(args: argparse.Namespace) -> int:
         # Goals auto-refresh state
         goals_refresh_count = 0
         goals_refresh_max = int(getattr(args, "goals_refresh_max_per_run", 3) or 3)
+        goals_auto_refresh = bool(getattr(args, "goals_auto_refresh", False))
+
+        async def _try_goals_refresh(cycle_idx: int) -> bool:
+            """Attempt LLM-driven GOALS.md refresh. Returns True if new items appended."""
+            nonlocal goals_refresh_count
+            eprint(f"[GOALS-REFRESH] Attempt {goals_refresh_count + 1}/{goals_refresh_max}")
+            try:
+                _gp, _gt = read_goals(repo)
+                refresh_prompt = build_goals_refresh_prompt(_gt or "")
+                _gr_res = await codex_exec(
+                    refresh_prompt,
+                    model=str(getattr(args, "pm_model", "gpt-5.1-codex-mini") or "gpt-5.1-codex-mini"),
+                    cwd=repo,
+                    timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
+                )
+                refresh_text = (_gr_res.final_output or "").strip()
+                result = parse_and_append_refreshed_goals(repo, refresh_text)
+                if result.get("appended"):
+                    goals_refresh_count += 1
+                    eprint(f"[GOALS-REFRESH] +{result.get('p0_count', 0)} P0, +{result.get('p1_count', 0)} P1 추가됨")
+                    metrics.event("goals_refresh_ok", cycle=cycle_idx,
+                                  p0=result.get("p0_count", 0), p1=result.get("p1_count", 0),
+                                  refresh_n=goals_refresh_count)
+                    return True
+                eprint("[GOALS-REFRESH] 새 항목 없음 — 중단")
+                return False
+            except Exception as ex:
+                if is_quota_exception(ex):
+                    raise
+                eprint(f"[WARN] Goals refresh failed: {ex}")
+                return False
 
         try:
             for cycle_idx in range(int(cycles)):
@@ -2382,38 +2415,31 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 if reason == STOP_REASON_QUOTA:
                     break
-                if reason == STOP_REASON_PROJECT_COMPLETE:
-                    _gr_enabled = bool(getattr(args, "goals_auto_refresh", False))
-                    if _gr_enabled and goals_refresh_count < goals_refresh_max:
-                        eprint(f"[GOALS-REFRESH] Attempt {goals_refresh_count + 1}/{goals_refresh_max}")
-                        try:
-                            _gp, _gt = read_goals(repo)
-                            refresh_prompt = build_goals_refresh_prompt(_gt or "")
-                            _gr_res = await codex_exec(
-                                refresh_prompt,
-                                model=str(getattr(args, "pm_model", "gpt-5.1-codex-mini") or "gpt-5.1-codex-mini"),
-                                cwd=repo,
-                                timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
-                            )
-                            refresh_text = (_gr_res.final_output or "").strip()
-                            result = parse_and_append_refreshed_goals(repo, refresh_text)
-                            if result.get("appended"):
-                                goals_refresh_count += 1
-                                eprint(f"[GOALS-REFRESH] +{result.get('p0_count', 0)} P0, +{result.get('p1_count', 0)} P1 추가됨")
-                                metrics.event("goals_refresh_ok", cycle=cycle_idx,
-                                              p0=result.get("p0_count", 0), p1=result.get("p1_count", 0),
-                                              refresh_n=goals_refresh_count)
-                                continue  # next cycle — PM will pick up new GOALS
-                            else:
-                                eprint("[GOALS-REFRESH] 새 항목 없음 — 중단")
-                        except Exception as _gr_ex:
-                            if is_quota_exception(_gr_ex):
-                                raise
-                            eprint(f"[WARN] Goals refresh failed: {_gr_ex}")
-                    # Default: stop
-                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=project_complete")
-                    logger.stop_event("Project complete — all goals met.")
-                    break
+
+                # --- Goals auto-refresh rescue (frozenset dispatch) ---
+                if reason in GOALS_REFRESH_RESCUABLE_REASONS:
+                    _should, _why = should_attempt_goals_refresh(
+                        repo, reason, goals_refresh_count, goals_refresh_max,
+                        goals_auto_refresh=goals_auto_refresh,
+                    )
+                    if _should:
+                        if await _try_goals_refresh(cycle_idx):
+                            # STOP 파일 제거 (ensure_backlog가 생성한 경우)
+                            if stop_path.exists():
+                                try:
+                                    stop_path.unlink()
+                                except Exception:
+                                    pass
+                            consecutive_failures = max(0, consecutive_failures - 1)
+                            continue  # 다음 사이클 — PM이 새 GOALS 기반 태스크 생성
+
+                    # Refresh 불가/실패 → reason별 기존 중단 동작
+                    if reason == STOP_REASON_PROJECT_COMPLETE:
+                        append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=project_complete")
+                        logger.stop_event("Project complete — all goals met.")
+                        break
+                    # no_tasks, pm_refresh_no_backlog → fallthrough (consecutive_failures에서 처리)
+
                 if reason == STOP_REASON_ALL_TASKS_DONE:
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
                     if not args.loop:

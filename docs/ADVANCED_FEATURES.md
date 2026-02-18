@@ -196,15 +196,23 @@ REPO/.doc/GOALS.md
   → - [x] 가계부 입출금 CRUD 동작  (자동 체크)
 ```
 
-매칭 방식: 태스크 제목/설명의 키워드와 GOALS 항목의 키워드를 비교 (60% 이상 일치 시 체크)
+매칭 방식: 3-Tier 전략 (정확 매칭 → 한국어 구문 → 키워드 퍼지 40% 임계값). 아래 "자동 체크박스 매칭 전략" 섹션 참조.
 
 ## 완성 판단 (`project_complete`)
 
+`goals_completion_level` 설정에 따라 판정 기준이 달라집니다:
+
+| level | 판정 기준 |
+|-------|----------|
+| `"p0"` | P0 전부 `[x]` |
+| `"p1"` | P0 + P1 전부 `[x]` |
+| `"all"` (기본) | 파일 내 모든 체크박스 `[x]` |
+
 ```
-project_complete = (P0 전부 [x]) AND (실패 후 미재시도 태스크 == 0)
+project_complete = (completion_level 조건 충족) AND (실패 후 미재시도 태스크 == 0)
 ```
 
-- `project_complete` 신호 발생 시 → loop 모드여도 **자동 종료**
+- `project_complete` 신호 발생 시 → loop 모드여도 **자동 종료** (`goals_auto_refresh` 비활성일 때)
 - `COMPLETION_STATUS.json`이 run_dir에 생성됨:
 
 ```json
@@ -237,13 +245,24 @@ FAILED TASKS — MANDATORY RETRY (MUST address each one):
 
 PM은 실패 태스크를 **반드시** 다른 접근법으로 재생성하거나, 불가능한 경우 `open_questions`에 사유를 기재해야 합니다.
 
+## 자동 체크박스 매칭 전략 (3-Tier)
+
+태스크 완료 시 GOALS.md 항목과의 매칭은 3단계 전략으로 수행됩니다:
+
+1. **정확 매칭** (최고 신뢰도): 태스크 제목/프롬프트에 `GOALS: {항목텍스트}` 접두어가 있는 경우
+2. **한국어 구문 매칭**: GOALS 항목의 한국어 구문이 태스크 텍스트에 부분문자열로 포함
+3. **키워드 퍼지 매칭**: 40% 이상 키워드 일치 시 체크 (불용어 제외)
+
 ## Config 설정
 
 ```json
 {
   "goals_enabled": true,
   "goals_auto_generate": true,
-  "goals_auto_check": true
+  "goals_auto_check": true,
+  "goals_completion_level": "all",
+  "goals_auto_refresh": false,
+  "goals_refresh_max_per_run": 3
 }
 ```
 
@@ -252,13 +271,56 @@ PM은 실패 태스크를 **반드시** 다른 접근법으로 재생성하거�
 | `goals_enabled` | `true` | GOALS 기능 전체 활성화 |
 | `goals_auto_generate` | `true` | GOALS.md 없을 때 PM이 초안 자동 생성 |
 | `goals_auto_check` | `true` | 태스크 완료 시 GOALS.md 체크박스 자동 업데이트 |
+| `goals_completion_level` | `"all"` | 완료 판정 기준: `"p0"` / `"p1"` / `"all"` |
+| `goals_auto_refresh` | `false` | GOALS 달성/빈 백로그 시 차세대 목표 자동 생성 |
+| `goals_refresh_max_per_run` | `3` | 런 당 auto-refresh 최대 횟수 (무한 루프 방지) |
+
+## GOALS 자동 갱신 (Auto-Refresh)
+
+`goals_auto_refresh=true` 설정 시, 다음 상황에서 LLM이 새 P0/P1 항목을 GOALS.md에 자동 추가합니다:
+
+### 트리거 조건 (`GOALS_REFRESH_RESCUABLE_REASONS`)
+
+| reason | 상황 |
+|--------|------|
+| `project_complete` | Dev→QA 후 GOALS 전체 달성 |
+| `no_tasks` | PM이 태스크 0개 생성 (빈 백로그, STOP 파일 생성) |
+| `pm_refresh_no_backlog` | PM refresh 후에도 백로그 없음 |
+
+### 동작 흐름
+
+```
+Cycle N: reason ∈ RESCUABLE_REASONS
+  ↓
+should_attempt_goals_refresh() 판정:
+  1. goals_auto_refresh 활성? → 아니면 중단
+  2. reason이 rescuable? → 아니면 중단
+  3. refresh 횟수 < max? → 초과면 중단
+  4. GOALS.md 있고 project_complete? → 아니면 중단
+  5. 모두 통과 → LLM 호출
+  ↓
+_try_goals_refresh():
+  → LLM이 코드베이스 분석 후 3~10개 새 P0/P1 항목 생성
+  → GOALS.md에 <!-- Auto-Refresh #N --> 마커와 함께 추가
+  → STOP 파일 삭제, consecutive_failures 보정
+  → continue (다음 사이클에서 PM이 새 GOALS 기반 태스크 생성)
+```
+
+### 안전장치
+
+- `goals_refresh_max_per_run` (기본 3) 초과 시 강제 중단
+- GOALS.md가 없거나 아직 미완료면 시도하지 않음
+- LLM이 새 항목 생성 못하면 즉시 중단
+- 쿼타 예외는 항상 re-raise (비용 안전)
+- 기본 비활성 (`goals_auto_refresh: false`)
 
 ## Stop Reason 추가
 
 | stop_reason | 의미 |
 |-------------|------|
-| `project_complete` | P0 전부 달성 + 실패 미재시도 0개 → 프로젝트 완성 |
+| `project_complete` | GOALS 달성 + 실패 미재시도 0개 → 프로젝트 완성 |
 | `all_tasks_done` | 현재 백로그 태스크 전부 완료 (프로젝트 완성과는 별개) |
+| `all_tasks_attempted` | 모든 태스크 시도 (일부 skip) — loop 모드에서 재시도 가능 |
 
 ---
 

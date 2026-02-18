@@ -6,6 +6,7 @@
 - 실행 엔진(backend): **Codex(OpenAI)** 또는 **Claude Code(Anthropic)** 로 전환 가능
 - 기본 UX: **Interactive Shell** (`/start`, `/stop`, `/config` …)
   + 무인 운용/스크립트용: `--run-now` (즉시 실행)
+- **Runtime**: 프로젝트 내 가상환경 (Windows)
 
 ---
 
@@ -25,6 +26,8 @@
 - **정책/시크릿 스캔(옵션)**: run_dir 산출물/코드에서 키/토큰 유출 방지 스캔
 - **실행 아티팩트 관리**: `run_dir` 단위로 로그/상태/백로그/리포트 보존
 - **예산 가드레일**: 에스컬레이션/continuation/재시도 횟수에 상한을 두어 비용 폭주 방지
+- **쿼타 사용량 관리**: Claude OAuth 5h/7d 윈도우 사전 체크, 자동 대기/중단
+- **GOALS 자동 갱신**: 프로젝트 목표 달성 시 LLM이 차세대 목표를 자동 생성 (`goals_auto_refresh`)
 - **파이프라인 커스터마이징**
   - `roles="PM,Dev,QA,Security"`처럼 역할 순서/구성 변경
   - 플러그인 Stage(외부 모듈) 로드(Allowlist 기반)
@@ -38,15 +41,21 @@ agent_cli.py (진입점)
   ├─ --run-now → agent_runner/main.py → 즉시 실행
   └─ (기본)   → agent_runner/shell.py → Interactive Shell → /start로 실행
 
-agent_runner/main.py
-  └─ parse_args() → backend 분기
-       ├─ codex     → agent_runner/cycle.py          (codex exec 서브프로세스)
-       └─ claudecode → agent_runner/backends/claudecode.py (Claude Agent SDK)
+agent_runner/runner_entry.py (async dispatch + failover + signal handling)
+  ├─ codex     → cycle.py (~2550 lines) + codex_exec.py (서브프로세스 래퍼)
+  └─ claudecode → backends/claudecode.py (~2900 lines) + claude_extensions.py (MCP/hooks/subagents)
 
 파이프라인 오케스트레이션:
-  agent_runner/pipeline/manager.py   (PipelineManager)
-  agent_runner/pipeline/session.py   (PipelineSession — 백엔드 무관 컨텍스트)
-  agent_runner/pipeline/stages/      (PM, Dev, QA, Security Stage 정의)
+  pipeline/manager.py   (PipelineManager + _PROPAGATE_STOP_REASONS)
+  pipeline/session.py   (PipelineSession — 백엔드 무관 컨텍스트)
+  pipeline/stages/      (PM, Dev, QA, Security Stage 정의)
+
+서브시스템:
+  goals.py       (GOALS.md 추적 + 자동 갱신 + 체크박스 자동 업데이트)
+  prompts.py     (PromptStore + append_pm_essential_context)
+  task_history.py (SQLite 크로스-런 태스크 이력)
+  skills/        (SKILL.md 인덱싱, 매칭, 발췌)
+  utils.py       (Stop reasons 9개, 쿼타 사용량 체크, 예산 헬퍼)
 ```
 
 ### 설정 우선순위
@@ -59,23 +68,28 @@ CLI 인자 (--flag)  >  설정 파일 (JSON)  >  DEFAULTS (코드 내 기본값)
 
 | 모듈 | 역할 |
 |------|------|
-| `cli.py` | DEFAULTS 정의, CLI 파싱, 설정 병합 (`_merge_effective`) |
-| `codex_exec.py` | `codex exec` 서브프로세스 래퍼 (JSONL 파싱, 타임아웃, 프로세스 관리) |
-| `cycle.py` | Codex 백엔드 전체 파이프라인 (PM→Dev→QA→Reporter) |
-| `backends/claudecode.py` | Claude 백엔드 전체 파이프라인 |
+| `cli.py` | DEFAULTS 정의 (~125키), CLI 파싱, 설정 병합 (`_merge_effective`) |
+| `codex_exec.py` | `codex exec` 서브프로세스 래퍼 (`CodexExecResult`, JSONL 파싱, 타임아웃) |
+| `cycle.py` | Codex 백엔드 전체 파이프라인 (~2550줄, PM→Dev→QA→Reporter) |
+| `backends/claudecode.py` | Claude 백엔드 전체 파이프라인 (~2900줄) |
+| `backends/claude_extensions.py` | Claude SDK 확장 (MCP 도구, hooks, can_use_tool, subagents, ~616줄) |
 | `exceptions.py` | 공유 예외 클래스 (`BudgetExceeded`, `StopRequested`) |
 | `exc_detect.py` | 예외 감지 (`is_quota_exception`, `is_transient_exception` 등) |
 | `backlog_utils.py` | 백로그 정규화/검증/컨텍스트 (`normalize_backlog_tasks`, `validate_skill_ids`) |
 | `qa_utils.py` | QA followup 추출/병합 (`extract_qa_followups`, `merge_qa_followups`) |
 | `state.py` | `BACKLOG.json`, `STATE.json` 읽기/쓰기, TaskItem 정의 |
-| `utils.py` | Stop reason 상수, `has_quota_text()`, `budget_exceeded()`, 공용 헬퍼 |
+| `utils.py` | Stop reason 상수 (9개), `has_quota_text()`, `budget_exceeded()`, 쿼타 사용량 체크, 공용 헬퍼 |
+| `goals.py` | GOALS.md 완료 추적 (P0/P1), 자동 갱신 rescue, 체크박스 자동 업데이트 |
 | `gitops.py` | 체크포인트 생성/복원, worktree 격리, 변경 감지 |
 | `gates.py` | 빌드/테스트 게이트 실행 |
 | `prompts.py` | 프롬프트 템플릿 로딩, PM 출력 스키마 정의 |
 | `structured.py` | PM JSON 파싱/검증, 에러 설명 생성 |
 | `schemas.py` | `PMOutputV2` 스키마, JSON Schema 생성 |
-| `pipeline/` | Stage 오케스트레이션, 플러그인 로딩 |
+| `pipeline/` | Stage 오케스트레이션, `_PROPAGATE_STOP_REASONS`, 플러그인 로딩 |
+| `skills/` | SKILL.md 인덱싱, 퍼지 매칭, 발췌문 생성 |
 | `shell.py` | Interactive Shell (prompt_toolkit 기반) |
+| `reporting.py` | Shutdown 보고서 생성 (~475줄) |
+| `task_history.py` | SQLite 크로스-런 태스크 이력 DB |
 
 ---
 
@@ -147,6 +161,62 @@ python agent_cli.py --run-now --repo "<path>" --non-interactive --autopilot --co
 
 ---
 
+## Claude Code 커스텀 커맨드
+
+AgentCLI 프로젝트에는 **Claude Code CLI**에서 바로 사용할 수 있는 커스텀 커맨드(슬래시 커맨드)가 포함되어 있습니다.
+이 커맨드들은 AgentCLI가 대상 프로젝트를 분석/운용하기 위해 필요한 **설계문서**와 **GOALS.md**를 생성합니다.
+
+### 사용 가능한 커맨드
+
+| 커맨드 | 설명 | 모드 |
+|--------|------|------|
+| `/design-doc <경로>` | 대상 프로젝트를 분석하여 설계문서 자동 생성 | 자동 (일괄) |
+| `/generate-goals <경로>` | 대상 프로젝트의 GOALS.md 생성/보강 | 자동 (일괄) |
+| `/design-workshop <경로>` | 사용자와 대화하며 설계문서를 함께 작성 | 대화형 (단계별) |
+
+### 생성되는 산출물
+
+```
+{대상 프로젝트}/.doc/
+  ├─ GOALS.md                  (/generate-goals, /design-workshop Phase 5)
+  ├─ DOCS_DIGEST.md            (/design-doc, /design-workshop Phase 5)
+  └─ Docs/
+      ├─ ARCHITECTURE.md       (아키텍처 개요)
+      ├─ CONVENTIONS.md        (코딩 규약)
+      └─ CURRENT_STATE.md      (현재 상태 평가)
+```
+
+### 사용 예시
+
+```bash
+# Claude Code CLI에서 실행
+> /design-doc D:\000.Work\MyProject
+> /generate-goals D:\000.Work\MyProject
+> /design-workshop D:\000.Work\MyProject
+```
+
+- **`/design-doc`**: 코드베이스를 분석하여 ARCHITECTURE.md, CONVENTIONS.md, CURRENT_STATE.md, DOCS_DIGEST.md를 한 번에 생성합니다. AgentCLI config 권장 설정도 함께 제안합니다.
+- **`/generate-goals`**: 프로젝트의 미완성 기능을 분석하여 P0(Must-Have) / P1(Should-Have) 항목을 생성합니다. 기존 GOALS.md가 있으면 체크 상태를 보존하면서 보강합니다.
+- **`/design-workshop`**: 5단계 대화형 워크숍으로, 각 Phase마다 사용자 확인을 받으며 진행합니다. 한꺼번에 생성하지 않고, 사용자 피드백을 반영하여 문서 품질을 높입니다.
+
+> **주의**: 세 커맨드 모두 **대상 프로젝트 경로**가 필수입니다. 경로 없이 실행하면 오류 메시지와 함께 중단됩니다.
+
+### 다른 PC에서 사용하기
+
+커맨드 파일은 `.claude/commands/*.md`에 위치하며, `.gitignore` 예외 설정을 통해 **git으로 공유**됩니다:
+
+```gitignore
+# .claude 디렉토리 내용 무시 (하위 예외 허용을 위해 /* 사용)
+.claude/*
+!.claude/commands/
+!.claude/commands/*.md
+```
+
+다른 PC에서 repo를 `git clone`/`git pull`하면 커맨드가 자동으로 포함됩니다.
+Claude Code CLI가 프로젝트 루트에서 실행되면 `.claude/commands/` 내의 커맨드를 자동 인식합니다.
+
+---
+
 ## 문서 안내
 
 | 문서 | 내용 |
@@ -162,6 +232,16 @@ python agent_cli.py --run-now --repo "<path>" --non-interactive --autopilot --co
 | [설정 레퍼런스](docs/CONFIG_REFERENCE_KO.md) | 전체 설정 변수 상세 (23개 섹션) |
 
 ---
+
+## Dependencies
+
+```
+openai>=1.0.0
+openai-agents>=0.0.0
+claude-agent-sdk>=0.1.0
+pydantic>=2.0.0
+prompt_toolkit>=3.0.0
+```
 
 ## ChangeLog
 

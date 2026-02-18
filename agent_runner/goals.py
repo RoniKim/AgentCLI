@@ -222,6 +222,51 @@ GOALS_EVALUATION_INSTRUCTION = (
 
 
 # ---------------------------------------------------------------------------
+# GOALS.md auto-refresh — rescuable reasons + decision function
+# ---------------------------------------------------------------------------
+
+GOALS_REFRESH_RESCUABLE_REASONS: frozenset[str] = frozenset({
+    "project_complete",        # Dev→QA 후 GOALS 전체 완료
+    "no_tasks",                # PipelineManager: 백로그 없음/빈 태스크
+    "pm_refresh_no_backlog",   # run_dev_loop: PM refresh 후 백로그 없음
+})
+
+
+def should_attempt_goals_refresh(
+    repo: Path,
+    reason: str,
+    goals_refresh_count: int,
+    goals_refresh_max: int,
+    goals_auto_refresh: bool,
+) -> Tuple[bool, str]:
+    """Determine whether a goals auto-refresh should be attempted.
+
+    Returns (should_attempt, why) where *why* is a short tag:
+      "ok"              — attempt is warranted
+      "disabled"        — feature flag off
+      "not_rescuable"   — reason not in GOALS_REFRESH_RESCUABLE_REASONS
+      "max_reached"     — refresh count exhausted
+      "no_goals"        — GOALS.md absent or empty
+      "goals_incomplete" — goals exist but not all complete yet
+    """
+    if not goals_auto_refresh:
+        return (False, "disabled")
+    if reason not in GOALS_REFRESH_RESCUABLE_REASONS:
+        return (False, "not_rescuable")
+    if goals_refresh_count >= goals_refresh_max:
+        return (False, "max_reached")
+
+    _path, goals_text = read_goals(repo)
+    status = parse_goals_completion(goals_text)
+    if not status.get("has_goals"):
+        return (False, "no_goals")
+    if not status.get("project_complete"):
+        return (False, "goals_incomplete")
+
+    return (True, "ok")
+
+
+# ---------------------------------------------------------------------------
 # GOALS.md auto-refresh prompt + logic
 # ---------------------------------------------------------------------------
 

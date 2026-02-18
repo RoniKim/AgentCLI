@@ -75,7 +75,10 @@ supabase/functions/.env
 *.onnx
 *.safetensors
 *.bin
-.claude
+# .claude 디렉토리 내용 무시 (하위 예외 허용을 위해 /* 사용)
+.claude/*
+!.claude/commands/
+!.claude/commands/*.md
 # --------------------------------------------------------------------
 # [OS & Misc]
 # --------------------------------------------------------------------

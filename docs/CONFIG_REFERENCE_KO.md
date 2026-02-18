@@ -124,6 +124,7 @@
 | `loop_max_cycles` | int | `0` | 최대 루프 횟수. `0`이면 무제한. |
 | `loop_idle_exit_after` | int | `0` | 할 일이 없을 때 자동 종료까지 대기 시간 (초). `0`이면 종료 안 함. |
 | `max_consecutive_failed_cycles` | int | `3` | 연속 실패 사이클 허용 횟수. 초과 시 파이프라인 자동 중단. |
+| `idle_exit_cycles` | int | `3` | 연속 무진전(delta=0) 사이클 허용 횟수. 초과 시 `idle_exit`으로 자동 중단. |
 | `budget_reset_per_cycle` | bool | `true` | `true`면 매 사이클 시작 시 예산 카운터(에스컬레이션, continuation 등)를 초기화. |
 | `continuous` | bool | `false` | `true`면 한 사이클에서 여러 태스크를 연속 처리. |
 | `iterations` | int | `30` | 한 사이클에서 처리할 최대 반복(태스크) 수. |
@@ -394,12 +395,23 @@ GOALS.md 기반 프로젝트 완료 추적 시스템. P0(필수)와 P1(선택) �
 | `goals_enabled` | bool | `true` | Goals 시스템 활성화. |
 | `goals_auto_generate` | bool | `true` | `true`면 GOALS.md가 없을 때 PM이 첫 사이클에서 자동 생성. |
 | `goals_auto_check` | bool | `true` | `true`면 매 사이클마다 목표 달성률을 자동 검사하여 프로젝트 완료 여부 판단. |
+| `goals_completion_level` | string | `"all"` | 프로젝트 완료 판정 기준. `"p0"` (P0만), `"p1"` (P0+P1), `"all"` (전체 체크박스). |
+| `goals_auto_refresh` | bool | `false` | `true`면 GOALS 전체 완료/빈 백로그 시 LLM이 차세대 목표를 GOALS.md에 자동 추가. |
+| `goals_refresh_max_per_run` | int | `3` | 런 당 GOALS auto-refresh 최대 횟수. 무한 루프 방지. |
 
 **파일 위치**: `{repo}/.doc/GOALS.md`
 
-**완료 판정 로직**:
-- P0 항목이 모두 체크(`[x]`)되면 `project_complete = true` → 파이프라인이 `STOP_REASON_PROJECT_COMPLETE`로 종료
-- P1 항목은 완료 판정에 영향 없음 (nice-to-have)
+**완료 판정 로직** (`goals_completion_level` 기준):
+- `"p0"`: P0 항목이 모두 체크(`[x]`)되면 `project_complete = true`
+- `"p1"`: P0 + P1 항목 모두 체크 시 `project_complete = true`
+- `"all"` (기본): 파일 내 모든 체크박스 완료 시 `project_complete = true`
+
+**자동 갱신 (auto-refresh)**:
+- `goals_auto_refresh=true` 시, 다음 상황에서 LLM이 새 P0/P1 항목을 GOALS.md에 자동 추가:
+  - `project_complete` — GOALS 전체 달성 후
+  - `no_tasks` — PM이 태스크 0개 생성 (빈 백로그)
+  - `pm_refresh_no_backlog` — PM refresh 후에도 백로그 없음
+- 안전장치: `goals_refresh_max_per_run` (기본 3) 초과 시 강제 중단, GOALS 미완료 시 시도 안 함
 
 ---
 
