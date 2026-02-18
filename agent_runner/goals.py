@@ -18,6 +18,12 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from .utils import (
+    STOP_REASON_PROJECT_COMPLETE,
+    STOP_REASON_NO_TASKS,
+    STOP_REASON_PM_REFRESH_NO_BACKLOG,
+)
+
 from .utils import eprint, now_iso
 
 
@@ -226,9 +232,9 @@ GOALS_EVALUATION_INSTRUCTION = (
 # ---------------------------------------------------------------------------
 
 GOALS_REFRESH_RESCUABLE_REASONS: frozenset[str] = frozenset({
-    "project_complete",        # Dev→QA 후 GOALS 전체 완료
-    "no_tasks",                # PipelineManager: 백로그 없음/빈 태스크
-    "pm_refresh_no_backlog",   # run_dev_loop: PM refresh 후 백로그 없음
+    STOP_REASON_PROJECT_COMPLETE,       # Dev→QA 후 GOALS 전체 완료
+    STOP_REASON_NO_TASKS,               # PipelineManager: 백로그 없음/빈 태스크
+    STOP_REASON_PM_REFRESH_NO_BACKLOG,  # run_dev_loop: PM refresh 후 백로그 없음
 })
 
 

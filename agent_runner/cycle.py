@@ -93,6 +93,8 @@ from .utils import (
     STOP_REASON_ALL_TASKS_DONE,
     STOP_REASON_ALL_TASKS_ATTEMPTED,
     STOP_REASON_PROJECT_COMPLETE,
+    STOP_REASON_NO_TASKS,
+    STOP_REASON_PM_REFRESH_NO_BACKLOG,
 )
 from .exceptions import BudgetExceeded
 from .exc_detect import (
@@ -1211,7 +1213,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         return 0, (detected or STOP_REASON_STOP_FILE), 0, (len(done_set) > before_done)
                     return 1, "pm_failed", 0, (len(done_set) > before_done)
                 if not ensure_backlog():
-                    return 1, "pm_refresh_no_backlog", 0, (len(done_set) > before_done)
+                    return 1, STOP_REASON_PM_REFRESH_NO_BACKLOG, 0, (len(done_set) > before_done)
                 old_task_map = {t.id: (t.title, t.prompt) for t in tasks}
                 tasks = load_tasks()
                 task_ids = {t.id for t in tasks}
@@ -2203,7 +2205,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     return StageOutcome.stop("stop_file")
                 # Dev loop expects tasks loaded by the pipeline manager.
                 if not session.tasks:
-                    return StageOutcome.fail("no_tasks", rc=1)
+                    return StageOutcome.fail(STOP_REASON_NO_TASKS, rc=1)
 
                 rc, reason, done_delta, ran_tasks = await run_dev_loop(
                     ci,

@@ -19,6 +19,8 @@ STOP_REASON_ALL_TASKS_DONE = "all_tasks_done"
 STOP_REASON_PROJECT_COMPLETE = "project_complete"
 STOP_REASON_ALL_TASKS_ATTEMPTED = "all_tasks_attempted"
 STOP_REASON_PREPARED_ONLY = "prepared_only"
+STOP_REASON_NO_TASKS = "no_tasks"
+STOP_REASON_PM_REFRESH_NO_BACKLOG = "pm_refresh_no_backlog"
 STOP_REASON_IDLE_EXIT = "idle_exit"
 STOP_REASON_OK = "ok"
 

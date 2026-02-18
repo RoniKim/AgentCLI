@@ -5,7 +5,7 @@ from typing import Iterable, List, Tuple
 
 from .session import PipelineSession
 from .stages.base import Stage, StageOutcome
-from ..utils import STOP_REASON_ALL_TASKS_DONE, STOP_REASON_ALL_TASKS_ATTEMPTED, STOP_REASON_PROJECT_COMPLETE
+from ..utils import STOP_REASON_ALL_TASKS_DONE, STOP_REASON_ALL_TASKS_ATTEMPTED, STOP_REASON_PROJECT_COMPLETE, STOP_REASON_NO_TASKS
 
 # Stop reasons that should propagate through CycleResult for outer-loop handling
 _PROPAGATE_STOP_REASONS = frozenset({
@@ -65,7 +65,7 @@ class PipelineManager:
                 try:
                     if not session.ensure_tasks_loaded():
                         # missing backlog or cannot parse
-                        return CycleResult(rc=1, reason="no_tasks", done_delta=0, stages=stage_results)
+                        return CycleResult(rc=1, reason=STOP_REASON_NO_TASKS, done_delta=0, stages=stage_results)
                 except Exception as exc:
                     return CycleResult(rc=1, reason=f"ensure_tasks_exception: {exc}", done_delta=0, stages=stage_results)
                 tasks_checked = True
@@ -99,7 +99,7 @@ class PipelineManager:
         if not tasks_checked:
             try:
                 if not session.ensure_tasks_loaded():
-                    return CycleResult(rc=1, reason="no_tasks", done_delta=0, stages=stage_results)
+                    return CycleResult(rc=1, reason=STOP_REASON_NO_TASKS, done_delta=0, stages=stage_results)
             except Exception as exc:
                 return CycleResult(rc=1, reason=f"ensure_tasks_exception: {exc}", done_delta=0, stages=stage_results)
             tasks_checked = True
