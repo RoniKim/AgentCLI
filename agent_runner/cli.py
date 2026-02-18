@@ -280,6 +280,8 @@ DEFAULTS: Dict[str, Any] = {
     "goals_enabled": True,
     "goals_auto_generate": True,
     "goals_auto_check": True,
+    "goals_auto_refresh": False,           # project_complete 시 PM이 새 GOALS 자동 생성
+    "goals_refresh_max_per_run": 3,        # 런 당 최대 refresh 횟수 (무한 루프 방지)
 }
 
 

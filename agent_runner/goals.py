@@ -222,6 +222,143 @@ GOALS_EVALUATION_INSTRUCTION = (
 
 
 # ---------------------------------------------------------------------------
+# GOALS.md auto-refresh prompt + logic
+# ---------------------------------------------------------------------------
+
+GOALS_REFRESH_PROMPT = (
+    "당신은 프로젝트 분석 전문가입니다.\n"
+    "아래에 현재 GOALS.md 내용이 제공됩니다. 모든 항목이 완료(체크) 상태입니다.\n\n"
+    "프로젝트 코드베이스를 분석하여 **다음 단계로 수행할 새로운 개선/기능 항목**을 식별하세요.\n\n"
+    "규칙:\n"
+    "1. 이미 완료된 항목을 다시 생성하지 마세요.\n"
+    "2. 3~10개의 새 항목을 P0(필수)와 P1(개선)으로 구분하여 출력하세요.\n"
+    "3. 출력 형식은 반드시 아래 마크다운 체크박스 형식을 사용하세요:\n\n"
+    "```\n"
+    "## P0\n"
+    "- [ ] 항목 설명\n"
+    "- [ ] 항목 설명\n\n"
+    "## P1\n"
+    "- [ ] 항목 설명\n"
+    "```\n\n"
+    "4. 각 항목은 구체적이고 실행 가능해야 합니다.\n"
+    "5. 프로젝트의 현재 상태를 파악하여 실질적으로 가치 있는 작업만 제안하세요.\n"
+    "6. 기존 기능 강화, 성능 개선, 코드 품질, 테스트 커버리지, 문서화 등을 고려하세요.\n"
+)
+
+
+def build_goals_refresh_prompt(goals_text: str) -> str:
+    """Combine current GOALS.md text with the refresh prompt for LLM."""
+    header = "=== 현재 GOALS.md (모든 항목 완료됨) ===\n"
+    if goals_text.strip():
+        header += goals_text.strip() + "\n"
+    else:
+        header += "(비어 있음)\n"
+    header += "\n=== 지시사항 ===\n"
+    return header + GOALS_REFRESH_PROMPT
+
+
+def parse_and_append_refreshed_goals(repo: Path, llm_output: str) -> Dict[str, Any]:
+    """Parse LLM output for new goal items and append them to GOALS.md.
+
+    Extracts ``- [ ] ...`` lines, categorises by P0/P1 headers, appends to
+    GOALS.md with an auto-refresh separator comment.
+
+    Returns:
+        {"appended": bool, "p0_count": int, "p1_count": int}
+    """
+    try:
+        return _parse_and_append_refreshed_goals_inner(repo, llm_output)
+    except Exception:
+        return {"appended": False, "p0_count": 0, "p1_count": 0}
+
+
+def _parse_and_append_refreshed_goals_inner(repo: Path, llm_output: str) -> Dict[str, Any]:
+    """Inner implementation (may raise)."""
+    if not llm_output or not llm_output.strip():
+        return {"appended": False, "p0_count": 0, "p1_count": 0}
+
+    lines = llm_output.splitlines()
+    p0_items: list[str] = []
+    p1_items: list[str] = []
+    current_section: Optional[str] = None
+
+    for line in lines:
+        stripped = line.strip()
+        lower = stripped.lower()
+
+        # Detect section headers
+        if re.match(r'^#{1,3}\s+p0\b', lower):
+            current_section = "p0"
+            continue
+        elif re.match(r'^#{1,3}\s+p1\b', lower):
+            current_section = "p1"
+            continue
+        elif stripped.startswith('#'):
+            # Other headers reset section (could be noise)
+            continue
+
+        # Extract unchecked checkbox items
+        m = re.match(r'^\s*-\s*\[\s\]\s+(.+)$', stripped)
+        if m:
+            item_text = m.group(1).strip()
+            if not item_text:
+                continue
+            if current_section == "p1":
+                p1_items.append(item_text)
+            else:
+                # Default to P0 if no section header seen yet
+                p0_items.append(item_text)
+
+    total = len(p0_items) + len(p1_items)
+    if total == 0:
+        return {"appended": False, "p0_count": 0, "p1_count": 0}
+
+    # Build the append block
+    timestamp = now_iso()
+    # Determine refresh number by counting existing auto-refresh markers
+    gp = goals_path(repo)
+    existing_text = ""
+    if gp.exists():
+        try:
+            existing_text = gp.read_text(encoding="utf-8-sig", errors="replace")
+        except Exception:
+            try:
+                existing_text = gp.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+    refresh_n = len(re.findall(r'<!-- Auto-Refresh #\d+', existing_text)) + 1
+
+    block_lines: list[str] = [
+        "",
+        f"<!-- Auto-Refresh #{refresh_n} ({timestamp}) -->",
+        "",
+    ]
+    if p0_items:
+        block_lines.append("## P0")
+        for item in p0_items:
+            block_lines.append(f"- [ ] {item}")
+        block_lines.append("")
+    if p1_items:
+        block_lines.append("## P1")
+        for item in p1_items:
+            block_lines.append(f"- [ ] {item}")
+        block_lines.append("")
+
+    append_text = "\n".join(block_lines)
+
+    # Append to GOALS.md
+    gp.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(gp, "a", encoding="utf-8", errors="replace") as f:
+            f.write(append_text)
+    except Exception:
+        return {"appended": False, "p0_count": len(p0_items), "p1_count": len(p1_items)}
+
+    return {"appended": True, "p0_count": len(p0_items), "p1_count": len(p1_items)}
+
+
+# ---------------------------------------------------------------------------
 # GOALS.md checkbox auto-update
 # ---------------------------------------------------------------------------
 

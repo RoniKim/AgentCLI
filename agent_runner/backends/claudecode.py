@@ -146,6 +146,8 @@ from ..goals import (
     parse_goals_completion,
     update_goals_checkboxes,
     write_completion_status,
+    build_goals_refresh_prompt,
+    parse_and_append_refreshed_goals,
     GOALS_GENERATION_INSTRUCTION,
     GOALS_EVALUATION_INSTRUCTION,
 )
@@ -2649,6 +2651,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         eprint("[WARN] loop_max_cycles not set; defaulting to 1000 to prevent infinite loops.")
     cycles = 1 if not loop_mode else (loop_max_cycles if loop_max_cycles > 0 else 1000)
 
+    # Goals auto-refresh state
+    goals_refresh_count = 0
+    goals_refresh_max = int(getattr(args, "goals_refresh_max_per_run", 3) or 3)
+
     try:
         for cycle_idx in range(int(cycles)):
             if stop_path.exists():
@@ -2746,9 +2752,38 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             if reason == STOP_REASON_QUOTA:
                 break
             if reason == STOP_REASON_PROJECT_COMPLETE:
+                _gr_enabled = bool(getattr(args, "goals_auto_refresh", False))
+                if _gr_enabled and goals_refresh_count < goals_refresh_max:
+                    eprint(f"[GOALS-REFRESH] Attempt {goals_refresh_count + 1}/{goals_refresh_max}")
+                    try:
+                        _gp, _gt = read_goals(repo)
+                        refresh_prompt = build_goals_refresh_prompt(_gt or "")
+                        refresh_text, _ = await _run_claude_query(
+                            cfg, refresh_prompt,
+                            repo=repo, stage="goals_refresh",
+                            stop_path=stop_path, debug=bool(getattr(args, "debug", False)),
+                            model_override=str(getattr(args, "pm_model", "") or ""),
+                            max_turns_override=15,
+                            timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
+                        )
+                        result = parse_and_append_refreshed_goals(repo, refresh_text or "")
+                        if result.get("appended"):
+                            goals_refresh_count += 1
+                            eprint(f"[GOALS-REFRESH] +{result.get('p0_count', 0)} P0, +{result.get('p1_count', 0)} P1 추가됨")
+                            metrics.event("goals_refresh_ok", cycle=cycle_idx,
+                                          p0=result.get("p0_count", 0), p1=result.get("p1_count", 0),
+                                          refresh_n=goals_refresh_count)
+                            continue  # next cycle — PM will pick up new GOALS
+                        else:
+                            eprint("[GOALS-REFRESH] 새 항목 없음 — 중단")
+                    except Exception as _gr_ex:
+                        if is_quota_exception(_gr_ex):
+                            raise
+                        eprint(f"[WARN] Goals refresh failed: {_gr_ex}")
+                # Default: stop
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=project_complete")
-                logger.stop_event("Project complete — all P0 goals met.")
-                break  # Always stop on project complete, even in loop mode
+                logger.stop_event("Project complete — all goals met.")
+                break
             if reason == STOP_REASON_ALL_TASKS_DONE:
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
                 if not loop_mode:

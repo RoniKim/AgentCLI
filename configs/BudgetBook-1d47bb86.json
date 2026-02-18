@@ -186,10 +186,9 @@
   "allow_no_diff": false,
   "stop_if_no_diff": true,
   "dangerous_git_rollback": false,
-  "failover_enabled": true,
+  "failover_enabled": false,
   "failover_backends": [
-    "claudecode",
-    "codex"
+    "claudecode"
   ],
   "failover_on": [
     "quota_exhausted"
@@ -203,5 +202,7 @@
   "max_consecutive_task_failures": 3,
   "goals_enabled": true,
   "goals_auto_generate": true,
-  "goals_auto_check": true
+  "goals_auto_check": true,
+  "goals_auto_refresh": true,
+  "goals_refresh_max_per_run": 3
 }
