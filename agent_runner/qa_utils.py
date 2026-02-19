@@ -11,7 +11,7 @@ from typing import Any
 from .utils import hash_prompt
 
 
-MIN_FOLLOWUP_PROMPT_LENGTH = 150
+MIN_FOLLOWUP_PROMPT_LENGTH = 80  # Lowered from 150; Korean text is shorter than English for equivalent detail
 
 
 def normalize_followup_prompt(text: str) -> str:

@@ -214,9 +214,10 @@ GOALS_GENERATION_INSTRUCTION = (
 
 GOALS_EVALUATION_INSTRUCTION = (
     "**GOALS.md는 최우선 지시사항입니다. 반드시 아래 규칙을 따르세요:**\n\n"
-    "1. **미완료 P0 항목이 최고 우선순위입니다.** 모든 태스크는 미완료 P0 항목을 직접 구현해야 합니다.\n"
-    "2. **GOALS 외 작업 금지.** GOALS.md에 없는 버그픽스, 리팩토링, 테스트는 생성하지 마세요.\n"
-    "   예외: 빌드 실패를 유발하는 긴급 버그만 허용.\n"
+    "1. **미완료 P0 항목이 최고 우선순위입니다.** 대부분의 태스크는 미완료 P0 항목을 직접 구현해야 합니다.\n"
+    "2. **안정화 태스크 허용.** GOALS 구현 과정에서 발견된 빌드 에러, 테스트 실패, 컴파일 경고 수정은\n"
+    "   GOALS 항목과 같은 태스크에 포함하거나 별도 안정화 태스크로 생성할 수 있습니다.\n"
+    "   단, GOALS와 무관한 순수 리팩토링이나 코드 스타일 개선은 허용하지 않습니다.\n"
     "3. **P0 전부 완료 시에만 P1로 이동.** P0가 남아 있으면 P1 태스크를 생성하지 마세요.\n"
     "4. **태스크 제목에 GOALS 항목 원문을 반드시 포함하세요.**\n"
     "   예: title=\"Dashboard 데이터 최신성 표시 — 각 카드별 N분 전 갱신 타임스탬프\"\n"
@@ -225,6 +226,7 @@ GOALS_EVALUATION_INSTRUCTION = (
     "   예: prompt=\"GOALS: Dashboard 데이터 최신성 표시 — 각 카드별 N분 전 갱신 타임스탬프\\n\\n구현: ...\"\n"
     "6. GOALS.md 체크박스는 시스템이 자동 업데이트합니다. 직접 수정하지 마세요.\n"
     "7. 새로운 P0/P1 이슈를 발견하면 open_questions에 기재하세요 (태스크로 만들지 마세요).\n"
+    "8. **Backend gap 처리.** RPC/뷰 계약이 누락된 GOALS 항목은 가짜 구현 대신 warnings에 기록하세요.\n"
 )
 
 
@@ -508,18 +510,22 @@ def _goal_match_detail(goal_item: str, corpus: str) -> tuple[bool, str]:
 
     # --- Strategy 2: Korean phrase substring matching ---
     # Extract Korean phrases (2+ chars) and check substring presence
+    # Raised threshold to 80% to reduce false positives (was 60%)
     ko_phrases = re.findall(r'[가-힣]{2,}', goal_item)
     if ko_phrases:
         ko_match = sum(1 for p in ko_phrases if p in corpus)
-        if len(ko_phrases) >= 2 and ko_match >= max(2, math.ceil(len(ko_phrases) * 0.6)):
+        if len(ko_phrases) >= 3 and ko_match >= max(3, math.ceil(len(ko_phrases) * 0.8)):
             return True, "korean_phrase"
 
     # --- Strategy 3: mixed keyword matching (strict threshold) ---
+    # Raised threshold to 80% with minimum 4 keywords to prevent false auto-check.
+    # Common Korean verbs/nouns that appear across many GOALS items are noise.
     noise = {
         "the", "and", "for", "with", "from", "that", "this", "have", "has",
         "been", "are", "was", "were", "will", "can", "not", "all", "but",
         "없음", "있음", "동작", "기능", "정상", "성공", "완료", "추가",
-        "항목", "필요", "처리", "사용", "적용", "구현",
+        "항목", "필요", "처리", "사용", "적용", "구현", "수정", "표시",
+        "확인", "설정", "변경", "제거", "호출", "검증", "방지",
     }
     words = re.findall(r'[\w가-힣]+', goal_lower)
     keywords = [w for w in words if len(w) >= 2 and w not in noise]
@@ -528,8 +534,8 @@ def _goal_match_detail(goal_item: str, corpus: str) -> tuple[bool, str]:
         return False, "none"
 
     match_count = sum(1 for kw in keywords if kw in corpus_lower)
-    # Strict: 60% threshold, minimum 3
-    threshold = max(3, math.ceil(len(keywords) * 0.6))
+    # Strict: 80% threshold, minimum 4 (was 60%/3)
+    threshold = max(4, math.ceil(len(keywords) * 0.8))
 
     if match_count >= threshold:
         return True, "keyword"

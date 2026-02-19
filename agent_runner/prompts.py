@@ -107,12 +107,12 @@ PM_OUTPUT_CONTRACT_SUFFIX = (
 # regardless of custom per-project prompts.
 PM_TASK_SIZING_RULES = (
     "<pm_task_sizing_rules>\n"
-    "CRITICAL — task sizing rules (always enforced):\n"
+    "Task sizing guidelines (enforced):\n"
     "- Aim for 3-7 tasks per cycle. More than 8 is almost always over-fragmented.\n"
     "- Bundle related small fixes into ONE task (e.g., 'Fix lifecycle issues in SyncBadge, Sync, Dashboard' instead of 3 tasks).\n"
     "- A task that only changes 1-5 lines in a single file is too small — merge it with related work.\n"
-    "- Group by theme: all UI polish → 1 task, all null-safety fixes → 1 task, all test additions → 1 task.\n"
-    "- Each task should represent meaningful, reviewable work (typically 10+ lines across 1-3 files).\n"
+    "- Each task should represent meaningful, reviewable work (typically 10+ lines across 1-5 files).\n"
+    "- For chained changes (signature change + callers + tests), include ALL related files in ONE task.\n"
     "- Exception: a genuinely independent, complex single-file change (new feature, major refactor) can stand alone.\n"
     "</pm_task_sizing_rules>\n"
 )

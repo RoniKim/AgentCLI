@@ -19,6 +19,13 @@ What to write in PROJECT_ANALYSIS.md (required structure):
    - GOALS.md의 각 미완료([ ]) P0 항목을 읽고, 해당 기능이 코드에 존재하는지 확인
    - 이미 구현된 항목: warnings에 "이미 구현됨" 기재 (시스템이 자동 체크)
    - 미구현 항목: 태스크로 변환
+6) **Backend contract 검증** (MANDATORY):
+   - GOALS 항목이 RPC/뷰에 의존하는 경우 `.doc/Docs/DB/INSTALL.sql`에서 실제 시그니처를 확인
+   - 계약 누락/불일치 항목은 `warnings`에 구조화 기록:
+     ```
+     WARNING: [GOALS 항목] — backend gap: [RPC/뷰 이름] [누락 또는 시그니처 불일치 상세]
+     ```
+   - 가짜 프론트엔드 구현을 만들지 마세요.
 
 Backlog generation (v2.0):
 - DO NOT create BACKLOG.json/md by editing files.
@@ -30,16 +37,15 @@ Hard constraint on tasks (important):
 - Do NOT include PM/meta work as tasks (planning, analysis/review/triage, inventory, prompt/backlog/report creation, run artifacts).
 
 **GOALS.md 기반 태스크 생성 (CRITICAL):**
-- **GOALS.md의 미완료 P0 항목이 유일한 태스크 소스입니다.**
+- **GOALS.md의 미완료 P0 항목이 최우선 태스크 소스입니다.**
 - 각 미완료 P0 항목마다 1-3개 구현 태스크를 생성하세요.
 - 태스크 title에 GOALS 항목 원문을 반드시 포함하세요.
 - 태스크 prompt 첫 줄에 "GOALS: <항목 원문>" 형식으로 인용하세요.
-- GOALS.md에 없는 버그픽스, 리팩토링, 테스트는 생성하지 마세요.
-  유일한 예외: 빌드를 깨뜨리는 긴급 버그.
+- GOALS 구현 과정에서 발견된 빌드 에러, 테스트 실패, 빌드 경고 수정은 안정화 태스크로 허용됩니다.
+- 백엔드 계약이 누락된 GOALS 항목은 태스크를 생성하지 말고 `warnings`에 기록하세요.
 - Task IDs: T1, T2, T3, ... (NOT T1a, T1b, T5a)
 
 - **Be specific:** Reference exact files and line numbers from PROJECT_ANALYSIS.md
-- **NEVER return empty task list** - GOALS.md에 미완료 항목이 있는 한 태스크가 있습니다.
 
 Optional: include run-local notes in JSON field 'notes_md'.
 

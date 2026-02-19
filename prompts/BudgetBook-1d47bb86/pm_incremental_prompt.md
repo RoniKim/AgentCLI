@@ -36,13 +36,16 @@ Hard constraint on tasks (important):
 - Tasks marked [F] in the backlog MUST NOT be blindly recreated with the same title/description.
 
 **GOALS.md 기반 태스크 생성 (CRITICAL — 최우선):**
-- **GOALS.md의 미완료 P0 항목이 유일한 태스크 소스입니다.**
+- **GOALS.md의 미완료 P0 항목이 최우선 태스크 소스입니다.**
 - 이전 사이클에서 완료된 태스크가 GOALS 항목을 구현했는지 확인하세요.
 - 아직 미완료인 P0 항목에 대해 1-3개 구현 태스크를 생성하세요.
 - 태스크 title에 GOALS 항목 원문을 반드시 포함하세요.
 - 태스크 prompt 첫 줄에 "GOALS: <항목 원문>" 형식으로 인용하세요.
-- GOALS.md에 없는 버그픽스, 리팩토링, 테스트, 코드품질 개선은 생성하지 마세요.
-  유일한 예외: 빌드를 깨뜨리는 긴급 버그.
+- GOALS 구현 과정에서 발견된 빌드 에러, 테스트 실패, 빌드 경고 수정은 안정화 태스크로 허용됩니다.
+- 백엔드 계약이 누락된 GOALS 항목은 태스크를 생성하지 말고 `warnings`에 기록하세요:
+  ```
+  WARNING: [GOALS 항목] — backend gap: [RPC/뷰 이름] [누락 또는 시그니처 불일치 상세]
+  ```
 - P0 항목이 남아있으면 P1 태스크를 생성하지 마세요.
 - Task IDs: T1, T2, T3, ... (NOT T1a, T1b, T5a, T6a)
 
@@ -50,10 +53,10 @@ Hard constraint on tasks (important):
   NOT generic: "Improve dashboard UX"
 
 - **Priority distribution:**
-  - 미완료 P0 항목이 있는 한 100% GOALS 태스크.
+  - 미완료 P0 항목이 있는 한 GOALS 태스크 우선 + 필요 시 안정화 태스크 포함.
   - P0 전부 완료 시에만 P1 항목으로 이동.
 
-- **Empty backlog = 분석 미완료** - GOALS.md에 미완료 항목이 있는 한 태스크가 있습니다.
+- **태스크가 없는 경우:** 모든 P0이 완료되었거나, 남은 P0이 전부 backend gap으로 blocked인 경우에만 빈 태스크 리스트가 허용됩니다. 이 경우 `warnings`에 사유를 명시하세요.
 
 Optional: include run-local notes in JSON field 'notes_md'.
 
