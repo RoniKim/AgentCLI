@@ -502,8 +502,11 @@ class _CodexAppServerClient:
     """
 
     def __init__(self, codex_path: str = "codex", timeout_s: float = 10.0):
+        # Resolve bare name to full path — Windows can't execute .cmd shims
+        # via CreateProcess without the full path.
+        resolved = shutil.which(codex_path) or codex_path
         self._proc = subprocess.Popen(
-            [codex_path, "app-server", "--listen", "stdio://"],
+            [resolved, "app-server", "--listen", "stdio://"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

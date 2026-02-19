@@ -210,12 +210,12 @@ async def codex_exec(
     if full_auto:
         cmd.append("--full-auto")
 
-    # Use --last-message-file for reliable output capture as JSONL parsing fallback
+    # Use --output-last-message (-o) for reliable output capture as JSONL parsing fallback
     last_msg_file: str | None = None
     try:
         fd, last_msg_file = tempfile.mkstemp(prefix="codex_out_", suffix=".txt")
         os.close(fd)
-        cmd.extend(["--last-message-file", last_msg_file])
+        cmd.extend(["--output-last-message", last_msg_file])
     except Exception:
         last_msg_file = None
 
@@ -309,7 +309,7 @@ async def codex_exec(
             if not result.events:
                 result.final_output = stdout_text.strip()
 
-        # Fallback: read --last-message-file if JSONL parsing didn't yield output
+        # Fallback: read --output-last-message file if JSONL parsing didn't yield output
         if not result.final_output and last_msg_file:
             try:
                 lm_path = Path(last_msg_file)
