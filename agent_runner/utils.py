@@ -486,6 +486,7 @@ class CodexRateLimitWindow:
     used_percent: float
     window_minutes: int
     resets_at_unix: int
+    window_type: str = "primary"  # "primary" (5h) | "secondary" (7d)
 
     @property
     def remaining_percent(self) -> float:
@@ -638,8 +639,32 @@ def _to_int(v: Any) -> Optional[int]:
         return None
 
 
+def _parse_window_entry(
+    raw: dict[str, Any], limit_id: str, window_key: str,
+) -> Optional[CodexRateLimitWindow]:
+    """Parse a single primary/secondary window entry from codex rate-limit data."""
+    entry = raw.get(window_key) if isinstance(raw.get(window_key), dict) else {}
+    used = _to_float(entry.get("usedPercent"))
+    mins = _to_int(entry.get("windowDurationMins"))
+    reset_unix = _to_int(entry.get("resetsAt"))
+    if used is None or mins is None or reset_unix is None:
+        return None
+    lid = str(limit_id or "codex").strip() or "codex"
+    return CodexRateLimitWindow(
+        limit_id=lid,
+        used_percent=used,
+        window_minutes=mins,
+        resets_at_unix=reset_unix,
+        window_type=window_key,
+    )
+
+
 def parse_codex_rate_limit_windows(rate_limits_result: dict[str, Any]) -> dict[str, CodexRateLimitWindow]:
-    """Normalize codex app-server rate-limit response into windows keyed by limit id."""
+    """Normalize codex app-server rate-limit response into windows.
+
+    Keys are ``"{limit_id}:primary"`` and ``"{limit_id}:secondary"`` to
+    distinguish 5-hour vs 7-day windows.
+    """
     windows: dict[str, CodexRateLimitWindow] = {}
     if not isinstance(rate_limits_result, dict):
         return windows
@@ -649,36 +674,20 @@ def parse_codex_rate_limit_windows(rate_limits_result: dict[str, Any]) -> dict[s
         for limit_id, raw in by_id.items():
             if not isinstance(raw, dict):
                 continue
-            primary = raw.get("primary") if isinstance(raw.get("primary"), dict) else {}
-            used = _to_float(primary.get("usedPercent"))
-            mins = _to_int(primary.get("windowDurationMins"))
-            reset_unix = _to_int(primary.get("resetsAt"))
-            if used is None or mins is None or reset_unix is None:
-                continue
-            lid = str(limit_id or "codex").strip() or "codex"
-            windows[lid] = CodexRateLimitWindow(
-                limit_id=lid,
-                used_percent=used,
-                window_minutes=mins,
-                resets_at_unix=reset_unix,
-            )
+            for wkey in ("primary", "secondary"):
+                win = _parse_window_entry(raw, limit_id, wkey)
+                if win is not None:
+                    windows[f"{win.limit_id}:{wkey}"] = win
         if windows:
             return windows
 
     single = rate_limits_result.get("rateLimits")
     if isinstance(single, dict):
-        primary = single.get("primary") if isinstance(single.get("primary"), dict) else {}
-        used = _to_float(primary.get("usedPercent"))
-        mins = _to_int(primary.get("windowDurationMins"))
-        reset_unix = _to_int(primary.get("resetsAt"))
-        if used is not None and mins is not None and reset_unix is not None:
-            lid = str(single.get("limitId") or "codex").strip() or "codex"
-            windows[lid] = CodexRateLimitWindow(
-                limit_id=lid,
-                used_percent=used,
-                window_minutes=mins,
-                resets_at_unix=reset_unix,
-            )
+        lid = str(single.get("limitId") or "codex").strip() or "codex"
+        for wkey in ("primary", "secondary"):
+            win = _parse_window_entry(single, lid, wkey)
+            if win is not None:
+                windows[f"{win.limit_id}:{wkey}"] = win
 
     return windows
 
@@ -696,19 +705,34 @@ def seconds_until_unix_reset(resets_at_unix: Optional[int]) -> int:
 
 def check_codex_quota_utilization(
     *,
-    max_used_percent: float = 95.0,
+    five_hour_max: float = 95.0,
+    seven_day_max: float = 95.0,
     codex_path: str = "codex",
 ) -> tuple[str, dict[str, Any], Optional[int]]:
-    """Check codex app-server quota and return (action, info, resets_at_unix)."""
+    """Check codex app-server quota and return (action, info, resets_at_unix).
+
+    Mirrors :func:`check_quota_utilization` (Claude backend) behaviour:
+
+    - 7-day window exceeds *seven_day_max* → ``"stop"`` (hard limit)
+    - 5-hour window exceeds *five_hour_max* → ``"wait"`` (soft limit)
+    - Both under threshold → ``"ok"``
+    """
     if codex_path == "codex" and shutil.which("codex") is None:
         return ("skip", {}, None)
 
     try:
-        max_used = float(max_used_percent)
+        _5h = float(five_hour_max)
     except Exception:
-        max_used = 95.0
-    if max_used <= 0:
-        max_used = 95.0
+        _5h = 95.0
+    if _5h <= 0:
+        _5h = 95.0
+
+    try:
+        _7d = float(seven_day_max)
+    except Exception:
+        _7d = 95.0
+    if _7d <= 0:
+        _7d = 95.0
 
     try:
         with _CodexAppServerClient(codex_path=codex_path, timeout_s=10.0) as client:
@@ -731,13 +755,33 @@ def check_codex_quota_utilization(
             info["used_percent_by_limit_id"] = {
                 k: round(v.used_percent, 3) for k, v in windows.items()
             }
-            hottest = max(windows.values(), key=lambda w: w.used_percent)
-            info["max_used_limit_id"] = hottest.limit_id
-            info["max_used_percent"] = round(hottest.used_percent, 3)
-            info["remaining_percent"] = round(hottest.remaining_percent, 3)
 
-            if hottest.used_percent >= max_used:
-                return ("wait", info, int(hottest.resets_at_unix))
+            # Separate primary (5h) and secondary (7d) windows
+            primary_wins = [w for w in windows.values() if w.window_type == "primary"]
+            secondary_wins = [w for w in windows.values() if w.window_type == "secondary"]
+
+            hottest_5h = max(primary_wins, key=lambda w: w.used_percent) if primary_wins else None
+            hottest_7d = max(secondary_wins, key=lambda w: w.used_percent) if secondary_wins else None
+
+            if hottest_5h:
+                info["five_hour"] = round(hottest_5h.used_percent, 3)
+            if hottest_7d:
+                info["seven_day"] = round(hottest_7d.used_percent, 3)
+
+            # Legacy compat keys
+            hottest_all = max(windows.values(), key=lambda w: w.used_percent)
+            info["max_used_limit_id"] = hottest_all.limit_id
+            info["max_used_percent"] = round(hottest_all.used_percent, 3)
+            info["remaining_percent"] = round(hottest_all.remaining_percent, 3)
+
+            # 7d 초과 → stop (hard limit, Claude 백엔드와 동일)
+            if hottest_7d and hottest_7d.used_percent >= _7d:
+                return ("stop", info, int(hottest_7d.resets_at_unix))
+
+            # 5h 초과 → wait (soft limit)
+            if hottest_5h and hottest_5h.used_percent >= _5h:
+                return ("wait", info, int(hottest_5h.resets_at_unix))
+
             return ("ok", info, None)
     except Exception as exc:
         eprint(f"[WARN] check_codex_quota_utilization failed: {exc}")
