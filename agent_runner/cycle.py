@@ -2110,7 +2110,7 @@ async def main_async(args: argparse.Namespace) -> int:
             return 0, "ok", done_delta, ran_tasks
 
 
-        async def run_cycle(cycle_idx: int) -> tuple[int, str, int]:
+        async def run_cycle(cycle_idx: int) -> tuple[int, str, int, int]:
             nonlocal prev_head
             nonlocal policy_scan_summary, security_scan_summary
 

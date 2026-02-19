@@ -2515,7 +2515,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     # Run cycle (same structure as Codex)
     # ---------------------------------------------------------------------------
 
-    async def run_cycle(cycle_idx: int) -> tuple[int, str, int]:
+    async def run_cycle(cycle_idx: int) -> tuple[int, str, int, int]:
         nonlocal prev_head, policy_scan_summary, security_scan_summary
 
         if stop_path.exists():

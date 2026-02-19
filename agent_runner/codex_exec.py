@@ -160,7 +160,12 @@ def _parse_events(raw_lines: list[str]) -> tuple[list[dict[str, Any]], str, str 
 # Core async function
 # ---------------------------------------------------------------------------
 
-_PROMPT_FILE_THRESHOLD = 7000  # Windows cmd limit is 8191 chars
+_PROMPT_FILE_THRESHOLD = 7000  # Legacy threshold (unused on Windows)
+
+# On Windows, ALWAYS deliver prompts via stdin pipe.  The npm-installed
+# codex CLI is a .CMD shim that passes %* through cmd.exe, which garbles
+# Unicode / Korean text and special characters in CLI arguments.
+_ALWAYS_USE_STDIN = os.name == "nt"
 
 
 def _resolve_codex_path() -> str:
@@ -203,7 +208,10 @@ async def codex_exec(
         Extra environment variables merged on top of ``os.environ``.
     """
 
-    full_prompt = f"{instructions}\n\n{prompt}".strip() if instructions else prompt
+    # Task prompt first, instructions after — codex models treat the initial
+    # message as an actionable request.  Putting instructions (role/rules) first
+    # causes the model to enter "assistant-ready" mode instead of executing.
+    full_prompt = f"{prompt}\n\n{instructions}".strip() if instructions else prompt
 
     codex_bin = _resolve_codex_path()
 
@@ -226,8 +234,9 @@ async def codex_exec(
     except Exception:
         last_msg_file = None
 
-    # Windows command-line length limit: pipe via stdin if prompt is large
-    use_stdin = len(full_prompt) > _PROMPT_FILE_THRESHOLD
+    # Windows: always pipe via stdin to bypass .CMD shim argument garbling.
+    # Other platforms: pipe only when prompt exceeds shell arg limits.
+    use_stdin = _ALWAYS_USE_STDIN or len(full_prompt) > _PROMPT_FILE_THRESHOLD
 
     if use_stdin:
         # codex exec reads from stdin when `-` is passed as the prompt argument
