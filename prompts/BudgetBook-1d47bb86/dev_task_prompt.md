@@ -9,18 +9,21 @@ Task:
 Implementation instructions:
 {task_prompt}
 
-Files to touch (ONLY these files — do NOT edit other files):
+Files to touch (starting points — do NOT edit unrelated files):
 {files_hint}
+
+If your changes cause compilation errors in other files (call sites, consumers, Razor pages),
+you MUST fix those files too. But do NOT edit files unaffected by your changes.
 
 Selected skills (use Codex skills system; do NOT inline skill text):
 {skills_context}
 
 Execution protocol (must follow in order):
 1) Read the EXACT files listed above and their direct dependencies first.
-2) Make focused edits ONLY in files listed above (plus callers/tests if signatures change).
-3) If behavior/signature changes, update all call sites/tests in the SAME task.
-4) Self-review ONLY the files you touched — patch adjacent defects within those files only.
-5) Do NOT scan or edit unrelated files. Do NOT do broad refactors.
+2) Make focused edits starting with files listed above.
+3) If behavior/signature/type changes break other files, fix all affected call sites and consumers.
+4) Self-review touched flows for adjacent regressions (null handling, cancellation/dispose, async UI state, error/loading/empty handling).
+5) Do NOT scan or edit files unaffected by your changes. Do NOT do broad refactors.
 6) Run `git diff --stat` once after edits to ensure real changes exist.
 
 Constraints (non-negotiable):
