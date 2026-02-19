@@ -189,12 +189,14 @@
   "dangerous_git_rollback": false,
   "failover_enabled": false,
   "failover_backends": [
+    "codex",
     "claudecode"
   ],
   "failover_on": [
-    "quota_exhausted"
+    "quota_exhausted",
+    "quota_utilization"
   ],
-  "failover_max_switches": 1,
+  "failover_max_switches": 0,
   "plugins_enabled": false,
   "plugins_allowlist": [],
   "plugins_strict": true,

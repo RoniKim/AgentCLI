@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import json
 import os
+import queue
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -470,6 +474,276 @@ def seconds_until_reset(resets_at: Optional[str]) -> int:
         return 0
 
 
+class CodexAppServerError(RuntimeError):
+    """Raised when codex app-server JSON-RPC requests fail."""
+
+
+@dataclass(frozen=True)
+class CodexRateLimitWindow:
+    """Normalized codex rate-limit window."""
+
+    limit_id: str
+    used_percent: float
+    window_minutes: int
+    resets_at_unix: int
+
+    @property
+    def remaining_percent(self) -> float:
+        return max(0.0, 100.0 - float(self.used_percent))
+
+
+class _CodexAppServerClient:
+    """Minimal JSON-RPC client for ``codex app-server`` over stdio JSONL.
+
+    Not thread-safe — all public methods must be called from a single thread.
+    Use as a context manager (``with _CodexAppServerClient() as client:``)
+    or call :meth:`close` explicitly in a ``finally`` block.
+    """
+
+    def __init__(self, codex_path: str = "codex", timeout_s: float = 10.0):
+        self._proc = subprocess.Popen(
+            [codex_path, "app-server", "--listen", "stdio://"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        if self._proc.stdin is None or self._proc.stdout is None:
+            raise CodexAppServerError("Failed to start codex app-server (stdio unavailable)")
+
+        # Register with process_guard for orphan cleanup
+        try:
+            from .process_guard import register_pid
+            if self._proc.pid:
+                register_pid(self._proc.pid)
+        except Exception:
+            pass
+
+        self._queue: "queue.Queue[dict[str, Any]]" = queue.Queue()
+        self._next_id = 1  # monotonic, single-thread only
+        self._reader = threading.Thread(
+            target=self._reader_loop,
+            daemon=True,
+            name="codex-app-server-reader",
+        )
+        self._reader.start()
+
+        self._initialize(timeout_s=timeout_s)
+
+    def __enter__(self) -> "_CodexAppServerClient":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=2)
+            except Exception:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+
+    def _reader_loop(self) -> None:
+        assert self._proc.stdout is not None
+        for line in self._proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(msg, dict):
+                self._queue.put(msg)
+
+    def _send(self, payload: dict[str, Any]) -> None:
+        if self._proc.stdin is None:
+            raise CodexAppServerError("codex app-server stdin closed")
+        try:
+            self._proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            self._proc.stdin.flush()
+        except Exception as exc:
+            raise CodexAppServerError(f"Failed to write to codex app-server: {exc}") from exc
+
+    def _rpc(self, method: str, *, params: Optional[dict[str, Any]] = None, timeout_s: float = 10.0) -> dict[str, Any]:
+        req_id = self._next_id
+        self._next_id += 1
+
+        payload: dict[str, Any] = {"method": method, "id": req_id}
+        if params is not None:
+            payload["params"] = params
+        self._send(payload)
+
+        deadline = time.monotonic() + timeout_s
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                msg = self._queue.get(timeout=remaining)
+            except queue.Empty:
+                break
+
+            if msg.get("id") != req_id:
+                continue
+            if msg.get("error"):
+                raise CodexAppServerError(f"{method} failed: {msg.get('error')}")
+
+            result = msg.get("result")
+            if isinstance(result, dict):
+                return result
+            return {}
+
+        raise CodexAppServerError(f"Timeout waiting for response: {method}")
+
+    def _initialize(self, *, timeout_s: float = 10.0) -> None:
+        self._rpc(
+            "initialize",
+            params={
+                "clientInfo": {
+                    "name": "agent_runner",
+                    "title": "AgentCLI",
+                    "version": "0.1.0",
+                }
+            },
+            timeout_s=timeout_s,
+        )
+        self._send({"method": "initialized", "params": {}})
+
+    def account_read(self, *, refresh_token: bool = False) -> dict[str, Any]:
+        return self._rpc("account/read", params={"refreshToken": bool(refresh_token)})
+
+    def rate_limits_read(self) -> dict[str, Any]:
+        return self._rpc("account/rateLimits/read")
+
+
+def _to_float(v: Any) -> Optional[float]:
+    try:
+        return float(v)
+    except Exception:
+        return None
+
+
+def _to_int(v: Any) -> Optional[int]:
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+
+def parse_codex_rate_limit_windows(rate_limits_result: dict[str, Any]) -> dict[str, CodexRateLimitWindow]:
+    """Normalize codex app-server rate-limit response into windows keyed by limit id."""
+    windows: dict[str, CodexRateLimitWindow] = {}
+    if not isinstance(rate_limits_result, dict):
+        return windows
+
+    by_id = rate_limits_result.get("rateLimitsByLimitId")
+    if isinstance(by_id, dict) and by_id:
+        for limit_id, raw in by_id.items():
+            if not isinstance(raw, dict):
+                continue
+            primary = raw.get("primary") if isinstance(raw.get("primary"), dict) else {}
+            used = _to_float(primary.get("usedPercent"))
+            mins = _to_int(primary.get("windowDurationMins"))
+            reset_unix = _to_int(primary.get("resetsAt"))
+            if used is None or mins is None or reset_unix is None:
+                continue
+            lid = str(limit_id or "codex").strip() or "codex"
+            windows[lid] = CodexRateLimitWindow(
+                limit_id=lid,
+                used_percent=used,
+                window_minutes=mins,
+                resets_at_unix=reset_unix,
+            )
+        if windows:
+            return windows
+
+    single = rate_limits_result.get("rateLimits")
+    if isinstance(single, dict):
+        primary = single.get("primary") if isinstance(single.get("primary"), dict) else {}
+        used = _to_float(primary.get("usedPercent"))
+        mins = _to_int(primary.get("windowDurationMins"))
+        reset_unix = _to_int(primary.get("resetsAt"))
+        if used is not None and mins is not None and reset_unix is not None:
+            lid = str(single.get("limitId") or "codex").strip() or "codex"
+            windows[lid] = CodexRateLimitWindow(
+                limit_id=lid,
+                used_percent=used,
+                window_minutes=mins,
+                resets_at_unix=reset_unix,
+            )
+
+    return windows
+
+
+def seconds_until_unix_reset(resets_at_unix: Optional[int]) -> int:
+    """Calculate seconds until a Unix reset timestamp."""
+    if resets_at_unix is None:
+        return 0
+    try:
+        diff = int(resets_at_unix) - int(time.time())
+        return max(0, diff + 60)  # +60s safety buffer
+    except Exception:
+        return 0
+
+
+def check_codex_quota_utilization(
+    *,
+    max_used_percent: float = 95.0,
+    codex_path: str = "codex",
+) -> tuple[str, dict[str, Any], Optional[int]]:
+    """Check codex app-server quota and return (action, info, resets_at_unix)."""
+    if codex_path == "codex" and shutil.which("codex") is None:
+        return ("skip", {}, None)
+
+    try:
+        max_used = float(max_used_percent)
+    except Exception:
+        max_used = 95.0
+    if max_used <= 0:
+        max_used = 95.0
+
+    try:
+        with _CodexAppServerClient(codex_path=codex_path, timeout_s=10.0) as client:
+            account = client.account_read(refresh_token=False)
+            acct = account.get("account") if isinstance(account, dict) and isinstance(account.get("account"), dict) else {}
+
+            account_type = str(acct.get("type") or account.get("type") or "").strip()
+            plan_type = str(acct.get("planType") or account.get("planType") or "").strip()
+
+            limits = client.rate_limits_read()
+            windows = parse_codex_rate_limit_windows(limits)
+
+            info: dict[str, Any] = {
+                "account_type": account_type,
+                "plan_type": plan_type,
+            }
+            if not windows:
+                return ("skip", info, None)
+
+            info["used_percent_by_limit_id"] = {
+                k: round(v.used_percent, 3) for k, v in windows.items()
+            }
+            hottest = max(windows.values(), key=lambda w: w.used_percent)
+            info["max_used_limit_id"] = hottest.limit_id
+            info["max_used_percent"] = round(hottest.used_percent, 3)
+            info["remaining_percent"] = round(hottest.remaining_percent, 3)
+
+            if hottest.used_percent >= max_used:
+                return ("wait", info, int(hottest.resets_at_unix))
+            return ("ok", info, None)
+    except Exception as exc:
+        eprint(f"[WARN] check_codex_quota_utilization failed: {exc}")
+        return ("skip", {}, None)
+
+
 def write_heartbeat(run_dir: Path) -> None:
     """Write a HEARTBEAT file for external monitoring."""
     try:
@@ -505,13 +779,37 @@ def hash_prompt(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:10]
 
 
+# All known stop reason constant values for direct STOP-file matching
+_KNOWN_STOP_REASONS: frozenset[str] = frozenset({
+    STOP_REASON_QUOTA,
+    STOP_REASON_QUOTA_UTILIZATION,
+    STOP_REASON_STOP_FILE,
+    STOP_REASON_ALL_TASKS_DONE,
+    STOP_REASON_PROJECT_COMPLETE,
+    STOP_REASON_ALL_TASKS_ATTEMPTED,
+    STOP_REASON_PREPARED_ONLY,
+    STOP_REASON_NO_TASKS,
+    STOP_REASON_PM_REFRESH_NO_BACKLOG,
+    STOP_REASON_IDLE_EXIT,
+    STOP_REASON_OK,
+})
+
+
 def detect_stop_reason(stop_paths: Sequence[Path]) -> str:
-    """Detect stop reason from one of the provided stop files."""
+    """Detect stop reason from one of the provided stop files.
+
+    If the file content exactly matches a known stop reason constant,
+    return that constant directly.  Otherwise fall back to quota-text
+    heuristic or generic ``STOP_REASON_STOP_FILE``.
+    """
     for path in stop_paths:
         try:
             if not path.exists():
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
+            normalized = text.strip().lower()
+            if normalized in _KNOWN_STOP_REASONS:
+                return normalized
             if _has_quota_text(text):
                 return STOP_REASON_QUOTA
             return STOP_REASON_STOP_FILE

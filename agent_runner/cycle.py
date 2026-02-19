@@ -85,11 +85,12 @@ from .utils import (
     choose_stop_reason,
     detect_stop_reason,
     write_heartbeat,
-    check_quota_utilization,
-    seconds_until_reset,
+    check_codex_quota_utilization,
+    seconds_until_unix_reset,
     severity_at_or_above,
     budget_exceeded,
     is_unsafe_path,
+    STOP_REASON_QUOTA_UTILIZATION,
     STOP_REASON_QUOTA,
     STOP_REASON_STOP_FILE,
     STOP_REASON_ALL_TASKS_DONE,
@@ -2336,7 +2337,14 @@ async def main_async(args: argparse.Namespace) -> int:
         consecutive_failures = 0
         max_consecutive_failed_cycles = int(getattr(args, "max_consecutive_failed_cycles", 3) or 3)
         budget_reset_per_cycle = bool(getattr(args, "budget_reset_per_cycle", True))
+        quota_check_enabled = bool(getattr(args, "quota_check_enabled", True))
         quota_wait_for_reset = bool(getattr(args, "quota_wait_for_reset", True))
+        try:
+            _q5 = float(getattr(args, "quota_five_hour_max_utilization", 95) or 95)
+            _q7 = float(getattr(args, "quota_seven_day_max_utilization", 95) or 95)
+            codex_quota_max_used = max(1.0, min(_q5, _q7))
+        except Exception:
+            codex_quota_max_used = 95.0
         loop_sleep_seconds = int(getattr(args, "loop_sleep_seconds", 60) or 60)
         if args.loop and (not args.loop_max_cycles or args.loop_max_cycles <= 0):
             eprint("[WARN] loop_max_cycles not set; defaulting to 1000 to prevent infinite loops.")
@@ -2388,6 +2396,90 @@ async def main_async(args: argparse.Namespace) -> int:
                 check_and_remove_stale_git_lock(repo)
                 write_heartbeat(run_dir)
 
+                # --- Pre-cycle quota utilization check (codex app-server) ---
+                if quota_check_enabled:
+                    q_action, q_info, q_reset_unix = check_codex_quota_utilization(
+                        max_used_percent=codex_quota_max_used,
+                    )
+                    q_used_raw = q_info.get("max_used_percent", "N/A")
+                    q_limit = str(q_info.get("max_used_limit_id", "") or "")
+                    q_account = str(q_info.get("account_type", "") or "")
+                    q_plan = str(q_info.get("plan_type", "") or "")
+                    try:
+                        q_used_num = float(q_used_raw)
+                    except Exception:
+                        q_used_num = -1.0
+
+                    if q_action == "wait":
+                        wait_sec = seconds_until_unix_reset(q_reset_unix)
+                        if wait_sec <= 0:
+                            wait_sec = 30  # minimum wait even if reset time already passed
+                        if quota_wait_for_reset:
+                            wait_min = wait_sec / 60
+                            logger.info(
+                                f"[QUOTA-WAIT] Codex quota {q_used_raw}% >= {codex_quota_max_used}% "
+                                f"(limit={q_limit or 'unknown'}) — waiting {wait_min:.1f}min for reset"
+                            )
+                            logger.quota_event(
+                                "wait",
+                                five_hour=q_used_raw,
+                                wait_seconds=wait_sec,
+                                backend="codex",
+                                limit_id=q_limit,
+                                account_type=q_account,
+                                plan_type=q_plan,
+                                resets_at_unix=q_reset_unix,
+                            )
+                            metrics.event(
+                                "quota_utilization_wait",
+                                cycle=cycle_idx,
+                                window="codex",
+                                used_percent=q_used_num,
+                                threshold=codex_quota_max_used,
+                                limit_id=q_limit,
+                                wait_seconds=wait_sec,
+                                resets_at_unix=int(q_reset_unix or 0),
+                            )
+                            await asyncio.sleep(wait_sec)
+                            logger.info(f"[QUOTA-WAIT] Resumed after {wait_min:.1f}min wait — continuing cycle {cycle_idx}")
+                            logger.quota_event("resumed", backend="codex", limit_id=q_limit)
+                        else:
+                            # quota_wait_for_reset=false — stop immediately
+                            append_cycle_summary(
+                                f"{now_iso()} cycle={cycle_idx} stop=quota_utilization_codex "
+                                f"used={q_used_raw}% limit={q_limit or 'unknown'}"
+                            )
+                            logger.stop_event(
+                                f"Codex quota {q_used_raw}% >= {codex_quota_max_used}% — "
+                                "quota_wait_for_reset disabled, stopping."
+                            )
+                            metrics.event(
+                                "quota_utilization_stop",
+                                cycle=cycle_idx,
+                                window="codex",
+                                used_percent=q_used_num,
+                                threshold=codex_quota_max_used,
+                                limit_id=q_limit,
+                                resets_at_unix=int(q_reset_unix or 0),
+                            )
+                            last_reason = STOP_REASON_QUOTA_UTILIZATION
+                            try:
+                                stop_path.write_text(STOP_REASON_QUOTA_UTILIZATION, encoding="utf-8", errors="replace")
+                            except Exception:
+                                pass
+                            break
+                    elif q_action == "ok":
+                        logger.quota_event(
+                            "ok",
+                            five_hour=q_used_raw,
+                            backend="codex",
+                            limit_id=q_limit,
+                            account_type=q_account,
+                            plan_type=q_plan,
+                        )
+                    else:
+                        logger.quota_event("skip", backend="codex")
+
                 # --- Per-cycle budget reset ---
                 if budget_reset_per_cycle and cycle_idx > 0:
                     prev_budget = {
@@ -2424,23 +2516,36 @@ async def main_async(args: argparse.Namespace) -> int:
                     if quota_wait_for_reset:
                         # Mid-cycle quota exhaustion: wait for reset then continue
                         wait_sec = 0
+                        q_limit = ""
                         try:
-                            _q_action, _q_info, _q_resets = check_quota_utilization(
-                                five_hour_max=float(getattr(args, "quota_five_hour_max_utilization", 95) or 95),
-                                seven_day_max=float(getattr(args, "quota_seven_day_max_utilization", 95) or 95),
+                            _q_action, _q_info, _q_reset_unix = check_codex_quota_utilization(
+                                max_used_percent=codex_quota_max_used,
                             )
-                            if _q_resets:
-                                wait_sec = seconds_until_reset(_q_resets)
+                            q_limit = str(_q_info.get("max_used_limit_id", "") or "")
+                            if _q_reset_unix is not None:
+                                wait_sec = seconds_until_unix_reset(_q_reset_unix)
                         except Exception:
                             pass
                         if wait_sec <= 0:
                             # Fallback: 5 minutes minimum wait
                             wait_sec = max(300, loop_sleep_seconds * 5)
                         wait_min = wait_sec / 60
-                        append_cycle_summary(f"{now_iso()} cycle={cycle_idx} quota_exhausted_wait wait_min={wait_min:.1f}")
-                        eprint(f"[QUOTA-WAIT] quota_exhausted — waiting {wait_min:.1f}min for reset (quota_wait_for_reset=true)")
-                        logger.quota_event("exhausted_wait", wait_seconds=wait_sec)
-                        metrics.event("quota_exhausted_wait", cycle=cycle_idx, wait_seconds=wait_sec)
+                        append_cycle_summary(
+                            f"{now_iso()} cycle={cycle_idx} quota_exhausted_wait wait_min={wait_min:.1f} "
+                            f"limit={q_limit or 'unknown'}"
+                        )
+                        eprint(
+                            f"[QUOTA-WAIT] quota_exhausted — waiting {wait_min:.1f}min for reset "
+                            f"(limit={q_limit or 'unknown'}, quota_wait_for_reset=true)"
+                        )
+                        logger.quota_event("exhausted_wait", wait_seconds=wait_sec, backend="codex", limit_id=q_limit)
+                        metrics.event(
+                            "quota_exhausted_wait",
+                            cycle=cycle_idx,
+                            wait_seconds=wait_sec,
+                            window="codex",
+                            limit_id=q_limit,
+                        )
                         if stop_path.exists():
                             try:
                                 stop_path.unlink()
@@ -2448,7 +2553,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 pass
                         await asyncio.sleep(wait_sec)
                         eprint(f"[QUOTA-WAIT] Resumed after {wait_min:.1f}min wait — continuing next cycle")
-                        logger.quota_event("exhausted_resumed")
+                        logger.quota_event("exhausted_resumed", backend="codex", limit_id=q_limit)
                         consecutive_failures = 0
                         continue
                     break

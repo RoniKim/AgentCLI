@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import traceback
 from pathlib import Path
 
@@ -43,6 +44,32 @@ async def _run_single_backend(args: argparse.Namespace, repo: Path, backend: str
     return await runner.run(args, repo)
 
 
+def _detect_backend_stop_reason(run_dir: Path, stop_paths: list[Path]) -> str:
+    """Detect stop reason from STOP file first, then run_summary.json final reason."""
+    reason = ""
+    try:
+        reason = detect_stop_reason(stop_paths)
+    except Exception:
+        reason = ""
+    if reason:
+        return reason
+
+    summary_path = run_dir / "run_summary.json"
+    try:
+        if not summary_path.exists():
+            return ""
+        raw = summary_path.read_text(encoding="utf-8", errors="replace")
+        payload = json.loads(raw) if raw.strip() else {}
+        if not isinstance(payload, dict):
+            return ""
+        final = payload.get("final")
+        if not isinstance(final, dict):
+            return ""
+        return str(final.get("reason") or "").strip().lower()
+    except Exception:
+        return ""
+
+
 async def _main_async_dispatch(args: argparse.Namespace) -> int:
     repo = Path(args.repo).expanduser().resolve()
     if not repo.exists():
@@ -58,7 +85,11 @@ async def _main_async_dispatch(args: argparse.Namespace) -> int:
     # Ensure primary backend runs first, then the rest in failover order
     backends = [base_backend] + [b for b in raw_backends if b != base_backend]
     failover_on = set(str(x).strip().lower() for x in (getattr(args, "failover_on", []) or []))
-    max_switches = int(getattr(args, "failover_max_switches", 1) or 1)
+    raw_max_switches = getattr(args, "failover_max_switches", 1)
+    try:
+        max_switches = int(raw_max_switches if raw_max_switches is not None else 1)
+    except Exception:
+        max_switches = 1
 
     preflight_results = run_preflight(args, backends)
     available = [r.backend for r in preflight_results if r.ok]
@@ -72,31 +103,44 @@ async def _main_async_dispatch(args: argparse.Namespace) -> int:
     run_dir = _ensure_run_dir(repo, args)
     args.run_dir = str(run_dir)
 
+    _MAX_ABSOLUTE_SWITCHES = 100  # safety cap even for unlimited (max_switches=0)
     switch_count = 0
     stop_file = str(getattr(args, "stop_file", "STOP") or "STOP")
     stop_paths = [run_dir / stop_file, run_dir / "STOP"]
+    if len(available) == 1:
+        return await _run_single_backend(args, repo, available[0])
 
-    for idx, backend in enumerate(available):
+    idx = 0
+    while True:
+        backend = available[idx]
         rc = await _run_single_backend(args, repo, backend)
-        reason = detect_stop_reason(stop_paths)
-        if (
-            reason
-            and reason in failover_on
-            and switch_count < max_switches
-            and idx < (len(available) - 1)
-        ):
-            switch_count += 1
-            for path in stop_paths:
-                try:
-                    if path.exists():
-                        path.unlink()
-                except Exception:
-                    pass
-            eprint(f"[FAILOVER] Switching backend after {reason}: {backend} -> {available[idx + 1]}")
-            continue
-        return rc
+        reason = _detect_backend_stop_reason(run_dir, stop_paths)
 
-    return 1
+        if max_switches <= 0:
+            has_switch_budget = switch_count < _MAX_ABSOLUTE_SWITCHES
+        else:
+            has_switch_budget = switch_count < max_switches
+        if not (reason and reason in failover_on and has_switch_budget):
+            return rc
+
+        next_idx = (idx + 1) % len(available)
+        if next_idx == idx:
+            return rc
+
+        switch_count += 1
+        for path in stop_paths:
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
+
+        limit_txt = "unlimited" if max_switches <= 0 else str(max_switches)
+        eprint(
+            f"[FAILOVER] Switching backend after {reason}: "
+            f"{backend} -> {available[next_idx]} (switch {switch_count}/{limit_txt})"
+        )
+        idx = next_idx
 
 
 def _install_signal_handlers(args: argparse.Namespace) -> None:

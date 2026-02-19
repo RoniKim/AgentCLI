@@ -262,9 +262,9 @@ DEFAULTS: Dict[str, Any] = {
 
     # Failover (backend chain)
     "failover_enabled": False,
-    "failover_backends": ["codex"],
-    "failover_on": ["quota_exhausted"],
-    "failover_max_switches": 1,
+    "failover_backends": ["codex", "claudecode"],
+    "failover_on": ["quota_exhausted", "quota_utilization"],
+    "failover_max_switches": 0,  # 0 means unlimited switches
 
     # Plugin stages
     "plugins_enabled": False,
@@ -379,7 +379,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--failover", dest="failover_enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable backend failover")
     p.add_argument("--failover-backends", default=None, help="Backend chain for failover (comma-separated)")
     p.add_argument("--failover-on", action="append", default=None, help="Failover triggers (repeatable)")
-    p.add_argument("--failover-max-switches", type=int, default=None, help="Max backend switches per run")
+    p.add_argument("--failover-max-switches", type=int, default=None, help="Max backend switches per run (0 = unlimited)")
 
     # Plugin stages
     p.add_argument("--plugins-enabled", action=argparse.BooleanOptionalAction, default=None, help="Enable plugin stage loading")
@@ -762,10 +762,13 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
     elif isinstance(fo, str):
         eff["failover_on"] = [fo]
 
+    raw_failover_max_switches = eff.get("failover_max_switches", None)
+    if raw_failover_max_switches is None:
+        raw_failover_max_switches = defaults.get("failover_max_switches", 0)
     try:
-        eff["failover_max_switches"] = int(eff.get("failover_max_switches") or defaults.get("failover_max_switches", 1))
+        eff["failover_max_switches"] = int(raw_failover_max_switches)
     except Exception:
-        eff["failover_max_switches"] = int(defaults.get("failover_max_switches", 1))
+        eff["failover_max_switches"] = int(defaults.get("failover_max_switches", 0))
 
 
     # normalize dev_escalate_on (repeatable CLI flag)
