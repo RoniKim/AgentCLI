@@ -1698,6 +1698,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     metrics.event("escalate_attempt", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
 
                 if attempt > 0 and (tb or cp):
+                    # Clear stale build error — branch reset reverts all changes,
+                    # so previous build errors are no longer relevant and would
+                    # confuse the escalation model with errors from wrong files.
+                    _prev_build_error = ""
                     if tb:
                         try:
                             reset_task_branch(repo, tb)

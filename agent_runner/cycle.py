@@ -282,6 +282,7 @@ async def main_async(args: argparse.Namespace) -> int:
         )
 
     autopilot = bool(args.autopilot)
+    codex_reasoning_effort = str(getattr(args, "codex_reasoning_effort", "") or "").strip().lower()
 
     # Prompt store
     prompts_dir = (repo / args.prompts_dir).resolve() if not Path(args.prompts_dir).is_absolute() else Path(args.prompts_dir).resolve()
@@ -460,6 +461,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     prompt,
                     instructions=reporter_instructions,
                     model=getattr(args, "reporter_model", None) or args.pm_model,
+                    reasoning_effort=codex_reasoning_effort,
                     cwd=repo,
                     timeout_seconds=300,
                 )
@@ -520,6 +522,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         prompt,
                         instructions=instructions,
                         model=model,
+                        reasoning_effort=codex_reasoning_effort,
                         full_auto=full_auto,
                         cwd=repo,
                         timeout_seconds=effective_timeout,
@@ -1093,6 +1096,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     qa_prompt,
                     instructions=qa_instructions,
                     model=args.qa_model,
+                    reasoning_effort=codex_reasoning_effort,
                     cwd=repo,
                     timeout_seconds=600,
                 )
@@ -1477,6 +1481,10 @@ async def main_async(args: argparse.Namespace) -> int:
 
                     # Restore baseline before retries
                     if attempt > 0 and (tb or cp):
+                        # Clear stale build error — branch reset reverts all changes,
+                        # so previous build errors are no longer relevant and would
+                        # confuse the escalation model with errors from wrong files.
+                        _prev_build_error = ""
                         if tb:
                             try:
                                 reset_task_branch(repo, tb)
@@ -2365,6 +2373,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 _gr_res = await codex_exec(
                     refresh_prompt,
                     model=str(getattr(args, "pm_model", "gpt-5.1-codex-mini") or "gpt-5.1-codex-mini"),
+                    reasoning_effort=codex_reasoning_effort,
                     cwd=repo,
                     timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
                 )

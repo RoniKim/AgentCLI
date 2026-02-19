@@ -136,6 +136,7 @@
     "no_commits"
   ],
   "qa_model": "gpt-5.3-codex",
+  "codex_reasoning_effort": "xhigh",
   "qa_always": true,
   "qa_to_backlog": true,
   "max_qa_followups": 8,

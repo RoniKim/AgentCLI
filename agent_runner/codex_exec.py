@@ -174,6 +174,7 @@ async def codex_exec(
     *,
     instructions: str = "",
     model: str = "gpt-5.1-codex-mini",
+    reasoning_effort: str = "",
     full_auto: bool = False,
     cwd: Path | None = None,
     timeout_seconds: int = 900,
@@ -189,6 +190,9 @@ async def codex_exec(
         System instructions prepended to the prompt.
     model:
         Model identifier passed to ``codex exec -m``.
+    reasoning_effort:
+        Optional codex reasoning effort override. When provided, passed as
+        ``-c model_reasoning_effort="<value>"``.
     full_auto:
         Pass ``--full-auto`` (unattended write/exec approval).
     cwd:
@@ -207,6 +211,9 @@ async def codex_exec(
     cmd: list[str] = [codex_bin, "exec", "--json"]
     if model:
         cmd.extend(["-m", model])
+    _effort = str(reasoning_effort or "").strip().lower()
+    if _effort:
+        cmd.extend(["-c", f'model_reasoning_effort="{_effort}"'])
     if full_auto:
         cmd.append("--full-auto")
 

@@ -32,6 +32,26 @@ def _normalize_execution_backend(v: Any) -> str:
     return s or "codex"
 
 
+def _normalize_codex_reasoning_effort(v: Any) -> str:
+    s = str(v or "").strip().lower()
+    if not s:
+        return ""
+    alias = {
+        "none": "",
+        "off": "",
+        "default": "",
+        "auto": "",
+        "max": "xhigh",
+        "highest": "xhigh",
+        "x-high": "xhigh",
+        "very-high": "xhigh",
+        "very_high": "xhigh",
+    }
+    s = alias.get(s, s)
+    allowed = {"minimal", "low", "medium", "high", "xhigh", ""}
+    return s if s in allowed else ""
+
+
 
 # ---- Defaults shown in /config ----
 # NOTE: cycle.py references many args attributes directly (args.foo). Those MUST exist to avoid AttributeError,
@@ -177,6 +197,9 @@ DEFAULTS: Dict[str, Any] = {
     "pm_model": "gpt-5.1-codex-mini",
     "dev_model": "gpt-5.1-codex-mini",
     "qa_model": "gpt-5.1-codex-mini",
+    # Optional codex exec override: -c model_reasoning_effort="<value>"
+    # Empty = use Codex CLI/global config default.
+    "codex_reasoning_effort": "",
     "qa_always": True,
     "qa_to_backlog": False,
     "max_qa_followups": 5,
@@ -402,6 +425,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pm-model", default=None)
     p.add_argument("--dev-model", default=None)
     p.add_argument("--qa-model", default=None)
+    p.add_argument(
+        "--codex-reasoning-effort",
+        default=None,
+        choices=["minimal", "low", "medium", "high", "xhigh"],
+        help="Codex reasoning effort override (maps to model_reasoning_effort).",
+    )
     p.add_argument("--qa-to-backlog", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--max-qa-followups", type=int, default=None)
     p.add_argument("--reporter-model", default=None)
@@ -748,6 +777,9 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
 
     # normalize execution_backend
     eff["execution_backend"] = _normalize_execution_backend(eff.get("execution_backend", defaults.get("execution_backend", "codex")))
+    eff["codex_reasoning_effort"] = _normalize_codex_reasoning_effort(
+        eff.get("codex_reasoning_effort", defaults.get("codex_reasoning_effort", ""))
+    )
 
     # normalize failover lists
     fb = eff.get("failover_backends")
