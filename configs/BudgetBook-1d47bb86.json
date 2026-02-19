@@ -5,7 +5,7 @@
   "run_dir": "",
   "resume_latest": true,
   "env_file": "",
-  "execution_backend": "claudecode",
+  "execution_backend": "codex",
   "claudecode_model": "sonnet",
   "claudecode_permission_mode": "acceptEdits",
   "claudecode_max_turns": 32,
@@ -123,19 +123,19 @@
     "test"
   ],
   "build_timeout_seconds": 1800,
-  "pm_model": "gpt-5.2",
+  "pm_model": "gpt-5.3-codex",
   "dev_auto_escalate": true,
   "dev_max_escalations": 1,
-  "dev_model": "gpt-5.1-codex-mini",
-  "dev_model_tier1": "gpt-5.1-codex-mini",
-  "dev_model_tier2": "gpt-5.2-codex",
+  "dev_model": "gpt-5.3-codex-spark",
+  "dev_model_tier1": "gpt-5.3-codex-spark",
+  "dev_model_tier2": "gpt-5.3-codex",
   "dev_escalate_on": [
     "build_failed",
     "test_failed",
     "no_diff",
     "no_commits"
   ],
-  "qa_model": "gpt-5-mini",
+  "qa_model": "gpt-5.3-codex",
   "qa_always": true,
   "qa_to_backlog": true,
   "max_qa_followups": 3,
@@ -187,7 +187,7 @@
   "allow_no_diff": false,
   "stop_if_no_diff": true,
   "dangerous_git_rollback": false,
-  "failover_enabled": false,
+  "failover_enabled": true,
   "failover_backends": [
     "codex",
     "claudecode"
