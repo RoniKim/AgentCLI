@@ -391,6 +391,7 @@ def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_overr
         "include_partial_messages": bool(cfg.include_partial_messages),
         "fork_session": bool(cfg.fork_session),
         "max_thinking_tokens": cfg.max_thinking_tokens,
+        "max_buffer_size": 10 * 1024 * 1024,  # 10MB — prevent buffer overflow on large responses
     }
     # Apply SDK extensions (MCP tools, hooks, can_use_tool, subagents)
     from .claude_extensions import apply_extensions, _MCP_TOOL_NAMES
