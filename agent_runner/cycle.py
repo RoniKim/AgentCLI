@@ -155,6 +155,7 @@ from .pipeline.shared_runtime import (
     build_qa_skills_context,
     compute_dev_model_tiers,
     collect_scan_with_config,
+    detect_and_clear_recycled_ids,
     ensure_backlog_artifacts,
     load_backlog_tasks,
     merge_pm_tasks_with_existing_pending,
@@ -704,7 +705,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 skills_cfg=skills_cfg,
             )
 
-        def _load_backlog_context_for_pm() -> tuple[str, list[TaskItem], set[str]]:
+        def _load_backlog_context_for_pm() -> tuple[str, list[TaskItem], set[str], set[str]]:
             return load_backlog_context_for_pm(
                 run_dir / "BACKLOG.json",
                 run_dir / "BACKLOG.md",
@@ -823,12 +824,14 @@ async def main_async(args: argparse.Namespace) -> int:
                         notes_md=pm_out.notes_md,
                         dump_pretty_fn=dump_pretty,
                     )
-                    _current_backlog_block, existing_tasks, done_ids = _load_backlog_context_for_pm()
+                    _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
+                    _pre_pm_tasks = list(existing_tasks)  # recycled ID 비교용 스냅샷
 
                     merged_tasks = merge_pm_tasks_with_existing_pending(
                         pm_tasks=[t.model_dump() for t in (pm_out.tasks or [])],
                         existing_tasks=existing_tasks,
                         done_ids=done_ids,
+                        failed_ids=failed_ids,
                     )
 
                     if merged_tasks:
@@ -858,6 +861,20 @@ async def main_async(args: argparse.Namespace) -> int:
                             except Exception as _qa_merge_ex:
                                 eprint(f"[WARN] QA followup merge during PM bootstrap failed: {_qa_merge_ex}")
                             write_backlog_files(run_dir, merged_tasks)
+                            # Recycled ID 감지: PM이 기존 done 태스크 ID를 새 내용으로 재사용했는지 확인
+                            try:
+                                _new_tasks = load_tasks()
+                                _st = load_state(run_dir / "STATE.json")
+                                _ds = set(_st.get("done", []))
+                                if _ds & {t.id for t in _new_tasks}:
+                                    detect_and_clear_recycled_ids(
+                                        prev_tasks=_pre_pm_tasks, new_tasks=_new_tasks,
+                                        done_set=_ds, state=_st, state_path=run_dir / "STATE.json",
+                                        save_state_fn=save_state,
+                                        on_changed_fn=lambda ids: eprint(f"[RECYCLE] Cleared {len(ids)} recycled task IDs with new content: {sorted(ids)}"),
+                                    )
+                            except Exception:
+                                pass
 
                     last_pm_fp = repo_fp or last_pm_fp
                     pm_fp_path.write_text(
@@ -884,7 +901,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 continue
                     hint_block = "\n".join(hint_lines) or "(none)"
 
-                    current_backlog_block, _, _ = _load_backlog_context_for_pm()
+                    current_backlog_block, _, _, _ = _load_backlog_context_for_pm()
                     failed_tasks_block = _build_failed_tasks_block()
 
                     # Collect build warnings from latest build log
@@ -951,12 +968,14 @@ async def main_async(args: argparse.Namespace) -> int:
                         notes_md=pm_out.notes_md,
                         dump_pretty_fn=dump_pretty,
                     )
-                    _current_backlog_block, existing_tasks, done_ids = _load_backlog_context_for_pm()
+                    _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
+                    _pre_pm_tasks_inc = list(existing_tasks)
 
                     merged_tasks = merge_pm_tasks_with_existing_pending(
                         pm_tasks=[t.model_dump() for t in (pm_out.tasks or [])],
                         existing_tasks=existing_tasks,
                         done_ids=done_ids,
+                        failed_ids=failed_ids,
                     )
 
                     if merged_tasks:
@@ -964,6 +983,20 @@ async def main_async(args: argparse.Namespace) -> int:
                         merged_tasks = _validate_skill_ids(merged_tasks)
                         if merged_tasks:
                             write_backlog_files(run_dir, merged_tasks)
+                            # Recycled ID 감지
+                            try:
+                                _new_tasks = load_tasks()
+                                _st = load_state(run_dir / "STATE.json")
+                                _ds = set(_st.get("done", []))
+                                if _ds & {t.id for t in _new_tasks}:
+                                    detect_and_clear_recycled_ids(
+                                        prev_tasks=_pre_pm_tasks_inc, new_tasks=_new_tasks,
+                                        done_set=_ds, state=_st, state_path=run_dir / "STATE.json",
+                                        save_state_fn=save_state,
+                                        on_changed_fn=lambda ids: eprint(f"[RECYCLE] Cleared {len(ids)} recycled task IDs with new content: {sorted(ids)}"),
+                                    )
+                            except Exception:
+                                pass
 
                     last_pm_fp = repo_fp or last_pm_fp
                     pm_fp_path.write_text(
@@ -2169,7 +2202,37 @@ async def main_async(args: argparse.Namespace) -> int:
                         wait_sec = seconds_until_unix_reset(q_reset_unix)
                         if wait_sec <= 0:
                             wait_sec = 30  # minimum wait even if reset time already passed
-                        if quota_wait_for_reset:
+                        # Failover 판정: enabled + reason이 failover_on에 포함 + 대체 백엔드 존재
+                        _fo_enabled = bool(getattr(args, "failover_enabled", False))
+                        _fo_on = set(str(x).strip().lower() for x in (getattr(args, "failover_on", []) or []))
+                        _fo_backends = [str(b).strip().lower() for b in (getattr(args, "failover_backends", []) or []) if str(b).strip().lower() != "codex"]
+                        _can_failover = _fo_enabled and STOP_REASON_QUOTA_UTILIZATION in _fo_on and len(_fo_backends) > 0
+                        if _can_failover:
+                            # Failover 가능 → 즉시 종료하여 runner_entry가 다른 백엔드로 전환
+                            append_cycle_summary(
+                                f"{now_iso()} cycle={cycle_idx} stop=quota_utilization_5h_failover "
+                                f"5h={_q5h}% 7d={_q7d}% limit={q_limit or 'unknown'}"
+                            )
+                            logger.stop_event(
+                                f"Codex 5h quota {_q5h}% >= {quota_5h_max}% - "
+                                f"failover enabled, stopping for backend switch. (7d={_q7d}%)"
+                            )
+                            metrics.event(
+                                "quota_utilization_failover",
+                                cycle=cycle_idx,
+                                window="five_hour",
+                                five_hour=_q5h,
+                                seven_day=_q7d,
+                                limit_id=q_limit,
+                                resets_at_unix=int(q_reset_unix or 0),
+                            )
+                            last_reason = STOP_REASON_QUOTA_UTILIZATION
+                            try:
+                                stop_path.write_text(STOP_REASON_QUOTA_UTILIZATION, encoding="utf-8", errors="replace")
+                            except Exception:
+                                pass
+                            break
+                        elif quota_wait_for_reset:
                             wait_min = wait_sec / 60
                             logger.info(
                                 f"[QUOTA-WAIT] Codex 5h quota {_q5h}% >= {quota_5h_max}% "

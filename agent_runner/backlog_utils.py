@@ -96,8 +96,12 @@ def normalize_backlog_tasks(
         m = re.match(r"^T(\d+)$", tid)
         n = int(m.group(1)) if m else 0
 
-        if n >= 1 and tid and tid not in used:
-            fixed_id = tid
+        # Canonicalize: T01 → T1, T002 → T2 (선행 0 제거로 ID 충돌 방지)
+        canonical = f"T{n}" if n >= 1 else ""
+        if canonical and canonical not in used:
+            fixed_id = canonical
+        elif n >= 1 and tid == canonical and tid not in used:
+            fixed_id = tid  # 이미 canonical form
         else:
             while True:
                 cand = f"T{next_num}"
@@ -273,7 +277,7 @@ def load_backlog_context_for_pm(
     backlog_json_path: Path,
     backlog_md_path: Path,
     state_path: Path,
-) -> tuple[str, list[TaskItem], set[str]]:
+) -> tuple[str, list[TaskItem], set[str], set[str]]:
     """Load backlog + state to provide PM with stable context for incremental planning."""
     tasks: list[TaskItem] = []
     if backlog_json_path.exists():
@@ -308,7 +312,7 @@ def load_backlog_context_for_pm(
         lines.append(f"- [{mark}] {t.id} {t.title}{dep_suffix}")
 
     block = "\n".join(lines) if lines else "(no backlog found)"
-    return block, tasks, done_ids
+    return block, tasks, done_ids, failed_ids
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +357,22 @@ def build_failed_tasks_block(state_path: Path, run_dir: Path) -> str:
             reason = f.get("reason", "unknown")
             detail = f.get("detail", "")
             lines.append(f"- {tid}: {reason}")
+            if reason == "persistent_failure" or reason == "persistent_skip":
+                attempts_raw = f.get("attempts")
+                attempts_txt = ""
+                if isinstance(attempts_raw, int) and attempts_raw > 0:
+                    attempts_txt = str(attempts_raw)
+                else:
+                    # detail example: "Failed 6 consecutive times across runs"
+                    m_attempts = re.search(r"(\d+)\s+consecutive", str(detail), re.IGNORECASE)
+                    if m_attempts:
+                        attempts_txt = str(m_attempts.group(1))
+                if not attempts_txt:
+                    attempts_txt = "multiple"
+                lines.append(
+                    f"  ⚠ SPLIT REQUIRED: This task failed {attempts_txt} times — "
+                    "must be decomposed into smaller subtasks with NEW IDs"
+                )
             if detail:
                 lines.append(f"  Detail: {detail}")
             dev_log = find_latest_dev_log_for_task(run_dir, tid)

@@ -180,8 +180,11 @@ def merge_pm_tasks_with_existing_pending(
     pm_tasks: list[dict[str, Any]],
     existing_tasks: list[Any],
     done_ids: set[str],
+    failed_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    existing_pending = [t for t in existing_tasks if t.id not in done_ids]
+    # PM 결과를 권위적 소스로 취급: done + failed 태스크는 기존 pending에서 제외
+    excluded = done_ids | (failed_ids or set())
+    existing_pending = [t for t in existing_tasks if t.id not in excluded]
     merged_tasks: list[dict[str, Any]] = list(pm_tasks)
     pm_ids = {str(t.get("id", "")).strip() for t in merged_tasks if isinstance(t, dict)}
     for t in existing_pending:
@@ -344,6 +347,42 @@ def process_qa_followups(
     }
 
 
+def detect_and_clear_recycled_ids(
+    *,
+    prev_tasks: list[Any],
+    new_tasks: list[Any],
+    done_set: set[str],
+    state: dict[str, Any],
+    state_path: Path,
+    save_state_fn: Callable[[Path, dict[str, Any]], None],
+    on_changed_fn: Callable[[set[str]], None] | None = None,
+    on_unchanged_fn: Callable[[set[str]], None] | None = None,
+) -> tuple[set[str], set[str]]:
+    """PM 실행 후 재활용된 태스크 ID를 감지하고 done_set에서 제거.
+
+    Returns (task_ids, done_set) — 갱신된 값.
+    done_set은 in-place로도 변경됨.
+    """
+    old_task_map = {t.id: (t.title, t.prompt) for t in prev_tasks}
+    new_task_ids = {t.id for t in new_tasks}
+    recycled_ids = done_set & new_task_ids
+    truly_new: set[str] = set()
+    for t in new_tasks:
+        if t.id in recycled_ids:
+            old = old_task_map.get(t.id)
+            if old is None or old != (t.title, t.prompt):
+                truly_new.add(t.id)
+    if truly_new:
+        if on_changed_fn:
+            on_changed_fn(truly_new)
+        done_set -= truly_new
+        state["done"] = sorted(done_set)
+        save_state_fn(state_path, state)
+    elif recycled_ids and on_unchanged_fn:
+        on_unchanged_fn(recycled_ids)
+    return new_task_ids, done_set
+
+
 @dataclass
 class PMRefreshOutcome:
     should_return: bool = False
@@ -435,23 +474,18 @@ async def maybe_refresh_tasks_after_pm(
                 done_set=done_set,
                 before_done=before_done,
             )
-        old_task_map = {t.id: (t.title, t.prompt) for t in tasks}
+        prev_tasks = list(tasks)
         tasks = load_tasks_fn()
-        task_ids = {t.id for t in tasks}
-        recycled_ids = done_set & task_ids
-        truly_new = set()
-        for t in tasks:
-            if t.id in recycled_ids:
-                old = old_task_map.get(t.id)
-                if old is None or old != (t.title, t.prompt):
-                    truly_new.add(t.id)
-        if truly_new:
-            on_recycled_ids_changed_fn(truly_new)
-            done_set -= truly_new
-            state["done"] = sorted(done_set)
-            save_state_fn(state_path, state)
-        elif recycled_ids:
-            on_recycled_ids_unchanged_fn(recycled_ids)
+        task_ids, done_set = detect_and_clear_recycled_ids(
+            prev_tasks=prev_tasks,
+            new_tasks=tasks,
+            done_set=done_set,
+            state=state,
+            state_path=state_path,
+            save_state_fn=save_state_fn,
+            on_changed_fn=on_recycled_ids_changed_fn,
+            on_unchanged_fn=on_recycled_ids_unchanged_fn,
+        )
         before_done = len(done_set.intersection(task_ids))
 
     return PMRefreshOutcome(
