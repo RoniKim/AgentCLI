@@ -60,7 +60,7 @@ python agent_cli.py --telegram --repo "C:/Dev/YourRepo"
     "allowed_chat_ids": [],
     "pairing_code": "",
     "instance_name": "home-pc-main",
-    "notify_events": ["run_start", "run_stop", "task_done", "task_failed", "quota", "error", "stalled"],
+    "notify_events": ["run_start", "run_stop", "task_done", "task_failed", "quota", "error", "stalled", "project_complete", "backend_failover"],
     "send_cycle_summary": true,
     "notify_poll_interval_seconds": 8,
     "stalled_seconds": 600,
@@ -94,6 +94,29 @@ python agent_cli.py --telegram --repo "C:/Dev/YourRepo"
 - 메시지는 모든 `allowed_chat_ids`로 브로드캐스트(broadcast)됩니다.
 - 각 메시지에 `instance_name`이 포함되어 여러 인스턴스를 구분할 수 있습니다.
 - `stalled_seconds` 동안 `metrics.jsonl` 업데이트가 없으면 `stalled` 알림이 트리거됩니다(기본 600초).
+
+### 이벤트 유형 레퍼런스
+
+| 이벤트명 | 설명 | 기본 활성 | metrics.jsonl event_type |
+|----------|------|----------|--------------------------|
+| `run_start` | 러너 시작 | ✅ | (상태 변화 기반) |
+| `run_stop` | 러너 중지 | ✅ | (상태 변화 기반) |
+| `task_done` | 태스크 완료 | ✅ | (상태 변화 기반) |
+| `task_failed` | 태스크 실패 | ✅ | (상태 변화 기반) |
+| `quota` | 쿼타 경고/소진 | ✅ | substring "quota" |
+| `error` | 에러 발생 | ✅ | level=error / rc≠0 |
+| `stalled` | 응답 없음 (멈춤 감지) | ✅ | (metrics.jsonl mtime 기반) |
+| `project_complete` | 프로젝트 완료 (Goals P0 전체 달성) | ✅ | `project_complete` |
+| `backend_failover` | 백엔드 전환 (failover) | ✅ | `backend_failover` |
+| `goals_refresh` | Goals 자동 갱신 성공 | ❌ | `goals_refresh_ok` |
+| `escalation` | Dev 에스컬레이션 (상위 모델 전환) | ❌ | `escalate_attempt` |
+| `phantom` | 팬텀 완료 감지 (커밋 없는 완료 보고) | ❌ | `phantom_completion_detected` |
+| `persistent_skip` | 태스크 영구 건너뜀 (연속 실패) | ❌ | `task_persistent_skip` |
+| `pm_garbage` | PM 가비지 감지 (비정상 출력) | ❌ | `pm_garbage_detected` (kind≠quota) |
+| `goals_updated` | Goals 체크박스 업데이트 | ❌ | `goals_updated` |
+
+**기본 활성(✅)**: DEFAULTS에 포함되어 신규 설치 시 자동 활성화.
+**비활성(❌)**: config에서 `notify_events`에 수동 추가 필요.
 
 ## 여러 인스턴스
 

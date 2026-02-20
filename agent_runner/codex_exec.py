@@ -24,6 +24,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from .utils import has_quota_text
@@ -184,6 +185,8 @@ async def codex_exec(
     cwd: Path | None = None,
     timeout_seconds: int = 900,
     env: dict[str, str] | None = None,
+    heartbeat_callback: Callable[[], None] | None = None,
+    heartbeat_interval_seconds: int = 120,
 ) -> CodexExecResult:
     """Run ``codex exec`` as an async subprocess and return structured results.
 
@@ -206,6 +209,11 @@ async def codex_exec(
         Hard timeout; the process is killed after this.
     env:
         Extra environment variables merged on top of ``os.environ``.
+    heartbeat_callback:
+        Optional callable invoked periodically while the subprocess runs.
+        Used to update metrics mtime and prevent stalled-process false positives.
+    heartbeat_interval_seconds:
+        Interval between heartbeat callback invocations (default 120s).
     """
 
     # Task prompt first, instructions after — codex models treat the initial
@@ -271,38 +279,54 @@ async def codex_exec(
 
         stdin_bytes = full_prompt.encode("utf-8") if use_stdin else None
 
+        # Periodic heartbeat to keep metrics mtime fresh
+        hb_task: asyncio.Task[None] | None = None
+        if heartbeat_callback:
+            async def _hb_loop() -> None:
+                while True:
+                    await asyncio.sleep(heartbeat_interval_seconds)
+                    try:
+                        heartbeat_callback()
+                    except Exception:
+                        pass
+            hb_task = asyncio.create_task(_hb_loop())
+
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(input=stdin_bytes),
-                timeout=timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            result.is_timeout = True
-            # Graceful termination
             try:
-                proc.terminate()
-            except Exception:
-                pass
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except (asyncio.TimeoutError, Exception):
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(input=stdin_bytes),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                result.is_timeout = True
+                # Graceful termination
                 try:
-                    proc.kill()
+                    proc.terminate()
                 except Exception:
                     pass
-            stdout_bytes = b""
-            stderr_bytes = b""
-            # Try to read partial output
-            try:
-                if proc.stdout:
-                    stdout_bytes = await asyncio.wait_for(proc.stdout.read(), timeout=2)
-            except Exception:
-                pass
-            try:
-                if proc.stderr:
-                    stderr_bytes = await asyncio.wait_for(proc.stderr.read(), timeout=2)
-            except Exception:
-                pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except (asyncio.TimeoutError, Exception):
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                stdout_bytes = b""
+                stderr_bytes = b""
+                # Try to read partial output
+                try:
+                    if proc.stdout:
+                        stdout_bytes = await asyncio.wait_for(proc.stdout.read(), timeout=2)
+                except Exception:
+                    pass
+                try:
+                    if proc.stderr:
+                        stderr_bytes = await asyncio.wait_for(proc.stderr.read(), timeout=2)
+                except Exception:
+                    pass
+        finally:
+            if hb_task is not None:
+                hb_task.cancel()
 
         result.duration_seconds = time.time() - t0
         result.exit_code = proc.returncode if proc.returncode is not None else -1

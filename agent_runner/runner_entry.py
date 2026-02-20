@@ -7,6 +7,7 @@ import traceback
 from pathlib import Path
 
 from .backends.factory import get_runner
+from .metrics import MetricsLogger
 from .preflight import run_preflight
 from .process_guard import init_process_guard, install_signal_handlers, terminate_all_children
 from .reporting import write_emergency_shutdown_report
@@ -128,6 +129,17 @@ async def _main_async_dispatch(args: argparse.Namespace) -> int:
             return rc
 
         switch_count += 1
+        try:
+            ml = MetricsLogger(run_dir / "metrics.jsonl")
+            ml.event(
+                "backend_failover",
+                from_backend=backend,
+                to_backend=available[next_idx],
+                reason=reason,
+                switch_count=switch_count,
+            )
+        except Exception:
+            pass
         for path in stop_paths:
             try:
                 if path.exists():

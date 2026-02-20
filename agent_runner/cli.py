@@ -322,6 +322,8 @@ DEFAULTS: Dict[str, Any] = {
             "quota",
             "error",
             "stalled",
+            "project_complete",
+            "backend_failover",
         ],
         "send_cycle_summary": True,
         "notify_poll_interval_seconds": 8,

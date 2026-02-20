@@ -73,6 +73,14 @@ _NOTIFY_EVENT_ALLOWED = {
     "quota",
     "error",
     "stalled",
+    "backend_failover",
+    "goals_refresh",
+    "project_complete",
+    "escalation",
+    "phantom",
+    "persistent_skip",
+    "pm_garbage",
+    "goals_updated",
 }
 
 
@@ -113,6 +121,14 @@ _EMOJI: dict[str, str] = {
     "detail": "\U0001f4cb",         # 📋
     "log": "\U0001f4dd",            # 📝
     "network_error": "\u26a1",      # ⚡
+    "backend_failover": "\U0001f500",   # 🔀
+    "goals_refresh": "\U0001f31f",      # 🌟
+    "project_complete": "\U0001f3c6",   # 🏆
+    "escalation": "\u2b06\ufe0f",       # ⬆️
+    "phantom": "\U0001f47b",            # 👻
+    "persistent_skip": "\u23e9",        # ⏩
+    "pm_garbage": "\U0001f5d1\ufe0f",   # 🗑️
+    "goals_updated": "\U0001f4c8",      # 📈
 }
 
 _REASON_KR: dict[str, str] = {
@@ -775,6 +791,16 @@ class TelegramControlService:
 
         quota_message = ""
         error_message = ""
+        # New event accumulators (last-one-wins per category)
+        failover_payload: dict[str, Any] | None = None
+        goals_refresh_payload: dict[str, Any] | None = None
+        project_complete_payload: dict[str, Any] | None = None
+        escalation_payload: dict[str, Any] | None = None
+        phantom_payload: dict[str, Any] | None = None
+        persistent_skip_payload: dict[str, Any] | None = None
+        pm_garbage_payload: dict[str, Any] | None = None
+        goals_updated_payload: dict[str, Any] | None = None
+
         for raw in lines:
             line = raw.strip()
             if not line:
@@ -804,11 +830,89 @@ class TelegramControlService:
                 if is_error:
                     error_message = formatted
 
+            # --- New event detection (exact match) ---
+            if self._notify_enabled("backend_failover") and event_type == "backend_failover":
+                failover_payload = payload
+            if self._notify_enabled("goals_refresh") and event_type == "goals_refresh_ok":
+                goals_refresh_payload = payload
+            if self._notify_enabled("project_complete") and event_type == "project_complete":
+                project_complete_payload = payload
+            if self._notify_enabled("escalation") and event_type == "escalate_attempt":
+                escalation_payload = payload
+            if self._notify_enabled("phantom") and event_type == "phantom_completion_detected":
+                phantom_payload = payload
+            if self._notify_enabled("persistent_skip") and event_type == "task_persistent_skip":
+                persistent_skip_payload = payload
+            if self._notify_enabled("pm_garbage") and event_type == "pm_garbage_detected":
+                kind = str(payload.get("kind") or "").strip().lower()
+                if kind != "quota":
+                    pm_garbage_payload = payload
+            if self._notify_enabled("goals_updated") and event_type == "goals_updated":
+                goals_updated_payload = payload
+
         out: list[str] = []
         if quota_message:
             out.append(f"{_EMOJI['quota']} \ucffc\ud0c0 \uacbd\uace0\n  {quota_message}")   # ⚠️ 쿼타 경고
         if error_message:
             out.append(f"{_EMOJI['error']} \uc5d0\ub7ec \ubc1c\uc0dd\n  {error_message}")     # 🚨 에러 발생
+
+        # --- New event messages ---
+        if failover_payload is not None:
+            fb = str(failover_payload.get("from_backend") or "?")
+            tb = str(failover_payload.get("to_backend") or "?")
+            fr = str(failover_payload.get("reason") or "")
+            out.append(
+                f"{_EMOJI['backend_failover']} \ubc31\uc5d4\ub4dc \uc804\ud658\n"   # 🔀 백엔드 전환
+                f"  {fb} \u2192 {tb} ({fr})"                                          #   codex → claudecode (reason)
+            )
+        if project_complete_payload is not None:
+            goals = project_complete_payload.get("goals") or {}
+            p0 = goals.get("p0") or ""
+            out.append(
+                f"{_EMOJI['project_complete']} \ud504\ub85c\uc81d\ud2b8 \uc644\ub8cc!\n"  # 🏆 프로젝트 완료!
+                f"  P0: {p0}"
+            )
+        if goals_refresh_payload is not None:
+            p0 = goals_refresh_payload.get("p0") or ""
+            p1 = goals_refresh_payload.get("p1") or ""
+            rn = goals_refresh_payload.get("refresh_n") or ""
+            out.append(
+                f"{_EMOJI['goals_refresh']} Goals \uac31\uc2e0\n"                   # 🌟 Goals 갱신
+                f"  P0: {p0}, P1: {p1} (#{rn})"
+            )
+        if escalation_payload is not None:
+            tid = str(escalation_payload.get("task_id") or "?")
+            att = str(escalation_payload.get("attempt") or "?")
+            out.append(
+                f"{_EMOJI['escalation']} Dev \uc5d0\uc2a4\uceec\ub808\uc774\uc158\n"  # ⬆️ Dev 에스컬레이션
+                f"  \ud0dc\uc2a4\ud06c: {tid} | \uc2dc\ub3c4: {att}"                   #   태스크: T03 | 시도: 2
+            )
+        if phantom_payload is not None:
+            tid = str(phantom_payload.get("task_id") or "?")
+            out.append(
+                f"{_EMOJI['phantom']} \ud32c\ud140 \uc644\ub8cc \uac10\uc9c0\n"  # 👻 팬텀 완료 감지
+                f"  \ud0dc\uc2a4\ud06c: {tid}"                                     #   태스크: T02
+            )
+        if persistent_skip_payload is not None:
+            tid = str(persistent_skip_payload.get("task_id") or "?")
+            consec = str(persistent_skip_payload.get("consecutive_failures") or "?")
+            out.append(
+                f"{_EMOJI['persistent_skip']} \ud0dc\uc2a4\ud06c \uc601\uad6c \uac74\ub108\ub700\n"  # ⏩ 태스크 영구 건너뜀
+                f"  \ud0dc\uc2a4\ud06c: {tid} | \uc5f0\uc18d \uc2e4\ud328: {consec}"                   #   태스크: T04 | 연속 실패: 3
+            )
+        if pm_garbage_payload is not None:
+            kind = str(pm_garbage_payload.get("kind") or "?")
+            out.append(
+                f"{_EMOJI['pm_garbage']} PM \uac00\ube44\uc9c0 \uac10\uc9c0\n"  # 🗑️ PM 가비지 감지
+                f"  \uc720\ud615: {kind}"                                          #   유형: repetitive
+            )
+        if goals_updated_payload is not None:
+            cnt = str(goals_updated_payload.get("checked_count") or "0")
+            out.append(
+                f"{_EMOJI['goals_updated']} Goals \uccb4\ud06c \uc5c5\ub370\uc774\ud2b8\n"  # 📈 Goals 체크 업데이트
+                f"  +{cnt}\uac74 \uccb4\ud06c\ub428"                                          #   +3건 체크됨
+            )
+
         return out
 
     def _collect_push_messages(self) -> list[str]:
@@ -1005,9 +1109,11 @@ class TelegramControlService:
         if not await self._require_auth(update):
             return
         events = sorted(self.notify_events)
+        available_inactive = sorted(_NOTIFY_EVENT_ALLOWED - self.notify_events)
         lines = [
             f"{_EMOJI['info']} {self.instance_name} \uc54c\ub9bc \uc124\uc815",    # 📊 {instance} 알림 설정
             f"  \ud65c\uc131 \uc774\ubca4\ud2b8: {events if events else '(\uc5c6\uc74c)'}",  # 활성 이벤트
+            f"  \uc0ac\uc6a9 \uac00\ub2a5: {available_inactive if available_inactive else '(\uc5c6\uc74c)'}",  # 사용 가능: [...]
             f"  \uc0ac\uc774\ud074 \uc694\uc57d \uc804\uc1a1: {'\uc608' if self.send_cycle_summary else '\uc544\ub2c8\uc624'}",  # 사이클 요약 전송: 예/아니오
             f"  \ud3f4\ub9c1 \uac04\uaca9: {self.notify_poll_interval_seconds}\ucd08",  # 폴링 간격: N초
             f"  \uba48\ucda4 \uac10\uc9c0: {self.stalled_seconds}\ucd08",               # 멈춤 감지: N초

@@ -475,6 +475,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     reasoning_effort=codex_reasoning_effort,
                     cwd=repo,
                     timeout_seconds=300,
+                    heartbeat_callback=lambda: metrics.event("heartbeat", stage="reporter"),
                 )
                 out = (res.final_output or "").strip()
                 if out:
@@ -537,6 +538,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         full_auto=full_auto,
                         cwd=repo,
                         timeout_seconds=effective_timeout,
+                        heartbeat_callback=lambda: metrics.event("heartbeat", stage=label, task_id=task_id),
                     )
                     last_result = result
 
@@ -1057,6 +1059,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     reasoning_effort=codex_reasoning_effort,
                     cwd=repo,
                     timeout_seconds=600,
+                    heartbeat_callback=lambda: metrics.event("heartbeat", stage="qa"),
                 )
                 qa_output_path = run_dir / f"qa_final_output_cycle_{cycle_idx:03d}.txt"
                 qa_output_path.write_text(
@@ -2099,6 +2102,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     reasoning_effort=codex_reasoning_effort,
                     cwd=repo,
                     timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
+                    heartbeat_callback=lambda: metrics.event("heartbeat", stage="goals_refresh"),
                 )
                 refresh_text = (_gr_res.final_output or "").strip()
                 result = parse_and_append_refreshed_goals(repo, refresh_text)

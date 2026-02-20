@@ -14,6 +14,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Optional, Tuple
 import inspect
 
@@ -636,6 +637,8 @@ async def _run_claude_query(
     max_retries: int = 3,
     initial_backoff: float = 5.0,
     ext_ctx: Any = None,
+    heartbeat_callback: Callable[[], None] | None = None,
+    heartbeat_interval_seconds: int = 120,
 ) -> Tuple[str, Optional[Any]]:
     """High-level helper: create client, send query, collect messages.
 
@@ -659,8 +662,19 @@ async def _run_claude_query(
                 child_pid = _extract_client_pid(client)
                 if child_pid is not None:
                     register_pid(child_pid)
+                hb_task: asyncio.Task[None] | None = None
                 try:
                     await asyncio.wait_for(_start_query(client, prompt), timeout=120)
+                    # Start heartbeat after query begins
+                    if heartbeat_callback:
+                        async def _hb_loop() -> None:
+                            while True:
+                                await asyncio.sleep(heartbeat_interval_seconds)
+                                try:
+                                    heartbeat_callback()
+                                except Exception:
+                                    pass
+                        hb_task = asyncio.create_task(_hb_loop())
                     coro = _receive_messages(client, stop_path=stop_path, debug=debug)
                     text, structured = await asyncio.wait_for(coro, timeout=effective_timeout)
                     # Post-return quota check: Claude Code subprocess may exit
@@ -673,6 +687,8 @@ async def _run_claude_query(
                         )
                     return text, structured
                 finally:
+                    if hb_task is not None:
+                        hb_task.cancel()
                     if child_pid is not None:
                         unregister_pid(child_pid)
         except (StopRequested, BudgetExceeded):
@@ -731,11 +747,13 @@ async def _run_with_continuations(
 
     while True:
         try:
+            _hb_cb = (lambda: metrics.event("heartbeat", stage=label or stage, task_id=task_id)) if metrics else None
             return await _run_claude_query(
                 cfg, prompt, repo=repo, stage=stage, stop_path=stop_path, debug=debug,
                 model_override=model_override, stage_instructions=stage_instructions,
                 max_turns_override=max_turns_override, timeout_seconds=timeout_seconds,
                 ext_ctx=ext_ctx,
+                heartbeat_callback=_hb_cb,
             )
         except (StopRequested, BudgetExceeded):
             raise
@@ -1955,6 +1973,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                                 max_turns_override=int(getattr(args, "max_turns_per_task", 12) or 12),
                                 timeout_seconds=int(getattr(args, "dev_timeout_seconds", 600) or 600),
                                 ext_ctx=ext_ctx,
+                                heartbeat_callback=lambda: metrics.event("heartbeat", stage="Dev", task_id=next_task.id),
                             )
                             dev_log = (dev_log or "") + "\n[PHANTOM_RETRY]\n" + (text2 or "")
                             (attempt_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
@@ -2331,6 +2350,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 max_turns_override=int(getattr(args, "report_max_turns", 8) or 8),
                 timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
                 ext_ctx=ext_ctx,
+                heartbeat_callback=lambda: metrics.event("heartbeat", stage="qa"),
             )
 
             qa_output_path = run_dir / f"qa_final_output_cycle_{cycle_idx:03d}.txt"
@@ -2411,6 +2431,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 max_turns_override=int(getattr(args, "report_max_turns", 8) or 8),
                 timeout_seconds=300,
                 ext_ctx=ext_ctx,
+                heartbeat_callback=lambda: metrics.event("heartbeat", stage="reporter"),
             )
             if text and text.strip():
                 clean_text = text.strip()
@@ -2545,6 +2566,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 model_override=str(getattr(args, "pm_model", "") or ""),
                 max_turns_override=15,
                 timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
+                heartbeat_callback=lambda: metrics.event("heartbeat", stage="goals_refresh"),
             )
             result = parse_and_append_refreshed_goals(repo, refresh_text or "")
             if result.get("appended"):
