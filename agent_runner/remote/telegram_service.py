@@ -1173,7 +1173,8 @@ class TelegramControlService:
                 poll_interval=1.0,
                 timeout=max(1, int(self.poll_timeout_seconds)),
                 allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=False,
+                # Always ignore backlog updates on startup to prevent replay bursts.
+                drop_pending_updates=True,
             )
             return 0
         finally:
