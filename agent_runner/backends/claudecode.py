@@ -103,6 +103,7 @@ from ..utils import (
     now_iso,
     run_cmd,
     safe_write_text,
+    rotate_log_file,
     has_quota_text,
     choose_stop_reason,
     detect_stop_reason,
@@ -999,6 +1000,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
     def append_cycle_summary(line: str) -> None:
         try:
+            rotate_log_file(cycle_summary_path, max_bytes=2_000_000, backup_count=5, max_age_days=14)
             with cycle_summary_path.open("a", encoding="utf-8", errors="replace") as f:
                 f.write(line.rstrip() + "\n")
         except Exception:

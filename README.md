@@ -252,9 +252,9 @@ python -m pytest -q
 
 ---
 
-## Telegram Remote Control (Long Polling)
+## Telegram Remote Control (Hybrid, Long Polling)
 
-AgentCLI can run a Telegram control-plane service for remote monitoring and control.
+AgentCLI can run a Telegram hybrid mode for remote monitoring and control.
 
 ### 1) Configure Telegram
 
@@ -271,24 +271,58 @@ Or set in config JSON under `telegram.bot_token` (stored under `%USERPROFILE%\\.
   "telegram": {
     "enabled": true,
     "runner_mode": "thread",
+    "instance_name": "home-pc-main",
     "allowed_chat_ids": [],
-    "pairing_code": "CHANGE-ME"
+    "pairing_code": "CHANGE-ME",
+    "notify_events": ["run_start", "run_stop", "task_done", "task_failed", "quota", "error", "stalled"],
+    "send_cycle_summary": true,
+    "notify_poll_interval_seconds": 8,
+    "stalled_seconds": 600
   }
 }
 ```
 
-### 2) Start service mode
+### 2) Start hybrid mode
 
 ```bash
 python agent_cli.py --telegram --repo "C:/Dev/YourRepo"
 ```
+
+`--telegram` starts both:
+- local interactive shell (`/start`, `/stop`, `/config`, ...)
+- Telegram control-plane (`/status`, `/run_start`, `/run_stop`, ...)
 
 ### 3) Telegram commands
 
 - `/whoami` : prints current `chat_id`
 - `/pair <code>` : register current chat into allowlist
 - `/status` : show run status and progress summary
+- `/detail [lines]` : combined detailed view (`cycle_summary.log`, `metrics.jsonl`, `run_summary.json`, and subprocess log when available)
+- `/errors [lines]` : tail only error-like metrics events
+- `/events <event_name> [lines]` : filter metrics by event type
+- `/grep <pattern> [file] [lines]` : regex search in run artifacts
 - `/run_start [--flags...]` : start runner
 - `/run_stop` : stop request with confirmation button
 - `/runs` : list recent runs
-- `/tail [file] [lines]` : tail run artifacts (`cycle_summary.log`, `metrics.jsonl`, ...)
+- `/tail [file] [lines]` : tail run artifacts (`cycle_summary.log`, `metrics.jsonl`, `telegram_runner_subprocess.log`, ...)
+- `/notify` : show push notification settings
+
+### 4) Automatic push notifications
+
+- Push is enabled automatically when `notify_events` is not empty or `send_cycle_summary=true`.
+- Notifications are sent to all allowlisted chats.
+- Default events: `run_start`, `run_stop`, `task_done`, `task_failed`, `quota`, `error`, `stalled`.
+- `stalled` is emitted when `metrics.jsonl` is unchanged for `stalled_seconds` (default: 600s / 10 minutes).
+- `instance_name` is included in every push message to distinguish instances.
+
+### 5) Multiple AgentCLI instances
+
+- Recommended: one bot token per AgentCLI instance.
+- If multiple processes use the same bot token with long polling, Telegram update handling can conflict.
+- If multiple instances share the same chat_id, you will receive one push stream per instance (separate messages).
+- If multiple instances control the same repo/run_dir, stop/status/log artifacts can interfere. Prefer one instance per repo.
+
+### 6) Log language recommendation
+
+- Keep run artifacts/log files in English for parser/LLM compatibility.
+- Use Telegram commands (`/status`, `/detail`, `/tail`) as a readable view layer.

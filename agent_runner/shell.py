@@ -133,12 +133,13 @@ def _parse_kv_tokens(tokens: list[str], defaults: Dict[str, Any] | None = None) 
 
 
 class RunnerShell:
-    def __init__(self, initial_argv: list[str] | None = None) -> None:
+    def __init__(self, initial_argv: list[str] | None = None, controller: Any | None = None) -> None:
         self.repo: Optional[Path] = None
         self.config_path: Optional[Path] = None
         self.config: Dict[str, Any] = {}
         self.overrides: Dict[str, Any] = {}
         self.run_dir: Optional[Path] = None
+        self._controller = controller
 
         self._runner_thread: Optional[threading.Thread] = None
         self._runner_exit_code: Optional[int] = None
@@ -282,11 +283,17 @@ class RunnerShell:
         print(f"roles:      {eff.get('roles')}")
         print(f"plugins_enabled: {bool(eff.get('plugins_enabled'))} (allowlist={eff.get('plugins_allowlist')}, strict={bool(eff.get('plugins_strict'))})")
         tg = eff.get("telegram") if isinstance(eff.get("telegram"), dict) else {}
+        notify_events = tg.get("notify_events") if isinstance(tg.get("notify_events"), list) else []
         print(
             "telegram: "
             f"enabled={bool(tg.get('enabled', False))}, "
             f"runner_mode={tg.get('runner_mode', 'thread')}, "
-            f"allowed_chat_ids={tg.get('allowed_chat_ids', [])}"
+            f"allowed_chat_ids={tg.get('allowed_chat_ids', [])}, "
+            f"instance_name={tg.get('instance_name') or self.repo.name if self.repo else ''}, "
+            f"notify_events={notify_events}, "
+            f"cycle_summary={bool(tg.get('send_cycle_summary', True))}, "
+            f"notify_interval={int(tg.get('notify_poll_interval_seconds') or 8)}s, "
+            f"stalled_after={int(tg.get('stalled_seconds') or 600)}s"
         )
         print(f"debug:      {bool(eff.get('debug', False))}")
         print(f"auth:       login-based (codex login / claude auth login)")
@@ -307,7 +314,24 @@ class RunnerShell:
             print()
 
     def _runner_is_alive(self) -> bool:
+        if self._controller is not None:
+            try:
+                return bool(self._controller.status().get("running", False))
+            except Exception:
+                return False
         return bool(self._runner_thread and self._runner_thread.is_alive())
+
+    def _sync_controller_args(self) -> None:
+        if self._controller is None:
+            return
+        eff = self.effective()
+        for key in DEFAULTS.keys():
+            try:
+                setattr(self._controller.base_args, key, eff.get(key))
+            except Exception:
+                pass
+        if self.repo:
+            self._controller.repo = self.repo
 
     def _ensure_run_dir(self) -> Path:
         if not self.repo:
@@ -388,6 +412,36 @@ class RunnerShell:
             self._start_lock.release()
 
     def _start_locked(self, extra_tokens: list[str]) -> None:
+        if self._controller is not None:
+            if not self.repo:
+                print("[ERR] repo is not set. Use /repo <path>.")
+                return
+            if not self.repo.exists():
+                print(f"[ERR] repo not found: {self.repo}")
+                return
+            if self._runner_is_alive():
+                print("[INFO] Runner is already running. Use /status or /stop.")
+                return
+
+            self.overrides.update(_parse_kv_tokens(extra_tokens))
+            self._sync_controller_args()
+            result = self._controller.start()
+            run_dir = str(result.get("run_dir") or "").strip()
+            if run_dir:
+                try:
+                    self.run_dir = Path(run_dir).expanduser().resolve()
+                    self.overrides["run_dir"] = str(self.run_dir)
+                except Exception:
+                    pass
+            if result.get("ok", False):
+                print("[OK] Runner started in background.")
+                print(f" - run_dir: {result.get('run_dir') or '(unknown)'}")
+                print(f" - stop:   /stop  (creates {self.effective().get('stop_file') or 'STOP'})")
+                print(" - status: /status\n")
+            else:
+                print(f"[ERR] {result.get('message') or 'Failed to start runner.'}")
+            return
+
         if self._runner_is_alive():
             print("[INFO] Runner is already running. Use /status or /stop.")
             return
@@ -446,6 +500,21 @@ class RunnerShell:
         print(" - status: /status\n")
 
     def stop(self, wait: bool = False) -> None:
+        if self._controller is not None:
+            result = self._controller.stop(wait=wait)
+            ok = bool(result.get("ok", False))
+            prefix = "[OK]" if ok else "[ERR]"
+            print(f"{prefix} {result.get('message') or 'stop failed'}")
+            run_dir = str(result.get("run_dir") or "").strip()
+            if run_dir:
+                try:
+                    self.run_dir = Path(run_dir).expanduser().resolve()
+                except Exception:
+                    pass
+            if wait:
+                self.status()
+            return
+
         if not self._runner_thread:
             print("[INFO] Runner is not started yet.")
             return
@@ -474,6 +543,33 @@ class RunnerShell:
             self.status()
 
     def status(self) -> None:
+        if self._controller is not None:
+            data = self._controller.status()
+            run_dir = str(data.get("run_dir") or "").strip()
+            if run_dir:
+                try:
+                    self.run_dir = Path(run_dir).expanduser().resolve()
+                except Exception:
+                    pass
+            print("\n=== Runner Status ===")
+            print(f"running: {bool(data.get('running'))}")
+            print(f"mode:    {data.get('runner_mode') or 'thread'}")
+            print(f"run_dir: {data.get('run_dir') or '(not set)'}")
+            print(f"uptime:  {int(data.get('uptime_seconds') or 0)}s")
+            print(f"exit:    {data.get('exit_code') if data.get('exit_code') is not None else '(running/unknown)'}")
+            print(
+                "progress: "
+                f"done={int(data.get('done') or 0)} "
+                f"failed={int(data.get('failed') or 0)} "
+                f"warnings={int(data.get('warnings') or 0)}"
+            )
+            print(f"reason:  {data.get('reason') or '(none)'}")
+            last_event = str(data.get("last_event") or "").strip()
+            if last_event:
+                print(f"last_event: {last_event}")
+            print("=====================\n")
+            return
+
         alive = self._runner_is_alive()
         started = self._runner_started_at
         dur = "-" if not started else f"{int(time.time() - started)}s"
@@ -846,14 +942,14 @@ def _build_completer() -> Any:
     )
 
 
-def shell_main(argv: list[str] | None = None) -> int:
+def shell_main(argv: list[str] | None = None, shell_instance: RunnerShell | None = None) -> int:
     # Initialize process guard early (L1 Job Object, L2 atexit, L4 orphan cleanup)
     try:
         init_process_guard()
     except Exception:
         pass
 
-    sh = RunnerShell(initial_argv=argv or [])
+    sh = shell_instance or RunnerShell(initial_argv=argv or [])
     print("AgentCLI Shell (prompt_toolkit). Type /help.")
     if sh.repo:
         print(f"repo preset: {sh.repo}")

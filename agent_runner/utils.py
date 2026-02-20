@@ -269,6 +269,78 @@ def safe_write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8", errors="replace")
 
 
+def rotate_log_file(
+    path: Path,
+    *,
+    max_bytes: int = 5_000_000,
+    backup_count: int = 5,
+    max_age_days: int = 14,
+) -> None:
+    """Rotate log file by size and prune aged/overflow backups.
+
+    Backups are stored as ``<name>.1``, ``<name>.2``, ... where ``.1`` is newest.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+
+    try:
+        size = int(path.stat().st_size) if path.exists() else 0
+    except Exception:
+        size = 0
+
+    max_bytes_i = max(1_024, int(max_bytes))
+    backup_count_i = max(1, int(backup_count))
+    max_age_days_i = max(0, int(max_age_days))
+
+    # Size-based rotation.
+    if size >= max_bytes_i and path.exists():
+        try:
+            oldest = Path(str(path) + f".{backup_count_i}")
+            if oldest.exists():
+                oldest.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        for idx in range(backup_count_i - 1, 0, -1):
+            src = Path(str(path) + f".{idx}")
+            dst = Path(str(path) + f".{idx + 1}")
+            try:
+                if src.exists():
+                    src.replace(dst)
+            except Exception:
+                pass
+
+        try:
+            path.replace(Path(str(path) + ".1"))
+        except Exception:
+            pass
+
+    # Time/count-based retention for numeric backups.
+    threshold = time.time() - (max_age_days_i * 86_400) if max_age_days_i > 0 else None
+    prefix = path.name + "."
+    try:
+        for cand in path.parent.glob(path.name + ".*"):
+            suffix = cand.name[len(prefix):]
+            if not suffix.isdigit():
+                continue
+            idx = int(suffix)
+            delete = idx > backup_count_i
+            if not delete and threshold is not None:
+                try:
+                    delete = cand.stat().st_mtime < threshold
+                except Exception:
+                    delete = False
+            if delete:
+                try:
+                    cand.unlink(missing_ok=True)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 def _has_quota_text(text: str) -> bool:
     """Canonical quota/billing/rate-limit needle list.
 

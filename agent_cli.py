@@ -48,10 +48,10 @@ if __name__ == "__main__":
         from agent_runner.main import main
         raise SystemExit(main(argv))
 
-    # Telegram control-plane service mode
+    # Telegram hybrid mode (local shell + Telegram control-plane)
     if _has_flag(argv, "--telegram"):
-        from agent_runner.remote.telegram_service import telegram_main
-        raise SystemExit(telegram_main(argv))
+        from agent_runner.remote.telegram_service import telegram_hybrid_main
+        raise SystemExit(telegram_hybrid_main(argv))
 
     # Default: interactive shell
     from agent_runner.shell import shell_main

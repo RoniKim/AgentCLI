@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -15,7 +16,7 @@ from ..config import AGENT_WORK_DIR, resolve_prompts_dir
 from ..process_guard import terminate_all_children
 from ..run_dir import find_latest_run_dir, make_run_dir
 from ..runner_entry import run as run_runner
-from ..utils import STOP_REASON_STOP_FILE, detect_stop_reason
+from ..utils import STOP_REASON_STOP_FILE, detect_stop_reason, rotate_log_file
 
 
 class RunnerController:
@@ -27,6 +28,7 @@ class RunnerController:
             "last_run_summary.json",
             "STATE.json",
             "BACKLOG.md",
+            "telegram_runner_subprocess.log",
         }
     )
 
@@ -119,6 +121,7 @@ class RunnerController:
         )
         log_path = run_dir / "telegram_runner_subprocess.log"
         try:
+            rotate_log_file(log_path, max_bytes=20_000_000, backup_count=5, max_age_days=14)
             self._runner_log_handle = log_path.open("ab")
             cmd = [
                 sys.executable,
@@ -357,6 +360,97 @@ class RunnerController:
             return ""
         self.run_dir = run_dir
         return self._tail_lines(run_dir / file_name, max(1, int(lines)))
+
+    def filter_metrics(self, *, event_type: str = "", errors_only: bool = False, limit: int = 50) -> str:
+        run_dir = self.run_dir or find_latest_run_dir(self.repo)
+        if run_dir is None:
+            return ""
+        self.run_dir = run_dir
+        metrics_path = run_dir / "metrics.jsonl"
+        if not metrics_path.exists() or not metrics_path.is_file():
+            return ""
+
+        event_key = str(event_type or "").strip().lower()
+        max_lines = max(1, int(limit))
+        dq: deque[str] = deque(maxlen=max_lines)
+
+        try:
+            with metrics_path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    raw = line.rstrip("\n")
+                    if not raw.strip():
+                        continue
+                    try:
+                        payload = json.loads(raw)
+                    except Exception:
+                        payload = {}
+
+                    if not isinstance(payload, dict):
+                        continue
+
+                    ev = str(payload.get("event") or payload.get("type") or "").strip().lower()
+                    level = str(payload.get("level") or "").strip().lower()
+                    reason = str(payload.get("reason") or payload.get("message") or "").strip().lower()
+                    rc = payload.get("rc")
+
+                    if event_key and ev != event_key:
+                        continue
+
+                    if errors_only:
+                        is_error = False
+                        if level == "error":
+                            is_error = True
+                        if isinstance(rc, int) and rc != 0:
+                            is_error = True
+                        if any(tok in ev for tok in ("error", "fail", "exception", "violation", "exhausted")):
+                            is_error = True
+                        if any(tok in reason for tok in ("error", "fail", "exception", "violation", "exhausted")):
+                            is_error = True
+                        if not is_error:
+                            continue
+
+                    dq.append(raw)
+        except Exception:
+            return ""
+        return "\n".join(dq).strip()
+
+    def grep(self, *, pattern: str, name: str = "metrics.jsonl", lines: int = 50, ignore_case: bool = True) -> str:
+        file_name = str(name or "metrics.jsonl").strip()
+        if file_name not in self.ALLOWED_TAIL_FILES:
+            allowed = ", ".join(sorted(self.ALLOWED_TAIL_FILES))
+            raise ValueError(f"Unsupported file. Allowed: {allowed}")
+
+        needle = str(pattern or "").strip()
+        if not needle:
+            raise ValueError("pattern is empty")
+
+        run_dir = self.run_dir or find_latest_run_dir(self.repo)
+        if run_dir is None:
+            return ""
+        self.run_dir = run_dir
+        path = run_dir / file_name
+        if not path.exists() or not path.is_file():
+            return ""
+
+        flags = re.IGNORECASE if ignore_case else 0
+        try:
+            rx = re.compile(needle, flags)
+        except Exception as ex:
+            raise ValueError(f"invalid regex: {ex}") from ex
+
+        max_lines = max(1, int(lines))
+        dq: deque[str] = deque(maxlen=max_lines)
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    raw = line.rstrip("\n")
+                    if not raw:
+                        continue
+                    if rx.search(raw):
+                        dq.append(raw)
+        except Exception:
+            return ""
+        return "\n".join(dq).strip()
 
     def status(self) -> dict[str, Any]:
         running = self._runner_is_alive()

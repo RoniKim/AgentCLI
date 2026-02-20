@@ -313,6 +313,7 @@ DEFAULTS: Dict[str, Any] = {
         "bot_token": "",
         "allowed_chat_ids": [],
         "pairing_code": "",
+        "instance_name": "",
         "notify_events": [
             "run_start",
             "run_stop",
@@ -320,8 +321,11 @@ DEFAULTS: Dict[str, Any] = {
             "task_failed",
             "quota",
             "error",
+            "stalled",
         ],
         "send_cycle_summary": True,
+        "notify_poll_interval_seconds": 8,
+        "stalled_seconds": 600,
         "tail_lines_default": 50,
         "runner_mode": "thread",  # thread | subprocess
         "poll_timeout_seconds": 30,
@@ -345,12 +349,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wizard", action="store_true", help="Run wizard to create/update config")
     p.add_argument("--non-interactive", action="store_true", help="Disable interactive prompts")
     p.add_argument("--init-prompts", action="store_true", help="Create prompt templates in prompts_dir and exit")
-    p.add_argument("--telegram", dest="telegram_service", action="store_true", default=None, help="Run Telegram control-plane service mode")
-    p.add_argument("--telegram-runner-mode", default=None, choices=["thread", "subprocess"], help="Runner execution mode for Telegram service")
+    p.add_argument("--telegram", dest="telegram_service", action="store_true", default=None, help="Run hybrid mode (local shell + Telegram control-plane)")
+    p.add_argument("--telegram-runner-mode", default=None, choices=["thread", "subprocess"], help="Runner execution mode for Telegram hybrid mode")
     p.add_argument("--telegram-poll-timeout", type=int, default=None, help="Telegram long-poll timeout seconds")
     p.add_argument("--telegram-allowed-chat-id", action="append", default=None, help="Allowlisted chat_id (repeatable)")
     p.add_argument("--telegram-bot-token", default=None, help="Telegram bot token override")
     p.add_argument("--telegram-pairing-code", default=None, help="One-time pairing code for /pair command")
+    p.add_argument("--telegram-instance-name", default=None, help="Instance label shown in Telegram notifications")
+    p.add_argument("--telegram-notify-events", default=None, help="Comma-separated push events (run_start,run_stop,task_done,task_failed,quota,error,stalled)")
+    p.add_argument("--telegram-send-cycle-summary", action=argparse.BooleanOptionalAction, default=None, help="Push new cycle_summary.log lines")
+    p.add_argument("--telegram-notify-interval", type=int, default=None, help="Telegram push polling interval seconds")
+    p.add_argument("--telegram-stalled-seconds", type=int, default=None, help="Stall detection threshold seconds (default: 600)")
 
     # Paths
     p.add_argument("--run-dir", default=None, help="Fixed run_dir to reuse. Empty/None = auto")
@@ -673,6 +682,7 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         out["enabled"] = bool(out.get("enabled", False))
         out["bot_token"] = str(out.get("bot_token") or "")
         out["pairing_code"] = str(out.get("pairing_code") or "")
+        out["instance_name"] = str(out.get("instance_name") or "").strip()
 
         allowed_raw = out.get("allowed_chat_ids") or []
         if isinstance(allowed_raw, str):
@@ -701,9 +711,25 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
             notify_events = [str(v).strip() for v in notify_raw if str(v).strip()]
         else:
             notify_events = []
-        out["notify_events"] = notify_events
+        normalized_events: list[str] = []
+        seen_events: set[str] = set()
+        for value in notify_events:
+            key = str(value).strip().lower()
+            if not key or key in seen_events:
+                continue
+            seen_events.add(key)
+            normalized_events.append(key)
+        out["notify_events"] = normalized_events
 
         out["send_cycle_summary"] = bool(out.get("send_cycle_summary", True))
+        try:
+            out["notify_poll_interval_seconds"] = max(2, int(out.get("notify_poll_interval_seconds") or 8))
+        except Exception:
+            out["notify_poll_interval_seconds"] = int(defaults_tg.get("notify_poll_interval_seconds") or 8)
+        try:
+            out["stalled_seconds"] = max(60, int(out.get("stalled_seconds") or 600))
+        except Exception:
+            out["stalled_seconds"] = int(defaults_tg.get("stalled_seconds") or 600)
         try:
             out["tail_lines_default"] = max(1, int(out.get("tail_lines_default") or 50))
         except Exception:
@@ -827,6 +853,26 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         eff["telegram"]["bot_token"] = str(eff.get("telegram_bot_token") or "")
     if "telegram_pairing_code" in explicit_args:
         eff["telegram"]["pairing_code"] = str(eff.get("telegram_pairing_code") or "")
+    if "telegram_instance_name" in explicit_args:
+        eff["telegram"]["instance_name"] = str(eff.get("telegram_instance_name") or "").strip()
+    if "telegram_notify_events" in explicit_args:
+        raw_events = str(eff.get("telegram_notify_events") or "").strip()
+        if raw_events:
+            eff["telegram"]["notify_events"] = [p.strip() for p in raw_events.split(",") if p.strip()]
+        else:
+            eff["telegram"]["notify_events"] = []
+    if "telegram_send_cycle_summary" in explicit_args:
+        eff["telegram"]["send_cycle_summary"] = bool(eff.get("telegram_send_cycle_summary"))
+    if "telegram_notify_interval" in explicit_args:
+        try:
+            eff["telegram"]["notify_poll_interval_seconds"] = max(2, int(eff.get("telegram_notify_interval") or 8))
+        except Exception:
+            pass
+    if "telegram_stalled_seconds" in explicit_args:
+        try:
+            eff["telegram"]["stalled_seconds"] = max(60, int(eff.get("telegram_stalled_seconds") or 600))
+        except Exception:
+            pass
 
     if eff["policy"].get("enabled") is None:
         eff["policy"]["enabled"] = not bool(eff.get("no_policy_scan", False))
