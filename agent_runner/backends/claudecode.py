@@ -1619,7 +1619,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             per_task_escalations.setdefault(next_task.id, 0)
             max_escalations_per_task_budget = int(budgets_cfg.get("max_dev_escalations_per_task") or 0)
             tiers, max_attempts, dev_max_escalations = compute_dev_model_tiers(
-                base_model=base_model,
+                base_model=cfg.dev_model,
                 tier1_model=cfg.dev_model_tier1,
                 tier2_model=cfg.dev_model_tier2,
                 dev_auto_escalate=dev_auto_escalate,
