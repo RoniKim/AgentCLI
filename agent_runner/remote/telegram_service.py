@@ -100,6 +100,68 @@ def _safe_text(text: str, limit: int = 3500) -> str:
     return _truncate(_mask_sensitive(text), limit=limit)
 
 
+_EMOJI: dict[str, str] = {
+    "run_start": "\U0001f7e2",      # 🟢
+    "run_stop": "\U0001f534",       # 🔴
+    "task_done": "\u2705",          # ✅
+    "task_failed": "\u274c",        # ❌
+    "quota": "\u26a0\ufe0f",        # ⚠️
+    "error": "\U0001f6a8",          # 🚨
+    "stalled": "\U0001f4a4",        # 💤
+    "cycle": "\U0001f504",          # 🔄
+    "info": "\U0001f4ca",           # 📊
+    "detail": "\U0001f4cb",         # 📋
+    "log": "\U0001f4dd",            # 📝
+    "network_error": "\u26a1",      # ⚡
+}
+
+_REASON_KR: dict[str, str] = {
+    "quota_exhausted": "\ucffc\ud0c0 \uc18c\uc9c4",                # 쿼타 소진
+    "quota_utilization": "\ucffc\ud0c0 \uc0ac\uc6a9\ub7c9 \ucd08\uacfc",  # 쿼타 사용량 초과
+    "stop_file": "\uc815\uc9c0 \ud30c\uc77c \uac10\uc9c0",          # 정지 파일 감지
+    "all_tasks_done": "\ubaa8\ub4e0 \ud0dc\uc2a4\ud06c \uc644\ub8cc",      # 모든 태스크 완료
+    "all_tasks_attempted": "\ubaa8\ub4e0 \ud0dc\uc2a4\ud06c \uc2dc\ub3c4 \uc644\ub8cc",  # 모든 태스크 시도 완료
+    "project_complete": "\ud504\ub85c\uc81d\ud2b8 \uc644\ub8cc",    # 프로젝트 완료
+    "no_tasks": "\ud0dc\uc2a4\ud06c \uc5c6\uc74c",                  # 태스크 없음
+    "pm_refresh_no_backlog": "PM \uac31\uc2e0 \ud6c4 \ubc31\ub85c\uadf8 \uc5c6\uc74c",  # PM 갱신 후 백로그 없음
+    "prepared_only": "\uc900\ube44\ub9cc \uc644\ub8cc",              # 준비만 완료
+    "idle_exit": "\uc720\ud734 \uc885\ub8cc",                       # 유휴 종료
+    "ok": "\uc815\uc0c1 \uc885\ub8cc",                               # 정상 종료
+}
+
+
+def _fmt_uptime(seconds: int | float) -> str:
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}\ucd08"  # N초
+    m, s = divmod(total, 60)
+    if m < 60:
+        return f"{m}\ubd84 {s}\ucd08"  # N분 N초
+    h, m = divmod(m, 60)
+    return f"{h}\uc2dc\uac04 {m}\ubd84 {s}\ucd08"  # N시간 N분 N초
+
+
+def _fmt_reason_kr(reason: str) -> str:
+    text = str(reason or "").strip()
+    if not text:
+        return "(\uc5c6\uc74c)"  # (없음)
+    return _REASON_KR.get(text, text)
+
+
+def _fmt_progress(done: int, failed: int, warnings: int) -> str:
+    return (
+        f"{_EMOJI['task_done']} \uc644\ub8cc {done} / "   # ✅ 완료
+        f"{_EMOJI['task_failed']} \uc2e4\ud328 {failed} / "  # ❌ 실패
+        f"{_EMOJI['quota']} \uacbd\uace0 {warnings}"       # ⚠️ 경고
+    )
+
+
+def _fmt_running_status(running: bool) -> str:
+    if running:
+        return f"{_EMOJI['run_start']} \uc2e4\ud589 \uc911"  # 🟢 실행 중
+    return f"{_EMOJI['run_stop']} \uc911\uc9c0\ub428"          # 🔴 중지됨
+
+
 def _chunk_text(text: str, limit: int = 3500) -> list[str]:
     raw = _mask_sensitive(text or "")
     if len(raw) <= limit:
@@ -298,6 +360,7 @@ class TelegramControlService:
         )
         self._token_lock_held = False
         self._atexit_registered = False
+        self.controller.register_on_done(self._on_runner_done)
 
     async def _reply(self, update: Update, text: str) -> None:
         if not update.message:
@@ -331,9 +394,9 @@ class TelegramControlService:
     def _auth_failed_message(self) -> str:
         if not self.allowed_chat_ids:
             if self.pairing_code:
-                return "Access denied: no paired chat. Use /pair <code> first."
-            return "Access denied: allowlist empty. Configure telegram.pairing_code or allowed_chat_ids."
-        return "Access denied: this chat_id is not allowlisted."
+                return "\uc811\uadfc \uac70\ubd80: \uc5f0\uacb0\ub41c \ucc44\ud305\uc774 \uc5c6\uc2b5\ub2c8\ub2e4. /pair <\ucf54\ub4dc>\ub97c \uba3c\uc800 \uc2e4\ud589\ud558\uc138\uc694."  # 접근 거부: 연결된 채팅이 없습니다...
+            return "\uc811\uadfc \uac70\ubd80: \ud5c8\uc6a9 \ubaa9\ub85d\uc774 \ube44\uc5b4 \uc788\uc2b5\ub2c8\ub2e4. telegram.pairing_code \ub610\ub294 allowed_chat_ids\ub97c \uc124\uc815\ud558\uc138\uc694."  # 접근 거부: 허용 목록이 비어 있습니다...
+        return "\uc811\uadfc \uac70\ubd80: \uc774 chat_id\ub294 \ud5c8\uc6a9 \ubaa9\ub85d\uc5d0 \uc5c6\uc2b5\ub2c8\ub2e4."  # 접근 거부: 이 chat_id는 허용 목록에 없습니다.
 
     async def _require_auth(self, update: Update) -> bool:
         chat = update.effective_chat
@@ -387,64 +450,72 @@ class TelegramControlService:
         self.allowed_chat_ids.add(chat_id)
 
     def _format_status(self, data: dict[str, Any]) -> str:
+        running = bool(data.get("running"))
+        done = int(data.get("done") or 0)
+        failed = int(data.get("failed") or 0)
+        warnings = int(data.get("warnings") or 0)
+        uptime = int(data.get("uptime_seconds") or 0)
+        reason = str(data.get("reason") or "").strip()
+        stop_file_exists = bool(data.get("stop_file_exists"))
+
         lines = [
-            "[AgentCLI Status]",
-            f"- instance: {self.instance_name}",
-            f"- running: {str(bool(data.get('running'))).lower()}",
-            f"- mode: {data.get('runner_mode') or 'thread'}",
-            f"- repo: {data.get('repo') or self.repo}",
-            f"- run_dir: {data.get('run_dir') or '(none)'}",
-            f"- uptime: {int(data.get('uptime_seconds') or 0)}s",
-            f"- exit_code: {data.get('exit_code') if data.get('exit_code') is not None else '(running/unknown)'}",
-            f"- progress: done={int(data.get('done') or 0)} failed={int(data.get('failed') or 0)} warnings={int(data.get('warnings') or 0)}",
-            f"- reason: {data.get('reason') or '(none)'}",
-            f"- stop_file: {'present' if data.get('stop_file_exists') else 'absent'} ({data.get('stop_file') or 'STOP'})",
+            f"{_EMOJI['info']} {self.instance_name} \uc0c1\ud0dc",  # 📊 {instance} 상태
+            f"  \uc0c1\ud0dc: {_fmt_running_status(running)}",       # 상태: 🟢/🔴
+            f"  \ubaa8\ub4dc: {data.get('runner_mode') or 'thread'} | "
+            f"\uacbd\ub85c: {data.get('repo') or self.repo} | "
+            f"\uac00\ub3d9 \uc2dc\uac04: {_fmt_uptime(uptime)}",     # 모드/경로/가동 시간
+            f"  \uc9c4\ud589: {_fmt_progress(done, failed, warnings)}",  # 진행: ✅ 완료 ...
+            f"  \uc911\uc9c0 \uc0ac\uc720: {_fmt_reason_kr(reason)} | "
+            f"STOP \ud30c\uc77c: {'\uc788\uc74c' if stop_file_exists else '\uc5c6\uc74c'}",  # 중지 사유/STOP 파일
         ]
         last_event = str(data.get("last_event") or "").strip()
         if last_event:
-            lines.append(f"- last_event: {last_event}")
+            lines.append(f"  \ub9c8\uc9c0\ub9c9 \uc774\ubca4\ud2b8: {last_event}")  # 마지막 이벤트
         return "\n".join(lines)
 
     def _build_detail_text(self, *, lines: int = 80) -> str:
         n = max(10, min(400, int(lines)))
         status = self.controller.status()
         run_dir = str(status.get("run_dir") or "").strip()
+        running = bool(status.get("running"))
+        done = int(status.get("done") or 0)
+        failed = int(status.get("failed") or 0)
+        warnings = int(status.get("warnings") or 0)
+        reason = str(status.get("reason") or "").strip()
 
         out: list[str] = [
-            "[AgentCLI Detail]",
-            f"- instance: {self.instance_name}",
-            f"- running: {str(bool(status.get('running'))).lower()}",
-            f"- mode: {status.get('runner_mode') or 'thread'}",
-            f"- repo: {status.get('repo') or self.repo}",
-            f"- run_dir: {run_dir or '(none)'}",
-            f"- progress: done={int(status.get('done') or 0)} failed={int(status.get('failed') or 0)} warnings={int(status.get('warnings') or 0)}",
-            f"- reason: {status.get('reason') or '(none)'}",
+            f"{_EMOJI['detail']} {self.instance_name} \uc0c1\uc138",  # 📋 {instance} 상세
+            f"  \uc0c1\ud0dc: {_fmt_running_status(running)}",
+            f"  \ubaa8\ub4dc: {status.get('runner_mode') or 'thread'} | "
+            f"\uacbd\ub85c: {status.get('repo') or self.repo}",
+            f"  \uc9c4\ud589: {_fmt_progress(done, failed, warnings)}",
+            f"  \uc911\uc9c0 \uc0ac\uc720: {_fmt_reason_kr(reason)}",
             "",
         ]
 
         if not run_dir:
-            out.append("No run_dir found. Run /run_start first.")
+            out.append("\uc2e4\ud589 \ub514\ub809\ud1a0\ub9ac \uc5c6\uc74c. /run_start\ub97c \uba3c\uc800 \uc2e4\ud589\ud558\uc138\uc694.")  # 실행 디렉토리 없음...
             return "\n".join(out)
 
         def _append_section(name: str, content: str) -> None:
-            out.append(f"[{name}] last {n}")
-            out.append(content.strip() or "(empty)")
+            out.append(f"{_EMOJI['log']} {name} (\ucd5c\uadfc {n}\uc904)")  # 📝 name (최근 N줄)
+            out.append(content.strip() or "(\ube44\uc5b4 \uc788\uc74c)")     # (비어 있음)
             out.append("")
 
         try:
             _append_section("cycle_summary.log", self.controller.tail(name="cycle_summary.log", lines=n))
         except Exception as ex:
-            _append_section("cycle_summary.log", f"(error) {ex}")
+            _append_section("cycle_summary.log", f"(\uc624\ub958) {ex}")
 
         try:
             _append_section("metrics.jsonl", self.controller.tail(name="metrics.jsonl", lines=n))
         except Exception as ex:
-            _append_section("metrics.jsonl", f"(error) {ex}")
+            _append_section("metrics.jsonl", f"(\uc624\ub958) {ex}")
 
         try:
             _append_section("run_summary.json", self.controller.tail(name="run_summary.json", lines=max(20, n // 2)))
         except Exception as ex:
-            _append_section("run_summary.json", f"(error) {ex}")
+            _append_section("run_summary.json", f"(\uc624\ub958) {ex}")
 
         if str(status.get("runner_mode") or "").strip().lower() == "subprocess":
             try:
@@ -453,13 +524,60 @@ class TelegramControlService:
                     self.controller.tail(name="telegram_runner_subprocess.log", lines=n),
                 )
             except Exception as ex:
-                _append_section("telegram_runner_subprocess.log", f"(error) {ex}")
+                _append_section("telegram_runner_subprocess.log", f"(\uc624\ub958) {ex}")
 
-        out.append("Tip: use /tail <file> <lines> for focused view.")
+        out.append("\ud301: /tail <\ud30c\uc77c\uba85> <\uc904\uc218> \ub85c \ud2b9\uc815 \ud30c\uc77c\uc744 \ud655\uc778\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.")  # 팁: /tail ...
         return "\n".join(out).strip()
 
     def _notify_enabled(self, event: str) -> bool:
         return event in self.notify_events
+
+    def _send_push_sync(self, messages: list[str]) -> None:
+        """Send push messages synchronously via raw HTTP (thread-safe, no PTB dependency)."""
+        if not messages or not self.allowed_chat_ids or not self.bot_token:
+            return
+        import urllib.request
+
+        limited = messages[:6]
+        extra = len(messages) - len(limited)
+        lines = [f"{_EMOJI['info']} {self.instance_name} \uc54c\ub9bc"]  # 📊 {instance} 알림
+        lines.extend(limited)
+        if extra > 0:
+            lines.append(f"... (\uc678 {extra}\uac74)")  # ... (외 N건)
+        payload = _safe_text("\n\n".join(lines))
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        for chat_id in sorted(self.allowed_chat_ids):
+            try:
+                data = json.dumps({"chat_id": chat_id, "text": payload}).encode("utf-8")
+                req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+                urllib.request.urlopen(req, timeout=10)
+            except Exception as ex:
+                print(f"[TELEGRAM][WARN] Sync push failed chat_id={chat_id}: {ex}")
+
+    def _on_runner_done(self, exit_code: int) -> None:
+        """Callback invoked from runner thread when runner finishes. Sends immediate notification."""
+        try:
+            messages = self._collect_push_messages()
+        except Exception:
+            messages = []
+        if messages:
+            self._send_push_sync(messages)
+
+    def _atexit_shutdown(self) -> None:
+        """atexit handler: send final run_stop if runner was still tracked as running."""
+        try:
+            if not self._push_initialized:
+                return
+            with self._push_lock:
+                was_running = bool(self._push_state.get("running", False))
+            if not was_running:
+                return
+            messages = self._collect_push_messages()
+            if messages:
+                self._send_push_sync(messages)
+        except Exception:
+            pass
 
     def _short_run_id(self, run_dir: str) -> str:
         text = str(run_dir or "").strip()
@@ -688,9 +806,9 @@ class TelegramControlService:
 
         out: list[str] = []
         if quota_message:
-            out.append(f"[quota] {quota_message}")
+            out.append(f"{_EMOJI['quota']} \ucffc\ud0c0 \uacbd\uace0\n  {quota_message}")   # ⚠️ 쿼타 경고
         if error_message:
-            out.append(f"[error] {error_message}")
+            out.append(f"{_EMOJI['error']} \uc5d0\ub7ec \ubc1c\uc0dd\n  {error_message}")     # 🚨 에러 발생
         return out
 
     def _collect_push_messages(self) -> list[str]:
@@ -748,27 +866,31 @@ class TelegramControlService:
 
             if self._notify_enabled("run_start") and running and (not prev_running or run_changed):
                 messages.append(
-                    f"[run_start] instance={self.instance_name} run_id={self._short_run_id(run_dir)} mode={runner_mode}"
+                    f"{_EMOJI['run_start']} \ub7ec\ub108 \uc2dc\uc791\ub428\n"   # 🟢 러너 시작됨
+                    f"  \uc2e4\ud589 ID: {self._short_run_id(run_dir)} | "        # 실행 ID
+                    f"\ubaa8\ub4dc: {runner_mode}"                                 # 모드
                 )
 
             if self._notify_enabled("run_stop") and (not running) and prev_running:
-                final_reason = reason or str(prev.get("reason") or "").strip() or "(none)"
+                final_reason = reason or str(prev.get("reason") or "").strip()
                 stop_run_id = self._short_run_id(prev_run_dir or run_dir)
                 messages.append(
-                    f"[run_stop] instance={self.instance_name} run_id={stop_run_id} "
-                    f"reason={final_reason} done={done} failed={failed} warnings={warnings}"
+                    f"{_EMOJI['run_stop']} \ub7ec\ub108 \uc911\uc9c0\ub428\n"          # 🔴 러너 중지됨
+                    f"  \uc2e4\ud589 ID: {stop_run_id}\n"                                # 실행 ID
+                    f"  \uc774\uc720: {_fmt_reason_kr(final_reason)} | "                  # 이유
+                    f"{_fmt_progress(done, failed, warnings)}"                             # ✅ 완료 ...
                 )
 
             if self._notify_enabled("task_done") and done > prev_done:
                 messages.append(
-                    f"[task_done] instance={self.instance_name} +{done - prev_done} "
-                    f"total={done} failed={failed} warnings={warnings}"
+                    f"{_EMOJI['task_done']} \ud0dc\uc2a4\ud06c \uc644\ub8cc (+{done - prev_done})\n"  # ✅ 태스크 완료 (+N)
+                    f"  \uc9c4\ud589: {_fmt_progress(done, failed, warnings)}"                          # 진행: ...
                 )
 
             if self._notify_enabled("task_failed") and failed > prev_failed:
                 messages.append(
-                    f"[task_failed] instance={self.instance_name} +{failed - prev_failed} "
-                    f"total={failed} reason={reason or '(none)'}"
+                    f"{_EMOJI['task_failed']} \ud0dc\uc2a4\ud06c \uc2e4\ud328 (+{failed - prev_failed})\n"  # ❌ 태스크 실패 (+N)
+                    f"  \ucd1d \uc2e4\ud328: {failed} | \uc774\uc720: {_fmt_reason_kr(reason)}"              # 총 실패: N | 이유: ...
                 )
 
             if run_dir and self.send_cycle_summary:
@@ -779,9 +901,9 @@ class TelegramControlService:
                 )
                 if cycle_lines:
                     for line in cycle_lines[-2:]:
-                        messages.append(f"[cycle] {line}")
+                        messages.append(f"{_EMOJI['cycle']} \uc0ac\uc774\ud074: {line}")  # 🔄 사이클: {line}
                     if len(cycle_lines) > 2:
-                        messages.append(f"[cycle] ... ({len(cycle_lines) - 2} more lines)")
+                        messages.append(f"{_EMOJI['cycle']} ... (\uc678 {len(cycle_lines) - 2}\uac74)")  # 🔄 ... (외 N건)
 
             messages.extend(self._collect_metric_push_messages(run_dir))
 
@@ -793,8 +915,9 @@ class TelegramControlService:
                     idle_seconds = max(0, int(now_ts - metrics_mtime))
                     if idle_seconds >= int(self.stalled_seconds) and not stalled_notified:
                         messages.append(
-                            f"[stalled] instance={self.instance_name} run_id={self._short_run_id(run_dir)} "
-                            f"idle={idle_seconds}s threshold={int(self.stalled_seconds)}s"
+                            f"{_EMOJI['stalled']} \uc751\ub2f5 \uc5c6\uc74c (\uba48\ucda4 \uac10\uc9c0)\n"  # 💤 응답 없음 (멈춤 감지)
+                            f"  \uc720\ud734: {_fmt_uptime(idle_seconds)} | "                                  # 유휴: ...
+                            f"\uc784\uacc4\uac12: {_fmt_uptime(int(self.stalled_seconds))}"                    # 임계값: ...
                         )
                         stalled_notified = True
             if not running:
@@ -831,11 +954,11 @@ class TelegramControlService:
 
         limited = messages[:6]
         extra = len(messages) - len(limited)
-        lines = [f"[AgentCLI Notify] instance={self.instance_name}"]
-        lines.extend([f"- {line}" for line in limited])
+        lines = [f"{_EMOJI['info']} {self.instance_name} \uc54c\ub9bc"]  # 📊 {instance} 알림
+        lines.extend(limited)
         if extra > 0:
-            lines.append(f"- ... ({extra} more events)")
-        payload = _safe_text("\n".join(lines))
+            lines.append(f"... (\uc678 {extra}\uac74)")  # ... (외 N건)
+        payload = _safe_text("\n\n".join(lines))
 
         chat_ids = sorted(self.allowed_chat_ids)
         for chat_id in chat_ids:
@@ -863,19 +986,19 @@ class TelegramControlService:
         chat_id = int(chat.id) if chat else 0
         authorized = self._is_allowed(chat_id) if chat_id else False
         lines = [
-            "AgentCLI Telegram control plane",
-            f"- instance: {self.instance_name}",
-            f"- token_fingerprint: {self.token_fingerprint}",
-            f"- repo: {self.repo}",
-            f"- authorized: {str(authorized).lower()}",
-            f"- paired_chat_count: {len(self.allowed_chat_ids)}",
-            "Commands: /whoami /pair /status /detail /errors /events /grep /run_start /run_stop /runs /tail /notify",
+            f"{_EMOJI['info']} AgentCLI \ud154\ub808\uadf8\ub7a8 \uc81c\uc5b4",  # 📊 AgentCLI 텔레그램 제어
+            f"  \uc778\uc2a4\ud134\uc2a4: {self.instance_name}",      # 인스턴스
+            f"  \ud1a0\ud070 \uc9c0\ubb38: {self.token_fingerprint}",  # 토큰 지문
+            f"  \uc800\uc7a5\uc18c: {self.repo}",                      # 저장소
+            f"  \uc778\uc99d: {'\uc644\ub8cc' if authorized else '\ubbf8\uc778\uc99d'}",  # 인증: 완료/미인증
+            f"  \uc5f0\uacb0\ub41c \ucc44\ud305: {len(self.allowed_chat_ids)}\uac1c",    # 연결된 채팅: N개
+            "\uba85\ub839\uc5b4: /whoami /pair /status /detail /errors /events /grep /run_start /run_stop /runs /tail /notify",  # 명령어
         ]
         if not authorized:
             if self.pairing_code:
-                lines.append("Pairing required: /pair <code>")
+                lines.append("\ud398\uc5b4\ub9c1 \ud544\uc694: /pair <\ucf54\ub4dc>")  # 페어링 필요
             else:
-                lines.append("Pairing is disabled. Set telegram.pairing_code or allowed_chat_ids in config.")
+                lines.append("\ud398\uc5b4\ub9c1 \ube44\ud65c\uc131. telegram.pairing_code \ub610\ub294 allowed_chat_ids\ub97c \uc124\uc815\ud558\uc138\uc694.")  # 페어링 비활성...
         await self._reply(update, "\n".join(lines))
 
     async def cmd_notify(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -883,14 +1006,12 @@ class TelegramControlService:
             return
         events = sorted(self.notify_events)
         lines = [
-            "[Notify Settings]",
-            f"- instance: {self.instance_name}",
-            f"- token_fingerprint: {self.token_fingerprint}",
-            f"- enabled_events: {events if events else '(none)'}",
-            f"- send_cycle_summary: {str(self.send_cycle_summary).lower()}",
-            f"- poll_interval_seconds: {self.notify_poll_interval_seconds}",
-            f"- stalled_seconds: {self.stalled_seconds}",
-            f"- paired_chat_count: {len(self.allowed_chat_ids)}",
+            f"{_EMOJI['info']} {self.instance_name} \uc54c\ub9bc \uc124\uc815",    # 📊 {instance} 알림 설정
+            f"  \ud65c\uc131 \uc774\ubca4\ud2b8: {events if events else '(\uc5c6\uc74c)'}",  # 활성 이벤트
+            f"  \uc0ac\uc774\ud074 \uc694\uc57d \uc804\uc1a1: {'\uc608' if self.send_cycle_summary else '\uc544\ub2c8\uc624'}",  # 사이클 요약 전송: 예/아니오
+            f"  \ud3f4\ub9c1 \uac04\uaca9: {self.notify_poll_interval_seconds}\ucd08",  # 폴링 간격: N초
+            f"  \uba48\ucda4 \uac10\uc9c0: {self.stalled_seconds}\ucd08",               # 멈춤 감지: N초
+            f"  \uc5f0\uacb0\ub41c \ucc44\ud305: {len(self.allowed_chat_ids)}\uac1c",   # 연결된 채팅: N개
         ]
         await self._reply(update, "\n".join(lines))
 
@@ -916,21 +1037,21 @@ class TelegramControlService:
         try:
             body = self.controller.filter_metrics(errors_only=True, limit=lines)
         except Exception as ex:
-            await self._reply(update, f"errors failed: {ex}")
+            await self._reply(update, f"\uc5d0\ub7ec \uc870\ud68c \uc2e4\ud328: {ex}")
             return
-        payload = body.strip() or "(empty)"
-        await self._reply(update, f"[errors] last {lines}\n{payload}")
+        payload = body.strip() or "(\ube44\uc5b4 \uc788\uc74c)"  # (비어 있음)
+        await self._reply(update, f"{_EMOJI['error']} \uc5d0\ub7ec (\ucd5c\uadfc {lines}\uac74)\n{payload}")  # 🚨 에러 (최근 N건)
 
     async def cmd_events(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._require_auth(update):
             return
         args = context.args or []
         if not args:
-            await self._reply(update, "Usage: /events <event_name> [lines]")
+            await self._reply(update, "\uc0ac\uc6a9\ubc95: /events <\uc774\ubca4\ud2b8\uba85> [\uc904\uc218]")
             return
         event_name = str(args[0] or "").strip().lower()
         if not event_name:
-            await self._reply(update, "Usage: /events <event_name> [lines]")
+            await self._reply(update, "\uc0ac\uc6a9\ubc95: /events <\uc774\ubca4\ud2b8\uba85> [\uc904\uc218]")
             return
         lines = self.tail_lines_default
         if len(args) > 1:
@@ -940,21 +1061,21 @@ class TelegramControlService:
         try:
             body = self.controller.filter_metrics(event_type=event_name, limit=lines)
         except Exception as ex:
-            await self._reply(update, f"events failed: {ex}")
+            await self._reply(update, f"\uc774\ubca4\ud2b8 \uc870\ud68c \uc2e4\ud328: {ex}")
             return
-        payload = body.strip() or "(empty)"
-        await self._reply(update, f"[events] {event_name} last {lines}\n{payload}")
+        payload = body.strip() or "(\ube44\uc5b4 \uc788\uc74c)"
+        await self._reply(update, f"{_EMOJI['info']} \uc774\ubca4\ud2b8: {event_name} (\ucd5c\uadfc {lines}\uac74)\n{payload}")  # 📊 이벤트: name (최근 N건)
 
     async def cmd_grep(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._require_auth(update):
             return
         args = context.args or []
         if not args:
-            await self._reply(update, "Usage: /grep <pattern> [file] [lines]")
+            await self._reply(update, "\uc0ac\uc6a9\ubc95: /grep <\ud328\ud134> [\ud30c\uc77c] [\uc904\uc218]")
             return
         pattern = str(args[0] or "").strip()
         if not pattern:
-            await self._reply(update, "Usage: /grep <pattern> [file] [lines]")
+            await self._reply(update, "\uc0ac\uc6a9\ubc95: /grep <\ud328\ud134> [\ud30c\uc77c] [\uc904\uc218]")
             return
 
         file_name = "metrics.jsonl"
@@ -973,48 +1094,48 @@ class TelegramControlService:
         try:
             body = self.controller.grep(pattern=pattern, name=file_name, lines=lines, ignore_case=True)
         except Exception as ex:
-            await self._reply(update, f"grep failed: {ex}")
+            await self._reply(update, f"\uac80\uc0c9 \uc2e4\ud328: {ex}")
             return
-        payload = body.strip() or "(empty)"
-        await self._reply(update, f"[grep] {file_name} /{pattern}/ last {lines}\n{payload}")
+        payload = body.strip() or "(\ube44\uc5b4 \uc788\uc74c)"
+        await self._reply(update, f"\uac80\uc0c9: {file_name} /{pattern}/ (\ucd5c\uadfc {lines}\uac74)\n{payload}")  # 검색: file /pat/ (최근 N건)
 
     async def cmd_whoami(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
         chat_id = int(chat.id) if chat else 0
-        text = f"chat_id: {chat_id}" if chat_id else "chat_id: (unknown)"
+        text = f"chat_id: {chat_id}" if chat_id else "chat_id: (\uc54c \uc218 \uc5c6\uc74c)"  # (알 수 없음)
         await self._reply(update, text)
 
     async def cmd_pair(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
         chat_id = int(chat.id) if chat else 0
         if not chat_id:
-            await self._reply(update, "Pairing failed: chat_id is unavailable.")
+            await self._reply(update, "\ud398\uc5b4\ub9c1 \uc2e4\ud328: chat_id\ub97c \ud655\uc778\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.")  # 페어링 실패: chat_id를 확인할 수 없습니다.
             return
 
         if self._is_allowed(chat_id):
-            await self._reply(update, "Already paired.")
+            await self._reply(update, "\uc774\ubbf8 \ud398\uc5b4\ub9c1\ub418\uc5b4 \uc788\uc2b5\ub2c8\ub2e4.")  # 이미 페어링되어 있습니다.
             return
 
         if not self.pairing_code:
-            await self._reply(update, "Pairing is disabled: telegram.pairing_code is empty.")
+            await self._reply(update, "\ud398\uc5b4\ub9c1 \ube44\ud65c\uc131: telegram.pairing_code\uac00 \uc124\uc815\ub418\uc9c0 \uc54a\uc558\uc2b5\ub2c8\ub2e4.")  # 페어링 비활성: ...
             return
 
         provided = " ".join(context.args or []).strip()
         if not provided:
-            await self._reply(update, "Usage: /pair <code>")
+            await self._reply(update, "\uc0ac\uc6a9\ubc95: /pair <\ucf54\ub4dc>")  # 사용법: /pair <코드>
             return
 
         if provided != self.pairing_code:
-            await self._reply(update, "Pairing failed: invalid code.")
+            await self._reply(update, "\ud398\uc5b4\ub9c1 \uc2e4\ud328: \uc798\ubabb\ub41c \ucf54\ub4dc\uc785\ub2c8\ub2e4.")  # 페어링 실패: 잘못된 코드입니다.
             return
 
         try:
             self._persist_allowlist(chat_id)
         except Exception as ex:
-            await self._reply(update, f"Pairing failed: {ex}")
+            await self._reply(update, f"\ud398\uc5b4\ub9c1 \uc2e4\ud328: {ex}")  # 페어링 실패: {ex}
             return
 
-        await self._reply(update, f"Pairing successful. allowlisted chat_id={chat_id}")
+        await self._reply(update, f"\ud398\uc5b4\ub9c1 \uc131\uacf5. \ud5c8\uc6a9\ub41c chat_id={chat_id}")  # 페어링 성공. 허용된 chat_id=...
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._require_auth(update):
@@ -1029,15 +1150,15 @@ class TelegramControlService:
         try:
             result = self.controller.start(overrides=overrides)
         except Exception as ex:
-            await self._reply(update, f"Failed to start runner: {ex}")
+            await self._reply(update, f"\ub7ec\ub108 \uc2dc\uc791 \uc2e4\ud328: {ex}")  # 러너 시작 실패
             return
-        lines = [result.get("message") or "Failed to start runner."]
+        lines = [result.get("message") or "\ub7ec\ub108 \uc2dc\uc791 \uc2e4\ud328."]  # 러너 시작 실패.
         if result.get("run_dir"):
-            lines.append(f"run_dir: {result['run_dir']}")
+            lines.append(f"\uc2e4\ud589 \uacbd\ub85c: {result['run_dir']}")  # 실행 경로
         if result.get("runner_mode"):
-            lines.append(f"mode: {result['runner_mode']}")
+            lines.append(f"\ubaa8\ub4dc: {result['runner_mode']}")  # 모드
         if ignored:
-            lines.append(f"ignored options: {', '.join(ignored)}")
+            lines.append(f"\ubb34\uc2dc\ub41c \uc635\uc158: {', '.join(ignored)}")  # 무시된 옵션
         await self._reply(update, "\n".join(lines))
 
     async def cmd_run_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1046,9 +1167,9 @@ class TelegramControlService:
         if not update.message:
             return
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Confirm Stop", callback_data="confirm_run_stop")]]
+            [[InlineKeyboardButton("\uc911\uc9c0 \ud655\uc778", callback_data="confirm_run_stop")]]  # 중지 확인
         )
-        await update.message.reply_text("Stop runner now?", reply_markup=keyboard)
+        await update.message.reply_text("\ub7ec\ub108\ub97c \uc9c0\uae08 \uc911\uc9c0\ud558\uc2dc\uaca0\uc2b5\ub2c8\uae4c?", reply_markup=keyboard)  # 러너를 지금 중지하시겠습니까?
 
     async def cmd_runs(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._require_auth(update):
@@ -1061,13 +1182,17 @@ class TelegramControlService:
                 count = 10
         runs = self.controller.list_runs(n=count)
         if not runs:
-            await self._reply(update, "No run history found.")
+            await self._reply(update, "\uc2e4\ud589 \uc774\ub825\uc774 \uc5c6\uc2b5\ub2c8\ub2e4.")  # 실행 이력이 없습니다.
             return
-        lines = ["[Recent Runs]"]
+        lines = [f"{_EMOJI['info']} \ucd5c\uadfc \uc2e4\ud589 \uc774\ub825"]  # 📊 최근 실행 이력
         for item in runs:
+            r_done = int(item.get("done") or 0)
+            r_failed = int(item.get("failed") or 0)
+            r_warn = int(item.get("warnings") or 0)
+            r_reason = str(item.get("reason") or "").strip()
             lines.append(
-                f"- {item.get('run_id')}: done={item.get('done', 0)} failed={item.get('failed', 0)} "
-                f"warn={item.get('warnings', 0)} reason={item.get('reason') or '-'}"
+                f"  {item.get('run_id')}: {_fmt_progress(r_done, r_failed, r_warn)}"
+                f" | \uc0ac\uc720: {_fmt_reason_kr(r_reason)}"  # 사유
             )
         await self._reply(update, "\n".join(lines))
 
@@ -1090,11 +1215,22 @@ class TelegramControlService:
         try:
             tail_text = self.controller.tail(name=file_name, lines=lines)
         except Exception as ex:
-            await self._reply(update, f"tail failed: {ex}")
+            await self._reply(update, f"\ud14c\uc77c \uc2e4\ud328: {ex}")
             return
-        payload = tail_text.strip() or "(empty)"
-        response = f"[tail] {file_name} (last {lines})\n{payload}"
+        payload = tail_text.strip() or "(\ube44\uc5b4 \uc788\uc74c)"
+        response = f"{_EMOJI['log']} {file_name} (\ucd5c\uadfc {lines}\uc904)\n{payload}"  # 📝 file (최근 N줄)
         await self._reply(update, response)
+
+    async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle PTB errors gracefully instead of dumping full tracebacks."""
+        err = context.error
+        if err is None:
+            return
+        # Network errors during polling are transient — log one line, PTB retries automatically.
+        err_name = type(err).__name__
+        cause = type(err.__cause__).__name__ if err.__cause__ else ""
+        label = f"{err_name}({cause})" if cause else err_name
+        print(f"[TELEGRAM][WARN] {label}: {err}")
 
     async def on_stop_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -1107,8 +1243,8 @@ class TelegramControlService:
             return
 
         result = self.controller.stop(wait=False)
-        await query.answer("Stop requested.")
-        await query.edit_message_text(_safe_text(result.get("message") or "Stop requested."))
+        await query.answer("\uc911\uc9c0 \uc694\uccad\ub428.")  # 중지 요청됨.
+        await query.edit_message_text(_safe_text(result.get("message") or "\uc911\uc9c0 \uc694\uccad\ub428."))
 
     def run(self) -> int:
         ok, detail = self.acquire_token_lock()
@@ -1145,6 +1281,7 @@ class TelegramControlService:
             app.add_handler(CommandHandler("tail", self.cmd_tail))
             app.add_handler(CommandHandler("notify", self.cmd_notify))
             app.add_handler(CallbackQueryHandler(self.on_stop_confirm, pattern=r"^confirm_run_stop$"))
+            app.add_error_handler(self._error_handler)
 
             if self.notify_events or self.send_cycle_summary:
                 if app.job_queue is None:
@@ -1163,6 +1300,11 @@ class TelegramControlService:
                         f"events={sorted(self.notify_events)} cycle_summary={self.send_cycle_summary} "
                         f"stalled_after={self.stalled_seconds}s"
                     )
+
+            try:
+                atexit.register(self._atexit_shutdown)
+            except Exception:
+                pass
 
             print(
                 f"[TELEGRAM] Control plane started. "

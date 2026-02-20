@@ -9,7 +9,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..cli import DEFAULTS
 from ..config import AGENT_WORK_DIR, resolve_prompts_dir
@@ -44,10 +44,21 @@ class RunnerController:
         self._runner_started_at: Optional[float] = None
         self._start_lock = threading.Lock()
         self.run_dir: Optional[Path] = None
+        self._on_done_callbacks: list[Callable[[int], None]] = []
 
         configured_run_dir = str(getattr(base_args, "run_dir", "") or "").strip()
         if configured_run_dir:
             self.run_dir = Path(configured_run_dir).expanduser().resolve()
+
+    def register_on_done(self, callback: Callable[[int], None]) -> None:
+        self._on_done_callbacks.append(callback)
+
+    def _fire_on_done(self, rc: int) -> None:
+        for cb in self._on_done_callbacks:
+            try:
+                cb(rc)
+            except Exception:
+                pass
 
     def _stop_file_name(self) -> str:
         raw = str(getattr(self.base_args, "stop_file", "STOP") or "STOP").strip()
@@ -108,6 +119,7 @@ class RunnerController:
             except Exception:
                 rc = 1
             self._runner_exit_code = int(rc)
+            self._fire_on_done(int(rc))
 
         self._runner_thread = threading.Thread(target=_target, name="agentcli-runner", daemon=True)
         self._runner_thread.start()
@@ -149,11 +161,11 @@ class RunnerController:
 
     def start(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self._start_lock.acquire(blocking=False):
-            return {"ok": False, "message": "Runner start already in progress."}
+            return {"ok": False, "message": "\ub7ec\ub108 \uc2dc\uc791\uc774 \uc774\ubbf8 \uc9c4\ud589 \uc911\uc785\ub2c8\ub2e4."}
 
         try:
             if self._runner_is_alive():
-                return {"ok": False, "message": "Runner is already running."}
+                return {"ok": False, "message": "\ub7ec\ub108\uac00 \uc774\ubbf8 \uc2e4\ud589 \uc911\uc785\ub2c8\ub2e4."}
 
             eff = self._effective_dict(overrides)
             run_dir = self._ensure_run_dir(eff)
@@ -180,7 +192,7 @@ class RunnerController:
 
             return {
                 "ok": True,
-                "message": "Runner started.",
+                "message": "\ub7ec\ub108\uac00 \uc2dc\uc791\ub418\uc5c8\uc2b5\ub2c8\ub2e4.",
                 "runner_mode": self.runner_mode,
                 "run_dir": str(run_dir),
             }
@@ -190,14 +202,14 @@ class RunnerController:
     def stop(self, *, wait: bool = False) -> dict[str, Any]:
         run_dir = self.run_dir or find_latest_run_dir(self.repo)
         if run_dir is None:
-            return {"ok": False, "message": "No run_dir found."}
+            return {"ok": False, "message": "\uc2e4\ud589 \ub514\ub809\ud1a0\ub9ac\ub97c \ucc3e\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4."}
         self.run_dir = run_dir
 
         stop_path = run_dir / self._stop_file_name()
         try:
             stop_path.write_text(STOP_REASON_STOP_FILE + "\n", encoding="utf-8", errors="replace")
         except Exception as ex:
-            return {"ok": False, "message": f"Failed to create stop file: {ex}"}
+            return {"ok": False, "message": f"\uc815\uc9c0 \ud30c\uc77c \uc0dd\uc131 \uc2e4\ud328: {ex}"}
 
         if self.runner_mode == "thread":
             try:
@@ -225,7 +237,7 @@ class RunnerController:
 
         return {
             "ok": True,
-            "message": f"Stop requested: {stop_path}",
+            "message": f"\uc911\uc9c0 \uc694\uccad\ub428: {stop_path}",
             "running": self._runner_is_alive(),
             "run_dir": str(run_dir),
         }
@@ -353,7 +365,7 @@ class RunnerController:
         file_name = str(name or "cycle_summary.log").strip()
         if file_name not in self.ALLOWED_TAIL_FILES:
             allowed = ", ".join(sorted(self.ALLOWED_TAIL_FILES))
-            raise ValueError(f"Unsupported file. Allowed: {allowed}")
+            raise ValueError(f"\uc9c0\uc6d0\ub418\uc9c0 \uc54a\ub294 \ud30c\uc77c. \ud5c8\uc6a9: {allowed}")
 
         run_dir = self.run_dir or find_latest_run_dir(self.repo)
         if run_dir is None:
@@ -418,11 +430,11 @@ class RunnerController:
         file_name = str(name or "metrics.jsonl").strip()
         if file_name not in self.ALLOWED_TAIL_FILES:
             allowed = ", ".join(sorted(self.ALLOWED_TAIL_FILES))
-            raise ValueError(f"Unsupported file. Allowed: {allowed}")
+            raise ValueError(f"\uc9c0\uc6d0\ub418\uc9c0 \uc54a\ub294 \ud30c\uc77c. \ud5c8\uc6a9: {allowed}")
 
         needle = str(pattern or "").strip()
         if not needle:
-            raise ValueError("pattern is empty")
+            raise ValueError("\ud328\ud134\uc774 \ube44\uc5b4 \uc788\uc2b5\ub2c8\ub2e4")
 
         run_dir = self.run_dir or find_latest_run_dir(self.repo)
         if run_dir is None:
@@ -436,7 +448,7 @@ class RunnerController:
         try:
             rx = re.compile(needle, flags)
         except Exception as ex:
-            raise ValueError(f"invalid regex: {ex}") from ex
+            raise ValueError(f"\uc798\ubabb\ub41c \uc815\uaddc\uc2dd: {ex}") from ex
 
         max_lines = max(1, int(lines))
         dq: deque[str] = deque(maxlen=max_lines)
