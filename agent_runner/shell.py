@@ -17,6 +17,7 @@ from .config import (
     save_config,
     resolve_config_path,
     default_config_path,
+    legacy_default_config_path,
     legacy_config_path,
     resolve_prompts_dir,
 )
@@ -186,7 +187,13 @@ class RunnerShell:
             return
         self.config_path = self.config_path or default_config_path(self.repo)
         # Prefer AgentCLI-side config. If missing, fall back to legacy repo/.doc config for compatibility.
-        load_path = self.config_path if self.config_path.exists() else legacy_config_path(self.repo)
+        load_path = self.config_path
+        if not load_path.exists():
+            fallback = legacy_default_config_path(self.repo)
+            if fallback and fallback.exists():
+                load_path = fallback
+            else:
+                load_path = legacy_config_path(self.repo)
         if load_path.exists():
             try:
                 self.config = load_config(load_path)
@@ -274,6 +281,13 @@ class RunnerShell:
             print(f"claudecode_qa_allowed_tools: {eff.get('claudecode_qa_allowed_tools')}")
         print(f"roles:      {eff.get('roles')}")
         print(f"plugins_enabled: {bool(eff.get('plugins_enabled'))} (allowlist={eff.get('plugins_allowlist')}, strict={bool(eff.get('plugins_strict'))})")
+        tg = eff.get("telegram") if isinstance(eff.get("telegram"), dict) else {}
+        print(
+            "telegram: "
+            f"enabled={bool(tg.get('enabled', False))}, "
+            f"runner_mode={tg.get('runner_mode', 'thread')}, "
+            f"allowed_chat_ids={tg.get('allowed_chat_ids', [])}"
+        )
         print(f"debug:      {bool(eff.get('debug', False))}")
         print(f"auth:       login-based (codex login / claude auth login)")
         print("======================================\n")

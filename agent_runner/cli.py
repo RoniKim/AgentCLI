@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional, Sequence
 from .config import (
     app_home,
     legacy_config_path,
+    legacy_default_config_path,
     load_config,
     resolve_config_path,
     resolve_prompts_dir,
@@ -193,7 +194,7 @@ DEFAULTS: Dict[str, Any] = {
     "test_cmd": [],
     "build_timeout_seconds": 1800,
 
-    # Models (all Codex — single billing)
+    # Models (all Codex; single billing)
     "pm_model": "gpt-5.1-codex-mini",
     "dev_model": "gpt-5.1-codex-mini",
     "qa_model": "gpt-5.1-codex-mini",
@@ -303,8 +304,28 @@ DEFAULTS: Dict[str, Any] = {
     "goals_enabled": True,
     "goals_auto_generate": True,
     "goals_auto_check": True,
-    "goals_auto_refresh": False,           # project_complete 시 PM이 새 GOALS 자동 생성
-    "goals_refresh_max_per_run": 3,        # 런 당 최대 refresh 횟수 (무한 루프 방지)
+    "goals_auto_refresh": False,           # Auto-refresh GOALS after project_complete
+    "goals_refresh_max_per_run": 3,        # Max refresh attempts per run (loop guard)
+
+    # Remote control plane (Telegram)
+    "telegram": {
+        "enabled": False,
+        "bot_token": "",
+        "allowed_chat_ids": [],
+        "pairing_code": "",
+        "notify_events": [
+            "run_start",
+            "run_stop",
+            "task_done",
+            "task_failed",
+            "quota",
+            "error",
+        ],
+        "send_cycle_summary": True,
+        "tail_lines_default": 50,
+        "runner_mode": "thread",  # thread | subprocess
+        "poll_timeout_seconds": 30,
+    },
 }
 
 
@@ -318,12 +339,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--config",
         default="",
-        help="Config file path (default: AgentCLI/configs/<repo-slug>.json). Relative paths resolve from AgentCLI home.",
+        help="Config file path (default: ~/.agentcli/configs/<repo-slug>.json). Relative paths resolve from AgentCLI home.",
     )
     p.add_argument("--run-now", action="store_true", help="Run immediately (skip interactive shell)")
     p.add_argument("--wizard", action="store_true", help="Run wizard to create/update config")
     p.add_argument("--non-interactive", action="store_true", help="Disable interactive prompts")
     p.add_argument("--init-prompts", action="store_true", help="Create prompt templates in prompts_dir and exit")
+    p.add_argument("--telegram", dest="telegram_service", action="store_true", default=None, help="Run Telegram control-plane service mode")
+    p.add_argument("--telegram-runner-mode", default=None, choices=["thread", "subprocess"], help="Runner execution mode for Telegram service")
+    p.add_argument("--telegram-poll-timeout", type=int, default=None, help="Telegram long-poll timeout seconds")
+    p.add_argument("--telegram-allowed-chat-id", action="append", default=None, help="Allowlisted chat_id (repeatable)")
+    p.add_argument("--telegram-bot-token", default=None, help="Telegram bot token override")
+    p.add_argument("--telegram-pairing-code", default=None, help="One-time pairing code for /pair command")
 
     # Paths
     p.add_argument("--run-dir", default=None, help="Fixed run_dir to reuse. Empty/None = auto")
@@ -500,7 +527,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--prompts-dir",
         default=None,
-        help="Prompt templates directory. Absolute path or relative to AgentCLI home. Empty uses default AgentCLI/prompts/<repo-slug>/",
+        help="Prompt templates directory. Absolute path or relative to AgentCLI home. Empty uses default ~/.agentcli/prompts/<repo-slug>/",
     )
 
     # Diagnostics
@@ -637,6 +664,64 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
     eff["policy"] = _normalize_policy(eff.get("policy"))
     eff["security"] = _normalize_security(eff.get("security"))
 
+    def _normalize_telegram(raw: Any) -> dict[str, Any]:
+        defaults_tg = defaults.get("telegram", {}) if isinstance(defaults.get("telegram", {}), dict) else {}
+        out: dict[str, Any] = dict(defaults_tg)
+        if isinstance(raw, dict):
+            out.update(raw)
+
+        out["enabled"] = bool(out.get("enabled", False))
+        out["bot_token"] = str(out.get("bot_token") or "")
+        out["pairing_code"] = str(out.get("pairing_code") or "")
+
+        allowed_raw = out.get("allowed_chat_ids") or []
+        if isinstance(allowed_raw, str):
+            allowed_values = [p.strip() for p in allowed_raw.split(",") if p.strip()]
+        elif isinstance(allowed_raw, list):
+            allowed_values = [str(v).strip() for v in allowed_raw if str(v).strip()]
+        else:
+            allowed_values = []
+        allowed_ids: list[int] = []
+        seen: set[int] = set()
+        for value in allowed_values:
+            try:
+                chat_id = int(str(value).strip())
+            except Exception:
+                continue
+            if chat_id in seen:
+                continue
+            seen.add(chat_id)
+            allowed_ids.append(chat_id)
+        out["allowed_chat_ids"] = allowed_ids
+
+        notify_raw = out.get("notify_events") or []
+        if isinstance(notify_raw, str):
+            notify_events = [p.strip() for p in notify_raw.split(",") if p.strip()]
+        elif isinstance(notify_raw, list):
+            notify_events = [str(v).strip() for v in notify_raw if str(v).strip()]
+        else:
+            notify_events = []
+        out["notify_events"] = notify_events
+
+        out["send_cycle_summary"] = bool(out.get("send_cycle_summary", True))
+        try:
+            out["tail_lines_default"] = max(1, int(out.get("tail_lines_default") or 50))
+        except Exception:
+            out["tail_lines_default"] = int(defaults_tg.get("tail_lines_default") or 50)
+
+        runner_mode = str(out.get("runner_mode") or "thread").strip().lower()
+        if runner_mode not in {"thread", "subprocess"}:
+            runner_mode = "thread"
+        out["runner_mode"] = runner_mode
+        try:
+            out["poll_timeout_seconds"] = max(1, int(out.get("poll_timeout_seconds") or 30))
+        except Exception:
+            out["poll_timeout_seconds"] = int(defaults_tg.get("poll_timeout_seconds") or 30)
+
+        return out
+
+    eff["telegram"] = _normalize_telegram(eff.get("telegram"))
+
     def _normalize_scan() -> None:
         eff["scan_scope"] = str(eff.get("scan_scope") or defaults.get("scan_scope") or "quick").strip().lower()
         if eff["scan_scope"] not in {"quick", "staged", "full"}:
@@ -712,6 +797,36 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         eff["security"]["fail_severity"] = str(eff.get("security_fail_severity") or eff["security"]["fail_severity"])
     if "security_rules_path" in explicit_args:
         eff["security"]["rules_path"] = str(eff.get("security_rules_path") or "")
+
+    if "telegram_service" in explicit_args:
+        eff["telegram"]["enabled"] = bool(eff.get("telegram_service"))
+    if "telegram_runner_mode" in explicit_args:
+        mode = str(eff.get("telegram_runner_mode") or "").strip().lower()
+        if mode in {"thread", "subprocess"}:
+            eff["telegram"]["runner_mode"] = mode
+    if "telegram_poll_timeout" in explicit_args:
+        try:
+            eff["telegram"]["poll_timeout_seconds"] = max(1, int(eff.get("telegram_poll_timeout") or 30))
+        except Exception:
+            pass
+    if "telegram_allowed_chat_id" in explicit_args:
+        raw_ids = eff.get("telegram_allowed_chat_id") or []
+        normalized: list[int] = []
+        seen_ids: set[int] = set()
+        for value in raw_ids:
+            try:
+                chat_id = int(str(value).strip())
+            except Exception:
+                continue
+            if chat_id in seen_ids:
+                continue
+            seen_ids.add(chat_id)
+            normalized.append(chat_id)
+        eff["telegram"]["allowed_chat_ids"] = normalized
+    if "telegram_bot_token" in explicit_args:
+        eff["telegram"]["bot_token"] = str(eff.get("telegram_bot_token") or "")
+    if "telegram_pairing_code" in explicit_args:
+        eff["telegram"]["pairing_code"] = str(eff.get("telegram_pairing_code") or "")
 
     if eff["policy"].get("enabled") is None:
         eff["policy"]["enabled"] = not bool(eff.get("no_policy_scan", False))
@@ -942,6 +1057,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
     # Resolve config path (python-side default)
     cfg_path = resolve_config_path(repo, args.config)
+    legacy_default_path = legacy_default_config_path(repo)
     legacy_path = legacy_config_path(repo)
 
     cfg: Dict[str, Any] = {}
@@ -956,7 +1072,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         raise SystemExit(0)
 
     # Normal mode: load config (prefer new location, fallback to legacy)
-    read_path = cfg_path if cfg_path.exists() else legacy_path
+    read_path = cfg_path
+    if not read_path.exists():
+        if legacy_default_path is not None and legacy_default_path.exists():
+            read_path = legacy_default_path
+        else:
+            read_path = legacy_path
     if read_path.exists():
         try:
             cfg = load_config(read_path)

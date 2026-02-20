@@ -10,6 +10,12 @@ __pycache__/
 *.so
 .doc
 .AgentCLI
+configs/*.json
+databases/*.db
+prompts/*
+!prompts/.gitkeep
+*.jsonl
+*.log
 # --------------------------------------------------------------------
 # [Virtual Environments & Distribution]
 # --------------------------------------------------------------------

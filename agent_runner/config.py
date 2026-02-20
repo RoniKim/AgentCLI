@@ -25,11 +25,22 @@ def app_home() -> Path:
     env = (os.getenv("AGENTCLI_HOME") or "").strip()
     if env:
         try:
-            p = Path(env).expanduser().resolve()
-            if p.exists() and p.is_dir():
-                return p
+            # Allow non-existing paths so first-run can create the directory.
+            return Path(env).expanduser().resolve()
         except Exception:
             pass
+
+    # Safer default for open-source usage: keep user-specific config/data
+    # outside the repository working tree.
+    try:
+        return (Path.home() / ".agentcli").expanduser().resolve()
+    except Exception:
+        # Last-resort fallback for unusual environments.
+        return Path(__file__).resolve().parents[1]
+
+
+def _legacy_repo_home() -> Path:
+    """Previous default app_home (repo root) for migration fallback reads."""
     return Path(__file__).resolve().parents[1]
 
 
@@ -195,60 +206,115 @@ def default_config_path(repo: Path) -> Path:
     home = app_home()
     slug = _repo_slug(repo)
     primary = (home / "configs" / f"{slug}.json").resolve()
-    if primary.exists():
-        return primary
-    # Legacy path-based slug fallback
+
     old_slug = _path_based_slug(repo)
+    prefixes = _fallback_prefixes(repo)
+    candidate = (home / "configs" / f"{slug}.json").resolve()
+    if candidate.exists():
+        return candidate
+
     if old_slug != slug:
         old = (home / "configs" / f"{old_slug}.json").resolve()
         if old.exists():
             return old
-    # Prefix scan fallback (handles folder rename + different PC path)
-    found = _find_legacy_slug_file(home / "configs", _fallback_prefixes(repo), ".json")
+
+    found = _find_legacy_slug_file(home / "configs", prefixes, ".json")
     if found:
         return found.resolve()
+
     return primary
+
+
+def legacy_default_config_path(repo: Path) -> Optional[Path]:
+    """Find legacy config under previous repo-root app_home.
+
+    This is read-only fallback discovery; callers should keep writing to
+    ``default_config_path(repo)`` so config migrates out of the repository.
+    """
+    home = app_home()
+    legacy_home = _legacy_repo_home()
+    if legacy_home == home:
+        return None
+
+    slug = _repo_slug(repo)
+    candidate = (legacy_home / "configs" / f"{slug}.json").resolve()
+    if candidate.exists():
+        return candidate
+
+    old_slug = _path_based_slug(repo)
+    if old_slug != slug:
+        old = (legacy_home / "configs" / f"{old_slug}.json").resolve()
+        if old.exists():
+            return old
+
+    found = _find_legacy_slug_file(legacy_home / "configs", _fallback_prefixes(repo), ".json")
+    return found.resolve() if found else None
 
 
 def default_prompts_dir(repo: Path) -> Path:
     """Prompts directory with migration fallback."""
     home = app_home()
+    legacy_home = _legacy_repo_home()
     slug = _repo_slug(repo)
     primary = (home / "prompts" / slug).resolve()
-    if primary.exists():
-        return primary
+
+    roots = [home]
+    if legacy_home != home:
+        roots.append(legacy_home)
+
     old_slug = _path_based_slug(repo)
-    if old_slug != slug:
-        old = (home / "prompts" / old_slug).resolve()
-        if old.exists():
-            return old
-    # Prefix scan: look for directory with any known prefix
-    prompts_root = home / "prompts"
-    if prompts_root.exists():
-        prefixes = _fallback_prefixes(repo)
-        candidates = [d for d in prompts_root.iterdir()
-                      if d.is_dir()
-                      and any(d.name.startswith(f"{pfx}-") for pfx in prefixes)]
+    prefixes = _fallback_prefixes(repo)
+    for root in roots:
+        candidate = (root / "prompts" / slug).resolve()
+        if candidate.exists():
+            return candidate
+
+        if old_slug != slug:
+            old = (root / "prompts" / old_slug).resolve()
+            if old.exists():
+                return old
+
+        prompts_root = root / "prompts"
+        if not prompts_root.exists():
+            continue
+        candidates = [
+            d
+            for d in prompts_root.iterdir()
+            if d.is_dir() and any(d.name.startswith(f"{pfx}-") for pfx in prefixes)
+        ]
         if len(candidates) == 1:
             return candidates[0].resolve()
+
     return primary
 
 
 def default_database_path(repo: Path) -> Path:
     """Database path with migration fallback."""
     home = app_home()
+    legacy_home = _legacy_repo_home()
     slug = _repo_slug(repo)
     primary = (home / "databases" / f"{slug}.db").resolve()
-    if primary.exists():
-        return primary
+
+    roots = [home]
+    if legacy_home != home:
+        roots.append(legacy_home)
+
     old_slug = _path_based_slug(repo)
-    if old_slug != slug:
-        old = (home / "databases" / f"{old_slug}.db").resolve()
-        if old.exists():
-            return old
-    found = _find_legacy_slug_file(home / "databases", _fallback_prefixes(repo), ".db")
-    if found:
-        return found.resolve()
+    prefixes = _fallback_prefixes(repo)
+    for root in roots:
+        candidate = (root / "databases" / f"{slug}.db").resolve()
+        if candidate.exists():
+            return candidate
+
+        if old_slug != slug:
+            old = (root / "databases" / f"{old_slug}.db").resolve()
+            if old.exists():
+                return old
+
+        found = _find_legacy_slug_file(root / "databases", prefixes, ".db")
+        if found:
+            return found.resolve()
+
     return primary
 
 

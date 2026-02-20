@@ -249,3 +249,46 @@ prompt_toolkit>=3.0.0
 ```bash
 python -m pytest -q
 ```
+
+---
+
+## Telegram Remote Control (Long Polling)
+
+AgentCLI can run a Telegram control-plane service for remote monitoring and control.
+
+### 1) Configure Telegram
+
+Set bot token with env var (recommended):
+
+```bash
+set AGENTCLI_TELEGRAM_BOT_TOKEN=123456:ABCDEF...
+```
+
+Or set in config JSON under `telegram.bot_token` (stored under `%USERPROFILE%\\.agentcli\\configs` by default).
+
+```json
+{
+  "telegram": {
+    "enabled": true,
+    "runner_mode": "thread",
+    "allowed_chat_ids": [],
+    "pairing_code": "CHANGE-ME"
+  }
+}
+```
+
+### 2) Start service mode
+
+```bash
+python agent_cli.py --telegram --repo "C:/Dev/YourRepo"
+```
+
+### 3) Telegram commands
+
+- `/whoami` : prints current `chat_id`
+- `/pair <code>` : register current chat into allowlist
+- `/status` : show run status and progress summary
+- `/run_start [--flags...]` : start runner
+- `/run_stop` : stop request with confirmation button
+- `/runs` : list recent runs
+- `/tail [file] [lines]` : tail run artifacts (`cycle_summary.log`, `metrics.jsonl`, ...)
