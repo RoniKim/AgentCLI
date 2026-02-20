@@ -256,6 +256,22 @@ python -m pytest -q
 
 AgentCLI는 원격 모니터링/제어를 위해 Telegram 하이브리드 모드로 실행할 수 있습니다.
 
+### 0) Dependency Install (Conda/Windows)
+
+If `pip.exe` is blocked, install with `python -m pip`:
+
+```bash
+'C:\ProgramData\Anaconda3\python.exe' -m pip install --user python-telegram-bot
+```
+
+Conda users can also install from conda-forge:
+
+```bash
+conda config --add channels conda-forge
+conda config --set channel_priority strict
+conda install python-telegram-bot
+```
+
 ### 1) Telegram 설정
 
 환경변수로 bot token을 설정(권장):
@@ -319,6 +335,7 @@ python agent_cli.py --telegram --repo "C:/Dev/YourRepo"
 ### 5) 여러 AgentCLI 인스턴스
 
 - 권장: AgentCLI 인스턴스(프로세스)마다 bot token을 1개씩 사용
+- Same-PC duplicate startup with the same bot token is blocked by local token-lock.
 - 여러 프로세스가 같은 token으로 long polling을 하면 Telegram 업데이트 처리 충돌이 날 수 있습니다.
 - 여러 인스턴스가 같은 `chat_id`로 알림을 보내면, 인스턴스별로 별도의 푸시 스트림(메시지)을 받게 됩니다.
 - 여러 인스턴스가 동일 repo/run_dir을 제어하면 stop/status/log 아티팩트가 서로 간섭할 수 있습니다. 가능하면 repo당 1개 인스턴스를 사용하세요.

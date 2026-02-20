@@ -18,6 +18,23 @@ AgentCLI는 Telegram Long Polling 기반 하이브리드 모드를 지원합니�
 
 ## 시작
 
+Install dependency first:
+
+```bash
+# If pip.exe is blocked, use python -m pip
+'C:\ProgramData\Anaconda3\python.exe' -m pip install --user python-telegram-bot
+```
+
+Conda users can also use conda-forge:
+
+```bash
+conda config --add channels conda-forge
+conda config --set channel_priority strict
+conda install python-telegram-bot
+```
+
+Then run:
+
 ```bash
 set AGENTCLI_TELEGRAM_BOT_TOKEN=123456:ABCDEF...
 python agent_cli.py --telegram --repo "C:/Dev/YourRepo"
@@ -81,6 +98,7 @@ python agent_cli.py --telegram --repo "C:/Dev/YourRepo"
 ## 여러 인스턴스
 
 - 안정적인 Long Polling을 위해 AgentCLI 프로세스마다 서로 다른 bot token 사용을 권장합니다.
+- AgentCLI enforces a local token lock per bot token; duplicate token usage on the same PC is blocked at startup.
 - 여러 프로세스가 하나의 token을 공유하면 Telegram 업데이트 폴링이 충돌할 수 있습니다.
 - 여러 인스턴스가 같은 chat을 대상으로 하면, 인스턴스별로 별도 알림을 받게 됩니다.
 - 여러 인스턴스가 동일 repo/run_dir을 가리키면 stop/status/log 파일이 서로 간섭할 수 있습니다.

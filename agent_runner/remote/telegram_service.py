@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import atexit
 import argparse
 import hashlib
 import json
@@ -137,14 +139,25 @@ def _pid_is_alive(pid: int) -> bool:
         return False
     try:
         if os.name == "nt":
-            proc = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {int(pid)}", "/FO", "CSV", "/NH"],
-                capture_output=True,
-                text=True,
-                timeout=4,
-            )
-            out = str(proc.stdout or "").strip()
-            return bool(out) and ("No tasks are running" not in out)
+            try:
+                import ctypes  # local import for Windows-only check
+
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                kernel32 = ctypes.windll.kernel32
+                handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+                if int(handle) != 0:
+                    kernel32.CloseHandle(handle)
+                    return True
+                return False
+            except Exception:
+                proc = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {int(pid)}", "/FO", "CSV", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=4,
+                )
+                out = str(proc.stdout or "").strip()
+                return bool(out) and ("No tasks are running" not in out)
         os.kill(int(pid), 0)
         return True
     except Exception:
@@ -283,12 +296,34 @@ class TelegramControlService:
             instance_name=self.instance_name,
             repo=self.repo,
         )
+        self._token_lock_held = False
+        self._atexit_registered = False
 
     async def _reply(self, update: Update, text: str) -> None:
         if not update.message:
             return
         for chunk in _chunk_text(text, limit=3500):
             await update.message.reply_text(chunk or " ")
+
+    def acquire_token_lock(self) -> tuple[bool, str]:
+        if self._token_lock_held:
+            return True, ""
+        ok, detail = self._token_lock.acquire()
+        if ok:
+            self._token_lock_held = True
+            if not self._atexit_registered:
+                try:
+                    atexit.register(self.release_token_lock)
+                    self._atexit_registered = True
+                except Exception:
+                    pass
+        return ok, detail
+
+    def release_token_lock(self) -> None:
+        if not self._token_lock_held:
+            return
+        self._token_lock.release()
+        self._token_lock_held = False
 
     def _is_allowed(self, chat_id: int) -> bool:
         return chat_id in self.allowed_chat_ids
@@ -830,6 +865,7 @@ class TelegramControlService:
         lines = [
             "AgentCLI Telegram control plane",
             f"- instance: {self.instance_name}",
+            f"- token_fingerprint: {self.token_fingerprint}",
             f"- repo: {self.repo}",
             f"- authorized: {str(authorized).lower()}",
             f"- paired_chat_count: {len(self.allowed_chat_ids)}",
@@ -1075,7 +1111,7 @@ class TelegramControlService:
         await query.edit_message_text(_safe_text(result.get("message") or "Stop requested."))
 
     def run(self) -> int:
-        ok, detail = self._token_lock.acquire()
+        ok, detail = self.acquire_token_lock()
         if not ok:
             print(
                 "[TELEGRAM][ERR] Another Telegram control-plane appears to be using the same bot token. "
@@ -1084,7 +1120,16 @@ class TelegramControlService:
             print(f"[TELEGRAM][ERR] {detail}")
             return 2
 
+        created_loop: asyncio.AbstractEventLoop | None = None
         try:
+            # PTB run_polling expects a current event loop on the running thread.
+            # In hybrid mode this service runs in a background thread.
+            try:
+                asyncio.get_event_loop()
+            except RuntimeError:
+                created_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(created_loop)
+
             app = ApplicationBuilder().token(self.bot_token).build()
             app.add_handler(CommandHandler("start", self.cmd_start))
             app.add_handler(CommandHandler("whoami", self.cmd_whoami))
@@ -1132,7 +1177,13 @@ class TelegramControlService:
             )
             return 0
         finally:
-            self._token_lock.release()
+            if created_loop is not None:
+                try:
+                    if not created_loop.is_closed():
+                        created_loop.close()
+                except Exception:
+                    pass
+            self.release_token_lock()
 
 
 def telegram_hybrid_main(argv: list[str] | None = None) -> int:
@@ -1169,8 +1220,21 @@ def telegram_hybrid_main(argv: list[str] | None = None) -> int:
     )
     service = TelegramControlService(args, controller=controller)
 
+    ok, detail = service.acquire_token_lock()
+    if not ok:
+        print(
+            "[ERR] Telegram control plane lock conflict. "
+            "Use a different bot token per instance."
+        )
+        print(f"[ERR] {detail}")
+        return 2
+
     t = threading.Thread(target=service.run, name="agentcli-telegram", daemon=True)
-    t.start()
+    try:
+        t.start()
+    except Exception:
+        service.release_token_lock()
+        raise
     print("[HYBRID] Telegram control plane started in background.")
     print("[HYBRID] Local shell is available. Use /help for commands.")
 
