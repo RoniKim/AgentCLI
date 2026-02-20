@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shlex
+import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -122,6 +125,95 @@ def _chunk_text(text: str, limit: int = 3500) -> list[str]:
     return chunks if chunks else [""]
 
 
+def _token_fingerprint(token: str) -> str:
+    raw = str(token or "").strip()
+    if not raw:
+        return "none"
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:10]
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if int(pid) <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            proc = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {int(pid)}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=4,
+            )
+            out = str(proc.stdout or "").strip()
+            return bool(out) and ("No tasks are running" not in out)
+        os.kill(int(pid), 0)
+        return True
+    except Exception:
+        return False
+
+
+class _TokenInstanceLock:
+    def __init__(self, *, token_fingerprint: str, instance_name: str, repo: Path) -> None:
+        self.token_fingerprint = str(token_fingerprint or "none")
+        self.instance_name = str(instance_name or "").strip() or "default"
+        self.repo = str(repo)
+        self.path = Path(tempfile.gettempdir()) / f"agentcli_tg_{self.token_fingerprint}.lock"
+        self._held = False
+
+    def _read_existing(self) -> dict[str, Any]:
+        try:
+            raw = self.path.read_text(encoding="utf-8", errors="replace").strip()
+            obj = json.loads(raw) if raw else {}
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+        return {}
+
+    def acquire(self) -> tuple[bool, str]:
+        payload = {
+            "pid": int(os.getpid()),
+            "instance": self.instance_name,
+            "repo": self.repo,
+            "started_unix": float(time.time()),
+            "token_fingerprint": self.token_fingerprint,
+        }
+
+        for _ in range(2):
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as handle:
+                    handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+                self._held = True
+                return True, ""
+            except FileExistsError:
+                existing = self._read_existing()
+                old_pid = int(existing.get("pid") or 0)
+                if old_pid and not _pid_is_alive(old_pid):
+                    try:
+                        self.path.unlink(missing_ok=True)
+                        continue
+                    except Exception:
+                        pass
+                detail = (
+                    f"lock={self.path} token_fp={self.token_fingerprint} "
+                    f"pid={old_pid or 'unknown'} instance={existing.get('instance') or 'unknown'}"
+                )
+                return False, detail
+            except Exception as ex:
+                return False, f"lock_error: {ex}"
+
+        return False, f"lock={self.path} token_fp={self.token_fingerprint}"
+
+    def release(self) -> None:
+        if not self._held:
+            return
+        try:
+            self.path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        self._held = False
+
+
 class TelegramControlService:
     def __init__(self, args: argparse.Namespace, controller: RunnerController | None = None) -> None:
         self.args = args
@@ -134,6 +226,7 @@ class TelegramControlService:
         self.telegram_cfg = telegram_cfg
 
         self.bot_token = str(telegram_cfg.get("bot_token") or "").strip()
+        self.token_fingerprint = _token_fingerprint(self.bot_token)
         self.pairing_code = str(telegram_cfg.get("pairing_code") or "").strip()
         self.tail_lines_default = int(telegram_cfg.get("tail_lines_default") or 50)
         self.poll_timeout_seconds = int(telegram_cfg.get("poll_timeout_seconds") or 30)
@@ -185,6 +278,11 @@ class TelegramControlService:
         }
         self._file_offsets: dict[str, int] = {}
         self._cursor_run_dir: str = ""
+        self._token_lock = _TokenInstanceLock(
+            token_fingerprint=self.token_fingerprint,
+            instance_name=self.instance_name,
+            repo=self.repo,
+        )
 
     async def _reply(self, update: Update, text: str) -> None:
         if not update.message:
@@ -751,6 +849,7 @@ class TelegramControlService:
         lines = [
             "[Notify Settings]",
             f"- instance: {self.instance_name}",
+            f"- token_fingerprint: {self.token_fingerprint}",
             f"- enabled_events: {events if events else '(none)'}",
             f"- send_cycle_summary: {str(self.send_cycle_summary).lower()}",
             f"- poll_interval_seconds: {self.notify_poll_interval_seconds}",
@@ -976,50 +1075,64 @@ class TelegramControlService:
         await query.edit_message_text(_safe_text(result.get("message") or "Stop requested."))
 
     def run(self) -> int:
-        app = ApplicationBuilder().token(self.bot_token).build()
-        app.add_handler(CommandHandler("start", self.cmd_start))
-        app.add_handler(CommandHandler("whoami", self.cmd_whoami))
-        app.add_handler(CommandHandler("pair", self.cmd_pair))
-        app.add_handler(CommandHandler("status", self.cmd_status))
-        app.add_handler(CommandHandler("detail", self.cmd_detail))
-        app.add_handler(CommandHandler("errors", self.cmd_errors))
-        app.add_handler(CommandHandler("events", self.cmd_events))
-        app.add_handler(CommandHandler("grep", self.cmd_grep))
-        app.add_handler(CommandHandler("run_start", self.cmd_run_start))
-        app.add_handler(CommandHandler("run_stop", self.cmd_run_stop))
-        app.add_handler(CommandHandler("runs", self.cmd_runs))
-        app.add_handler(CommandHandler("tail", self.cmd_tail))
-        app.add_handler(CommandHandler("notify", self.cmd_notify))
-        app.add_handler(CallbackQueryHandler(self.on_stop_confirm, pattern=r"^confirm_run_stop$"))
+        ok, detail = self._token_lock.acquire()
+        if not ok:
+            print(
+                "[TELEGRAM][ERR] Another Telegram control-plane appears to be using the same bot token. "
+                "Use a different bot token per instance."
+            )
+            print(f"[TELEGRAM][ERR] {detail}")
+            return 2
 
-        if self.notify_events or self.send_cycle_summary:
-            if app.job_queue is None:
-                print("[TELEGRAM][WARN] Push notifications disabled: job_queue is unavailable.")
-            else:
-                app.job_queue.run_repeating(
-                    self._push_tick,
-                    interval=float(self.notify_poll_interval_seconds),
-                    first=2.0,
-                    name="agentcli-push",
-                )
-                print(
-                    "[TELEGRAM] Push notifications enabled. "
-                    f"instance={self.instance_name} interval={self.notify_poll_interval_seconds}s "
-                    f"events={sorted(self.notify_events)} cycle_summary={self.send_cycle_summary} "
-                    f"stalled_after={self.stalled_seconds}s"
-                )
+        try:
+            app = ApplicationBuilder().token(self.bot_token).build()
+            app.add_handler(CommandHandler("start", self.cmd_start))
+            app.add_handler(CommandHandler("whoami", self.cmd_whoami))
+            app.add_handler(CommandHandler("pair", self.cmd_pair))
+            app.add_handler(CommandHandler("status", self.cmd_status))
+            app.add_handler(CommandHandler("detail", self.cmd_detail))
+            app.add_handler(CommandHandler("errors", self.cmd_errors))
+            app.add_handler(CommandHandler("events", self.cmd_events))
+            app.add_handler(CommandHandler("grep", self.cmd_grep))
+            app.add_handler(CommandHandler("run_start", self.cmd_run_start))
+            app.add_handler(CommandHandler("run_stop", self.cmd_run_stop))
+            app.add_handler(CommandHandler("runs", self.cmd_runs))
+            app.add_handler(CommandHandler("tail", self.cmd_tail))
+            app.add_handler(CommandHandler("notify", self.cmd_notify))
+            app.add_handler(CallbackQueryHandler(self.on_stop_confirm, pattern=r"^confirm_run_stop$"))
 
-        print(
-            f"[TELEGRAM] Control plane started. "
-            f"instance={self.instance_name} repo={self.repo} mode={self.controller.runner_mode}"
-        )
-        app.run_polling(
-            poll_interval=1.0,
-            timeout=max(1, int(self.poll_timeout_seconds)),
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=False,
-        )
-        return 0
+            if self.notify_events or self.send_cycle_summary:
+                if app.job_queue is None:
+                    print("[TELEGRAM][WARN] Push notifications disabled: job_queue is unavailable.")
+                else:
+                    app.job_queue.run_repeating(
+                        self._push_tick,
+                        interval=float(self.notify_poll_interval_seconds),
+                        first=2.0,
+                        name="agentcli-push",
+                    )
+                    print(
+                        "[TELEGRAM] Push notifications enabled. "
+                        f"instance={self.instance_name} token_fp={self.token_fingerprint} "
+                        f"interval={self.notify_poll_interval_seconds}s "
+                        f"events={sorted(self.notify_events)} cycle_summary={self.send_cycle_summary} "
+                        f"stalled_after={self.stalled_seconds}s"
+                    )
+
+            print(
+                f"[TELEGRAM] Control plane started. "
+                f"instance={self.instance_name} token_fp={self.token_fingerprint} "
+                f"repo={self.repo} mode={self.controller.runner_mode}"
+            )
+            app.run_polling(
+                poll_interval=1.0,
+                timeout=max(1, int(self.poll_timeout_seconds)),
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=False,
+            )
+            return 0
+        finally:
+            self._token_lock.release()
 
 
 def telegram_hybrid_main(argv: list[str] | None = None) -> int:

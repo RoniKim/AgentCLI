@@ -233,7 +233,7 @@ Claude Code CLI가 프로젝트 루트에서 실행되면 `.claude/commands/` �
 
 ---
 
-## Dependencies
+## 의존성(Dependencies)
 
 ```
 openai>=1.0.0
@@ -243,7 +243,7 @@ pydantic>=2.0.0
 prompt_toolkit>=3.0.0
 ```
 
-## ChangeLog
+## 변경 이력(ChangeLog)
 
 단위 테스트(있는 경우):
 ```bash
@@ -252,19 +252,20 @@ python -m pytest -q
 
 ---
 
-## Telegram Remote Control (Hybrid, Long Polling)
+## Telegram 원격 제어 (하이브리드, Long Polling)
 
-AgentCLI can run a Telegram hybrid mode for remote monitoring and control.
+AgentCLI는 원격 모니터링/제어를 위해 Telegram 하이브리드 모드로 실행할 수 있습니다.
 
-### 1) Configure Telegram
+### 1) Telegram 설정
 
-Set bot token with env var (recommended):
+환경변수로 bot token을 설정(권장):
 
 ```bash
 set AGENTCLI_TELEGRAM_BOT_TOKEN=123456:ABCDEF...
 ```
 
-Or set in config JSON under `telegram.bot_token` (stored under `%USERPROFILE%\\.agentcli\\configs` by default).
+
+또는 config JSON의 `telegram.bot_token`에 설정할 수 있습니다(기본 저장 경로: `%USERPROFILE%\.agentcli\configs`).
 
 ```json
 {
@@ -281,48 +282,48 @@ Or set in config JSON under `telegram.bot_token` (stored under `%USERPROFILE%\\.
   }
 }
 ```
-
-### 2) Start hybrid mode
+### 2) 하이브리드 모드 시작
 
 ```bash
 python agent_cli.py --telegram --repo "C:/Dev/YourRepo"
 ```
 
-`--telegram` starts both:
-- local interactive shell (`/start`, `/stop`, `/config`, ...)
-- Telegram control-plane (`/status`, `/run_start`, `/run_stop`, ...)
 
-### 3) Telegram commands
+`--telegram`은 다음 두 가지를 함께 시작합니다:
+- 로컬 인터랙티브 셸 (`/start`, `/stop`, `/config`, ...)
+- Telegram 컨트롤 플레인 (`/status`, `/run_start`, `/run_stop`, ...)
 
-- `/whoami` : prints current `chat_id`
-- `/pair <code>` : register current chat into allowlist
-- `/status` : show run status and progress summary
-- `/detail [lines]` : combined detailed view (`cycle_summary.log`, `metrics.jsonl`, `run_summary.json`, and subprocess log when available)
-- `/errors [lines]` : tail only error-like metrics events
-- `/events <event_name> [lines]` : filter metrics by event type
-- `/grep <pattern> [file] [lines]` : regex search in run artifacts
-- `/run_start [--flags...]` : start runner
-- `/run_stop` : stop request with confirmation button
-- `/runs` : list recent runs
-- `/tail [file] [lines]` : tail run artifacts (`cycle_summary.log`, `metrics.jsonl`, `telegram_runner_subprocess.log`, ...)
-- `/notify` : show push notification settings
+### 3) Telegram 명령어
 
-### 4) Automatic push notifications
+- `/whoami` : 현재 `chat_id` 출력
+- `/pair <code>` : 현재 채팅을 allowlist에 등록(페어링)
+- `/status` : 실행 상태/진행 요약 표시
+- `/detail [lines]` : 상세 통합 뷰 (`cycle_summary.log`, `metrics.jsonl`, `run_summary.json`, subprocess 로그 등)
+- `/errors [lines]` : 에러 성격의 metrics 이벤트만 tail
+- `/events <event_name> [lines]` : 이벤트 타입별 metrics 필터
+- `/grep <pattern> [file] [lines]` : run 산출물에서 정규식 검색
+- `/run_start [--flags...]` : 러너 시작
+- `/run_stop` : 확인 버튼(Confirm) 포함 중지 요청
+- `/runs` : 최근 실행(run) 목록
+- `/tail [file] [lines]` : run 아티팩트 tail (`cycle_summary.log`, `metrics.jsonl`, `telegram_runner_subprocess.log`, ...)
+- `/notify` : 푸시 알림 설정 조회
 
-- Push is enabled automatically when `notify_events` is not empty or `send_cycle_summary=true`.
-- Notifications are sent to all allowlisted chats.
-- Default events: `run_start`, `run_stop`, `task_done`, `task_failed`, `quota`, `error`, `stalled`.
-- `stalled` is emitted when `metrics.jsonl` is unchanged for `stalled_seconds` (default: 600s / 10 minutes).
-- `instance_name` is included in every push message to distinguish instances.
+### 4) 자동 푸시 알림
 
-### 5) Multiple AgentCLI instances
+- `notify_events`가 비어있지 않거나 `send_cycle_summary=true`이면 푸시가 자동으로 활성화됩니다.
+- 알림은 allowlist에 등록된 모든 채팅으로 전송됩니다.
+- 기본 이벤트: `run_start`, `run_stop`, `task_done`, `task_failed`, `quota`, `error`, `stalled`.
+- `stalled`는 `stalled_seconds` 동안 `metrics.jsonl` 갱신이 없을 때 발생합니다(기본 600초 / 10분).
+- 각 푸시 메시지에는 인스턴스 구분을 위한 `instance_name`이 포함됩니다.
 
-- Recommended: one bot token per AgentCLI instance.
-- If multiple processes use the same bot token with long polling, Telegram update handling can conflict.
-- If multiple instances share the same chat_id, you will receive one push stream per instance (separate messages).
-- If multiple instances control the same repo/run_dir, stop/status/log artifacts can interfere. Prefer one instance per repo.
+### 5) 여러 AgentCLI 인스턴스
 
-### 6) Log language recommendation
+- 권장: AgentCLI 인스턴스(프로세스)마다 bot token을 1개씩 사용
+- 여러 프로세스가 같은 token으로 long polling을 하면 Telegram 업데이트 처리 충돌이 날 수 있습니다.
+- 여러 인스턴스가 같은 `chat_id`로 알림을 보내면, 인스턴스별로 별도의 푸시 스트림(메시지)을 받게 됩니다.
+- 여러 인스턴스가 동일 repo/run_dir을 제어하면 stop/status/log 아티팩트가 서로 간섭할 수 있습니다. 가능하면 repo당 1개 인스턴스를 사용하세요.
 
-- Keep run artifacts/log files in English for parser/LLM compatibility.
-- Use Telegram commands (`/status`, `/detail`, `/tail`) as a readable view layer.
+### 6) 로그 언어 권장 사항
+
+- 파서/LLM 호환성을 위해 run 산출물/로그 파일은 영어로 유지하는 것을 권장합니다.
+- Telegram 명령어(`/status`, `/detail`, `/tail`)는 사람이 읽기 좋은 조회 레이어로 사용하세요.
