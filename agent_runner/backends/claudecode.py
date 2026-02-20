@@ -1,4 +1,4 @@
-"""Claude Code backend — full feature parity with Codex backend (cycle.py).
+"""Claude Code backend - full feature parity with Codex backend (cycle.py).
 
 This backend uses the Claude Agent SDK (claude_agent_sdk) as the execution engine
 while providing the same artifacts, logging, and orchestration as the Codex backend.
@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime, timezone
 import json
 import os
 import re
@@ -52,7 +51,7 @@ from ..metrics import MetricsLogger
 from ..logger import create_logger
 from ..policy import load_policy_rules, policy_scan_files
 from ..security import load_security_rules, security_scan_files
-from ..scan import collect_scan_files, DEFAULT_SCAN_IGNORE_GLOBS
+from ..scan import DEFAULT_SCAN_IGNORE_GLOBS
 from ..prompts import (
     PromptStore,
     ensure_pm_instructions_have_output_schema,
@@ -72,8 +71,24 @@ from ..prompts import (
 )
 from ..reporting import collect_shutdown_context, build_local_shutdown_report
 from ..pipeline import PipelineManager, make_stages
-from ..pipeline.session import PipelineSession
-from ..pipeline.stages.base import StageOutcome
+from ..pipeline.shared_runtime import (
+    SharedCycleDeps,
+    append_cycle_summary_line,
+    build_goals_prompt_context,
+    build_qa_skills_context,
+    compute_dev_model_tiers,
+    collect_scan_with_config,
+    ensure_backlog_artifacts,
+    load_backlog_tasks,
+    merge_pm_tasks_with_existing_pending,
+    maybe_refresh_tasks_after_pm,
+    prepare_pm_inventory_markdown,
+    process_qa_followups,
+    run_shared_cycle_once,
+    select_next_task_with_dependency_checks,
+    write_pm_output_artifacts,
+    write_run_summary_file,
+)
 from ..run_dir import make_run_dir, find_latest_run_dir
 from ..schemas import PMOutputV2, pm_output_json_schema
 from ..state import (
@@ -163,21 +178,21 @@ def _patch_prompt_for_claude(prompt: str) -> str:
     # 1) Catch-all first: replace any "Codex MCP" mentions before inserting new text
     prompt = re.sub(r"Codex MCP", "Claude Code built-in tools", prompt)
 
-    # 2) "When editing files, call Claude Code built-in tools with ..." → clean instruction
+    # 2) "When editing files, call Claude Code built-in tools with ..." - clean instruction
     prompt = re.sub(
         r"When editing files,\s*(?:call|use)\s+Claude Code built-in tools\s+with[^\n]*",
         "When editing files, use Claude Code built-in tools (Read, Write, Edit, Grep, Glob, Bash) directly.",
         prompt,
     )
 
-    # 3) "use Codex skills system" → neutral phrasing
+    # 3) "use Codex skills system" - neutral phrasing
     prompt = re.sub(
         r"\(use Codex skills system;\s*do NOT inline skill text\)",
         "(apply the skills listed below; do NOT inline full skill text)",
         prompt,
     )
 
-    # 4) "Prefer apply_patch for edits" → Claude Code Edit tool
+    # 4) "Prefer apply_patch for edits" - Claude Code Edit tool
     prompt = re.sub(
         r"Prefer apply_patch for (?:edits|modifications)[^.\n]*\.?",
         "Use the Edit tool for targeted modifications and the Write tool for new files.",
@@ -392,7 +407,7 @@ def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_overr
         "include_partial_messages": bool(cfg.include_partial_messages),
         "fork_session": bool(cfg.fork_session),
         "max_thinking_tokens": cfg.max_thinking_tokens,
-        "max_buffer_size": 10 * 1024 * 1024,  # 10MB — prevent buffer overflow on large responses
+        "max_buffer_size": 10 * 1024 * 1024,  # 10MB - prevent buffer overflow on large responses
     }
     # Apply SDK extensions (MCP tools, hooks, can_use_tool, subagents)
     from .claude_extensions import apply_extensions, _MCP_TOOL_NAMES
@@ -404,7 +419,7 @@ def _build_options(cfg: ClaudeCodeConfig, *, repo: Path, stage: str, model_overr
     kwargs = _filter_kwargs_for_ctor(ClaudeAgentOptions, kwargs)
 
     # Clean up orphaned tool names when _filter_kwargs_for_ctor drops extension keys
-    # (SDK version doesn't support these params yet → tool names would reference nothing)
+    # (SDK version doesn't support these params yet - tool names would reference nothing)
     _ext_keys_after = {k for k in ("mcp_servers", "hooks", "can_use_tool", "agents") if k in kwargs}
     dropped_ext = _ext_keys_before - _ext_keys_after
     if dropped_ext and "allowed_tools" in kwargs:
@@ -480,7 +495,7 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
                 tool_name = getattr(msg, "name", None) or getattr(msg, "tool_name", None) or ""
                 is_error = getattr(msg, "is_error", None) or getattr(msg, "error", None)
                 status = "ERROR" if is_error else "ok"
-                eprint(f"  [TOOL_RESULT] {tool_name} → {status}")
+                eprint(f"  [TOOL_RESULT] {tool_name} - {status}")
 
         if msg_name in {"AssistantMessage", "TextMessage"} or msg_type == "assistant":
             content = getattr(msg, "content", None)
@@ -513,7 +528,7 @@ async def _collect_messages(stream: Any, *, stop_path: Path, debug: bool) -> Tup
                     if isinstance(t, str) and t.strip():
                         text_parts.append(t)
 
-        # Capture error/system messages — Claude Code may surface quota or
+        # Capture error/system messages - Claude Code may surface quota or
         # API errors as ErrorMessage/SystemMessage without raising an exception.
         if msg_name in {"ErrorMessage", "SystemMessage"} or msg_type in {"error", "system"}:
             err_text = (
@@ -592,7 +607,7 @@ def _extract_client_pid(client: object) -> Optional[int]:
     """Extract the child process PID from a ClaudeSDKClient instance.
 
     Traverses client._transport._process.pid defensively.
-    Single attempt — by the time ``__aenter__`` returns, the subprocess
+    Single attempt - by the time ``__aenter__`` returns, the subprocess
     should already be started.  Returns None if not available (L1 Job Object
     still protects in that case).
     """
@@ -632,7 +647,7 @@ async def _run_claude_query(
     """
     from claude_agent_sdk import ClaudeSDKClient
 
-    _DEFAULT_SAFETY_TIMEOUT = 3600  # 1 hour — prevents infinite hang
+    _DEFAULT_SAFETY_TIMEOUT = 3600  # 1 hour - prevents infinite hang
     effective_timeout = timeout_seconds if timeout_seconds > 0 else _DEFAULT_SAFETY_TIMEOUT
 
     # _build_options sets cwd=repo in ClaudeAgentOptions, so the SDK
@@ -763,7 +778,7 @@ async def _run_with_continuations(
 # ---------------------------------------------------------------------------
 
 async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
-    """Claude Code backend main — full parity with Codex backend (cycle.py)."""
+    """Claude Code backend main - full parity with Codex backend (cycle.py)."""
 
     force_utf8_stdio()
 
@@ -794,16 +809,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     }
 
     def _write_run_summary() -> None:
-        try:
-            # Trim in-memory cycles to prevent unbounded growth
-            if len(run_summary["cycles"]) > _MAX_SUMMARY_CYCLES:
-                run_summary["cycles"] = run_summary["cycles"][-_MAX_SUMMARY_CYCLES:]
-            (run_dir / "run_summary.json").write_text(
-                json.dumps(run_summary, ensure_ascii=False, indent=2),
-                encoding="utf-8", errors="replace",
-            )
-        except Exception as ex:
-            eprint(f"[WARN] Failed to write run_summary.json: {ex}")
+        write_run_summary_file(
+            run_summary=run_summary,
+            run_dir=run_dir,
+            max_summary_cycles=_MAX_SUMMARY_CYCLES,
+            warn=eprint,
+        )
 
     def _fail_validation(name: str, value: str) -> None:
         msg = (
@@ -830,7 +841,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             return 2
         repo = worktree_dir
 
-    # NOTE: Do NOT call os.chdir(repo) here — it is process-global and
+    # NOTE: Do NOT call os.chdir(repo) here - it is process-global and
     # thread-unsafe when the runner executes in shell mode's background thread.
     # The SDK receives 'cwd' via ClaudeAgentOptions instead.
 
@@ -999,12 +1010,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     pm_stage_enabled = any((getattr(s, 'name', '') or '').strip().lower() == 'pm' for s in stages)
 
     def append_cycle_summary(line: str) -> None:
-        try:
-            rotate_log_file(cycle_summary_path, max_bytes=2_000_000, backup_count=5, max_age_days=14)
-            with cycle_summary_path.open("a", encoding="utf-8", errors="replace") as f:
-                f.write(line.rstrip() + "\n")
-        except Exception:
-            pass
+        append_cycle_summary_line(
+            cycle_summary_path=cycle_summary_path,
+            line=line,
+            rotate_log_file_fn=rotate_log_file,
+        )
 
     # Backlog state
     backlog_json_path = run_dir / "BACKLOG.json"
@@ -1016,15 +1026,17 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     # ---------------------------------------------------------------------------
 
     def _collect_scan(scope: str, *, ignore_paths: Optional[list[str]] = None) -> tuple[list[tuple[str, str]], dict[str, Any]]:
-        return collect_scan_files(
-            repo, scope,
-            ignore_paths=scan_ignore_paths if ignore_paths is None else ignore_paths,
-            ignore_globs=scan_ignore_globs,
-            max_files=scan_max_files,
-            max_bytes_per_file=scan_max_bytes_per_file,
-            max_total_bytes=scan_max_total_bytes,
-            timeout_seconds=scan_timeout_seconds,
-            include_untracked_in_full=scan_include_untracked_in_full,
+        return collect_scan_with_config(
+            repo=repo,
+            scope=scope,
+            scan_ignore_paths=scan_ignore_paths,
+            scan_ignore_globs=scan_ignore_globs,
+            scan_max_files=scan_max_files,
+            scan_max_bytes_per_file=scan_max_bytes_per_file,
+            scan_max_total_bytes=scan_max_total_bytes,
+            scan_timeout_seconds=scan_timeout_seconds,
+            scan_include_untracked_in_full=scan_include_untracked_in_full,
+            ignore_paths=ignore_paths,
         )
 
     _extract_qa_followups = extract_qa_followups
@@ -1044,26 +1056,20 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         )
 
     def ensure_backlog() -> bool:
-        if backlog_json_path.exists() or backlog_md_path.exists():
-            return True
-        eprint("[PM ERROR] BACKLOG not created by PM. Stopping to avoid running irrelevant tasks.")
-        try:
-            stop_path.write_text("BACKLOG missing\n", encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-        metrics.event("pm_backlog_missing", cycle=-1)
-        return False
+        return ensure_backlog_artifacts(
+            run_dir=run_dir,
+            stop_path=stop_path,
+            metrics=metrics,
+            warn=eprint,
+        )
 
     def load_tasks() -> list[TaskItem]:
-        tasks: list[TaskItem] = []
-        if backlog_json_path.exists():
-            try:
-                tasks = load_backlog_json(backlog_json_path)
-            except Exception as ex:
-                eprint(f"Failed to parse BACKLOG.json: {ex}")
-        if not tasks and backlog_md_path.exists():
-            tasks = parse_backlog_md(backlog_md_path)
-        return tasks
+        return load_backlog_tasks(
+            run_dir=run_dir,
+            load_backlog_json_fn=load_backlog_json,
+            parse_backlog_md_fn=parse_backlog_md,
+            warn=eprint,
+        )
 
     def _load_backlog_context_for_pm() -> tuple[str, list[TaskItem], set[str]]:
         return load_backlog_context_for_pm(backlog_json_path, backlog_md_path, state_path)
@@ -1083,7 +1089,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         )
 
     # ---------------------------------------------------------------------------
-    # PM phase (structured output with repair — same as Codex)
+    # PM phase (structured output with repair - same as Codex)
     # ---------------------------------------------------------------------------
 
     async def _run_pm_structured(pm_prompt: str, *, max_turns: int, cycle_idx: int, kind: str, output_path: Path) -> PMOutputV2 | None:
@@ -1141,13 +1147,13 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 return parsed
             metrics.event("pm_structured_parse", cycle=cycle_idx, attempt=attempt, ok=False)
 
-            # Early exit: quota or repetitive garbage — no point retrying
+            # Early exit: quota or repetitive garbage - no point retrying
             if "<quota_detected>" in missing:
                 logger.stage_event("pm", "quota_detected", cycle=cycle_idx)
                 metrics.event("pm_garbage_detected", cycle=cycle_idx, kind="quota")
-                raise Exception("quota exceeded — detected in PM output")
+                raise Exception("quota exceeded - detected in PM output")
             if "<repetitive_output>" in missing:
-                eprint("[PM] Repetitive/garbage output detected — aborting PM structured retries.")
+                eprint("[PM] Repetitive/garbage output detected - aborting PM structured retries.")
                 metrics.event("pm_garbage_detected", cycle=cycle_idx, kind="repetitive")
                 break
 
@@ -1218,35 +1224,29 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
         pm_output_path = run_dir / f"pm_final_output_cycle_{cycle_idx:03d}.txt"
 
-        try:
-            inventory = build_repo_inventory(repo)
-            _, inv_md = write_repo_inventory_files(repo, pm_cache_dir, inventory)
-        except Exception as inv_ex:
-            metrics.event("inventory_error", cycle=cycle_idx, error=str(inv_ex))
-            inv_md = pm_cache_dir / "REPO_INVENTORY.md"
-            try:
-                pm_cache_dir.mkdir(parents=True, exist_ok=True)
-                inv_md.write_text("# REPO_INVENTORY\n\n- (inventory generation failed)\n", encoding="utf-8", errors="replace")
-            except Exception:
-                inv_md = run_dir / "REPO_INVENTORY.md"
-                try:
-                    inv_md.write_text("# REPO_INVENTORY\n\n- (inventory generation failed)\n", encoding="utf-8", errors="replace")
-                except Exception:
-                    pass
+        inv_md = prepare_pm_inventory_markdown(
+            repo=repo,
+            run_dir=run_dir,
+            pm_cache_dir=pm_cache_dir,
+            cycle_idx=cycle_idx,
+            metrics=metrics,
+            build_repo_inventory_fn=build_repo_inventory,
+            write_repo_inventory_files_fn=write_repo_inventory_files,
+        )
 
         todo_path, todo_text = read_current_todo(repo)
         todo_block = format_todo_block(todo_path, todo_text)
 
         # Goals context
-        _goals_enabled = bool(getattr(args, "goals_enabled", True))
-        _goals_auto_gen = bool(getattr(args, "goals_auto_generate", True))
-        if _goals_enabled:
-            _gp, _gt = read_goals(repo)
-            goals_block = format_goals_block(_gp, _gt)
-            goals_instruction = GOALS_EVALUATION_INSTRUCTION if _gp else (GOALS_GENERATION_INSTRUCTION if _goals_auto_gen else "")
-        else:
-            goals_block = "(disabled)"
-            goals_instruction = ""
+        goals_block, goals_instruction = build_goals_prompt_context(
+            repo=repo,
+            goals_enabled=bool(getattr(args, "goals_enabled", True)),
+            goals_auto_generate=bool(getattr(args, "goals_auto_generate", True)),
+            read_goals_fn=read_goals,
+            format_goals_block_fn=format_goals_block,
+            goals_evaluation_instruction=GOALS_EVALUATION_INSTRUCTION,
+            goals_generation_instruction=GOALS_GENERATION_INSTRUCTION,
+        )
 
         try:
             if need_bootstrap:
@@ -1281,17 +1281,20 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=1, error="structured_output_failed")
                     return False
 
-                (run_dir / f"PM_OUTPUT_cycle_{cycle_idx:03d}.json").write_text(dump_pretty(pm_out.model_dump()) + "\n", encoding="utf-8", errors="replace")
-                if pm_out.notes_md:
-                    (run_dir / "NOTES_PM.md").write_text(pm_out.notes_md.strip() + "\n", encoding="utf-8", errors="replace")
+                write_pm_output_artifacts(
+                    run_dir=run_dir,
+                    cycle_idx=cycle_idx,
+                    pm_output_model_dump=pm_out.model_dump(),
+                    notes_md=pm_out.notes_md,
+                    dump_pretty_fn=dump_pretty,
+                )
 
-                current_backlog_block, existing_tasks, done_ids = _load_backlog_context_for_pm()
-                existing_pending = [t for t in existing_tasks if t.id not in done_ids]
-                merged_tasks: list[dict[str, Any]] = [t.model_dump() for t in (pm_out.tasks or [])]
-                pm_ids = {str(t.get("id", "")).strip() for t in merged_tasks if isinstance(t, dict)}
-                for t in existing_pending:
-                    if t.id not in pm_ids:
-                        merged_tasks.append({"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files or [], "done_when": t.done_when, "skills": t.skills or [], "skills_rationale": t.skills_rationale, "depends_on": t.depends_on})
+                _current_backlog_block, existing_tasks, done_ids = _load_backlog_context_for_pm()
+                merged_tasks = merge_pm_tasks_with_existing_pending(
+                    pm_tasks=[t.model_dump() for t in (pm_out.tasks or [])],
+                    existing_tasks=existing_tasks,
+                    done_ids=done_ids,
+                )
                 if merged_tasks:
                     merged_tasks = _normalize_backlog_tasks(merged_tasks)
                     merged_tasks = _validate_skill_ids(merged_tasks)
@@ -1371,17 +1374,20 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     metrics.event("pm_end", cycle=cycle_idx, kind="incremental" if need_incremental else "refresh", rc=1, error="structured_output_failed")
                     return False
 
-                (run_dir / f"PM_OUTPUT_cycle_{cycle_idx:03d}.json").write_text(dump_pretty(pm_out.model_dump()) + "\n", encoding="utf-8", errors="replace")
-                if pm_out.notes_md:
-                    (run_dir / "NOTES_PM.md").write_text(pm_out.notes_md.strip() + "\n", encoding="utf-8", errors="replace")
+                write_pm_output_artifacts(
+                    run_dir=run_dir,
+                    cycle_idx=cycle_idx,
+                    pm_output_model_dump=pm_out.model_dump(),
+                    notes_md=pm_out.notes_md,
+                    dump_pretty_fn=dump_pretty,
+                )
 
-                current_backlog_block, existing_tasks, done_ids = _load_backlog_context_for_pm()
-                existing_pending = [t for t in existing_tasks if t.id not in done_ids]
-                merged_tasks = [t.model_dump() for t in (pm_out.tasks or [])]
-                pm_ids = {str(t.get("id", "")).strip() for t in merged_tasks if isinstance(t, dict)}
-                for t in existing_pending:
-                    if t.id not in pm_ids:
-                        merged_tasks.append({"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files or [], "done_when": t.done_when, "skills": t.skills or [], "skills_rationale": t.skills_rationale, "depends_on": t.depends_on})
+                _current_backlog_block, existing_tasks, done_ids = _load_backlog_context_for_pm()
+                merged_tasks = merge_pm_tasks_with_existing_pending(
+                    pm_tasks=[t.model_dump() for t in (pm_out.tasks or [])],
+                    existing_tasks=existing_tasks,
+                    done_ids=done_ids,
+                )
                 if merged_tasks:
                     merged_tasks = _normalize_backlog_tasks(merged_tasks)
                     merged_tasks = _validate_skill_ids(merged_tasks)
@@ -1414,7 +1420,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             return False
 
     # ---------------------------------------------------------------------------
-    # Dev loop (full parity with Codex — escalation, continuations, policy scan)
+    # Dev loop (full parity with Codex - escalation, continuations, policy scan)
     # ---------------------------------------------------------------------------
 
     policy_scan_summary: Optional[dict[str, Any]] = None
@@ -1434,38 +1440,42 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         task_ids = {t.id for t in tasks}
         before_done = len(done_set.intersection(task_ids))
 
-        if pm_stage_enabled and bool(getattr(args, "pm_refresh_backlog", False)) and (before_done >= len(task_ids)):
-            pm_ok2 = await run_pm_if_needed(cycle_idx, curr_head, changed_files, repo_fp, force_refresh_backlog=True)
-            if not pm_ok2:
-                if pm_stop_reason.get("reason") == STOP_REASON_QUOTA:
-                    return 0, STOP_REASON_QUOTA, 0, (len(done_set) > before_done)
-                if stop_path.exists():
-                    detected = detect_stop_reason([stop_path])
-                    return 0, (detected or STOP_REASON_STOP_FILE), 0, (len(done_set) > before_done)
-                return 1, "pm_failed", 0, (len(done_set) > before_done)
-            if not ensure_backlog():
-                return 1, STOP_REASON_PM_REFRESH_NO_BACKLOG, 0, (len(done_set) > before_done)
-            old_task_map = {t.id: (t.title, t.prompt) for t in tasks}
-            tasks = load_tasks()
-            task_ids = {t.id for t in tasks}
-            # Only clear done_set for IDs where PM actually changed the task content.
-            # If the task has the same title+prompt, PM just preserved the old backlog
-            # (e.g. returned "skip") and we should NOT re-run already-done tasks.
-            recycled_ids = done_set & task_ids
-            truly_new = set()
-            for t in tasks:
-                if t.id in recycled_ids:
-                    old = old_task_map.get(t.id)
-                    if old is None or old != (t.title, t.prompt):
-                        truly_new.add(t.id)
-            if truly_new:
-                eprint(f"[PM-REFRESH] Clearing {len(truly_new)} recycled task IDs with new content: {sorted(truly_new)}")
-                done_set -= truly_new
-                state["done"] = sorted(done_set)
-                save_state(state_path, state)
-            elif recycled_ids:
-                eprint(f"[PM-REFRESH] {len(recycled_ids)} task IDs unchanged — keeping done status.")
-            before_done = len(done_set.intersection(task_ids))
+        pm_refresh = await maybe_refresh_tasks_after_pm(
+            pm_stage_enabled=pm_stage_enabled,
+            pm_refresh_backlog=bool(getattr(args, "pm_refresh_backlog", False)),
+            cycle_idx=cycle_idx,
+            curr_head=curr_head,
+            changed_files=changed_files,
+            repo_fp=repo_fp,
+            before_done=before_done,
+            tasks=tasks,
+            task_ids=task_ids,
+            done_set=done_set,
+            state=state,
+            state_path=state_path,
+            run_pm_if_needed_fn=run_pm_if_needed,
+            pm_stop_reason=pm_stop_reason,
+            stop_reason_quota=STOP_REASON_QUOTA,
+            stop_reason_stop_file=STOP_REASON_STOP_FILE,
+            stop_reason_pm_refresh_no_backlog=STOP_REASON_PM_REFRESH_NO_BACKLOG,
+            stop_path=stop_path,
+            detect_stop_reason_fn=detect_stop_reason,
+            ensure_backlog_fn=ensure_backlog,
+            load_tasks_fn=load_tasks,
+            save_state_fn=save_state,
+            on_recycled_ids_changed_fn=lambda truly_new: eprint(
+                f"[PM-REFRESH] Clearing {len(truly_new)} recycled task IDs with new content: {sorted(truly_new)}"
+            ),
+            on_recycled_ids_unchanged_fn=lambda recycled_ids: eprint(
+                f"[PM-REFRESH] {len(recycled_ids)} task IDs unchanged - keeping done status."
+            ),
+        )
+        if pm_refresh.should_return:
+            return pm_refresh.rc, pm_refresh.reason, pm_refresh.done_delta, pm_refresh.ran_tasks
+        tasks = pm_refresh.tasks
+        task_ids = pm_refresh.task_ids
+        done_set = pm_refresh.done_set
+        before_done = pm_refresh.before_done
 
         tasks_root = run_dir / "tasks"
         tasks_root.mkdir(parents=True, exist_ok=True)
@@ -1498,7 +1508,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "1. Read the failing files and fix each error\n"
                     "2. After fixing, run the build command to verify\n"
                     "3. Keep fixing until the build succeeds with 0 errors\n"
-                    "4. Do NOT add new features — only fix build errors\n"
+                    "4. Do NOT add new features - only fix build errors\n"
                 )
 
                 build_fix_max_turns = int(getattr(args, "max_turns_per_task", 12) or 12) * 2
@@ -1535,59 +1545,31 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 else:
                     eprint("[BUILD-FIX] Build still broken after fix attempt.")
                     metrics.event("build_fix_end", cycle=cycle_idx, rc=1)
-                    # In continuous mode, proceed anyway — partial fixes may help
-                    # In non-continuous mode, also proceed — tasks may fix remaining issues
+                    # In continuous mode, proceed anyway - partial fixes may help
+                    # In non-continuous mode, also proceed - tasks may fix remaining issues
 
         for step in range(iterations):
             if stop_path.exists():
                 break
 
             max_consecutive_failures = int(getattr(args, "max_consecutive_task_failures", 3) or 3)
-            next_task: Optional[TaskItem] = None
-            processed = done_set | skipped_set
-            for t in tasks:
-                if t.id in processed:
-                    continue
-                # Persistent failure check: skip tasks that failed too many times consecutively
-                if bool(getattr(args, "task_history_enabled", True)):
-                    consec = _count_consecutive_title_failures(repo, t.title)
-                    if consec >= max_consecutive_failures:
-                        logger.skip_event(t.id, f"failed {consec} times consecutively (>= {max_consecutive_failures})")
-                        skipped_set.add(t.id)
-                        state.setdefault("failed", []).append({
-                            "task": t.id, "reason": "persistent_failure",
-                            "detail": f"Failed {consec} consecutive times across runs"
-                        })
-                        save_state(state_path, state)
-                        _record_history(t.id, t.title, "failed", reason="persistent_failure",
-                                        detail=f"Auto-skipped after {consec} consecutive failures", files=t.files, cycle=cycle_idx)
-                        metrics.event("task_persistent_skip", cycle=cycle_idx, task_id=t.id, consecutive_failures=consec)
-                        task_results.append({"id": t.id, "title": t.title, "status": "skipped", "reason": "persistent_failure", "duration": -1})
-                        continue
-                # Dependency check: all depends_on tasks must be in done_set
-                if t.depends_on:
-                    unmet = [dep for dep in t.depends_on if dep not in done_set]
-                    if unmet:
-                        failed_ids = {f.get("task") for f in state.get("failed", []) if isinstance(f, dict)}
-                        all_known_ids = {bt.id for bt in tasks} | done_set | failed_ids | skipped_set
-                        orphaned = [dep for dep in unmet if dep not in all_known_ids]
-                        permanently_blocked = [dep for dep in unmet if dep in (skipped_set | failed_ids)] + orphaned
-                        if permanently_blocked:
-                            reason = "dependency_orphaned" if orphaned else "dependency_failed"
-                            eprint(f"[SKIP] Task {t.id} depends on unresolvable tasks {permanently_blocked}; skipping.")
-                            skipped_set.add(t.id)
-                            state.setdefault("failed", []).append({
-                                "task": t.id, "reason": reason,
-                                "detail": f"Depends on: {permanently_blocked}"
-                            })
-                            save_state(state_path, state)
-                            _record_history(t.id, t.title, "failed", reason=reason,
-                                            detail=f"Depends on: {permanently_blocked}", files=t.files, cycle=cycle_idx)
-                            task_results.append({"id": t.id, "title": t.title, "status": "skipped", "reason": reason, "duration": -1})
-                            continue
-                        continue  # pending dependencies — try later
-                next_task = t
-                break
+            next_task: Optional[TaskItem] = select_next_task_with_dependency_checks(
+                tasks=tasks,
+                done_set=done_set,
+                skipped_set=skipped_set,
+                state=state,
+                state_path=state_path,
+                cycle_idx=cycle_idx,
+                max_consecutive_failures=max_consecutive_failures,
+                task_history_enabled=bool(getattr(args, "task_history_enabled", True)),
+                count_consecutive_title_failures_fn=lambda title: _count_consecutive_title_failures(repo, title),
+                save_state_fn=save_state,
+                record_history_fn=_record_history,
+                logger=logger,
+                metrics=metrics,
+                eprint_fn=eprint,
+                task_results=task_results,
+            )
             if not next_task:
                 break
 
@@ -1618,21 +1600,14 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             per_task_escalations = budget_state["per_task_escalations"]
             per_task_escalations.setdefault(next_task.id, 0)
             max_escalations_per_task_budget = int(budgets_cfg.get("max_dev_escalations_per_task") or 0)
-            if max_escalations_per_task_budget > 0:
-                dev_max_escalations = min(dev_max_escalations, max_escalations_per_task_budget)
-
-            base_model = cfg.dev_model or cfg.model
-            tiers: list[str] = [base_model]
-            t1 = cfg.dev_model_tier1.strip()
-            t2 = cfg.dev_model_tier2.strip()
-            if t1 and t1 not in tiers:
-                tiers.append(t1)
-            if t2 and t2 not in tiers:
-                tiers.append(t2)
-
-            max_attempts = 1
-            if dev_auto_escalate and dev_max_escalations > 0:
-                max_attempts = min(1 + dev_max_escalations, len(tiers))
+            tiers, max_attempts, dev_max_escalations = compute_dev_model_tiers(
+                base_model=base_model,
+                tier1_model=cfg.dev_model_tier1,
+                tier2_model=cfg.dev_model_tier2,
+                dev_auto_escalate=dev_auto_escalate,
+                dev_max_escalations=dev_max_escalations,
+                max_escalations_per_task_budget=max_escalations_per_task_budget,
+            )
 
             if dev_auto_escalate and not tb and not cp:
                 try:
@@ -1700,7 +1675,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     metrics.event("escalate_attempt", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
 
                 if attempt > 0 and (tb or cp):
-                    # Clear stale build error — branch reset reverts all changes,
+                    # Clear stale build error - branch reset reverts all changes,
                     # so previous build errors are no longer relevant and would
                     # confuse the escalation model with errors from wrong files.
                     _prev_build_error = ""
@@ -1991,7 +1966,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         after = git_porcelain(repo)
                         changed = has_working_tree_changes(repo, before, after, before_untracked=before_untracked)
                         if changed:
-                            eprint(f"[INFO] Phantom edit retry succeeded for {next_task.id} — diff now exists.")
+                            eprint(f"[INFO] Phantom edit retry succeeded for {next_task.id} - diff now exists.")
                             metrics.event("dev_attempt_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0, reason="phantom_retry_success")
                             logger.task_end(task_id=next_task.id, success=True, reason="completed_after_retry", attempt=attempt)
                             task_results.append({"id": next_task.id, "title": next_task.title, "status": "done", "reason": "phantom_retry_success", "duration": time.time() - task_outer_t0})
@@ -2244,7 +2219,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
         ran_tasks = (len(done_set) > before_done)
         cycle_dt = time.time() - cycle_t0
-        # Count unique failed tasks (not raw entries — one task can have multiple failure records)
+        # Count unique failed tasks (not raw entries - one task can have multiple failure records)
         failed_count = len({f.get("task") for f in state.get("failed", []) if f.get("task")})
         done_count = len(done_set.intersection(task_ids))
         total_count = len(task_ids)
@@ -2297,7 +2272,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     write_completion_status(run_dir, comp_status, failed_unresolved=unresolved,
                                            stop_reason="cycle_end")
                     if comp_status.get("project_complete") and unresolved == 0:
-                        eprint(f"[GOALS] PROJECT COMPLETE — all goals met (level={_completion_level}), no unresolved failures.")
+                        eprint(f"[GOALS] PROJECT COMPLETE - all goals met (level={_completion_level}), no unresolved failures.")
                         metrics.event("project_complete", cycle=cycle_idx, goals=comp_status)
                         return 0, STOP_REASON_PROJECT_COMPLETE, done_delta, ran_tasks
                     else:
@@ -2311,14 +2286,14 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         if total_count > 0 and done_count >= total_count:
             return 0, STOP_REASON_ALL_TASKS_DONE, done_delta, ran_tasks
         if total_count > 0 and (done_count + skipped_count) >= total_count:
-            # All tasks attempted but some were skipped — not truly "all done"
+            # All tasks attempted but some were skipped - not truly "all done"
             logger.info(f"All tasks attempted: {done_count} done, {skipped_count} skipped out of {total_count}.")
             return 0, STOP_REASON_ALL_TASKS_ATTEMPTED, done_delta, ran_tasks
 
         return 0, "ok", done_delta, ran_tasks
 
     # ---------------------------------------------------------------------------
-    # QA phase (with followup injection — same as Codex)
+    # QA phase (with followup injection - same as Codex)
     # ---------------------------------------------------------------------------
 
     async def run_qa_if_needed(cycle_idx: int, ran_tasks: bool) -> dict[str, Any]:
@@ -2330,23 +2305,14 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0}
         try:
             metrics.event("qa_start", cycle=cycle_idx)
-            skills_context = "(skills disabled)"
-            if skills_enabled:
-                skill_ids: list[str] = []
-                for t in load_tasks():
-                    skill_ids.extend(t.skills or [])
-                deduped = list(dict.fromkeys([s for s in skill_ids if s]))
-                selected_records = [skills_by_id[sid] for sid in deduped if sid in skills_by_id]
-                include_excerpts = _inline_skills_for("qa", skills_cfg.get("inline_mode", ""))
-                skills_context = build_skills_context(
-                    selected_records,
-                    max_excerpt_lines=int(skills_cfg.get("max_excerpt_lines", 0) or 0),
-                    total_char_cap=int(skills_cfg.get("qa_max_total_chars", 0) or 0),
-                    include_excerpts=include_excerpts,
-                )
-                missing = [sid for sid in deduped if sid not in skills_by_id]
-                if missing:
-                    skills_context += "\nMissing skills: " + ", ".join(missing)
+            skills_context = build_qa_skills_context(
+                load_tasks_fn=load_tasks,
+                skills_enabled=skills_enabled,
+                skills_by_id=skills_by_id,
+                skills_cfg=skills_cfg,
+                inline_skills_for_fn=_inline_skills_for,
+                build_skills_context_fn=build_skills_context,
+            )
 
             qa_ctx = {"repo": str(repo), "run_dir": str(run_dir), "skills_context": skills_context}
             qa_prompt = _patch_prompt_for_claude(store.render("qa_prompt", QA_TEMPLATE_DEFAULT, qa_ctx))
@@ -2369,48 +2335,26 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
             qa_output_path = run_dir / f"qa_final_output_cycle_{cycle_idx:03d}.txt"
             qa_output_path.write_text((text or "") + "\n", encoding="utf-8", errors="replace")
-
-            followups_added = 0
-            followups_candidates = 0
-            followups_skipped = 0
-            manual_test_count = 0
-            parse_ok: Optional[bool] = None
-            followups: list = []
-
-            if bool(getattr(args, "qa_to_backlog", False)):
-                qa_text = qa_output_path.read_text(encoding="utf-8", errors="replace")
-                max_items = int(getattr(args, "max_qa_followups", 5)) or 5
-                parsed_qa, parse_err = parse_qa_followups(qa_text)
-                if parsed_qa is not None:
-                    parse_ok = True
-                    followups = _followups_from_structured(parsed_qa, max_items=max_items)
-                else:
-                    parse_ok = False
-                    followups = _extract_qa_followups(qa_text, max_items=max_items, run_dir=run_dir)
-                    metrics.event("qa_followups_parse", cycle=cycle_idx, parse_ok=False, error=str(parse_err or "parse_failed"))
-                if parse_ok:
-                    metrics.event("qa_followups_parse", cycle=cycle_idx, parse_ok=True)
-                if followups:
-                    followups_candidates = len(followups)
-                    code_fix_items, manual_test_items = split_followups_by_type(followups)
-                    manual_test_count = len(manual_test_items)
-                    if manual_test_items:
-                        write_manual_checks(run_dir, cycle_idx, manual_test_items)
-                    if code_fix_items:
-                        state_obj = load_state(state_path)
-                        done_ids = set(state_obj.get("done", []) or [])
-                        existing = load_tasks()
-                        base_tasks = [{"id": t.id, "title": t.title, "prompt": t.prompt, "files": t.files, "done_when": t.done_when, "skills": t.skills, "skills_rationale": t.skills_rationale, "depends_on": t.depends_on} for t in existing]
-                        merged = _merge_qa_followups(base_tasks, code_fix_items, done_ids)
-                        followups_added = max(0, len(merged) - len(base_tasks))
-                        followups_skipped = max(0, len(code_fix_items) - followups_added)
-                        write_backlog_files(run_dir, merged)
-                (run_dir / f"qa_followups_cycle_{cycle_idx:03d}.json").write_text(
-                    json.dumps({"cycle": cycle_idx, "parse_ok": parse_ok, "candidates_count": followups_candidates, "added_count": followups_added, "skipped_count": followups_skipped, "manual_test_count": manual_test_count, "tasks": followups}, ensure_ascii=False, indent=2),
-                    encoding="utf-8", errors="replace",
-                )
+            qa_summary = process_qa_followups(
+                cycle_idx=cycle_idx,
+                run_dir=run_dir,
+                qa_text=qa_output_path.read_text(encoding="utf-8", errors="replace"),
+                qa_to_backlog=bool(getattr(args, "qa_to_backlog", False)),
+                max_qa_followups=int(getattr(args, "max_qa_followups", 5)) or 5,
+                parse_qa_followups_fn=parse_qa_followups,
+                followups_from_structured_fn=_followups_from_structured,
+                extract_qa_followups_fn=_extract_qa_followups,
+                split_followups_by_type_fn=split_followups_by_type,
+                write_manual_checks_fn=write_manual_checks,
+                load_state_fn=load_state,
+                state_path=state_path,
+                load_tasks_fn=load_tasks,
+                merge_qa_followups_fn=_merge_qa_followups,
+                write_backlog_files_fn=write_backlog_files,
+                metrics=metrics,
+            )
             metrics.event("qa_end", cycle=cycle_idx, rc=0)
-            return {"parse_ok": parse_ok, "candidates": followups_candidates, "added": followups_added, "skipped": followups_skipped, "manual_test_count": manual_test_count}
+            return qa_summary
         except StopRequested:
             return {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0}
         except Exception as ex:
@@ -2481,166 +2425,85 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             metrics.event("shutdown_report", cycle=cycle, step=step, reason=stop_reason, ok=False, error=str(ex))
 
     # ---------------------------------------------------------------------------
-    # Security phase
-    # ---------------------------------------------------------------------------
-
-    async def security_phase_fn(ci: int) -> StageOutcome:
-        nonlocal security_scan_summary
-        if not security_enabled:
-            return StageOutcome.skip("security_disabled")
-        if stop_path.exists():
-            return StageOutcome.stop("stop_file")
-        metrics.event("security_start", cycle=ci)
-        scan_files, scan_stats = _collect_scan(security_scan_scope)
-        scan_result = security_scan_files(scan_files, security_rules, ignore_paths=scan_ignore_paths)
-        findings = scan_result.get("findings", [])
-        fail_hits = [f for f in findings if severity_at_or_above(str(f.get("severity", "")), security_fail_severity)]
-        ok = len(fail_hits) == 0
-        security_scan_summary = {
-            "scope": scan_stats.get("scope", security_scan_scope),
-            "files_scanned": scan_stats.get("files_scanned", 0),
-            "bytes_scanned": scan_stats.get("bytes_scanned", 0),
-            "files_skipped": scan_stats.get("files_skipped", 0),
-            "findings_total": len(findings),
-            "findings_fail": len(fail_hits),
-        }
-        out = {"cycle": ci, "ok": ok, "fail_severity": security_fail_severity, "findings": findings, "stats": scan_stats}
-        (run_dir / f"security_scan_cycle_{ci:03d}.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
-        metrics.event("security_end", cycle=ci, rc=0 if ok else 1, findings=len(fail_hits), **security_scan_summary)
-        metrics.event("security_scan_summary", cycle=ci, **security_scan_summary)
-        if not ok:
-            metrics.event("security_violation", cycle=ci, findings=len(fail_hits))
-            return StageOutcome.fail("security_violation", rc=1)
-        return StageOutcome.ok("security_ok")
-
-    # ---------------------------------------------------------------------------
-    # Run cycle (same structure as Codex)
+    # Run cycle (shared runtime)
     # ---------------------------------------------------------------------------
 
     async def run_cycle(cycle_idx: int) -> tuple[int, str, int, int]:
-        nonlocal prev_head, policy_scan_summary, security_scan_summary
+        def _get_prev_head() -> str:
+            return prev_head
 
-        if stop_path.exists():
-            return 0, STOP_REASON_STOP_FILE, 0
+        def _set_prev_head(value: str) -> None:
+            nonlocal prev_head
+            prev_head = value
 
-        policy_scan_summary = None
-        security_scan_summary = None
-        cycle_t0 = time.time()
-        metrics.event("cycle_start", cycle=cycle_idx)
+        def _get_policy_scan_summary() -> Optional[dict[str, Any]]:
+            return policy_scan_summary
 
-        curr_head = git_head(repo).strip()
-        head_changed_files = git_changed_files(repo, prev_head, curr_head)
-        wt_changed_files: list[str] = []
-        if bool(getattr(args, "pm_include_working_tree", False)):
-            try:
-                wt_changed_files = git_worktree_changed_files(repo)
-            except Exception as ex:
-                eprint(f"[WARN] working-tree change detection failed: {ex}")
-        changed_files = sorted(set([*head_changed_files, *wt_changed_files]))
-        repo_fp = repo_fingerprint(repo)
+        def _set_policy_scan_summary(value: Optional[dict[str, Any]]) -> None:
+            nonlocal policy_scan_summary
+            policy_scan_summary = value
 
-        async def pm_phase_fn(ci: int) -> StageOutcome:
-            if stop_path.exists():
-                return StageOutcome.stop("stop_file")
-            metrics.event("pm_stage_start", cycle=ci)
-            ok = await run_pm_if_needed(ci, curr_head, changed_files, repo_fp, force_refresh_backlog=False)
-            if not ok:
-                if pm_stop_reason.get("reason") == STOP_REASON_QUOTA:
-                    metrics.event("pm_stage_end", cycle=ci, rc=0, reason=STOP_REASON_QUOTA)
-                    return StageOutcome.stop(STOP_REASON_QUOTA, rc=0)
-                if stop_path.exists():
-                    detected = detect_stop_reason([stop_path]) or STOP_REASON_STOP_FILE
-                    metrics.event("pm_stage_end", cycle=ci, rc=0, reason=detected)
-                    return StageOutcome.stop(detected, rc=0)
-                metrics.event("pm_stage_end", cycle=ci, rc=1)
-                return StageOutcome.fail("pm_failed", rc=1)
-            metrics.event("pm_stage_end", cycle=ci, rc=0)
-            return StageOutcome.ok("pm_ok")
+        def _get_security_scan_summary() -> Optional[dict[str, Any]]:
+            return security_scan_summary
 
-        async def dev_phase_fn(ci: int) -> StageOutcome:
-            if stop_path.exists():
-                return StageOutcome.stop("stop_file")
-            if not session.tasks:
-                return StageOutcome.fail(STOP_REASON_NO_TASKS, rc=1)
-            rc, reason, done_delta, ran = await run_dev_loop(ci, session.tasks, curr_head, changed_files, repo_fp, cycle_t0)
-            session.done_delta = int(done_delta or 0)
-            session.ran_tasks = bool(ran)
-            if reason == STOP_REASON_QUOTA:
-                return StageOutcome.stop(STOP_REASON_QUOTA, rc=0)
-            if reason == STOP_REASON_PROJECT_COMPLETE:
-                return StageOutcome.ok(STOP_REASON_PROJECT_COMPLETE)
-            if reason == STOP_REASON_ALL_TASKS_DONE:
-                return StageOutcome.ok(STOP_REASON_ALL_TASKS_DONE)
-            if reason == STOP_REASON_STOP_FILE:
-                return StageOutcome.stop(STOP_REASON_STOP_FILE, rc=0)
-            if rc != 0:
-                return StageOutcome.fail(reason, rc=rc)
-            return StageOutcome.ok(reason)
+        def _set_security_scan_summary(value: Optional[dict[str, Any]]) -> None:
+            nonlocal security_scan_summary
+            security_scan_summary = value
 
-        async def qa_phase_fn(ci: int) -> StageOutcome:
-            if stop_path.exists():
-                return StageOutcome.stop("stop_file")
-            qa_summary = await run_qa_if_needed(ci, ran_tasks=session.ran_tasks)
-            session.data["qa_followups_summary"] = qa_summary
-            session.data["qa_followups_added"] = int(qa_summary.get("added", 0) or 0)
-            if qa_summary.get("quota_exhausted"):
-                return StageOutcome.stop(STOP_REASON_QUOTA)
-            return StageOutcome.ok("qa_done")
-
-        session = PipelineSession(
-            args=args, repo=repo, run_dir=run_dir, stop_path=stop_path,
-            ensure_backlog=ensure_backlog, load_tasks=load_tasks,
-            pm_phase=pm_phase_fn, dev_phase=dev_phase_fn, qa_phase=qa_phase_fn,
-            security_phase=security_phase_fn,
+        result = await run_shared_cycle_once(
+            cycle_idx,
+            SharedCycleDeps(
+                args=args,
+                repo=repo,
+                run_dir=run_dir,
+                stop_path=stop_path,
+                metrics=metrics,
+                pipeline_mgr=pipeline_mgr,
+                continuous=continuous,
+                ensure_backlog=ensure_backlog,
+                load_tasks=load_tasks,
+                run_pm_if_needed=run_pm_if_needed,
+                run_dev_loop=run_dev_loop,
+                run_qa_if_needed=run_qa_if_needed,
+                pm_stop_reason=pm_stop_reason,
+                detect_stop_reason=detect_stop_reason,
+                budget_state=budget_state,
+                run_summary=run_summary,
+                write_run_summary=_write_run_summary,
+                snapshot_json=snapshot_json,
+                get_prev_head=_get_prev_head,
+                set_prev_head=_set_prev_head,
+                get_policy_scan_summary=_get_policy_scan_summary,
+                set_policy_scan_summary=_set_policy_scan_summary,
+                get_security_scan_summary=_get_security_scan_summary,
+                set_security_scan_summary=_set_security_scan_summary,
+                policy_scan_enabled=policy_scan_enabled,
+                policy_scan_scope=policy_scan_scope,
+                security_enabled=security_enabled,
+                security_scan_scope=security_scan_scope,
+                security_rules=security_rules,
+                security_fail_severity=security_fail_severity,
+                security_end_include_totals=True,
+                scan_ignore_paths=scan_ignore_paths,
+                collect_scan=_collect_scan,
+                security_scan_files_fn=security_scan_files,
+                severity_at_or_above_fn=severity_at_or_above,
+                git_head_fn=git_head,
+                git_changed_files_fn=git_changed_files,
+                git_worktree_changed_files_fn=git_worktree_changed_files,
+                repo_fingerprint_fn=repo_fingerprint,
+                eprint_fn=eprint,
+                stop_reason_quota=STOP_REASON_QUOTA,
+                stop_reason_stop_file=STOP_REASON_STOP_FILE,
+                stop_reason_project_complete=STOP_REASON_PROJECT_COMPLETE,
+                stop_reason_all_tasks_done=STOP_REASON_ALL_TASKS_DONE,
+                stop_reason_no_tasks=STOP_REASON_NO_TASKS,
+            ),
         )
-
-        res = await pipeline_mgr.run_cycle(session, cycle_idx, continuous=continuous)
-
-        cycle_entry: dict[str, Any] = {
-            "cycle": cycle_idx, "stages": [],
-            "budget": {
-                "total_escalations": budget_state["total_escalations"],
-                "total_continuations": budget_state["total_continuations"],
-                "total_repairs": budget_state["total_repairs"],
-            },
-            "policy_scan": policy_scan_summary or (
-                {"scope": "disabled", "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "violations_total": 0, "violations_fail": 0}
-                if not policy_scan_enabled
-                else {"scope": policy_scan_scope, "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "violations_total": 0, "violations_fail": 0}
-            ),
-            "security_scan": security_scan_summary or (
-                {"scope": "disabled", "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "findings_total": 0, "findings_fail": 0}
-                if not security_enabled
-                else {"scope": security_scan_scope, "files_scanned": 0, "bytes_scanned": 0, "files_skipped": 0, "findings_total": 0, "findings_fail": 0}
-            ),
-            "qa_followups": session.data.get("qa_followups_summary") or {"parse_ok": None, "candidates": 0, "added": 0, "skipped": 0, "manual_test_count": 0},
-        }
-        for st in res.stages:
-            entry = dict(st)
-            if str(entry.get("name", "")).lower() == "qa":
-                entry["followups_added"] = int(session.data.get("qa_followups_added", 0) or 0)
-            cycle_entry["stages"].append(entry)
-        run_summary["cycles"].append(cycle_entry)
-        try:
-            (run_dir / f"run_summary_cycle_{cycle_idx:03d}.json").write_text(json.dumps(cycle_entry, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-        _write_run_summary()
-
-        if res.reason not in ("stop_file",) and not stop_path.exists():
-            try:
-                final_head = git_head(repo).strip()
-                if final_head:
-                    snapshot_json.write_text(json.dumps({"prev_head": prev_head, "head": final_head, "ts": datetime.now(timezone.utc).isoformat() + "Z"}, indent=2, sort_keys=True) + "\n", encoding="utf-8", errors="replace")
-                    prev_head = final_head
-            except Exception as ex:
-                eprint(f"[WARN] snapshot update failed: {ex}")
-
-        qa_added = int(session.data.get("qa_followups_added", 0) or 0)
-        return res.rc, res.reason, res.done_delta, qa_added
+        return result.rc, result.reason, result.done_delta, result.qa_followups_added
 
     # ---------------------------------------------------------------------------
-    # Main loop (same as Codex — with idle tracking and shutdown report)
+    # Main loop (same as Codex - with idle tracking and shutdown report)
     # ---------------------------------------------------------------------------
 
     idle_accum = 0
@@ -2686,12 +2549,14 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             result = parse_and_append_refreshed_goals(repo, refresh_text or "")
             if result.get("appended"):
                 goals_refresh_count += 1
-                eprint(f"[GOALS-REFRESH] +{result.get('p0_count', 0)} P0, +{result.get('p1_count', 0)} P1 추가됨")
+                eprint(
+                    f"[GOALS-REFRESH] +{result.get('p0_count', 0)} P0, +{result.get('p1_count', 0)} P1 added"
+                )
                 metrics.event("goals_refresh_ok", cycle=cycle_idx,
                               p0=result.get("p0_count", 0), p1=result.get("p1_count", 0),
                               refresh_n=goals_refresh_count)
                 return True
-            eprint("[GOALS-REFRESH] 새 항목 없음 — 중단")
+            eprint("[GOALS-REFRESH] No new valid goals appended")
             return False
         except Exception as ex:
             if is_quota_exception(ex):
@@ -2718,7 +2583,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 _q7d = q_info.get("seven_day", "N/A")
                 if q_action == "stop":
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=quota_utilization_7d 5h={_q5h}% 7d={_q7d}%")
-                    logger.stop_event(f"7-day quota {_q7d}% >= {quota_7d_max}% — stopping run. (5h={_q5h}%)")
+                    logger.stop_event(f"7-day quota {_q7d}% >= {quota_7d_max}% - stopping run. (5h={_q5h}%)")
                     metrics.event("quota_utilization_stop", cycle=cycle_idx, window="seven_day",
                                   five_hour=_q5h, seven_day=_q7d, resets_at=q_resets or "")
                     last_reason = STOP_REASON_QUOTA_UTILIZATION
@@ -2728,16 +2593,16 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     if quota_wait_for_reset and wait_sec > 0:
                         quota_waited_this_cycle = True
                         wait_min = wait_sec / 60
-                        logger.info(f"[QUOTA-WAIT] 5h quota {_q5h}% >= {quota_5h_max}% — waiting {wait_min:.1f}min for reset (resets_at={q_resets})")
+                        logger.info(f"[QUOTA-WAIT] 5h quota {_q5h}% >= {quota_5h_max}% - waiting {wait_min:.1f}min for reset (resets_at={q_resets})")
                         logger.quota_event("wait", five_hour=_q5h, seven_day=_q7d, resets_at=q_resets, wait_seconds=wait_sec)
                         metrics.event("quota_utilization_wait", cycle=cycle_idx, window="five_hour",
                                       five_hour=_q5h, seven_day=_q7d, wait_seconds=wait_sec, resets_at=q_resets or "")
                         await asyncio.sleep(wait_sec)
-                        logger.info(f"[QUOTA-WAIT] Resumed after {wait_min:.1f}min wait — continuing cycle {cycle_idx}")
+                        logger.info(f"[QUOTA-WAIT] Resumed after {wait_min:.1f}min wait - continuing cycle {cycle_idx}")
                         logger.quota_event("resumed")
                     elif not quota_wait_for_reset:
                         append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=quota_utilization_5h 5h={_q5h}% 7d={_q7d}%")
-                        logger.stop_event(f"5-hour quota {_q5h}% >= {quota_5h_max}% — quota_wait_for_reset disabled, stopping. (7d={_q7d}%)")
+                        logger.stop_event(f"5-hour quota {_q5h}% >= {quota_5h_max}% - quota_wait_for_reset disabled, stopping. (7d={_q7d}%)")
                         metrics.event("quota_utilization_stop", cycle=cycle_idx, window="five_hour",
                                       five_hour=_q5h, seven_day=_q7d, resets_at=q_resets or "")
                         last_reason = STOP_REASON_QUOTA_UTILIZATION
@@ -2788,7 +2653,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 logger.warning(f"Consecutive failed cycles: {consecutive_failures}/{max_consecutive_failed_cycles}")
                 if consecutive_failures >= max_consecutive_failed_cycles:
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=consecutive_failures count={consecutive_failures}")
-                    logger.stop_event(f"{consecutive_failures} consecutive failed cycles with no progress — stopping run.")
+                    logger.stop_event(f"{consecutive_failures} consecutive failed cycles with no progress - stopping run.")
                     break
             else:
                 consecutive_failures = 0
@@ -2810,7 +2675,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         wait_sec = max(300, loop_sleep_seconds * 5)
                     wait_min = wait_sec / 60
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} quota_exhausted_wait wait_min={wait_min:.1f}")
-                    eprint(f"[QUOTA-WAIT] quota_exhausted — waiting {wait_min:.1f}min for reset (quota_wait_for_reset=true)")
+                    eprint(f"[QUOTA-WAIT] quota_exhausted - waiting {wait_min:.1f}min for reset (quota_wait_for_reset=true)")
                     logger.quota_event("exhausted_wait", wait_seconds=wait_sec)
                     metrics.event("quota_exhausted_wait", cycle=cycle_idx, wait_seconds=wait_sec)
                     if stop_path.exists():
@@ -2819,7 +2684,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         except Exception:
                             pass
                     await asyncio.sleep(wait_sec)
-                    eprint(f"[QUOTA-WAIT] Resumed after {wait_min:.1f}min wait — continuing next cycle")
+                    eprint(f"[QUOTA-WAIT] Resumed after {wait_min:.1f}min wait - continuing next cycle")
                     logger.quota_event("exhausted_resumed")
                     consecutive_failures = 0
                     continue
@@ -2833,26 +2698,26 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 )
                 if _should:
                     if await _try_goals_refresh(cycle_idx):
-                        # STOP 파일 제거 (ensure_backlog가 생성한 경우)
+                        # Remove STOP file if ensure_backlog created it.
                         if stop_path.exists():
                             try:
                                 stop_path.unlink()
                             except Exception:
                                 pass
                         consecutive_failures = max(0, consecutive_failures - 1)
-                        continue  # 다음 사이클 — PM이 새 GOALS 기반 태스크 생성
+                        continue  # Continue next cycle so PM can generate GOALS-based tasks.
 
-                # Refresh 불가/실패 → reason별 기존 중단 동작
+                # Refresh not applicable/failed: keep existing stop behavior by reason.
                 if reason == STOP_REASON_PROJECT_COMPLETE:
                     if qa_followups > 0:
-                        eprint(f"[GOALS] project_complete deferred — QA added {qa_followups} followup task(s), continuing next cycle.")
+                        eprint(f"[GOALS] project_complete deferred - QA added {qa_followups} followup task(s), continuing next cycle.")
                         append_cycle_summary(f"{now_iso()} cycle={cycle_idx} project_complete_deferred qa_followups={qa_followups}")
                         consecutive_failures = 0
                         continue
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=project_complete")
-                    logger.stop_event("Project complete — all goals met.")
+                    logger.stop_event("Project complete - all goals met.")
                     break
-                # no_tasks, pm_refresh_no_backlog → fallthrough (consecutive_failures에서 처리)
+                # no_tasks and pm_refresh_no_backlog fall through to consecutive-failure handling.
 
             if reason == STOP_REASON_ALL_TASKS_DONE:
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
@@ -2861,15 +2726,15 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 # In loop mode: allow ONE more cycle for PM to generate new tasks.
                 # If delta==0 (no progress), next cycle's idle detection will trigger.
                 if delta <= 0:
-                    # PM refresh already ran and produced no new work — stop now.
-                    logger.stop_event("All tasks done and PM produced no new work — stopping loop.")
+                    # PM refresh already ran and produced no new work - stop now.
+                    logger.stop_event("All tasks done and PM produced no new work - stopping loop.")
                     break
             if reason == STOP_REASON_ALL_TASKS_ATTEMPTED:
-                # All tasks tried but some skipped — in loop mode, next cycle may get new tasks from PM
+                # All tasks tried but some skipped - in loop mode, next cycle may get new tasks from PM
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_attempted")
                 if not loop_mode:
                     break
-                # In loop mode, fall through to loop sleep — PM refresh may add new tasks
+                # In loop mode, fall through to loop sleep - PM refresh may add new tasks
             if rc != 0 and not (loop_mode and continuous):
                 # In continuous loop mode, non-critical failures don't stop the run
                 break
@@ -2881,12 +2746,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 idle_cycle_count = 0
             if idle_exit_cycles > 0 and idle_cycle_count >= idle_exit_cycles:
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=idle_exit idle_cycles={idle_cycle_count}")
-                logger.stop_event(f"{idle_cycle_count} consecutive zero-progress cycles — idle exit.")
+                logger.stop_event(f"{idle_cycle_count} consecutive zero-progress cycles - idle exit.")
                 break
 
             if loop_mode:
                 if quota_waited_this_cycle:
-                    # Quota wait is active waiting (work pending, rate-limited) — not idle
+                    # Quota wait is active waiting (work pending, rate-limited) - not idle
                     idle_accum = 0
                 elif delta <= 0:
                     idle_accum += loop_sleep_seconds
@@ -2948,3 +2813,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         logger.close()
 
     return last_rc
+
+
+
+
+
+
