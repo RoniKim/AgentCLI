@@ -683,7 +683,7 @@ async def run_shared_cycle_once(
 
     async def pm_phase(ci: int) -> StageOutcome:
         if deps.stop_path.exists():
-            return StageOutcome.stop("stop_file")
+            return StageOutcome.stop(deps.stop_reason_stop_file)
         deps.metrics.event("pm_stage_start", cycle=ci)
         ok = await deps.run_pm_if_needed(ci, curr_head, changed_files, repo_fp, False)
         if not ok:
@@ -703,7 +703,7 @@ async def run_shared_cycle_once(
         if not deps.security_enabled:
             return StageOutcome.skip("security_disabled")
         if deps.stop_path.exists():
-            return StageOutcome.stop("stop_file")
+            return StageOutcome.stop(deps.stop_reason_stop_file)
         deps.metrics.event("security_start", cycle=ci)
         scan_files, scan_stats = deps.collect_scan(deps.security_scan_scope)
         scan_result = deps.security_scan_files_fn(scan_files, deps.security_rules, ignore_paths=deps.scan_ignore_paths)
@@ -767,7 +767,7 @@ async def run_shared_cycle_once(
 
     async def dev_phase(ci: int) -> StageOutcome:
         if deps.stop_path.exists():
-            return StageOutcome.stop("stop_file")
+            return StageOutcome.stop(deps.stop_reason_stop_file)
         if not session.tasks:
             return StageOutcome.fail(deps.stop_reason_no_tasks, rc=1)
 
@@ -796,7 +796,7 @@ async def run_shared_cycle_once(
 
     async def qa_phase(ci: int) -> StageOutcome:
         if deps.stop_path.exists():
-            return StageOutcome.stop("stop_file")
+            return StageOutcome.stop(deps.stop_reason_stop_file)
         qa_summary = await deps.run_qa_if_needed(ci, session.ran_tasks)
         session.data["qa_followups_summary"] = qa_summary
         session.data["qa_followups_added"] = int(qa_summary.get("added", 0) or 0)
@@ -859,7 +859,7 @@ async def run_shared_cycle_once(
         pass
     deps.write_run_summary()
 
-    if res.reason not in ("stop_file",) and not deps.stop_path.exists():
+    if res.reason not in (deps.stop_reason_stop_file,) and not deps.stop_path.exists():
         try:
             final_head = deps.git_head_fn(deps.repo).strip()
             if final_head:
@@ -868,7 +868,7 @@ async def run_shared_cycle_once(
                         {
                             "prev_head": deps.get_prev_head(),
                             "head": final_head,
-                            "ts": datetime.now(timezone.utc).isoformat() + "Z",
+                            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                         },
                         indent=2,
                         sort_keys=True,
