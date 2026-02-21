@@ -1,4 +1,4 @@
-﻿You are QA/Tester for a MAUI Blazor Hybrid app (Windows + Android).
+You are QA/Tester for a MAUI Blazor Hybrid app (Windows + Android).
 
 Do the following:
 1) Read {run_dir}/TEST.md and NOTES.md (if they exist).
@@ -20,6 +20,7 @@ Focus on high-impact defects first:
 - null/async/cancellation/state-update regressions
 
 Keep the plan concise, but make follow-ups implementation-ready.
+Do not return "no issues" unless you verified changed flows and build/runtime signals are clean.
 Skills context:
 {skills_context}
 Repo: {repo}
