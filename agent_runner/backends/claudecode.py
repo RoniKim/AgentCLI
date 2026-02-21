@@ -2745,6 +2745,27 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 consecutive_failures = 0
 
             if reason == STOP_REASON_QUOTA:
+                # Prefer backend failover over local quota waiting when configured.
+                _fo_enabled = bool(getattr(args, "failover_enabled", False))
+                _fo_on = set(str(x).strip().lower() for x in (getattr(args, "failover_on", []) or []))
+                _fo_backends = [
+                    str(b).strip().lower()
+                    for b in (getattr(args, "failover_backends", []) or [])
+                    if str(b).strip().lower() != "claudecode"
+                ]
+                _can_failover = _fo_enabled and STOP_REASON_QUOTA in _fo_on and len(_fo_backends) > 0
+                if _can_failover:
+                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=quota_exhausted_failover")
+                    logger.stop_event(
+                        "quota_exhausted detected - failover enabled, stopping current backend for switch."
+                    )
+                    metrics.event("quota_exhausted_failover", cycle=cycle_idx)
+                    last_reason = STOP_REASON_QUOTA
+                    try:
+                        stop_path.write_text(STOP_REASON_QUOTA, encoding="utf-8")
+                    except Exception:
+                        pass
+                    break
                 if quota_wait_for_reset:
                     # Mid-cycle quota exhaustion: wait for reset then continue
                     wait_sec = 0
