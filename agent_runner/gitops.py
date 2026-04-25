@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -840,6 +841,7 @@ def export_worktree_patch(
     worktree_dir: Path,
     patch_path: Path,
     *,
+    base_ref: str = "HEAD",
     exclude_globs: Sequence[str] | None = None,
     chunk_size: int = 50,
 ) -> None:
@@ -852,7 +854,7 @@ def export_worktree_patch(
                 eprint(f"[WARN] git add -N failed in worktree: rc={code}\n{out}")
     out = ""
     try:
-        code, out = run_cmd(["git", "diff", "--binary", "HEAD"], cwd=worktree_dir, timeout_sec=120)
+        code, out = run_cmd(["git", "diff", "--binary", base_ref], cwd=worktree_dir, timeout_sec=120)
         if code != 0:
             raise RuntimeError(f"git diff failed in worktree: rc={code}\n{out}")
     finally:
@@ -870,6 +872,136 @@ def apply_patch_to_repo(repo: Path, patch_path: Path) -> None:
     code, out = run_cmd(["git", "apply", "--binary", "--whitespace=nowarn", str(patch_path)], cwd=repo, timeout_sec=120)
     if code != 0:
         raise RuntimeError(f"git apply failed: rc={code}\n{out}")
+
+
+WORKTREE_MERGE_PENDING = "WORKTREE_MERGE_PENDING.json"
+WORKTREE_MERGE_PENDING_MD = "WORKTREE_MERGE_PENDING.md"
+
+
+def _worktree_pending_payload(
+    worktree_dir: Path,
+    source_repo: Path,
+    run_dir: Path,
+    patch_path: Path,
+    base_ref: str,
+    last_rc: int,
+) -> dict[str, object]:
+    head_ref = git_head(worktree_dir)
+    return {
+        "schema_version": 1,
+        "status": "pending",
+        "created_at": now_iso(),
+        "source_repo": str(source_repo.resolve()),
+        "run_dir": str(run_dir.resolve()),
+        "worktree_dir": str(worktree_dir.resolve()),
+        "patch_path": str(patch_path.resolve()),
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "last_rc": last_rc,
+    }
+
+
+def _write_pending_merge_files(source_repo: Path, run_dir: Path, payload: dict[str, object]) -> None:
+    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    safe_write_text(run_dir / WORKTREE_MERGE_PENDING, text)
+    central = source_repo / ".AgentCLI" / WORKTREE_MERGE_PENDING
+    safe_write_text(central, text)
+
+    md = (
+        "# Worktree Merge Pending\n\n"
+        "AgentCLI completed work in an isolated git worktree. The source repository was not modified.\n\n"
+        f"- source repo: `{payload.get('source_repo')}`\n"
+        f"- worktree: `{payload.get('worktree_dir')}`\n"
+        f"- patch: `{payload.get('patch_path')}`\n"
+        f"- base: `{payload.get('base_ref')}`\n"
+        f"- head: `{payload.get('head_ref')}`\n"
+        f"- runner rc: `{payload.get('last_rc')}`\n\n"
+        "From AgentCLI Shell, run `/merge-worktree` to apply this patch to the source repository, "
+        "or `/discard-worktree` to remove the isolated worktree without applying it.\n"
+    )
+    safe_write_text(run_dir / WORKTREE_MERGE_PENDING_MD, md)
+
+
+def find_pending_worktree_merge(repo: Path, run_dir: Path | None = None) -> Path | None:
+    candidates: list[Path] = []
+    if run_dir is not None:
+        candidates.append(run_dir / WORKTREE_MERGE_PENDING)
+    candidates.append(repo / ".AgentCLI" / WORKTREE_MERGE_PENDING)
+    runs_root = repo / ".AgentCLI" / "agent_runs"
+    if runs_root.exists():
+        for d in sorted([p for p in runs_root.iterdir() if p.is_dir()], key=lambda p: p.name, reverse=True):
+            candidates.append(d / WORKTREE_MERGE_PENDING)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def read_pending_worktree_merge(path: Path) -> dict[str, object]:
+    return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def _pending_companion_paths(payload: dict[str, object], pending_path: Path) -> list[Path]:
+    out = [pending_path]
+    run_dir = str(payload.get("run_dir") or "").strip()
+    source_repo = str(payload.get("source_repo") or "").strip()
+    if run_dir:
+        out.append(Path(run_dir) / WORKTREE_MERGE_PENDING)
+    if source_repo:
+        out.append(Path(source_repo) / ".AgentCLI" / WORKTREE_MERGE_PENDING)
+    uniq: list[Path] = []
+    seen: set[str] = set()
+    for p in out:
+        key = str(p.resolve()) if p.exists() else str(p)
+        if key not in seen:
+            seen.add(key)
+            uniq.append(p)
+    return uniq
+
+
+def _write_pending_status(payload: dict[str, object], pending_path: Path, status: str, message: str = "") -> None:
+    updated = dict(payload)
+    updated["status"] = status
+    updated["resolved_at"] = now_iso()
+    if message:
+        updated["message"] = message
+    text = json.dumps(updated, ensure_ascii=False, indent=2) + "\n"
+    for path in _pending_companion_paths(payload, pending_path):
+        if path.exists():
+            safe_write_text(path.with_name(f"WORKTREE_MERGE_{status.upper()}.json"), text)
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
+
+def apply_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
+    payload = read_pending_worktree_merge(pending_path)
+    source_repo = Path(str(payload.get("source_repo") or "")).expanduser().resolve()
+    worktree_dir = Path(str(payload.get("worktree_dir") or "")).expanduser().resolve()
+    patch_path = Path(str(payload.get("patch_path") or "")).expanduser().resolve()
+    if not source_repo.exists():
+        raise RuntimeError(f"Source repo not found: {source_repo}")
+    if not patch_path.exists():
+        raise RuntimeError(f"Worktree patch not found: {patch_path}")
+    apply_patch_to_repo(source_repo, patch_path)
+    try:
+        remove_worktree(source_repo, worktree_dir)
+    except Exception as ex:
+        _write_pending_status(payload, pending_path, "applied_cleanup_failed", str(ex))
+        raise
+    _write_pending_status(payload, pending_path, "applied")
+    return payload
+
+
+def discard_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
+    payload = read_pending_worktree_merge(pending_path)
+    source_repo = Path(str(payload.get("source_repo") or "")).expanduser().resolve()
+    worktree_dir = Path(str(payload.get("worktree_dir") or "")).expanduser().resolve()
+    if source_repo.exists() and worktree_dir.exists():
+        remove_worktree(source_repo, worktree_dir)
+    _write_pending_status(payload, pending_path, "discarded")
+    return payload
 
 
 def _write_worktree_not_applied(run_dir: Path, patch_path: Path, last_rc: int) -> None:
@@ -902,16 +1034,20 @@ def handle_worktree_patch(
     run_dir: Path,
     last_rc: int,
     *,
+    base_ref: str = "HEAD",
+    auto_apply: bool = True,
     exclude_globs: Sequence[str] | None = None,
 ) -> int:
     patch_path = run_dir / "worktree.patch"
     try:
-        export_worktree_patch(worktree_dir, patch_path, exclude_globs=exclude_globs)
+        export_worktree_patch(worktree_dir, patch_path, base_ref=base_ref, exclude_globs=exclude_globs)
         patch_text = patch_path.read_text(encoding="utf-8", errors="replace").strip()
         if patch_text:
-            if last_rc == 0:
+            if auto_apply and last_rc == 0:
                 apply_patch_to_repo(source_repo, patch_path)
             else:
+                payload = _worktree_pending_payload(worktree_dir, source_repo, run_dir, patch_path, base_ref, last_rc)
+                _write_pending_merge_files(source_repo, run_dir, payload)
                 _write_worktree_not_applied(run_dir, patch_path, last_rc)
                 _write_recovery_md(run_dir, patch_path)
     except Exception as ex:

@@ -236,6 +236,7 @@ async def main_async(args: argparse.Namespace) -> int:
             return 2
 
     source_repo = repo
+    source_base_ref = git_head(source_repo)
     worktree_dir: Optional[Path] = None
     if bool(getattr(args, "worktree_isolation", False)):
         worktree_dir = default_worktree_dir(source_repo, run_dir)
@@ -2497,26 +2498,40 @@ async def main_async(args: argparse.Namespace) -> int:
             if worktree_dir is not None:
                 gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
                 exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []
+                merge_mode = str(gitops_cfg.get("worktree_merge_mode") or "manual").strip().lower()
+                auto_apply_worktree = merge_mode in {"auto", "apply", "true", "yes", "y"}
                 last_rc = handle_worktree_patch(
                     repo,
                     source_repo,
                     run_dir,
                     last_rc,
+                    base_ref=source_base_ref or "HEAD",
+                    auto_apply=auto_apply_worktree,
                     exclude_globs=exclude_globs,
                 )
-                try:
-                    remove_worktree(source_repo, worktree_dir)
-                except Exception as ex:
-                    eprint(f"[WARN] Failed to remove worktree: {ex}")
-                    safe_write_text(
-                        run_dir / "WORKTREE_CLEANUP_FAILURE.md",
-                        "# Worktree cleanup failure\n\n"
-                        f"AgentCLI could not remove the isolated worktree:\n\n- `{worktree_dir}`\n\n"
-                        f"Error:\n\n```text\n{ex}\n```\n",
-                    )
-                    if last_rc == 0:
-                        last_rc = 1
-                    final_reason = "worktree_cleanup_failed"
+                pending_merge = run_dir / "WORKTREE_MERGE_PENDING.json"
+                apply_failure = run_dir / "WORKTREE_APPLY_FAILURE.md"
+                if pending_merge.exists():
+                    eprint("")
+                    eprint("[ACTION REQUIRED] Worktree merge pending.")
+                    eprint(f" - worktree: {worktree_dir}")
+                    eprint(f" - patch:    {run_dir / 'worktree.patch'}")
+                    eprint(" - shell:    /merge-worktree  (or /discard-worktree)")
+                    eprint("")
+                if auto_apply_worktree or (not pending_merge.exists() and not apply_failure.exists()):
+                    try:
+                        remove_worktree(source_repo, worktree_dir)
+                    except Exception as ex:
+                        eprint(f"[WARN] Failed to remove worktree: {ex}")
+                        safe_write_text(
+                            run_dir / "WORKTREE_CLEANUP_FAILURE.md",
+                            "# Worktree cleanup failure\n\n"
+                            f"AgentCLI could not remove the isolated worktree:\n\n- `{worktree_dir}`\n\n"
+                            f"Error:\n\n```text\n{ex}\n```\n",
+                        )
+                        if last_rc == 0:
+                            last_rc = 1
+                        final_reason = "worktree_cleanup_failed"
             run_summary["final"] = {"rc": last_rc, "reason": final_reason or ""}
             _write_run_summary()
             try:

@@ -145,6 +145,7 @@ DEFAULTS: Dict[str, Any] = {
     # Gitops defaults
     "gitops": {
         "untracked_exclude_globs": [".doc/**", ".doc", ".AgentCLI/**", ".AgentCLI", ".agent_runs/**", ".agent_runs", "*.log"],
+        "worktree_merge_mode": "manual",
     },
 
     # Safety / gates

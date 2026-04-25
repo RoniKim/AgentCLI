@@ -27,6 +27,12 @@ from .run_dir import find_latest_run_dir
 from .todo import ensure_todo_file, read_current_todo, set_current_todo, open_path
 from .preflight import run_preflight
 from .process_guard import init_process_guard, terminate_all_children
+from .gitops import (
+    apply_pending_worktree_merge,
+    discard_pending_worktree_merge,
+    find_pending_worktree_merge,
+    read_pending_worktree_merge,
+)
 
 # prompt_toolkit is an optional dependency at import time (for nicer UX).
 # If it's missing, we fall back to basic input().
@@ -568,6 +574,7 @@ class RunnerShell:
             if last_event:
                 print(f"last_event: {last_event}")
             print("=====================\n")
+            self._print_pending_worktree_merge_hint()
             return
 
         alive = self._runner_is_alive()
@@ -580,6 +587,86 @@ class RunnerShell:
         print(f"uptime:  {dur}")
         print(f"exit:    {self._runner_exit_code if (not alive) else '(running)'}")
         print("=====================\n")
+        self._print_pending_worktree_merge_hint()
+
+    def _pending_worktree_merge_path(self) -> Optional[Path]:
+        if not self.repo:
+            return None
+        return find_pending_worktree_merge(self.repo, self.run_dir)
+
+    def _print_pending_worktree_merge_hint(self) -> None:
+        pending = self._pending_worktree_merge_path()
+        if pending is None:
+            return
+        try:
+            payload = read_pending_worktree_merge(pending)
+            print("[ACTION REQUIRED] Worktree merge pending.")
+            print(f" - run_dir:  {payload.get('run_dir') or pending.parent}")
+            print(f" - worktree: {payload.get('worktree_dir') or '(unknown)'}")
+            print(f" - patch:    {payload.get('patch_path') or '(unknown)'}")
+            print(" - apply:   /merge-worktree")
+            print(" - discard: /discard-worktree\n")
+        except Exception as ex:
+            print(f"[WARN] Pending worktree merge exists but could not be read: {pending} ({ex})")
+
+    def merge_worktree(self) -> None:
+        if self._runner_is_alive():
+            print("[ERR] Runner is still running. Wait for shutdown before merging the worktree result.")
+            return
+        pending = self._pending_worktree_merge_path()
+        if pending is None:
+            print("[INFO] No pending worktree merge.")
+            return
+        try:
+            payload = read_pending_worktree_merge(pending)
+        except Exception as ex:
+            print(f"[ERR] Failed to read pending worktree merge: {ex}")
+            return
+
+        print("\n=== Pending Worktree Merge ===")
+        print(f"source:   {payload.get('source_repo')}")
+        print(f"worktree: {payload.get('worktree_dir')}")
+        print(f"patch:    {payload.get('patch_path')}")
+        print(f"base:     {payload.get('base_ref')}")
+        print(f"head:     {payload.get('head_ref')}")
+        print("==============================")
+        answer = input("Apply this patch to the source repo working tree and remove the worktree? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("[INFO] Merge skipped. Pending worktree result was left in place.")
+            return
+        try:
+            apply_pending_worktree_merge(pending)
+            print("[OK] Worktree patch applied to the source repo working tree.")
+            print("[INFO] Review `git status` and commit manually when ready.")
+        except Exception as ex:
+            print(f"[ERR] Failed to apply pending worktree merge: {ex}")
+
+    def discard_worktree(self) -> None:
+        if self._runner_is_alive():
+            print("[ERR] Runner is still running. Wait for shutdown before discarding the worktree result.")
+            return
+        pending = self._pending_worktree_merge_path()
+        if pending is None:
+            print("[INFO] No pending worktree merge.")
+            return
+        try:
+            payload = read_pending_worktree_merge(pending)
+        except Exception as ex:
+            print(f"[ERR] Failed to read pending worktree merge: {ex}")
+            return
+        print("\n=== Discard Pending Worktree ===")
+        print(f"worktree: {payload.get('worktree_dir')}")
+        print(f"patch:    {payload.get('patch_path')}")
+        print("================================")
+        answer = input("Discard this worktree result without applying it? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("[INFO] Discard skipped. Pending worktree result was left in place.")
+            return
+        try:
+            discard_pending_worktree_merge(pending)
+            print("[OK] Pending worktree result discarded.")
+        except Exception as ex:
+            print(f"[ERR] Failed to discard pending worktree merge: {ex}")
 
     def cmd_set(self, key: str, raw_value: str) -> None:
         key = key.replace("-", "_").strip()
@@ -666,6 +753,8 @@ class RunnerShell:
             "  /start [--flags...]        러너 백그라운드 시작 (예: /start --autopilot --loop)",
             "  /stop [--wait]             중지 요청(STOP 파일 생성). --wait로 종료 대기",
             "  /status                    러너 상태 확인",
+            "  /merge-worktree            pending worktree result를 Y/N 확인 후 원본 repo에 적용",
+            "  /discard-worktree          pending worktree result를 Y/N 확인 후 버림",
             "  /todo [--save|--load ...]   TODO 파일 생성/선택(.AgentCLI/todo)",
             "  /exit                      종료",
             "",
@@ -935,6 +1024,8 @@ def _build_completer() -> Any:
             "/start": start_flags,
             "/stop": WordCompleter(["--wait"], ignore_case=True),
             "/status": None,
+            "/merge-worktree": None,
+            "/discard-worktree": None,
             "/todo": WordCompleter(["--save", "--load", "latest"], ignore_case=True),
             "/exit": None,
             "/quit": None,
@@ -1072,6 +1163,12 @@ def _dispatch(sh: RunnerShell, line: str) -> bool:
         return False
     if cmd == "/status":
         sh.status()
+        return False
+    if cmd == "/merge-worktree":
+        sh.merge_worktree()
+        return False
+    if cmd == "/discard-worktree":
+        sh.discard_worktree()
         return False
 
     if cmd == "/todo":
