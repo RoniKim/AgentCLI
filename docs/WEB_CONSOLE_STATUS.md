@@ -28,7 +28,7 @@
 - Stage duration fallback no longer invents PM/Dev durations when there is no elapsed run.
 - Idle snapshots now publish `stage: idle` and `iteration: 0` instead of defaulting to Dev iteration 1.
 - Config adapter normalizes string/list multienum values and common boolean/number string values.
-- Goals were reset to reflect alpha status instead of overclaiming production usability.
+- Current implementation status was moved into this status document so `GOALS.md` can remain the full product target backlog.
 
 ## Post-Fix Browser Check
 
@@ -38,6 +38,7 @@
 
 ## Remaining Production Gates
 
+- `GOALS.md` is now decomposed into small P0 task slices so AgentCLI PM should generate narrower task branches instead of large, vague web-console tasks.
 - Verify against a real live AgentCLI run, not only persisted artifacts.
 - Implement edit/save/backup flows for Goals, Config, and Prompts.
 - Add English/Korean locale coverage.
