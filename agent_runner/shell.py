@@ -635,8 +635,10 @@ class RunnerShell:
             print("[INFO] Merge skipped. Pending worktree result was left in place.")
             return
         try:
-            apply_pending_worktree_merge(pending)
+            result = apply_pending_worktree_merge(pending)
             print("[OK] Worktree patch applied to the source repo working tree.")
+            if result.get("cleanup_error"):
+                print(f"[WARN] Patch applied, but worktree cleanup failed: {result.get('cleanup_error')}")
             print("[INFO] Review `git status` and commit manually when ready.")
         except Exception as ex:
             print(f"[ERR] Failed to apply pending worktree merge: {ex}")
@@ -663,8 +665,11 @@ class RunnerShell:
             print("[INFO] Discard skipped. Pending worktree result was left in place.")
             return
         try:
-            discard_pending_worktree_merge(pending)
-            print("[OK] Pending worktree result discarded.")
+            result = discard_pending_worktree_merge(pending)
+            if result.get("cleanup_error"):
+                print(f"[WARN] Discard recorded, but worktree cleanup failed: {result.get('cleanup_error')}")
+            else:
+                print("[OK] Pending worktree result discarded.")
         except Exception as ex:
             print(f"[ERR] Failed to discard pending worktree merge: {ex}")
 

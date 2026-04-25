@@ -988,10 +988,16 @@ def apply_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
     try:
         remove_worktree(source_repo, worktree_dir)
     except Exception as ex:
-        _write_pending_status(payload, pending_path, "applied_cleanup_failed", str(ex))
-        raise
+        message = str(ex)
+        _write_pending_status(payload, pending_path, "applied_cleanup_failed", message)
+        result = dict(payload)
+        result["status"] = "applied_cleanup_failed"
+        result["cleanup_error"] = message
+        return result
     _write_pending_status(payload, pending_path, "applied")
-    return payload
+    result = dict(payload)
+    result["status"] = "applied"
+    return result
 
 
 def discard_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
@@ -999,9 +1005,19 @@ def discard_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
     source_repo = Path(str(payload.get("source_repo") or "")).expanduser().resolve()
     worktree_dir = Path(str(payload.get("worktree_dir") or "")).expanduser().resolve()
     if source_repo.exists() and worktree_dir.exists():
-        remove_worktree(source_repo, worktree_dir)
+        try:
+            remove_worktree(source_repo, worktree_dir)
+        except Exception as ex:
+            message = str(ex)
+            _write_pending_status(payload, pending_path, "discard_cleanup_failed", message)
+            result = dict(payload)
+            result["status"] = "discard_cleanup_failed"
+            result["cleanup_error"] = message
+            return result
     _write_pending_status(payload, pending_path, "discarded")
-    return payload
+    result = dict(payload)
+    result["status"] = "discarded"
+    return result
 
 
 def _write_worktree_not_applied(run_dir: Path, patch_path: Path, last_rc: int) -> None:

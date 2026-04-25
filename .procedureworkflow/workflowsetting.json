@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "project": {
+    "name": "999.AgentCLI",
+    "language": "other"
+  },
+  "rules": {
+    "always": [],
+    "forbid": [],
+    "require": []
+  },
+  "git": {
+    "main_branch": "main",
+    "protected_paths": []
+  },
+  "docs": {
+    "enabled": false,
+    "inject_stages": [],
+    "max_chars": 8000
+  },
+  "defaults": {
+    "template": "feature-dev"
+  }
+}
