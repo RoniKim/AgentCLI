@@ -116,7 +116,25 @@ RUNNER_CONTROL_CONFIRMATIONS = {
     "start": "START RUNNER",
     "stop": "STOP RUNNER",
     "reload": "RELOAD RUNNER",
-    "restart": "RELOAD RUNNER",
+    "restart": "RESTART RUNNER",
+}
+RUN_DIR_ARTIFACT_NAMES = {
+    "BACKLOG.json",
+    "BACKLOG.md",
+    "STATE.json",
+    "STOP",
+    "cycle_summary.log",
+    "last_run_summary.json",
+    "metrics.jsonl",
+    "run_summary.json",
+    "WORKTREE_APPLY_FAILURE.md",
+    "WORKTREE_MERGE_APPLIED.json",
+    "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json",
+    "WORKTREE_MERGE_DISCARDED.json",
+    "WORKTREE_MERGE_DISCARD_CLEANUP_FAILED.json",
+    "WORKTREE_MERGE_PENDING.json",
+    "WORKTREE_NOT_APPLIED.md",
+    "worktree.patch",
 }
 RUNNER_CONTROL_TRUTHY = {"1", "true", "yes", "on", "enabled"}
 RUNNER_CONTROL_FALSY = {"0", "false", "no", "off", "disabled"}
@@ -172,6 +190,23 @@ def fallbackSectionMessage(kind: str) -> str:
         "runnerControl": "Runner controls are unavailable in fallback mode.",
     }
     return messages.get(kind, "No data available yet.")
+
+
+def _run_dir_has_observable_artifacts(run_dir: Path | None) -> bool:
+    if run_dir is None:
+        return False
+    try:
+        if not run_dir.exists() or not run_dir.is_dir():
+            return False
+        for name in RUN_DIR_ARTIFACT_NAMES:
+            if (run_dir / name).exists():
+                return True
+        logs_dir = run_dir / "logs"
+        if logs_dir.exists() and logs_dir.is_dir():
+            return any(item.is_file() for item in logs_dir.iterdir())
+    except OSError:
+        return False
+    return False
 
 
 def _safe_json(path: Path, fallback: Any) -> Any:
@@ -290,8 +325,6 @@ def _resolve_runner_controls_enabled(explicit: bool | None = None) -> tuple[bool
 
 def _runner_control_confirmation(action: str) -> str:
     key = str(action or "").strip().lower()
-    if key == "restart":
-        key = "reload"
     return RUNNER_CONTROL_CONFIRMATIONS.get(key, "")
 
 
@@ -994,10 +1027,12 @@ def _active_run_payload(
     if cycles:
         latest_cycle = cycles[-1] if isinstance(cycles[-1], dict) else {}
 
+    active_status = str(progress.get("run_status") or "idle").strip() or "idle"
+
     last_event_stage = str(metrics.get("last_stage") or "").strip() or "Dev"
-    if progress.get("status") == "success":
+    if active_status == "success":
         last_event_stage = "QA"
-    if progress.get("status") == "idle":
+    if active_status == "idle":
         last_event_stage = "idle"
 
     task_id = progress.get("current_task_id") or progress.get("selected_task_id") or ""
@@ -1013,10 +1048,6 @@ def _active_run_payload(
     if not budget_used:
         budget_used = quota_used
 
-    active_status = str(progress.get("run_status") or "idle").strip() or "idle"
-    if active_status == "success":
-        active_status = "running"
-
     return {
         "id": run_id,
         "repo": repo_path,
@@ -1025,8 +1056,8 @@ def _active_run_payload(
         "backend": str(config.get("execution_backend") or "codex"),
         "startedAt": started_at_ms,
         "stage": last_event_stage,
-        "stageIndex": STAGE_ORDER.get(last_event_stage.lower(), 1),
-        "iteration": int(progress.get("iterations") or len(cycles) or 1),
+        "stageIndex": STAGE_ORDER.get(last_event_stage.lower(), 0),
+        "iteration": 0 if active_status == "idle" else int(progress.get("iterations") or len(cycles) or 1),
         "maxIterations": int(config.get("iterations") or 5),
         "progress": round(progress_ratio, 3),
         "budgetUsed": round(budget_used, 3),
@@ -1051,10 +1082,6 @@ def _stage_payload(repo: Path, active_run: dict[str, Any], progress: dict[str, A
     pm_duration = max(0, int(elapsed * 0.18))
     dev_duration = max(0, int(elapsed * 0.62))
     qa_duration = max(0, int(elapsed * 0.20))
-    if not elapsed:
-        pm_duration = 312
-        dev_duration = 1840
-        qa_duration = 0
 
     stage_status = {
         "PM": "done" if status in {"running", "success", "stopped", "failed"} else "pending",
@@ -1184,12 +1211,10 @@ def _run_dirs(repo: Path) -> list[Path]:
         for candidate in root.iterdir():
             if not candidate.is_dir():
                 continue
-            if not (
-                re.match(r"^\d{8}-\d{6}$", candidate.name)
-                or (candidate / "STATE.json").exists()
-                or (candidate / "run_summary.json").exists()
-                or (candidate / "last_run_summary.json").exists()
-            ):
+            has_artifacts = _run_dir_has_observable_artifacts(candidate)
+            if not (re.match(r"^\d{8}-\d{6}$", candidate.name) or has_artifacts):
+                continue
+            if not has_artifacts:
                 continue
             key = str(candidate.resolve())
             if key in seen:
@@ -1198,6 +1223,14 @@ def _run_dirs(repo: Path) -> list[Path]:
             found.append(candidate)
     found.sort(key=lambda item: item.name, reverse=True)
     return found
+
+
+def _latest_observable_run_dir(repo: Path) -> Path | None:
+    latest = find_latest_run_dir(repo)
+    if _run_dir_has_observable_artifacts(latest):
+        return latest
+    run_dirs = _run_dirs(repo)
+    return run_dirs[0] if run_dirs else None
 
 
 def _build_metrics_payload(run_dir: Path | None, progress: dict[str, Any]) -> dict[str, Any]:
@@ -1271,13 +1304,23 @@ def _build_progress_payload(
     last_run_summary = _safe_json(run_dir / "last_run_summary.json", {}) if run_dir else {}
     final = run_summary.get("final") if isinstance(run_summary.get("final"), dict) else {}
     final_reason = str(final.get("reason") or last_run_summary.get("stop_reason") or "").strip()
+    final_rc = final.get("rc") if isinstance(final, dict) else None
+    if final_rc is None:
+        final_rc = last_run_summary.get("rc") if isinstance(last_run_summary, dict) else None
+    final_rc_text = "" if final_rc is None else str(final_rc)
     if not final_reason and run_dir and (run_dir / "STOP").exists():
         final_reason = "stop_file"
 
-    if final_reason in {"project_complete", "all_tasks_done"} and goals_completion.get("project_complete"):
+    if not run_dir or not _run_dir_has_observable_artifacts(run_dir):
+        run_status = "idle"
+    elif final_reason in {"project_complete", "all_tasks_done"} or (
+        final_reason in {"ok", "prepared_only"} and final_rc_text in {"", "0"}
+    ):
         run_status = "success"
     elif final_reason in {"stop_file", "stopped", "user_stop"}:
         run_status = "stopped"
+    elif final_reason and final_rc_text == "0":
+        run_status = "success"
     elif final_reason and final_reason not in {"ok", "prepared_only"}:
         run_status = "failed"
     elif run_dir:
@@ -1506,7 +1549,7 @@ def build_snapshot(
     runner_controller_auto_build: bool = True,
 ) -> dict[str, Any]:
     repo_root = _repo_root(repo)
-    latest_run_dir = find_latest_run_dir(repo_root)
+    latest_run_dir = _latest_observable_run_dir(repo_root)
     cfg_path, cfg, cfg_source = _load_config_payload(repo_root, config_path)
     prompts_dir = resolve_prompts_dir(repo_root, str(cfg.get("prompts_dir") or ""))
     if not prompts_dir:

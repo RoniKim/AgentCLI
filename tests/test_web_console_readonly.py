@@ -818,6 +818,20 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(3, len(payload["stages"]))
         self.assertEqual(2, len(payload["backlog"]["items"]))
         self.assertEqual(1, payload["progress"]["tasks_done"])
+        self.assertEqual("success", payload["progress"]["run_status"])
+        self.assertEqual("success", payload["active_run"]["status"])
+
+    def test_empty_latest_timestamp_run_dir_does_not_mask_real_run(self) -> None:
+        empty_run = self.repo / ".AgentCLI" / "agent_runs" / "20260426-130000"
+        empty_run.mkdir(parents=True, exist_ok=True)
+
+        from agent_runner.web import build_snapshot
+
+        payload = build_snapshot(self.repo)
+
+        self.assertTrue(payload["latest_run_dir"].endswith("20260426-120000"))
+        self.assertEqual("20260426-120000", payload["active_run"]["id"])
+        self.assertEqual("success", payload["progress"]["run_status"])
 
     def test_section_endpoints_return_stable_shapes(self) -> None:
         progress = self.client.get("/api/progress").json()
@@ -925,6 +939,20 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         with self.subTest("fallback-fixture"):
             self.assertEqual("fallback", fallback["sourceMode"])
             self.assertEqual("Fallback data", fallback["snapshotLabel"])
+
+    def test_adapter_normalizes_string_config_values_for_schema_fields(self) -> None:
+        snapshot = _make_no_run_snapshot()
+        snapshot["config"]["data"] = {
+            "roles": "PM,Dev,QA",
+            "telegram": {"enabled": "false"},
+            "budget": {"max_iters": "7"},
+        }
+
+        normalized = _run_adapter_harness([{"kind": "snapshot", "data": snapshot}])[0]
+
+        self.assertEqual(["PM", "Dev", "QA"], normalized["config"]["roles"])
+        self.assertFalse(normalized["config"]["telegram"]["enabled"])
+        self.assertEqual(7, normalized["config"]["budget"]["max_iters"])
 
 
 if __name__ == "__main__":

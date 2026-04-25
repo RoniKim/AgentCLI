@@ -187,8 +187,21 @@
     return `${n}`;
   }
 
+  function normalizeListValues(values) {
+    if (Array.isArray(values)) {
+      return values.map((item) => toText(item, '').trim()).filter(Boolean);
+    }
+    if (typeof values === 'string') {
+      return values.split(/[,\n]/).map((item) => item.trim()).filter(Boolean);
+    }
+    if (values == null) {
+      return [];
+    }
+    return [toText(values, '').trim()].filter(Boolean);
+  }
+
   function fmtList(values) {
-    return (values || []).join(', ');
+    return normalizeListValues(values).join(', ');
   }
 
   function progressWidth(value) {
@@ -745,13 +758,33 @@
 
   function normalizeConfigData(config) {
     const raw = toObject(config);
-    const data = toObject(raw.data);
+    let data = toObject(raw.data);
+    const schema = toObject(defaults.configSchema);
+    for (const path of Object.keys(schema)) {
+      const current = getAt(data, path);
+      if (current === undefined) continue;
+      data = setAt(data, path, normalizeConfigValue(current, schema[path]));
+    }
     return {
       path: toText(raw.path, ''),
       source: toText(raw.source, ''),
       data,
       resolved_prompts_dir: toText(raw.resolved_prompts_dir, ''),
     };
+  }
+
+  function normalizeConfigValue(value, schema) {
+    if (!schema) return value;
+    if (schema.kind === 'multienum') return normalizeListValues(value);
+    if (schema.kind === 'bool' && typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+      if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+    }
+    if (schema.kind === 'number' && value !== '' && value != null && !Number.isNaN(Number(value))) {
+      return Number(value);
+    }
+    return value;
   }
 
   function adaptActiveRun(snapshot, context = {}) {

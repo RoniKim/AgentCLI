@@ -1,49 +1,47 @@
 # Project Goals - AgentCLI Web Console
 
-> Prepared for running AgentCLI against this repository itself.
-> Goal source: implement the design bundle under `docs/Design/` as a real web page.
-> Primary design target: `docs/Design/project/AgentCLI Web - A.html`.
+> Product target: make AgentCLI usable from a browser for monitoring, configuration, prompt review, logs, goals, and safe runner operations.
+> Design source: `docs/Design/`, especially `docs/Design/project/AgentCLI Web - A.html`.
+> Current status: alpha/prototype shell. It is not yet a complete operational web runner.
 > Last reviewed: 2026-04-26.
 
 ## P0 (Must-Have)
 
-- [x] Direction A web console exists as repo-owned production code, not just the exported prototype in `docs/Design/project/`.
-- [x] Implementation starts from the real design source: read `docs/Design/README.md`, `docs/Design/project/AgentCLI Web - A.html`, and its imported shared/direction files before building production UI.
-- [x] Desktop shell matches the primary design: top bar, left navigation, run status, quota/budget indicators, stop confirmation, and command palette.
-- [x] Web accessibility is the product goal: AgentCLI can be observed and operated from a browser instead of requiring the CLI shell for routine monitoring.
-- [x] Core screens are implemented from the design bundle: Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, and Notifications.
-- [x] Visual language is preserved from Direction A: dark terminal-style palette, compact information density, JetBrains Mono/Inter typography fallback, 2-4px radii, thin borders, status colors, and live-running accents.
-- [ ] Mobile preview/responsive layout is implemented from the `A_Mobile` design path with no incoherent text overlap at mobile widths.
-- [x] Prototype-only dependencies are removed from the production page path: no Babel-in-browser runtime, no unpinned CDN-only app logic, and no design-source mutation.
-- [x] UI data is wired through explicit AgentCLI-shaped adapters for active run, stages, backlog, goals, config, prompts, logs, notifications, metrics, and run history.
-- [x] FastAPI-based local web server can serve the production web console and expose AgentCLI progress, logs, config, prompts, and run state from the current notebook.
-- [x] Web runner controls support status, start, stop, and restart/reload flows through safe backend APIs with confirmation and clear disabled/error states.
-- [x] Worktree isolation results are visible and controlled: pending merge/discard state, patch path, source branch/base/head, and review-required status are shown before any source-repo change is applied.
-- [ ] Config and Prompt screens can read, validate, diff, backup, and save the repo-local AgentCLI config and prompt files used by the active profile.
-- [x] Web server default mode is safe for LAN/external viewing: progress/log endpoints are read-only by default, and mutating runner/config/prompt actions require explicit opt-in and confirmation.
-- [x] Safe local actions are represented with clear boundaries: start/status/stop/config/goals/prompts controls must not perform destructive filesystem or git operations without explicit confirmation.
-- [x] Validation path is documented and executable for the chosen implementation style, including at least `.venv/Scripts/python.exe -m compileall agent_runner agent_cli.py` and a web smoke check.
-- [x] README or dedicated docs explain how to run the FastAPI web server, bind it for localhost or LAN access, and where future API/control-plane integration should connect.
+- [x] The web console direction is grounded in the checked-in design bundle under `docs/Design/`.
+- [x] Repo-owned web console files exist under `web_console/` instead of running directly from the exported design prototype.
+- [x] A FastAPI entry point can serve the web console and read-only JSON snapshots from `agent_runner.web`.
+- [x] The dashboard no longer treats an empty timestamped run directory as an active run.
+- [x] Completed runs with final reason `ok`, `prepared_only`, `project_complete`, or `all_tasks_done` are not displayed as still running.
+- [x] The Config page can render the current config snapshot when schema fields such as `roles` arrive as comma-separated strings or arrays.
+- [ ] Dashboard status is accurate against a real live AgentCLI process: idle, running, stopped, failed, completed, quota, current task, stages, and elapsed time must come from real artifacts or a control-plane endpoint.
+- [ ] Core screens are operational, not just visual: Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, and Worktree Review.
+- [ ] English and Korean UI modes exist with a persistent locale toggle and complete copy coverage for all primary views, modals, validation messages, and controls.
+- [ ] Config screen can read, validate, diff, backup, save, and reload the active AgentCLI config without requiring manual CLI editing.
+- [ ] Prompt screen can browse, view, edit, validate, backup, and save active profile prompts with redaction where needed.
+- [ ] Goals screen can add, edit, reorder, check/uncheck, validate, backup, and save the active `GOALS.md`.
+- [ ] Logs screen supports live tailing, level/stage filters, search, pause/resume, and clear distinction between no logs and loading failure.
+- [ ] Runner controls are end-to-end usable from the browser in opt-in mode: start, stop, reload/restart, confirmation prompts, disabled states, and error reporting.
+- [ ] Manual worktree merge/discard workflow is visible and controllable from the browser without auto-applying patches.
+- [ ] LAN viewing is safe by default: read-only without opt-in controls, documented network binding, redaction, and a clear warning that authentication is not complete.
+- [ ] Playwright smoke validation covers desktop and mobile rendering, Dashboard, Config, Goals, Prompts, Logs, runner controls, and both English/Korean modes.
+- [x] Documentation states the current alpha limits, run commands, dependency setup, validation commands, and the path to production readiness.
 
 ## P1 (Should-Have)
 
-- [x] Live log tailing can read AgentCLI run artifacts from `.AgentCLI/agent_runs/` or a local control-plane endpoint.
-- [x] FastAPI server supports configurable host/port, latest-run discovery, health/status endpoints, and static asset serving for the console.
-- [ ] Web dashboard exposes the manual worktree merge workflow currently available in CLI (`/merge-worktree`, `/discard-worktree`) as an explicit review/approval surface.
-- [ ] Goals and Config screens support validated edits against the real `GOALS.md` and AgentCLI config schema.
-- [ ] Prompt management supports profile-aware prompt browsing, editing, validation, backup/restore, and change history.
-- [x] Run History can browse persisted run summaries, task results, QA output, and shutdown reports.
-- [ ] Notifications mirror Telegram/control-plane events with filtering and read/unread state.
-- [x] Keyboard navigation is complete: command palette, `g` navigation chords, Escape handling, focus states, and accessible button labels.
-- [ ] Browser smoke tests cover desktop and mobile rendering, command palette, stop modal, log filtering, and navigation.
+- [ ] Mobile layout matches the `A_Mobile` design path without text overlap or broken controls.
+- [ ] Notifications mirror AgentCLI/control-plane events with filtering and read/unread state.
+- [ ] Run History can browse persisted summaries, task results, QA output, shutdown reports, and worktree outcomes.
+- [ ] Keyboard navigation is complete: command palette, `g` navigation chords, Escape handling, focus states, and accessible labels.
 - [ ] The CLI can optionally launch or serve the web console from a documented command.
+- [ ] Web console exposes diagnostics for missing FastAPI/uvicorn dependencies and broken virtual environments.
+- [ ] UI state clearly distinguishes fallback/demo data from real API data.
+- [ ] External/LAN operation has an authentication plan before use outside trusted private networks.
 
 ## Completion Criteria
 
-- All P0 items are checked.
-- The production web page can be opened or served without relying on `docs/Design/project/` as runtime source.
-- Dashboard, run progress, logs, config, prompts, and runner controls are available from the browser with safe confirmations.
-- Worktree merge/discard approval is never automatic in manual mode and is visible from CLI now, with a documented path for Web dashboard approval.
-- AgentCLI Python compile check passes.
-- The web page has no blank primary views and no obvious layout overlap on desktop or mobile widths.
-- Remaining P1 items are documented as follow-up work, not hidden blockers.
+- All P0 items are checked from real browser and API validation, not visual inspection alone.
+- The production page runs from `web_console/` and `agent_runner.web`; `docs/Design/project/` remains reference-only.
+- A user can monitor a real run, inspect logs, edit Goals/Config/Prompts safely, and operate the runner from the browser with confirmations.
+- The page has no blank primary views, no uncaught JavaScript errors, and no obvious layout overlap on desktop or mobile.
+- AgentCLI Python compile checks and web console unit tests pass.
+- Playwright screenshots/snapshots prove the key views render correctly in both English and Korean.

@@ -96,3 +96,6 @@ fix1.sed
 test_write.txt
 test_perl.pl
 test_script.py
+.tmp-tests/
+.playwright-mcp/
+output/playwright/

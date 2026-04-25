@@ -146,10 +146,14 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
         normalized = _run_adapter_harness([snapshot])[0]
         worktree = snapshot["worktree"]
 
+        self.assertIsNone(snapshot["latest_run_dir"])
+        self.assertEqual("idle", snapshot["active_run"]["status"])
+        self.assertEqual("idle", snapshot["active_run"]["stage"])
+        self.assertEqual(0, snapshot["active_run"]["iteration"])
         self.assertEqual("none", worktree["status"])
         self.assertFalse(worktree["reviewRequired"])
         self.assertEqual(self.repo.as_posix(), worktree["sourceRepo"])
-        self.assertEqual(self.run_dir.as_posix(), worktree["runDir"])
+        self.assertEqual("", worktree["runDir"])
         self.assertEqual("HEAD", worktree["sourceBranch"])
         self.assertEqual("", worktree["baseRef"])
         self.assertEqual("", worktree["headRef"])

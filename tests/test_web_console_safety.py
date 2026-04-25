@@ -12,6 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 WEB_CONSOLE = ROOT / "web_console"
 
 
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", errors="replace")
+
+
 class FakeRunnerController:
     def __init__(self, *, repo: Path, base_args, runner_mode: str = "thread") -> None:
         self.repo = repo.expanduser().resolve()
@@ -201,10 +206,10 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertTrue(control_payload["controller_available"])
         self.assertEqual("cli", control_payload["source"])
         self.assertFalse(control_payload["busy"])
-        self.assertEqual("idle", control_payload["run_status"])
+        self.assertEqual("success", control_payload["run_status"])
         self.assertFalse(control_payload["runner_control"]["actions"]["reload"]["enabled"])
         self.assertFalse(control_payload["runner_control"]["actions"]["restart"]["enabled"])
-        self.assertEqual("RELOAD RUNNER", control_payload["confirmation"]["restart"])
+        self.assertEqual("RESTART RUNNER", control_payload["confirmation"]["restart"])
 
         response = client.post("/api/runner/start", json={"phrase": "START RUNNER"})
         self.assertEqual(403, response.status_code)
