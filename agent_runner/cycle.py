@@ -31,6 +31,7 @@ from .gitops import (
     merge_task_branch,
     abandon_task_branch,
     reset_task_branch,
+    default_worktree_dir,
     create_worktree,
     remove_worktree,
     handle_worktree_patch,
@@ -237,12 +238,13 @@ async def main_async(args: argparse.Namespace) -> int:
     source_repo = repo
     worktree_dir: Optional[Path] = None
     if bool(getattr(args, "worktree_isolation", False)):
-        worktree_dir = run_dir / "worktree"
+        worktree_dir = default_worktree_dir(source_repo, run_dir)
         try:
             create_worktree(source_repo, worktree_dir)
         except Exception as ex:
             eprint(f"[STOP] Failed to create worktree: {ex}")
             return 2
+        eprint(f"[INFO] Isolated worktree: {worktree_dir}")
         repo = worktree_dir
 
     # NOTE: Do NOT call os.chdir(repo) here - it is process-global and
@@ -2506,10 +2508,20 @@ async def main_async(args: argparse.Namespace) -> int:
                     remove_worktree(source_repo, worktree_dir)
                 except Exception as ex:
                     eprint(f"[WARN] Failed to remove worktree: {ex}")
+                    safe_write_text(
+                        run_dir / "WORKTREE_CLEANUP_FAILURE.md",
+                        "# Worktree cleanup failure\n\n"
+                        f"AgentCLI could not remove the isolated worktree:\n\n- `{worktree_dir}`\n\n"
+                        f"Error:\n\n```text\n{ex}\n```\n",
+                    )
+                    if last_rc == 0:
+                        last_rc = 1
+                    final_reason = "worktree_cleanup_failed"
             run_summary["final"] = {"rc": last_rc, "reason": final_reason or ""}
             _write_run_summary()
             try:
-                ctx = collect_shutdown_context(repo, run_dir)
+                ctx_repo = source_repo if worktree_dir is not None else repo
+                ctx = collect_shutdown_context(ctx_repo, run_dir)
                 tasks_done = int(ctx.get("tasks_done") or 0)
                 tasks_total = int(ctx.get("tasks_total") or 0)
                 porcelain = (ctx.get("git_porcelain") or "").strip()

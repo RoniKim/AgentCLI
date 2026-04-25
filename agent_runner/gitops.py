@@ -92,7 +92,22 @@ def ensure_clean_working_tree(repo: Path) -> bool:
 
 def git_head(repo: Path) -> str:
     code, out = run_cmd(["git", "rev-parse", "HEAD"], cwd=repo, timeout_sec=60)
-    return out.strip() if code == 0 else ""
+    lines = _git_data_lines(out)
+    return lines[-1] if code == 0 and lines else ""
+
+
+def _git_data_lines(out: str) -> list[str]:
+    """Return git stdout-like lines, dropping stderr warnings captured by run_cmd."""
+    data: list[str] = []
+    for raw in (out or "").splitlines():
+        probe = raw.strip()
+        if not probe:
+            continue
+        lower = probe.lower()
+        if lower.startswith("warning:") or lower.startswith("hint:"):
+            continue
+        data.append(raw.rstrip("\r\n"))
+    return data
 
 
 def has_new_commits(repo: Path, before_head: str) -> bool:
@@ -107,7 +122,7 @@ def git_ls_files(repo: Path) -> list[str]:
     code, out = run_cmd(["git", "ls-files"], cwd=repo, timeout_sec=120)
     if code != 0:
         return []
-    return [x.strip() for x in out.splitlines() if x.strip()]
+    return _git_data_lines(out)
 
 
 def git_changed_files(repo: Path, prev_head: str, curr_head: str) -> list[str]:
@@ -116,12 +131,12 @@ def git_changed_files(repo: Path, prev_head: str, curr_head: str) -> list[str]:
     code, out = run_cmd(["git", "diff", "--name-only", prev_head, curr_head], cwd=repo, timeout_sec=120)
     if code != 0:
         return []
-    return [x.strip() for x in out.splitlines() if x.strip()]
+    return _git_data_lines(out)
 
 
 def git_porcelain(repo: Path) -> str:
     code, out = run_cmd(["git", "status", "--porcelain"], cwd=repo, timeout_sec=60)
-    return out if code == 0 else ""
+    return "\n".join(_git_data_lines(out)) if code == 0 else ""
 
 
 def git_untracked_files(repo: Path) -> list[str]:
@@ -129,7 +144,7 @@ def git_untracked_files(repo: Path) -> list[str]:
     code, out = run_cmd(["git", "ls-files", "--others", "--exclude-standard"], cwd=repo, timeout_sec=30)
     if code != 0 or not out.strip():
         return []
-    return [f.strip() for f in out.splitlines() if f.strip()]
+    return _git_data_lines(out)
 
 
 def has_working_tree_changes(
@@ -166,7 +181,7 @@ def has_working_tree_changes(
 
     # Check for staged changes
     code, staged = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=repo, timeout_sec=30)
-    if code == 0 and staged.strip():
+    if code == 0 and _git_data_lines(staged):
         return True
 
     return False
@@ -242,7 +257,7 @@ def list_untracked(repo: Path) -> list[str]:
     code, out = run_cmd(["git", "ls-files", "--others", "--exclude-standard"], cwd=repo, timeout_sec=60)
     if code != 0:
         return []
-    return [ln.strip() for ln in out.splitlines() if ln.strip()]
+    return _git_data_lines(out)
 
 
 def normalize_glob_patterns(patterns: Sequence[str] | None) -> list[str]:
@@ -724,21 +739,101 @@ def restore_checkpoint(
     return rescue_branch
 
 
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def default_worktree_dir(repo: Path, run_dir: Path) -> Path:
+    """Return the default isolated worktree path for a run.
+
+    Run directories normally live under the repository's ignored `.AgentCLI`
+    folder. A git worktree placed there is nested inside the source repo and can
+    be treated as ignored repo content instead of an isolated checkout. Keep
+    worktrees outside the source tree by default, with an env override for
+    operators who want a different external location.
+    """
+    repo_resolved = repo.expanduser().resolve()
+    run_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in (run_dir.name or "run"))
+    repo_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in (repo_resolved.name or "repo"))
+
+    configured_root = os.environ.get("AGENTCLI_WORKTREE_HOME", "").strip()
+    if configured_root:
+        base = Path(configured_root).expanduser()
+    else:
+        base = repo_resolved.parent / ".agentcli_worktrees"
+    return (base / repo_name / run_name).resolve()
+
+
+def _worktree_validation_error(repo: Path, worktree_dir: Path) -> str | None:
+    repo_resolved = repo.expanduser().resolve()
+    worktree_resolved = worktree_dir.expanduser().resolve()
+    if _path_is_relative_to(worktree_resolved, repo_resolved):
+        return (
+            "worktree path is inside the source repository; this can make git "
+            f"treat generated files as ignored repo content: {worktree_resolved}"
+        )
+    if not (worktree_resolved / ".git").exists():
+        return f"worktree .git file is missing: {worktree_resolved / '.git'}"
+
+    code, out = run_cmd(["git", "rev-parse", "--show-toplevel"], cwd=worktree_resolved, timeout_sec=60)
+    if code != 0:
+        return f"git rev-parse failed in worktree: rc={code}\n{out}"
+    lines = _git_data_lines(out)
+    if not lines:
+        return "git rev-parse did not return a top-level path"
+    actual_top = Path(lines[-1]).expanduser().resolve()
+    if actual_top != worktree_resolved:
+        return f"git top-level mismatch: expected {worktree_resolved}, got {actual_top}"
+    return None
+
+
+def _safe_generated_worktree_path(worktree_dir: Path) -> bool:
+    parts = {p.lower() for p in worktree_dir.expanduser().resolve().parts}
+    return ".agentcli_worktrees" in parts
+
+
 def create_worktree(repo: Path, worktree_dir: Path) -> None:
+    repo_resolved = repo.expanduser().resolve()
+    worktree_resolved = worktree_dir.expanduser().resolve()
+    if _path_is_relative_to(worktree_resolved, repo_resolved):
+        raise RuntimeError(
+            "Refusing to create worktree inside the source repository. "
+            f"repo={repo_resolved} worktree={worktree_resolved}"
+        )
     if worktree_dir.exists():
+        error = _worktree_validation_error(repo, worktree_dir)
+        if error is not None:
+            raise RuntimeError(f"Existing worktree path is not a valid isolated git worktree: {error}")
         return
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
     code, out = run_cmd(["git", "worktree", "add", "--detach", str(worktree_dir), "HEAD"], cwd=repo, timeout_sec=120)
     if code != 0:
         raise RuntimeError(f"git worktree add failed: rc={code}\n{out}")
+    error = _worktree_validation_error(repo, worktree_dir)
+    if error is not None:
+        raise RuntimeError(f"git worktree add did not create a valid isolated worktree: {error}")
 
 
 def remove_worktree(repo: Path, worktree_dir: Path) -> None:
     if not worktree_dir.exists():
         return
     code, out = run_cmd(["git", "worktree", "remove", "--force", str(worktree_dir)], cwd=repo, timeout_sec=120)
-    if code != 0:
-        raise RuntimeError(f"git worktree remove failed: rc={code}\n{out}")
+    if code == 0:
+        return
+
+    run_cmd(["git", "worktree", "prune"], cwd=repo, timeout_sec=120)
+    if not worktree_dir.exists():
+        return
+
+    if _safe_generated_worktree_path(worktree_dir):
+        shutil.rmtree(worktree_dir)
+        return
+
+    raise RuntimeError(f"git worktree remove failed: rc={code}\n{out}")
 
 
 def export_worktree_patch(
