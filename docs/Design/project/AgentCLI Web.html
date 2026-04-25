@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<title>AgentCLI — Web Visualization Directions</title>
+<meta name="viewport" content="width=1600"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+<style>
+  html, body { margin:0; padding:0; background:#f0eee9; font-family: Inter, system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+</style>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="shared/mock-data.js"></script>
+<script type="text/babel" src="shared/primitives.jsx"></script>
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="directions/direction-a.jsx"></script>
+<script type="text/babel" src="directions/direction-b.jsx"></script>
+<script type="text/babel" src="directions/direction-c.jsx"></script>
+
+<script type="text/babel" data-presets="react">
+function App() {
+  return (
+    <DesignCanvas>
+      {/* ───── INTRO / NOTES ───── */}
+      <DCSection id="intro" title="AgentCLI — Web Visualization" subtitle="3 directions × 4–5 screens · hi-fi clickable mockups">
+        <DCArtboard id="notes" label="Design notes" width={520} height={520}>
+          <div style={{ padding:36, fontFamily:'Inter, sans-serif', color:'#2a251f', lineHeight:1.55, height:'100%', overflow:'auto', background:'#fafaf7' }}>
+            <div style={{ fontFamily:'JetBrains Mono, monospace', fontSize:12.5, color:'#8a7f6f', letterSpacing:'0.1em', marginBottom:14 }}>BRIEF</div>
+            <h2 style={{ fontSize:28, margin:'0 0 16px', fontWeight:600, letterSpacing:'-0.02em' }}>CLI → Web, 3가지 방향</h2>
+            <p style={{ fontSize:15.5, margin:'0 0 14px' }}>
+              기존 AgentCLI의 PM → Dev → QA 파이프라인, BACKLOG, GOALS, Telegram 원격 제어까지 모두 웹 콘솔로 시각화.
+              오픈소스 공개용으로 랜딩까지 포함한 세 방향을 비교합니다.
+            </p>
+            <div style={{ marginTop:20, fontSize:14.5 }}>
+              <div style={{ marginBottom:10 }}>
+                <strong>A · Terminal Precision</strong><br/>
+                <span style={{ color:'#6d6355' }}>CLI DNA 유지. Mono 중심, 녹색 액센트, 샤프한 1px 보더. 개발자에게 "이건 아직 너의 그 CLI야"를 말해줌.</span>
+              </div>
+              <div style={{ marginBottom:10 }}>
+                <strong>B · Linear Calm</strong><br/>
+                <span style={{ color:'#6d6355' }}>Linear/Vercel 톤. 여백 + 둥근 모서리 + 보라 그라데이션. 처음 방문하는 사람에게 가장 "만지고 싶은" 첫인상.</span>
+              </div>
+              <div>
+                <strong>C · Ops Console</strong><br/>
+                <span style={{ color:'#6d6355' }}>NOC/트레이딩 데스크 감성. 밀도 높고, 앰버/빨강/녹색 상태로 한눈에 파악. "야간 무인 운용"이라는 AgentCLI 본연의 운영 성격과 가장 맞음.</span>
+              </div>
+            </div>
+            <div style={{ marginTop:24, padding:14, background:'#fff', border:'1px solid rgba(0,0,0,0.08)', borderRadius:8, fontSize:14, color:'#4a4239' }}>
+              <strong>다음 스텝 제안</strong><br/>
+              1) 세 방향 중 선호하는 것을 고른 뒤<br/>
+              2) 실제 데이터 스키마(BACKLOG.json, STATE.json, metrics.jsonl)에 연결할 백엔드 엔드포인트 정의<br/>
+              3) 인터랙션 세부(클릭 → 상세 drawer, 키보드 단축키, 실시간 tail)
+            </div>
+          </div>
+        </DCArtboard>
+      </DCSection>
+
+      {/* ───── DIRECTION A ───── */}
+      <DCSection id="dir-a" title="A · Terminal Precision" subtitle="Mono · green accent · CLI DNA">
+        <DCArtboard id="a-landing"    label="Landing"      width={1440} height={900}><A_Landing/></DCArtboard>
+        <DCArtboard id="a-dashboard"  label="Dashboard"    width={1440} height={900}><A_Dashboard/></DCArtboard>
+        <DCArtboard id="a-rundetail"  label="Backlog + Metrics" width={1440} height={900}><A_RunDetail/></DCArtboard>
+        <DCArtboard id="a-pipeline"   label="Pipeline (detail)" width={900} height={620}>
+          <div style={{ padding:32, background:'#0a0c0a', height:'100%', color:'#c8d2be', fontFamily:'Inter, sans-serif', boxSizing:'border-box' }}>
+            <div style={{ fontFamily:'JetBrains Mono, monospace', fontSize:13.5, color:'#7ee38a' }}>// pipeline · iter 3/5</div>
+            <h3 style={{ fontFamily:'JetBrains Mono, monospace', margin:'6px 0 24px', fontSize:26, fontWeight:500 }}>PM → Dev → QA</h3>
+            <A_Pipeline/>
+          </div>
+        </DCArtboard>
+        <DCArtboard id="a-mobile"     label="Mobile · Telegram" width={390} height={780}><A_Mobile/></DCArtboard>
+      </DCSection>
+
+      {/* ───── DIRECTION B ───── */}
+      <DCSection id="dir-b" title="B · Linear Calm" subtitle="Airy · violet · rounded corners">
+        <DCArtboard id="b-landing"    label="Landing"      width={1440} height={1100}><B_Landing/></DCArtboard>
+        <DCArtboard id="b-dashboard"  label="Dashboard"    width={1440} height={900}><B_Dashboard/></DCArtboard>
+        <DCArtboard id="b-pipeline"   label="Pipeline timeline" width={1100} height={820}><B_Pipeline/></DCArtboard>
+        <DCArtboard id="b-runs"       label="Runs + Backlog" width={1300} height={820}><B_RunDetail/></DCArtboard>
+        <DCArtboard id="b-mobile"     label="Mobile"       width={390} height={780}><B_Mobile/></DCArtboard>
+      </DCSection>
+
+      {/* ───── DIRECTION C ───── */}
+      <DCSection id="dir-c" title="C · Ops Console" subtitle="Data-dense · amber · NOC feel">
+        <DCArtboard id="c-landing"    label="Landing"      width={1440} height={900}><C_Landing/></DCArtboard>
+        <DCArtboard id="c-dashboard"  label="Ops Dashboard" width={1440} height={900}><C_Dashboard/></DCArtboard>
+        <DCArtboard id="c-pipeline"   label="Pipeline · live edit" width={1440} height={820}><C_Pipeline/></DCArtboard>
+        <DCArtboard id="c-history"    label="Run History"  width={1300} height={780}><C_RunHistory/></DCArtboard>
+        <DCArtboard id="c-mobile"     label="Mobile"       width={390} height={780}><C_Mobile/></DCArtboard>
+      </DCSection>
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

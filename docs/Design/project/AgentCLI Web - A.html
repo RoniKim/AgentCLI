@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<title>AgentCLI · Web Console (Direction A)</title>
+<meta name="viewport" content="width=1440"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+<style>
+  html, body { margin:0; padding:0; background:#0a0c0a; color:#c8d2be; font-family:Inter, system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  ::selection { background: rgba(126,227,138,0.3); }
+  ::-webkit-scrollbar { width:8px; height:8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background:#1f2620; border-radius:4px; }
+  ::-webkit-scrollbar-thumb:hover { background:#2a3328; }
+  a { color: inherit; }
+  button { font-family: inherit; }
+</style>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="shared/mock-data.js?v=3"></script>
+<script type="text/babel" src="shared/primitives.jsx?v=3"></script>
+<script type="text/babel" src="directions/direction-a.jsx?v=3"></script>
+<script type="text/babel" src="directions/direction-a-screens.jsx?v=3"></script>
+
+<script type="text/babel" data-presets="react">
+const T = {
+  bg: '#0a0c0a', surface: '#10130f', surface2: '#161a14',
+  border: '#1f2620', borderHi: '#2a3328',
+  text: '#c8d2be', textDim: '#7a8275', textSub: '#505a4c',
+  accent: '#7ee38a', warn: '#f3c26b', err: '#e87a6a', info: '#7ab0e8',
+  mono: '"JetBrains Mono", ui-monospace, Menlo, monospace',
+  sans: 'Inter, system-ui, sans-serif',
+};
+
+// ─── Sidebar + Shell ──────────────────────────────────────────────────────
+const NAV = [
+  { s:'실행',    items:[
+    { id:'dashboard', label:'개요',        key:'g d' },
+    { id:'pipeline',  label:'파이프라인',  key:'g p' },
+    { id:'logs',      label:'로그',        key:'g l' },
+  ]},
+  { s:'프로젝트', items:[
+    { id:'backlog',   label:'백로그',      key:'g b' },
+    { id:'goals',     label:'목표',        key:'g g' },
+    { id:'config',    label:'설정',        key:'g c' },
+  ]},
+  { s:'이력',    items:[
+    { id:'history',   label:'실행 이력',   key:'g r' },
+    { id:'notifs',    label:'알림',        key:'g n', badge:3 },
+  ]},
+  { s:'_',       items:[
+    { id:'landing',   label:'랜딩 페이지', key:'g h' },
+    { id:'mobile',    label:'모바일 미리보기', key:'g m' },
+  ]},
+];
+
+function Shell() {
+  const [screen, setScreen] = React.useState('dashboard');
+  const [confirmStop, setConfirmStop] = React.useState(false);
+  const [cmdOpen, setCmdOpen] = React.useState(false);
+
+  // keyboard shortcuts
+  const lastKey = React.useRef(null);
+  React.useEffect(() => {
+    const onKey = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.key === '/' || (e.metaKey && e.key === 'k') || (e.ctrlKey && e.key === 'k')) {
+        e.preventDefault();
+        setCmdOpen(v => !v);
+        return;
+      }
+      if (e.key === 'Escape') { setCmdOpen(false); setConfirmStop(false); return; }
+      if (lastKey.current === 'g') {
+        const target = { d:'dashboard', p:'pipeline', l:'logs', b:'backlog', g:'goals', c:'config', r:'history', n:'notifs', h:'landing', m:'mobile' }[e.key];
+        if (target) { setScreen(target); lastKey.current = null; return; }
+      }
+      lastKey.current = e.key;
+      setTimeout(() => { if (lastKey.current === e.key) lastKey.current = null; }, 900);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Landing / mobile full-bleed variants
+  if (screen === 'landing') {
+    return (
+      <div style={{ position:'relative', minHeight:'100vh' }}>
+        <A_Landing/>
+        <button onClick={() => setScreen('dashboard')} style={{ position:'fixed', top:20, right:24, padding:'8px 14px', background:T.accent, color:T.bg, fontFamily:T.mono, fontSize:13.5, fontWeight:600, border:'none', borderRadius:2, cursor:'pointer', zIndex:100 }}>
+          ← 콘솔로 돌아가기
+        </button>
+      </div>
+    );
+  }
+  if (screen === 'mobile') {
+    return (
+      <div style={{ minHeight:'100vh', display:'flex', alignItems:'center', justifyContent:'center', background:T.bg, padding:40, gap:24, flexDirection:'column' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:16 }}>
+          <div style={{ width:390, height:780, border:`1px solid ${T.borderHi}`, borderRadius:28, overflow:'hidden', boxShadow:'0 40px 80px rgba(0,0,0,0.6)', background:T.bg }}>
+            <A_Mobile/>
+          </div>
+          <div style={{ fontFamily:T.mono, fontSize:13.5, color:T.textDim, maxWidth:220 }}>
+            <div style={{ color:T.text, fontSize:15.5, marginBottom:6 }}>텔레그램 동등 기능</div>
+            모바일 화면은 웹 콘솔과 동일하게 실행 상태, 파이프라인, 알림, 슬래시 명령을 제공합니다.
+          </div>
+        </div>
+        <button onClick={() => setScreen('dashboard')} style={{ padding:'8px 14px', background:'transparent', color:T.text, border:`1px solid ${T.borderHi}`, fontFamily:T.mono, fontSize:13.5, borderRadius:2, cursor:'pointer' }}>
+          ← 데스크탑으로 돌아가기
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight:'100vh', display:'grid', gridTemplateColumns:'220px 1fr', gridTemplateRows:'44px 1fr', background:T.bg, color:T.text }}>
+      {/* topbar */}
+      <div style={{ gridColumn:'1 / -1', display:'flex', alignItems:'center', gap:14, padding:'0 18px', borderBottom:`1px solid ${T.border}`, background:T.surface, fontFamily:T.mono, fontSize:13.5 }}>
+        <span style={{ color:T.accent }}>▍</span>
+        <span style={{ fontWeight:600 }}>agentcli</span>
+        <span style={{ color:T.textSub }}>/</span>
+        <span style={{ color:T.textDim }}>BudgetBook</span>
+        <span style={{ color:T.textSub }}>/</span>
+        <span>{MOCK.activeRun.id}</span>
+        <div style={{ flex:1 }}/>
+        <button onClick={() => setCmdOpen(true)} style={{ display:'inline-flex', alignItems:'center', gap:8, padding:'3px 8px', background:T.bg, color:T.textDim, border:`1px solid ${T.border}`, borderRadius:2, fontFamily:T.mono, fontSize:12.5, cursor:'pointer' }}>
+          <span>검색 · 명령어</span>
+          <span style={{ padding:'1px 5px', background:T.border, borderRadius:2, color:T.textSub, fontSize:11.5 }}>⌘K</span>
+        </button>
+        <span style={{ color:T.accent, display:'inline-flex', alignItems:'center', gap:6 }}>
+          <PulseDot color={T.accent} size={6}/> 실행 중 · Dev
+        </span>
+        <span style={{ color:T.textDim }}>쿼터 34%</span>
+        <span style={{ color:T.warn }}>예산 41%</span>
+        <button onClick={() => setConfirmStop(true)} style={{ padding:'4px 10px', background:'transparent', color:T.err, border:`1px solid ${T.err}`, borderRadius:2, fontFamily:T.mono, fontSize:12.5, cursor:'pointer' }}>
+          ■ 중지
+        </button>
+      </div>
+
+      {/* sidebar */}
+      <div style={{ borderRight:`1px solid ${T.border}`, background:T.surface, padding:'16px 0', fontFamily:T.mono, fontSize:13.5, overflow:'auto' }}>
+        {NAV.map((g, gi) => (
+          <div key={gi} style={{ marginBottom:14 }}>
+            {g.s !== '_' && <div style={{ padding:'0 16px', color:T.textSub, fontSize:11.5, letterSpacing:'0.12em', marginBottom:6 }}>{g.s}</div>}
+            {g.s === '_' && <div style={{ height:1, background:T.border, margin:'8px 16px 10px' }}/>}
+            {g.items.map(it => {
+              const active = screen === it.id;
+              return (
+                <div key={it.id}
+                  onClick={() => setScreen(it.id)}
+                  style={{
+                    display:'flex', alignItems:'center', gap:8,
+                    padding:'5px 14px', cursor:'pointer',
+                    color: active ? T.accent : T.textDim,
+                    borderLeft: active ? `2px solid ${T.accent}` : '2px solid transparent',
+                    background: active ? 'rgba(126,227,138,0.05)' : 'transparent',
+                  }}>
+                  <span style={{ flex:1 }}>{it.label}</span>
+                  {it.badge && <span style={{ padding:'1px 5px', background:T.err, color:T.bg, fontSize:11, borderRadius:2, fontWeight:600 }}>{it.badge}</span>}
+                  <span style={{ color:T.textSub, fontSize:11.5 }}>{it.key}</span>
+                </div>
+              );
+            })}
+          </div>
+        ))}
+        <div style={{ padding:'10px 14px', margin:'16px 12px 0', background:T.surface2, border:`1px solid ${T.border}`, borderRadius:2, fontSize:12, color:T.textDim }}>
+          <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:5 }}>
+            <PulseDot color={T.accent} size={5}/>
+            <span style={{ color:T.text, fontSize:12.5 }}>home-pc-main</span>
+          </div>
+          <div>telegram · 1 chat paired</div>
+          <div style={{ marginTop:4, color:T.textSub }}>quota 5h · 34%</div>
+          <div style={{ height:2, background:T.border, marginTop:4 }}>
+            <div style={{ width:'34%', height:'100%', background:T.accent }}/>
+          </div>
+        </div>
+      </div>
+
+      {/* main */}
+      <div style={{ overflow:'auto' }}>
+        {screen === 'dashboard'  && <DashboardScreen/>}
+        {screen === 'pipeline'   && <PipelineScreen/>}
+        {screen === 'logs'       && <LogsScreen/>}
+        {screen === 'backlog'    && <BacklogScreen/>}
+        {screen === 'goals'      && <A_Goals/>}
+        {screen === 'config'     && <A_Config/>}
+        {screen === 'history'    && <A_History/>}
+        {screen === 'notifs'     && <A_Notifications/>}
+      </div>
+
+      {/* stop confirm */}
+      {confirmStop && (
+        <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:200 }} onClick={() => setConfirmStop(false)}>
+          <div onClick={e=>e.stopPropagation()} style={{ background:T.surface, border:`1px solid ${T.borderHi}`, borderRadius:4, padding:24, width:420, boxShadow:'0 40px 80px rgba(0,0,0,0.6)' }}>
+            <div style={{ fontFamily:T.mono, fontSize:12.5, color:T.err, letterSpacing:'0.12em', marginBottom:8 }}>// CONFIRM STOP</div>
+            <div style={{ fontSize:16.5, marginBottom:6 }}>Stop the current run?</div>
+            <div style={{ fontSize:14, color:T.textDim, lineHeight:1.5 }}>
+              The runner will finish the current tool call, write a final checkpoint, and shutdown. In-flight task T-018 will be marked <span style={{color:T.warn, fontFamily:T.mono}}>interrupted</span> and resumed on next run.
+            </div>
+            <div style={{ display:'flex', gap:10, marginTop:20, justifyContent:'flex-end' }}>
+              <button onClick={() => setConfirmStop(false)} style={{ padding:'7px 14px', background:'transparent', color:T.text, border:`1px solid ${T.borderHi}`, borderRadius:2, fontFamily:T.mono, fontSize:13.5, cursor:'pointer' }}>cancel</button>
+              <button onClick={() => setConfirmStop(false)} style={{ padding:'7px 14px', background:T.err, color:T.bg, border:'none', borderRadius:2, fontFamily:T.mono, fontSize:13.5, fontWeight:600, cursor:'pointer' }}>■ stop run</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* command palette */}
+      {cmdOpen && <CommandPalette onClose={() => setCmdOpen(false)} onNav={(id) => { setScreen(id); setCmdOpen(false); }}/>}
+    </div>
+  );
+}
+
+// ─── Screens ──────────────────────────────────────────────────────────────
+function DashboardScreen() {
+  return <A_DashboardContent/>;
+}
+
+function PipelineScreen() {
+  return (
+    <div style={{ padding:28, fontFamily:T.sans }}>
+      <div style={{ display:'flex', alignItems:'baseline', gap:12, marginBottom:6 }}>
+        <h2 style={{ fontFamily:T.mono, fontSize:26, margin:0, fontWeight:500, letterSpacing:'-0.02em' }}>Pipeline</h2>
+        <span style={{ fontFamily:T.mono, fontSize:13.5, color:T.textSub }}>iter 3 of 5 · {MOCK.activeRun.id}</span>
+      </div>
+      <div style={{ marginTop:22, background:T.surface, border:`1px solid ${T.border}`, borderRadius:3, padding:24 }}>
+        <A_Pipeline/>
+      </div>
+    </div>
+  );
+}
+
+function LogsScreen() {
+  const [logs, setLogs] = React.useState(MOCK.logs);
+  const [paused, setPaused] = React.useState(false);
+  const [filter, setFilter] = React.useState('ALL');
+  const ref = React.useRef(null);
+
+  // live stream simulation
+  React.useEffect(() => {
+    if (paused) return;
+    const samples = [
+      { lvl:'debug', stage:'Dev', msg:'tool_use: str_replace_edit src/db/overrides.sql' },
+      { lvl:'info',  stage:'Dev', msg:'edit: src/repo/override_repo.py (+67)' },
+      { lvl:'debug', stage:'Dev', msg:'running tests: pytest tests/test_overrides.py' },
+      { lvl:'info',  stage:'Dev', msg:'tests passed · 4/4' },
+      { lvl:'debug', stage:'Dev', msg:'skills match: categorize-transactions (0.82)' },
+      { lvl:'warn',  stage:'Dev', msg:'build: 1 deprecation warning (non-blocking)' },
+    ];
+    const iv = setInterval(() => {
+      const s = samples[Math.floor(Math.random()*samples.length)];
+      const d = new Date();
+      setLogs(l => [...l.slice(-60), { t: d.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'}), ...s }]);
+    }, 1600);
+    return () => clearInterval(iv);
+  }, [paused]);
+
+  React.useEffect(() => {
+    if (ref.current && !paused) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [logs, paused]);
+
+  const filtered = logs.filter(l => filter === 'ALL' ? true : l.lvl === filter.toLowerCase());
+
+  return (
+    <div style={{ padding:28, fontFamily:T.sans, height:'calc(100vh - 44px)', display:'flex', flexDirection:'column' }}>
+      <div style={{ display:'flex', alignItems:'baseline', gap:12, marginBottom:14 }}>
+        <h2 style={{ fontFamily:T.mono, fontSize:26, margin:0, fontWeight:500, letterSpacing:'-0.02em' }}>Logs</h2>
+        <span style={{ fontFamily:T.mono, fontSize:13.5, color:T.textSub }}>cycle_summary.log · tail -f</span>
+        <div style={{ flex:1 }}/>
+        <div style={{ display:'flex', gap:6 }}>
+          {['ALL','INFO','WARN','ERR','DEBUG'].map(f => (
+            <span key={f} onClick={()=>setFilter(f)} style={{ padding:'4px 10px', fontFamily:T.mono, fontSize:12.5, border:`1px solid ${filter===f ? T.accent : T.borderHi}`, color:filter===f ? T.accent : T.textDim, borderRadius:2, cursor:'pointer' }}>{f}</span>
+          ))}
+        </div>
+        <button onClick={() => setPaused(p=>!p)} style={{ padding:'4px 10px', background:'transparent', color:paused ? T.warn : T.accent, border:`1px solid ${paused ? T.warn : T.accent}`, borderRadius:2, fontFamily:T.mono, fontSize:12.5, cursor:'pointer' }}>
+          {paused ? '▶ resume' : '❚❚ pause'}
+        </button>
+      </div>
+      <div ref={ref} style={{ flex:1, background:T.surface, border:`1px solid ${T.border}`, borderRadius:3, padding:'12px 16px', fontFamily:T.mono, fontSize:14, lineHeight:1.75, overflow:'auto' }}>
+        {filtered.map((l, i) => (
+          <div key={i} style={{ display:'flex', gap:14, animation: i === filtered.length-1 ? 'acli-logfade 0.3s' : 'none', color: l.lvl==='warn'? T.warn : l.lvl==='err'? T.err : l.lvl==='debug'? T.textSub : T.text }}>
+            <span style={{ color:T.textSub, flexShrink:0, width:70 }}>{l.t}</span>
+            <span style={{ width:52, flexShrink:0, color: l.stage==='PM'? T.info : l.stage==='Dev'? T.accent : l.stage==='QA'? T.warn : T.textDim }}>[{l.stage}]</span>
+            <span style={{ color:T.textSub, width:50, flexShrink:0, textTransform:'uppercase' }}>{l.lvl}</span>
+            <span>{l.msg}</span>
+          </div>
+        ))}
+        {!paused && (
+          <div style={{ display:'flex', gap:14, color:T.accent }}>
+            <span style={{ color:T.textSub, width:70 }}>{new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>
+            <span style={{ animation:'acli-cursor 1s step-end infinite' }}>▍</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BacklogScreen() {
+  return <A_RunDetail/>;
+}
+
+function CommandPalette({ onClose, onNav }) {
+  const [q, setQ] = React.useState('');
+  const commands = [
+    ...NAV.flatMap(g => g.items.map(it => ({ id: it.id, label: `Go to ${it.label}`, kind:'nav', shortcut:it.key }))),
+    { id:'stop',   label:'Stop current run', kind:'action' },
+    { id:'restart',label:'Restart stage',    kind:'action' },
+    { id:'new',    label:'New run',          kind:'action' },
+  ];
+  const filtered = commands.filter(c => c.label.toLowerCase().includes(q.toLowerCase()));
+
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.6)', zIndex:200, display:'flex', alignItems:'flex-start', justifyContent:'center', paddingTop:140 }} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{ width:520, background:T.surface, border:`1px solid ${T.borderHi}`, borderRadius:4, boxShadow:'0 40px 80px rgba(0,0,0,0.7)', overflow:'hidden' }}>
+        <div style={{ padding:'14px 18px', borderBottom:`1px solid ${T.border}`, display:'flex', alignItems:'center', gap:10 }}>
+          <span style={{ color:T.accent, fontFamily:T.mono, fontSize:15.5 }}>▍</span>
+          <input autoFocus value={q} onChange={e=>setQ(e.target.value)} placeholder="type a command or screen…" style={{ flex:1, background:'transparent', border:'none', outline:'none', color:T.text, fontFamily:T.mono, fontSize:15.5 }}/>
+          <span style={{ padding:'2px 6px', background:T.border, color:T.textSub, fontFamily:T.mono, fontSize:11.5, borderRadius:2 }}>esc</span>
+        </div>
+        <div style={{ maxHeight:320, overflow:'auto' }}>
+          {filtered.length === 0 && <div style={{ padding:'20px', fontFamily:T.mono, fontSize:13.5, color:T.textSub }}>no matches</div>}
+          {filtered.slice(0, 12).map((c, i) => (
+            <div key={c.id+c.kind} onClick={() => c.kind === 'nav' ? onNav(c.id) : onClose()} style={{ padding:'10px 18px', display:'flex', alignItems:'center', gap:10, borderTop:`1px solid ${T.border}`, cursor:'pointer', background: i===0 ? 'rgba(126,227,138,0.05)' : 'transparent' }}>
+              <span style={{ fontFamily:T.mono, fontSize:11.5, padding:'2px 6px', color: c.kind === 'nav' ? T.info : T.warn, border:`1px solid ${c.kind === 'nav' ? T.info : T.warn}`, borderRadius:2 }}>{c.kind}</span>
+              <span style={{ flex:1, fontSize:14.5 }}>{c.label}</span>
+              {c.shortcut && <span style={{ fontFamily:T.mono, fontSize:11.5, color:T.textSub }}>{c.shortcut}</span>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Shell/>);
+</script>
+</body>
+</html>
