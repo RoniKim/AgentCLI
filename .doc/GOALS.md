@@ -5,7 +5,7 @@
 > This file is the target backlog, not a status report. Current implementation notes belong in `docs/WEB_CONSOLE_STATUS.md`.
 > Do not downgrade, remove, or merge unmet P0 goals to make progress look complete; implement them until they are true.
 > Task sizing rule: each unchecked P0 item should be small enough for one focused AgentCLI task branch.
-> Last reviewed: 2026-04-26.
+> Last reviewed: 2026-04-27.
 
 ## P0 (Must-Have)
 
@@ -47,36 +47,36 @@
 - [x] Add a read endpoint that returns editable config values, default values, schema metadata, redaction metadata, and restart-required flags.
 - [x] Add frontend validation for editable config fields before save is allowed.
 - [x] Add frontend diff view for config changes with changed field, old value, new value, and restart-required indicator.
-- [ ] Add backend config backup creation before any save writes to disk.
-- [ ] Add backend config save endpoint with validation, redaction safety, and atomic write behavior.
-- [ ] Add UI success/error states for config save, backup path, and reload-required status.
-- [ ] Add tests for config read, validation failure, backup creation, successful save, and rejected unsafe save.
+- [x] Add backend config backup creation before any save writes to disk.
+- [x] Add backend config save endpoint with validation, redaction safety, and atomic write behavior.
+- [x] Add UI success/error states for config save, backup path, and reload-required status.
+- [x] Add tests for config read, validation failure, backup creation, successful save, and rejected unsafe save.
 
 ### P0-E. Prompt Editing Workflow
 
 - [x] Add backend prompt read endpoint that can return full prompt content only when explicitly requested by the browser UI.
 - [x] Add prompt editor UI with file selector, scope, source, dirty state, and redaction warning.
-- [ ] Add prompt validation for empty files, missing required template variables, and invalid prompt file names.
+- [x] Add prompt validation for empty files, missing required template variables, and invalid prompt file names.
 - [x] Add prompt diff view before save.
-- [ ] Add backend prompt backup creation before any prompt save writes to disk.
-- [ ] Add backend prompt save endpoint with path containment checks and atomic write behavior.
-- [ ] Add prompt restore-from-backup workflow.
-- [ ] Add tests for prompt read, validation failure, backup creation, save, restore, and path traversal rejection.
+- [x] Add backend prompt backup creation before any prompt save writes to disk.
+- [x] Add backend prompt save endpoint with path containment checks and atomic write behavior.
+- [x] Add prompt restore-from-backup workflow.
+- [x] Add tests for prompt read, validation failure, backup creation, save, restore, and path traversal rejection.
 
 ### P0-F. Goals Editing Workflow
 
 - [x] Add backend Goals read endpoint that returns raw text, parsed P0/P1 items, and file metadata.
-- [ ] Add Goals editor UI for add, edit, reorder, check/uncheck, and delete with dirty state.
-- [ ] Add Goals validation that prevents deleting or downgrading unmet P0 goals without explicit confirmation.
+- [x] Add Goals editor UI for add, edit, reorder, check/uncheck, and delete with dirty state.
+- [x] Add Goals validation that prevents deleting or downgrading unmet P0 goals without explicit confirmation.
 - [x] Add Goals diff view before save.
-- [ ] Add backend Goals backup creation before save.
-- [ ] Add backend Goals save endpoint with atomic write behavior.
-- [ ] Add tests for Goals parse, edit, backup, save, and downgrade-confirmation behavior.
+- [x] Add backend Goals backup creation before save.
+- [x] Add backend Goals save endpoint with atomic write behavior.
+- [x] Add tests for Goals parse, edit, backup, save, and downgrade-confirmation behavior.
 
 ### P0-G. Logs And Live Tail
 
 - [x] Logs screen can live-tail the active run log without reloading the whole page.
-- [ ] Logs screen supports pause/resume tailing.
+- [x] Logs screen supports pause/resume tailing.
 - [x] Logs screen supports level, stage, task id, and free-text filters.
 - [x] Logs screen supports copy selected log lines and download current filtered logs.
 - [x] Logs screen distinguishes empty logs, missing files, read errors, and loading state.
@@ -84,44 +84,44 @@
 
 ### P0-H. Runner Controls
 
-- [ ] Browser start action can launch AgentCLI with the selected repo/config when runner controls are explicitly enabled.
-- [ ] Browser stop action creates the expected stop signal and refreshes status until the runner exits or times out.
-- [ ] Browser reload action restarts the runner through a confirmed stop/start flow.
-- [ ] Browser restart action uses the `RESTART RUNNER` confirmation phrase and reports a distinct restart result.
-- [ ] Runner controls show live busy, disabled, error, and success states.
-- [ ] Runner controls are blocked by default on LAN/external binds unless explicitly enabled.
-- [ ] API tests cover start, stop, reload, restart, confirmation mismatch, disabled controls, and controller errors.
+- [x] Browser start action can launch AgentCLI with the selected repo/config when runner controls are explicitly enabled.
+- [x] Browser stop action creates the expected stop signal and refreshes status until the runner exits or times out.
+- [x] Browser reload action restarts the runner through a confirmed stop/start flow.
+- [x] Browser restart action uses the `RESTART RUNNER` confirmation phrase and reports a distinct restart result.
+- [x] Runner controls show live busy, disabled, error, and success states.
+- [x] Runner controls are blocked by default on LAN/external binds unless explicitly enabled.
+- [x] API tests cover start, stop, reload, restart, confirmation mismatch, disabled controls, and controller errors.
 
 ### P0-I. Manual Worktree Review
 
 - [x] Worktree Review screen shows pending worktree patch summary, changed file list, risk notes, source branch, base ref, and head ref.
 - [x] Worktree Review screen exposes explicit merge and discard actions only when runner controls/worktree actions are enabled.
-- [ ] Worktree merge action requires confirmation and applies the pending patch to the source repo without auto-committing.
-- [ ] Worktree discard action requires confirmation and removes or marks the pending worktree state without touching source repo files.
-- [ ] Worktree cleanup failures are shown as recoverable warnings with exact path and manual cleanup instructions.
-- [ ] API tests cover pending merge state, merge apply, discard, cleanup failure, and no-pending state.
+- [x] Worktree merge action requires confirmation and applies the pending patch to the source repo without auto-committing.
+- [x] Worktree discard action requires confirmation and removes or marks the pending worktree state without touching source repo files.
+- [x] Worktree cleanup failures are shown as recoverable warnings with exact path and manual cleanup instructions.
+- [x] API tests cover pending merge state, merge apply, discard, cleanup failure, and no-pending state.
 
 ### P0-J. English And Korean UI
 
-- [ ] Add a locale state model with `en` and `ko` options and persisted browser preference.
-- [ ] Add a visible language toggle in the shell header or settings area.
+- [x] Add a locale state model with `en` and `ko` options and persisted browser preference.
+- [x] Add a visible language toggle in the shell header or settings area.
 - [ ] Translate primary navigation, page titles, buttons, badges, empty states, validation errors, and confirmation text to English.
 - [ ] Translate primary navigation, page titles, buttons, badges, empty states, validation errors, and confirmation text to Korean.
-- [ ] Ensure command palette and keyboard shortcut labels use the active locale.
-- [ ] Add Playwright checks that Dashboard and Config render in both English and Korean.
+- [x] Ensure command palette and keyboard shortcut labels use the active locale.
+- [x] Add Playwright checks that Dashboard and Config render in both English and Korean.
 
 ### P0-K. Safety, LAN, And Validation
 
 - [x] Read-only mode is the default for localhost and LAN binds.
 - [x] Mutating config, prompt, goals, runner, and worktree actions require explicit server opt-in.
 - [x] Sensitive config and prompt values are redacted by default in API responses and UI previews.
-- [ ] LAN documentation clearly states trusted-network-only usage until authentication is implemented.
-- [ ] Playwright smoke covers Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, and mobile width.
-- [ ] Validation commands for compile, unit tests, and Playwright smoke are documented and runnable from this repo.
+- [x] LAN documentation clearly states trusted-network-only usage until authentication is implemented.
+- [x] Playwright smoke covers Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, and mobile width.
+- [x] Validation commands for compile, unit tests, and Playwright smoke are documented and runnable from this repo.
 
 ### P0-L. Self-Development And Worktree Reliability
 
-- [ ] Stale central `WORKTREE_MERGE_PENDING.json` markers are detected and treated as invalid when the run-local pending file or patch path is missing.
+- [x] Stale central `WORKTREE_MERGE_PENDING.json` markers are detected and treated as invalid when the run-local pending file or patch path is missing.
 - [ ] Existing isolated worktree directories are reused only when run id, expected head, current branch, clean/dirty state, and source repo ownership match the active run contract.
 - [ ] Worktree merge preflight blocks unsafe apply when the source repo is dirty, source `HEAD` differs from `base_ref`, the patch hash does not match metadata, or `git apply --check` fails.
 - [ ] Worktree cleanup on Windows retries locked-path removal, records exact permission failures, and keeps cleanup-failed states visible until reconciled.
@@ -131,9 +131,9 @@
 - [ ] Web snapshots separate execution status from project completion status, so `rc=0`/`reason=ok` does not appear as project success while required goals or backlog items remain incomplete.
 - [ ] Goals parsing treats missing or malformed required priority sections as invalid/incomplete instead of silently completing P0/P1 modes.
 - [ ] Goals auto-refresh and completion checks use the same configured `goals_completion_level` in shell, runner, web, and tests.
-- [ ] Web console tests are aligned with `goals_completion_level=all` defaults and pass without relying on operator-specific local config.
+- [x] Web console tests are aligned with `goals_completion_level=all` defaults and pass without relying on operator-specific local config.
 - [ ] Self-development runs execute at least the fast web/worktree regression suite, not only `compileall`, before marking task branches complete.
-- [ ] LAN web serving refuses runner controls without real authentication or an explicit trusted-network gate; confirmation phrases remain UX confirmations, not authentication.
+- [x] LAN web serving refuses runner controls without real authentication or an explicit trusted-network gate; confirmation phrases remain UX confirmations, not authentication.
 - [ ] Redaction covers logs, GOALS raw text, task output excerpts, config, prompts, and serialized runner arguments consistently before LAN exposure.
 
 ## P1 (Should-Have)
