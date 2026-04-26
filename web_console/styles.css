@@ -455,6 +455,14 @@ a {
   color: var(--accent);
 }
 
+.stat-card__value--unavailable {
+  color: var(--text-sub);
+  font-size: 16px;
+  line-height: 1.25;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .stat-card__sub {
   margin-top: 4px;
   color: var(--text-dim);
@@ -585,6 +593,36 @@ a {
   background: rgba(126, 227, 138, 0.05);
 }
 
+.status-chip--idle {
+  color: var(--text-sub);
+  border-color: var(--border);
+  background: var(--surface-3);
+}
+
+.status-chip--success {
+  color: var(--accent);
+  border-color: rgba(126, 227, 138, 0.5);
+  background: rgba(126, 227, 138, 0.09);
+}
+
+.status-chip--completed {
+  color: var(--accent);
+  border-color: rgba(126, 227, 138, 0.72);
+  background: rgba(126, 227, 138, 0.14);
+}
+
+.status-chip--stopped {
+  color: var(--warn);
+  border-color: rgba(243, 194, 107, 0.35);
+  background: rgba(243, 194, 107, 0.05);
+}
+
+.status-chip--failed {
+  color: var(--err);
+  border-color: rgba(232, 122, 106, 0.35);
+  background: rgba(232, 122, 106, 0.05);
+}
+
 .status-chip--warn {
   color: var(--warn);
   border-color: rgba(243, 194, 107, 0.35);
@@ -635,6 +673,12 @@ a {
   line-height: 1.2;
 }
 
+.meter-chip--unavailable {
+  color: var(--text-sub);
+  border-color: var(--border);
+  background: var(--surface-3);
+}
+
 .meter {
   width: 86px;
   height: 8px;
@@ -658,6 +702,14 @@ a {
   background: linear-gradient(90deg, var(--info), rgba(122, 176, 232, 0.55));
 }
 
+.meter__fill--muted {
+  background: linear-gradient(90deg, var(--text-sub), rgba(122, 130, 117, 0.45));
+}
+
+.meter--unavailable {
+  background: var(--border);
+}
+
 .kpi-grid {
   display: grid;
   gap: 1px;
@@ -669,6 +721,10 @@ a {
 
 .kpi-grid--three {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.kpi-grid--four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .kpi-card {
@@ -696,6 +752,14 @@ a {
 
 .kpi-card__value--accent {
   color: var(--accent);
+}
+
+.kpi-card__value--unavailable {
+  color: var(--text-sub);
+  font-size: 14px;
+  line-height: 1.25;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .kpi-card__sub {
@@ -736,6 +800,16 @@ a {
   background: rgba(243, 194, 107, 0.06);
 }
 
+.stage-card--failed {
+  border-color: rgba(255, 110, 110, 0.45);
+  background: rgba(255, 110, 110, 0.06);
+}
+
+.stage-card--stopped {
+  border-color: rgba(122, 176, 232, 0.4);
+  background: rgba(122, 176, 232, 0.05);
+}
+
 .stage-card__head {
   display: flex;
   align-items: center;
@@ -771,6 +845,18 @@ a {
 
 .stage-icon--pending {
   color: var(--text-sub);
+}
+
+.stage-icon--failed {
+  color: var(--err);
+  border-color: rgba(255, 110, 110, 0.45);
+  background: rgba(255, 110, 110, 0.06);
+}
+
+.stage-icon--stopped {
+  color: var(--info);
+  border-color: rgba(122, 176, 232, 0.45);
+  background: rgba(122, 176, 232, 0.06);
 }
 
 .stage-card__title {
@@ -813,6 +899,10 @@ a {
 
 .connector--done {
   background: rgba(126, 227, 138, 0.45);
+}
+
+.connector--warn {
+  background: rgba(255, 110, 110, 0.45);
 }
 
 .connector--running::after {
@@ -912,6 +1002,10 @@ a {
   display: grid;
   gap: 14px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.board-grid--four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .column {
@@ -1026,6 +1120,12 @@ a {
   border-color: rgba(122, 176, 232, 0.35);
   color: var(--info);
   background: rgba(122, 176, 232, 0.05);
+}
+
+.chip--err {
+  border-color: rgba(255, 110, 110, 0.35);
+  color: var(--err);
+  background: rgba(255, 110, 110, 0.05);
 }
 
 .goal-grid {
@@ -2061,6 +2161,22 @@ a {
   overflow-wrap: anywhere;
 }
 
+.runner-control__value--accent {
+  color: var(--accent);
+}
+
+.runner-control__value--warn {
+  color: var(--warn);
+}
+
+.runner-control__value--err {
+  color: var(--err);
+}
+
+.runner-control__value--muted {
+  color: var(--text-sub);
+}
+
 .runner-control__buttons {
   display: flex;
   gap: 8px;
@@ -2129,6 +2245,36 @@ a {
 .section-banner--running {
   border-color: rgba(126, 227, 138, 0.35);
   background: var(--accent-soft);
+  color: var(--text);
+}
+
+.section-banner--stopped {
+  border-color: rgba(243, 194, 107, 0.35);
+  background: var(--warn-soft);
+  color: var(--text);
+}
+
+.section-banner--failed {
+  border-color: rgba(232, 122, 106, 0.35);
+  background: var(--err-soft);
+  color: var(--text);
+}
+
+.section-banner--idle {
+  border-color: var(--border);
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.section-banner--success {
+  border-color: rgba(126, 227, 138, 0.45);
+  background: rgba(126, 227, 138, 0.09);
+  color: var(--text);
+}
+
+.section-banner--completed {
+  border-color: rgba(126, 227, 138, 0.68);
+  background: rgba(126, 227, 138, 0.14);
   color: var(--text);
 }
 
@@ -2311,9 +2457,11 @@ a {
   }
 
   .board-grid,
+  .board-grid--four,
   .goal-grid,
   .landing-strip,
-  .kpi-grid--three {
+  .kpi-grid--three,
+  .kpi-grid--four {
     grid-template-columns: 1fr;
   }
 

@@ -36,6 +36,18 @@
 - Config on `http://127.0.0.1:8767/#config` rendered without the previous `fmtList(...).join` JavaScript error.
 - The current config still comes from read-only API data; browser save flows are not production-ready.
 
+## Worktree Merge Review - 2026-04-26
+
+- Reviewed pending worktree run `20260426-084623` before merge instead of applying its generated patch directly.
+- Integrated the five useful worktree commits into source as a single stabilized change set.
+- Removed generated agent review artifacts from the merge candidate.
+- Fixed the empty-run regression so a stopped controller does not make an artifact-free timestamp directory look active unless the controller also reports terminal status.
+- Added read-only backend contracts for dashboard snapshots, lifecycle stages, backlog details, Goals metadata, and log tailing.
+- Stabilized the Goals parser for the current `## P0 (Must-Have)` / `### P0-*` document shape, so `/api/goals` returns real P0/P1 items instead of treating them as warnings.
+- Verified `compileall`, `test_worktree*.py`, and `test_web_console*.py` after stabilization.
+- Manually inspected Dashboard, Goals, Logs, Config, Worktree Review, and mobile Dashboard with Playwright; browser console reported no warnings or errors.
+- Remaining UI work is still tracked in `.doc/GOALS.md`; the Logs frontend still needs live-tail fetch/pause/filter/copy/download behavior, and edit/save flows remain incomplete.
+
 ## Remaining Production Gates
 
 - `GOALS.md` is now decomposed into small P0 task slices so AgentCLI PM should generate narrower task branches instead of large, vague web-console tasks.

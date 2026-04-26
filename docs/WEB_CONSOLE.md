@@ -10,6 +10,7 @@ Verified on 2026-04-26 with a local server and Playwright:
 
 - Static console serving works from `agent_runner.web`.
 - Read-only endpoints exist for health, status, progress, config, prompts, logs, history, and worktree review state.
+- Additional read-only contracts now cover Goals metadata and backend log tailing.
 - The UI has first-pass routes for Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, and Worktree Review.
 - Runner controls are disabled by default and require explicit opt-in.
 - Config rendering now tolerates `roles` as either `PM,Dev,QA` or `["PM", "Dev", "QA"]`.
@@ -19,6 +20,7 @@ Verified on 2026-04-26 with a local server and Playwright:
 Known blockers:
 
 - Goals, Config, and Prompts are not yet full edit/save workflows.
+- The Logs view still needs frontend live-tail fetch, pause/resume, filtering, copy, and download behavior.
 - English/Korean locale switching is not implemented.
 - Runner controls need end-to-end validation against a real AgentCLI process before they should be considered usable.
 - The UI still needs Playwright coverage across primary views, mobile width, and both future locales.

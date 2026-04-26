@@ -147,11 +147,13 @@
   }
 
   function fmtPercent(value) {
-    return `${Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100)}%`;
+    if (value == null || value === '' || Number.isNaN(Number(value))) return '--';
+    return `${Math.round(Math.max(0, Math.min(1, Number(value))) * 100)}%`;
   }
 
   function fmtMoney(value) {
-    return `$${Number(value || 0).toFixed(2)}`;
+    if (value == null || value === '' || Number.isNaN(Number(value))) return '--';
+    return `$${Number(value).toFixed(2)}`;
   }
 
   function fmtRelative(ts) {
@@ -180,11 +182,37 @@
     });
   }
 
+  function fmtDateTime(ts) {
+    if (ts == null || ts === '' || Number.isNaN(Number(ts))) return '--';
+    return new Date(Number(ts) * 1000).toLocaleString('en-GB', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+
   function fmtNumberShort(value) {
-    const n = Number(value || 0);
+    if (value == null || value === '' || Number.isNaN(Number(value))) return '--';
+    const n = Number(value);
     if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
     if (Math.abs(n) >= 1_000) return `${Math.round(n / 1_000)}k`;
     return `${n}`;
+  }
+
+  function metricText(available, value, formatter, unavailableText = 'unavailable') {
+    if (!available || value == null || value === '' || Number.isNaN(Number(value))) {
+      return unavailableText;
+    }
+    return formatter ? formatter(value) : String(value);
+  }
+
+  function metricWidth(available, value) {
+    if (!available || value == null || value === '' || Number.isNaN(Number(value))) {
+      return '0%';
+    }
+    return progressWidth(value);
   }
 
   function normalizeListValues(values) {
@@ -273,11 +301,57 @@
     return 'status-chip';
   }
 
-  function runStatusLabel(status) {
-    if (status === 'running') return 'running';
-    if (status === 'stopping') return 'stop requested';
-    if (status === 'stopped') return 'stopped';
-    return String(status || 'idle');
+  function runStatusLabel(status, finalReason = '') {
+    const normalized = String(status || 'idle').toLowerCase();
+    if (normalized === 'completed') return 'completed';
+    if (normalized === 'success' || normalized === 'complete' || normalized === 'done') {
+      return finalReason ? 'completed' : 'success';
+    }
+    if (normalized === 'running') return 'running';
+    if (normalized === 'stopping' || normalized === 'stopped') return 'stopped';
+    if (normalized === 'failed' || normalized === 'error') return 'failed';
+    if (normalized === 'idle') return 'idle';
+    return normalized || 'idle';
+  }
+
+  function runStatusTone(status, finalReason = '') {
+    const normalized = String(status || 'idle').toLowerCase();
+    if (normalized === 'success' || normalized === 'completed' || normalized === 'complete' || normalized === 'done') {
+      return finalReason ? 'completed' : 'success';
+    }
+    if (normalized === 'running') return 'running';
+    if (normalized === 'stopping' || normalized === 'stopped') return 'stopped';
+    if (normalized === 'failed' || normalized === 'error') return 'failed';
+    if (normalized === 'idle') return 'idle';
+    return 'idle';
+  }
+
+  const RUN_STATUS_CLASS_NAMES = {
+    idle: 'status-chip status-chip--idle',
+    running: 'status-chip status-chip--running',
+    completed: 'status-chip status-chip--completed',
+    success: 'status-chip status-chip--success',
+    stopped: 'status-chip status-chip--stopped',
+    failed: 'status-chip status-chip--failed',
+  };
+
+  const RUN_BANNER_CLASS_NAMES = {
+    idle: 'modal-banner section-banner section-banner--idle',
+    running: 'modal-banner section-banner section-banner--running',
+    completed: 'modal-banner section-banner section-banner--completed',
+    success: 'modal-banner section-banner section-banner--success',
+    stopped: 'modal-banner section-banner section-banner--stopped',
+    failed: 'modal-banner section-banner section-banner--failed',
+  };
+
+  function runStatusClass(status, finalReason = '') {
+    const tone = runStatusTone(status, finalReason);
+    return RUN_STATUS_CLASS_NAMES[tone] || RUN_STATUS_CLASS_NAMES.idle;
+  }
+
+  function runBannerClass(status, finalReason = '') {
+    const tone = runStatusTone(status, finalReason);
+    return RUN_BANNER_CLASS_NAMES[tone] || RUN_BANNER_CLASS_NAMES.idle;
   }
 
   function severityClass(level) {
@@ -302,7 +376,7 @@
   }
 
   function statusDotClass(status) {
-    if (status === 'done' || status === 'success') return 'dot status-chip__dot';
+    if (status === 'done' || status === 'success' || status === 'completed') return 'dot status-chip__dot';
     if (status === 'running') return 'dot dot--pulse';
     if (status === 'failed' || status === 'error') return 'dot status-chip__dot';
     if (status === 'stopped') return 'dot status-chip__dot';
@@ -332,6 +406,12 @@
   function toNumber(value, fallback = 0) {
     const num = Number(value);
     return Number.isFinite(num) ? num : fallback;
+  }
+
+  function toMaybeNumber(value) {
+    if (value == null || value === '') return null;
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
   }
 
   function toArray(value) {
@@ -543,33 +623,155 @@
     if (!hasRunData || status === 'no-run') {
       return 'idle';
     }
-    if (status === 'success') {
-      return 'running';
+    if (status === 'completed' || status === 'complete' || status === 'done' || status === 'success') {
+      return 'success';
     }
-    if (status === 'finished') {
+    if (status === 'finished' || status === 'stopping' || status === 'stop_requested') {
       return 'stopped';
+    }
+    if (status === 'error') {
+      return 'failed';
     }
     return status || 'idle';
   }
 
-  function normalizeStageStatus(rawStatus, index, activeStatus, hasData) {
-    const status = toText(rawStatus, '').toLowerCase();
-    if (status) {
-      return status;
+  function normalizeStageStatus(rawStatus, fallback = 'pending') {
+    const status = toText(rawStatus, '').trim().toLowerCase();
+    if (!status) {
+      return fallback;
     }
-    if (!hasData) {
-      return 'pending';
+    const aliases = {
+      complete: 'done',
+      completed: 'done',
+      done: 'done',
+      ok: 'done',
+      success: 'done',
+      skip: 'skipped',
+      skipped: 'skipped',
+      stop: 'stopped',
+      stopped: 'stopped',
+      halted: 'stopped',
+      cancelled: 'stopped',
+      canceled: 'stopped',
+      fail: 'failed',
+      failed: 'failed',
+      error: 'failed',
+      running: 'running',
+      active: 'running',
+      in_progress: 'running',
+      pending: 'pending',
+      idle: 'pending',
+    };
+    return aliases[status] || fallback;
+  }
+
+  function compactText(value, maxChars = 180) {
+    const text = toText(value, '').replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    if (text.length <= maxChars) return text;
+    return `${text.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
+  }
+
+  function lifecycleStatusToneClass(status) {
+    switch (normalizeStageStatus(status, 'pending')) {
+      case 'done':
+        return 'chip--accent';
+      case 'running':
+        return 'chip--warn';
+      case 'failed':
+        return 'chip--err';
+      case 'stopped':
+      case 'skipped':
+        return 'chip--info';
+      default:
+        return 'chip--info';
     }
-    if (activeStatus === 'running' && index === 1) {
-      return 'running';
+  }
+
+  function normalizeBacklogStatus(rawStatus, fallback = 'pending') {
+    const status = toText(rawStatus, '').trim().toLowerCase();
+    if (!status) {
+      return fallback;
     }
-    if (activeStatus === 'success') {
-      return 'done';
+    const aliases = {
+      complete: 'done',
+      completed: 'done',
+      done: 'done',
+      ok: 'done',
+      success: 'done',
+      fail: 'failed',
+      failed: 'failed',
+      error: 'failed',
+      running: 'in_progress',
+      active: 'in_progress',
+      in_progress: 'in_progress',
+      pending: 'pending',
+      idle: 'pending',
+    };
+    return aliases[status] || fallback;
+  }
+
+  function backlogStatusToneClass(status) {
+    switch (normalizeBacklogStatus(status, 'pending')) {
+      case 'done':
+        return 'chip--accent';
+      case 'in_progress':
+        return 'chip--warn';
+      case 'failed':
+        return 'chip--err';
+      default:
+        return 'chip--info';
     }
-    if (activeStatus === 'stopped' || activeStatus === 'failed') {
-      return index < 2 ? 'done' : 'pending';
+  }
+
+  function lifecycleStageCardClass(status) {
+    const classes = ['stage-card'];
+    switch (normalizeStageStatus(status, 'pending')) {
+      case 'running':
+        classes.push('stage-card--running');
+        break;
+      case 'failed':
+        classes.push('stage-card--failed');
+        break;
+      case 'stopped':
+        classes.push('stage-card--stopped');
+        break;
+      default:
+        break;
     }
-    return index === 0 ? 'done' : 'pending';
+    return classes.join(' ');
+  }
+
+  function lifecycleStageIconClass(status) {
+    switch (normalizeStageStatus(status, 'pending')) {
+      case 'done':
+        return 'stage-icon stage-icon--done';
+      case 'running':
+        return 'stage-icon stage-icon--running';
+      case 'failed':
+        return 'stage-icon stage-icon--failed';
+      case 'stopped':
+        return 'stage-icon stage-icon--stopped';
+      default:
+        return 'stage-icon stage-icon--pending';
+    }
+  }
+
+  function lifecycleStageIconText(status) {
+    switch (normalizeStageStatus(status, 'pending')) {
+      case 'done':
+        return 'OK';
+      case 'running':
+        return 'RUN';
+      case 'failed':
+        return 'ERR';
+      case 'stopped':
+        return 'STOP';
+      case 'skipped':
+        return 'SKIP';
+      default:
+        return 'WAIT';
+    }
   }
 
   function buildSectionState(kind, rawStatus, message, source = 'api') {
@@ -585,8 +787,8 @@
   function fallbackSectionMessage(kind) {
     const messages = {
       activeRun: 'No active run is published yet.',
-      stages: 'No pipeline stages are available yet.',
-      backlog: 'Backlog has not been emitted yet.',
+      stages: 'No lifecycle records were published yet.',
+      backlog: 'No backlog artifacts were published yet.',
       goals: 'No goals were found in GOALS.md.',
       config: 'Config snapshot is incomplete.',
       prompts: 'Prompt inventory is empty.',
@@ -637,24 +839,62 @@
 
   function normalizeBacklogItem(task) {
     const raw = toObject(task);
+    const failure = toObject(raw.failure);
     return {
       id: toText(raw.id, 'task'),
       title: toText(raw.title, 'Untitled task'),
-      status: toText(raw.status, 'pending'),
+      status: normalizeBacklogStatus(raw.status, 'pending'),
       priority: toText(raw.priority, 'P1'),
       tags: toArray(raw.tags).map((tag) => toText(tag)).filter(Boolean),
       estimate: toText(raw.estimate, 'M'),
       skill: toText(raw.skill, ''),
       description: toText(raw.description || raw.prompt, ''),
+      prompt: toText(raw.prompt, ''),
+      files: toArray(raw.files).map((file) => toText(file)).filter(Boolean),
+      dependsOn: toArray(raw.depends_on || raw.dependsOn || raw.dependencies).map((item) => toText(item)).filter(Boolean),
+      fileScope: toText(raw.file_scope || raw.fileScope, ''),
+      attempt: toMaybeNumber(raw.attempt),
+      failure: {
+        reason: toText(failure.reason || raw.failure_reason || raw.failureReason, ''),
+        detail: toText(failure.detail || raw.failure_detail || raw.failureDetail, ''),
+        cycle: toMaybeNumber(failure.cycle ?? raw.failure_cycle ?? raw.failureCycle),
+        step: toMaybeNumber(failure.step ?? raw.failure_step ?? raw.failureStep),
+        rc: toMaybeNumber(failure.rc ?? raw.failure_rc ?? raw.failureRc),
+      },
+      failureReason: toText(failure.reason || raw.failure_reason || raw.failureReason, ''),
+      failureDetail: toText(failure.detail || raw.failure_detail || raw.failureDetail, ''),
+      recentOutput: toText(raw.recent_output || raw.recentOutput, ''),
+      cycle: toMaybeNumber(raw.cycle),
+      step: toMaybeNumber(raw.step),
+      taskTitle: toText(raw.task_title || raw.taskTitle, ''),
+      model: toText(raw.model, ''),
+      startedAt: toMaybeNumber(raw.started_at || raw.startedAt),
+      endedAt: toMaybeNumber(raw.ended_at || raw.endedAt),
     };
   }
 
   function normalizeGoalBucket(bucket) {
     return toArray(bucket).map((goal) => ({
-      done: Boolean(toObject(goal).done),
+      done: Boolean(toObject(goal).done ?? toObject(goal).checked),
+      checked: Boolean(toObject(goal).done ?? toObject(goal).checked),
+      checkbox: toText(toObject(goal).checkbox, Boolean(toObject(goal).done ?? toObject(goal).checked) ? '[x]' : '[ ]'),
       text: toText(toObject(goal).text, ''),
       note: toText(toObject(goal).note, ''),
+      lineNumber: toNumber(toObject(goal).lineNumber || toObject(goal).line_number || toObject(goal).line || 0, 0),
+      line_number: toNumber(toObject(goal).lineNumber || toObject(goal).line_number || toObject(goal).line || 0, 0),
+      line: toNumber(toObject(goal).line || toObject(goal).lineNumber || toObject(goal).line_number || 0, 0),
     }));
+  }
+
+  function normalizeGoalWarning(warning) {
+    const raw = toObject(warning);
+    return {
+      lineNumber: toNumber(raw.lineNumber || raw.line_number || raw.line || 0, 0),
+      line_number: toNumber(raw.lineNumber || raw.line_number || raw.line || 0, 0),
+      line: toText(raw.line, ''),
+      reason: toText(raw.reason, 'unsupported_line'),
+      message: toText(raw.message, ''),
+    };
   }
 
   function normalizePrompt(prompt) {
@@ -743,16 +983,32 @@
 
   function normalizeMetrics(metrics) {
     const raw = toObject(metrics);
+    const tokens = toObject(raw.tokens);
+    const tokensAvailable = Boolean(
+      raw.tokens_available ||
+        raw.tokensAvailable ||
+        tokens.in != null ||
+        tokens.input != null ||
+        tokens.out != null ||
+        tokens.output != null
+    );
+    const budgetAvailable = Boolean(raw.budget_available || raw.budgetAvailable || raw.budget_used != null || raw.budgetUsed != null);
+    const quotaAvailable = Boolean(raw.quota_available || raw.quotaAvailable || raw.quota_used != null || raw.quotaUsed != null);
     return {
       tokens24h: toArray(raw.tokens24h).map((value) => toNumber(value, 0)),
       success24h: toArray(raw.success24h).map((value) => toNumber(value, 0)),
       budget: toArray(raw.budget).map((value) => clampUnit(value)),
       tokens: {
-        in: toNumber(toObject(raw.tokens).in || 0, 0),
-        out: toNumber(toObject(raw.tokens).out || 0, 0),
+        in: tokensAvailable ? toMaybeNumber(tokens.in ?? tokens.input) ?? 0 : null,
+        out: tokensAvailable ? toMaybeNumber(tokens.out ?? tokens.output) ?? 0 : null,
+        available: tokensAvailable,
       },
       last_stage: toText(raw.last_stage, ''),
-      quota_used: clampUnit(raw.quota_used || 0),
+      quota_used: quotaAvailable ? toMaybeNumber(raw.quota_used ?? raw.quotaUsed) : null,
+      budget_used: budgetAvailable ? toMaybeNumber(raw.budget_used ?? raw.budgetUsed) : null,
+      tokensAvailable,
+      budgetAvailable,
+      quotaAvailable,
     };
   }
 
@@ -793,71 +1049,133 @@
     const progress = toObject(context.progress);
     const metrics = normalizeMetrics(context.metrics);
     const config = toObject(context.config);
-    const hasRunData = Boolean(raw.id || raw.status || raw.stage || progress.latest_run_dir);
+    const hasRunData = Boolean(raw.id || raw.status || raw.stage || raw.runDir || raw.run_dir || progress.latest_run_dir);
     const repoPath = toText(raw.repo || repo.path || config.repo || '', '');
     const repoLabel = toText(raw.repoLabel || repo.name || repoNameFromPath(repoPath) || 'agentcli', 'agentcli');
     const stage = toText(raw.stage || progress.current_stage || metrics.last_stage || 'idle', 'idle');
-    const activeStatus = normalizeRunStatus(raw.status || progress.run_status, hasRunData);
-    const selectedTask = toText(raw.task || progress.current_task_id || '', '');
-    const progressRatio = clampUnit(raw.progress || progress.progress || 0);
-    const budgetUsed = clampUnit(raw.budgetUsed || metrics.quota_used || progressRatio);
-    const quotaUsed = clampUnit(toObject(raw.quota).used || metrics.quota_used || 0);
+    const activeStatus = normalizeRunStatus(raw.status || progress.run_status || progress.runStatus, hasRunData);
+    const selectedTask = toText(
+      raw.task ||
+        progress.current_task_id ||
+        progress.selected_task_id ||
+        toObject(progress.backlog).selected_id ||
+        '',
+      ''
+    );
+    const progressValue = toMaybeNumber(raw.progress ?? progress.progress ?? progress.progressValue);
+    const progressAvailable = Boolean(
+      raw.progressAvailable ||
+        raw.progress_available ||
+        progress.progress_available ||
+        progress.progressAvailable ||
+        (progressValue != null && progressValue > 0)
+    );
+    const progressRatio = progressAvailable ? progressValue : null;
+    const budgetAvailable = Boolean(
+      raw.budgetAvailable ||
+        raw.budget_available ||
+        metrics.budgetAvailable ||
+        metrics.budget_available ||
+        raw.budgetUsed != null ||
+        raw.budget_used != null ||
+        metrics.budget_used != null
+    );
+    const budgetUsed = budgetAvailable ? toMaybeNumber(raw.budgetUsed ?? raw.budget_used ?? metrics.budget_used ?? metrics.budgetUsed) : null;
+    const quotaAvailable = Boolean(
+      raw.quotaAvailable ||
+        raw.quota_available ||
+        metrics.quotaAvailable ||
+        metrics.quota_available ||
+        toObject(raw.quota).used != null ||
+        metrics.quota_used != null
+    );
+    const quotaUsed = quotaAvailable ? toMaybeNumber(toObject(raw.quota).used ?? metrics.quota_used ?? metrics.quotaUsed) : null;
+    const tokensAvailable = Boolean(
+      raw.tokensAvailable ||
+        raw.tokens_available ||
+        metrics.tokensAvailable ||
+        metrics.tokens_available ||
+        toObject(raw.tokens).in != null ||
+        toObject(raw.tokens).out != null ||
+        metrics.tokens.in != null ||
+        metrics.tokens.out != null
+    );
     const tokens = toObject(raw.tokens);
+    const tokenIn = tokensAvailable ? toMaybeNumber(tokens.in ?? tokens.input ?? metrics.tokens.in) : null;
+    const tokenOut = tokensAvailable ? toMaybeNumber(tokens.out ?? tokens.output ?? metrics.tokens.out) : null;
+    const runDir = toText(raw.runDir || raw.run_dir || progress.latest_run_dir || '', '');
+    const attempt = toMaybeNumber(raw.attempt ?? raw.currentAttempt ?? progress.attempt ?? progress.current_attempt);
+    const finalReason = toText(raw.finalReason || raw.final_reason || progress.final_reason || '');
     return {
-      id: toText(raw.id || (progress.latest_run_dir ? progress.latest_run_dir.split(/[\\/]/).pop() : ''), hasRunData ? '' : 'no-run'),
+      id: toText(raw.id || (runDir ? runDir.split(/[\\/]/).pop() : '') || (progress.latest_run_dir ? progress.latest_run_dir.split(/[\\/]/).pop() : ''), hasRunData ? '' : 'no-run'),
       repo: repoPath,
       repoLabel,
       branch: toText(raw.branch || repo.branch || context.branch || 'HEAD', 'HEAD'),
       backend: toText(raw.backend || config.execution_backend || 'codex', 'codex'),
-      startedAt: toNumber(raw.startedAt || 0, 0),
+      runDir,
+      startedAt: toNumber(raw.startedAt ?? raw.started_at ?? 0, 0),
       stage,
       stageIndex: toNumber(raw.stageIndex || STAGE_INDEX[stage.toLowerCase()] || 0, 0),
-      iteration: toNumber(raw.iteration || progress.iterations || 0, 0),
+      iteration: toNumber(raw.iteration ?? progress.iterations ?? 0, 0),
       maxIterations: toNumber(raw.maxIterations || config.iterations || 1, 1),
       progress: progressRatio,
+      progressAvailable,
+      attempt,
+      worktreeMode: toText(raw.worktreeMode || raw.worktree_mode || progress.worktree_mode || progress.worktreeMode || '', ''),
+      finalReason,
+      budgetAvailable,
       budgetUsed,
+      tokensAvailable,
       tokens: {
-        in: toNumber(tokens.in || metrics.tokens.in || 0, 0),
-        out: toNumber(tokens.out || metrics.tokens.out || 0, 0),
+        in: tokenIn,
+        out: tokenOut,
+        available: tokensAvailable,
       },
+      quotaAvailable,
       quota: {
-        window: toText(toObject(raw.quota).window || '5h', '5h'),
+        window: toText(toObject(raw.quota).window || metrics.quotaWindow || '5h', '5h'),
         used: quotaUsed,
+        available: quotaAvailable,
       },
-      elapsedSec: toNumber(raw.elapsedSec || 0, 0),
+      elapsedSec: toNumber(raw.elapsedSec ?? raw.elapsed_seconds ?? 0, 0),
       status: activeStatus,
       task: selectedTask,
-      taskTitle: toText(raw.taskTitle || progress.current_task_title || '', ''),
+      taskTitle: toText(raw.taskTitle || raw.task_title || progress.current_task_title || '', ''),
     };
   }
 
   function adaptStages(stages, context = {}) {
-    const rawStages = toArray(stages);
-    const activeStatus = toText(toObject(context.activeRun).status, 'idle');
-    const hasData = rawStages.length > 0;
-    const seed = [
-      { id: 'PM', label: 'PM', title: 'Backlog planning' },
-      { id: 'Dev', label: 'Dev', title: 'Implementation' },
-      { id: 'QA', label: 'QA', title: 'Verification' },
-    ];
-    const items = seed.map((base, index) => {
-      const raw = toObject(rawStages[index]);
-      const label = toText(raw.label || raw.id || base.label, base.label);
-      const title = toText(raw.title || raw.name || base.title, base.title);
-      return {
-        id: toText(raw.id || base.id, base.id),
-        label,
-        title,
-        status: normalizeStageStatus(raw.status, index, activeStatus, hasData),
-        durationSec: toNumber(raw.durationSec || 0, 0),
-        model: toText(raw.model || raw.backend || 'unknown', 'unknown'),
-        isFallback: !hasData || !raw.id,
-      };
-    });
-    const sectionStatus = !hasData ? 'empty' : rawStages.length < seed.length ? 'partial' : 'ready';
+    const items = toArray(stages)
+      .map((stage) => {
+        const raw = toObject(stage);
+        const id = toText(raw.id || raw.label || raw.name, '');
+        if (!id) return null;
+        const status = normalizeStageStatus(raw.status || raw.state, 'pending');
+        return {
+          id,
+          label: toText(raw.label || raw.id || raw.name, id),
+          title: toText(raw.title || raw.taskTitle || raw.task_title || raw.name, toText(raw.label || raw.id || raw.name, id)),
+          status,
+          cycle: toMaybeNumber(raw.cycle),
+          startedAt: toMaybeNumber(raw.startedAt || raw.started_at),
+          endedAt: toMaybeNumber(raw.endedAt || raw.ended_at),
+          durationSec: toMaybeNumber(raw.durationSec ?? raw.duration_seconds),
+          model: toText(raw.model || raw.backend || '', ''),
+          taskId: toText(raw.taskId || raw.task_id, ''),
+          taskTitle: toText(raw.taskTitle || raw.task_title, ''),
+          attempt: toMaybeNumber(raw.attempt || raw.currentAttempt),
+          step: toMaybeNumber(raw.step),
+          recentOutput: toText(raw.recentOutput || raw.recent_output, ''),
+          reason: toText(raw.reason || raw.message, ''),
+          rc: toMaybeNumber(raw.rc),
+          isFallback: false,
+        };
+      })
+      .filter(Boolean);
+    const sectionStatus = !items.length ? 'empty' : items.length < 3 ? 'partial' : 'ready';
     return {
       items,
-      state: buildSectionState('stages', sectionStatus, sectionStatus === 'ready' ? '' : sectionStatus === 'partial' ? 'Only some stage records were published.' : fallbackSectionMessage('stages')),
+      state: buildSectionState('stages', sectionStatus, sectionStatus === 'ready' ? '' : sectionStatus === 'partial' ? 'Only some lifecycle records were published.' : fallbackSectionMessage('stages')),
     };
   }
 
@@ -865,7 +1183,9 @@
     const raw = toObject(backlog);
     const items = toArray(raw.items).map(normalizeBacklogItem);
     const counts = toObject(raw.counts);
-    const selectedId = toText(raw.selected_id || context.currentTaskId || '', '');
+    const selectedId = toText(raw.selected_id, '');
+    const currentTaskId = toText(context.currentTaskId || '', '');
+    const selectedTaskId = selectedId || (currentTaskId && items.some((task) => task.id === currentTaskId) ? currentTaskId : '');
     const status = items.length ? 'ready' : 'empty';
     return {
       items,
@@ -873,29 +1193,48 @@
         pending: toNumber(counts.pending || items.filter((task) => task.status === 'pending').length, 0),
         in_progress: toNumber(counts.in_progress || items.filter((task) => task.status === 'in_progress').length, 0),
         done: toNumber(counts.done || items.filter((task) => task.status === 'done').length, 0),
+        failed: toNumber(counts.failed || items.filter((task) => task.status === 'failed').length, 0),
       },
-      selected_id: selectedId || items.find((task) => task.status === 'in_progress')?.id || items[0]?.id || '',
+      selected_id: selectedTaskId,
       state: buildSectionState('backlog', status, items.length ? '' : fallbackSectionMessage('backlog')),
     };
   }
 
   function adaptGoals(goals, context = {}) {
     const raw = toObject(goals);
+    const warnings = toArray(raw.warnings).map(normalizeGoalWarning);
     const items = {
       p0: normalizeGoalBucket(raw.items?.p0 || raw.p0 || []),
       p1: normalizeGoalBucket(raw.items?.p1 || raw.p1 || []),
     };
     const total = items.p0.length + items.p1.length;
     const done = items.p0.filter((goal) => goal.done).length + items.p1.filter((goal) => goal.done).length;
+    const summary = {
+      has_goals: Boolean(raw.completion?.has_goals ?? total),
+      project_complete: Boolean(raw.completion?.project_complete),
+      p0_total: toNumber(raw.summary?.p0_total || items.p0.length, items.p0.length),
+      p0_done: toNumber(raw.summary?.p0_done || items.p0.filter((goal) => goal.done).length, 0),
+      p1_total: toNumber(raw.summary?.p1_total || items.p1.length, items.p1.length),
+      p1_done: toNumber(raw.summary?.p1_done || items.p1.filter((goal) => goal.done).length, 0),
+      all_total: toNumber(raw.summary?.all_total || total, total),
+      all_done: toNumber(raw.summary?.all_done || done, done),
+      total: toNumber(raw.summary?.total || total, total),
+      done: toNumber(raw.summary?.done || done, done),
+      unchecked: toNumber(raw.summary?.unchecked || Math.max(0, total - done), Math.max(0, total - done)),
+      warnings: toNumber(raw.summary?.warnings || warnings.length, warnings.length),
+    };
     return {
       path: toText(raw.path, ''),
+      exists: Boolean(raw.exists),
+      mtime: raw.mtime == null ? null : Number(raw.mtime),
+      size: raw.size == null ? null : Number(raw.size),
+      raw_text: toText(raw.raw_text || raw.rawText, ''),
       completion: toObject(raw.completion),
+      completion_level: toText(raw.completion_level || raw.completionLevel, ''),
       items,
+      warnings,
       state: buildSectionState('goals', total ? 'ready' : 'empty', total ? '' : fallbackSectionMessage('goals')),
-      summary: {
-        total,
-        done,
-      },
+      summary,
     };
   }
 
@@ -943,7 +1282,15 @@
 
   function adaptMetrics(metrics, context = {}) {
     const data = normalizeMetrics(metrics);
-    const hasData = data.tokens24h.length > 0 || data.success24h.length > 0 || data.budget.length > 0 || data.tokens.in > 0 || data.tokens.out > 0;
+    const hasData =
+      data.tokensAvailable ||
+      data.budgetAvailable ||
+      data.quotaAvailable ||
+      data.tokens24h.length > 0 ||
+      data.success24h.length > 0 ||
+      data.budget.length > 0 ||
+      data.tokens.in != null ||
+      data.tokens.out != null;
     return {
       ...data,
       state: buildSectionState('metrics', hasData ? 'ready' : 'empty', hasData ? '' : fallbackSectionMessage('metrics')),
@@ -998,7 +1345,7 @@
       source: 'api',
     });
     const stages = adaptStages(raw.stages, { activeRun });
-    const backlog = adaptBacklog(raw.backlog, { currentTaskId: progress.current_task_id });
+    const backlog = adaptBacklog(raw.backlog, { currentTaskId: progress.current_task_id || activeRun.task || '' });
     const goals = adaptGoals(raw.goals, { progress });
     const prompts = adaptPrompts(raw.prompts);
     const logs = adaptLogs(raw.logs);
@@ -1025,6 +1372,7 @@
       backlogCounts: backlog.counts,
       backlogSelectedId: backlog.selected_id,
       goals: goals.items,
+      goalsSnapshot: goals,
       goalsMeta: goals.summary,
       goalsPath: goals.path,
       goalsCompletion: goals.completion,
@@ -1089,22 +1437,26 @@
         stageIndex: 0,
         iteration: 0,
         maxIterations: 1,
-        progress: 0,
-        budgetUsed: 0,
-        tokens: { in: 0, out: 0 },
-        quota: { window: '5h', used: 0 },
+        runDir: '',
+        attempt: null,
+        worktreeMode: '',
+        finalReason: '',
+        progressAvailable: false,
+        progress: null,
+        budgetAvailable: false,
+        budgetUsed: null,
+        tokensAvailable: false,
+        tokens: { in: null, out: null, available: false },
+        quotaAvailable: false,
+        quota: { window: '5h', used: null, available: false },
         elapsedSec: 0,
         status: 'idle',
         task: '',
         taskTitle: '',
       },
-      stages: [
-        { id: 'PM', label: 'PM', title: 'Waiting for snapshot', status: 'pending', durationSec: 0, model: 'unknown', isFallback: true },
-        { id: 'Dev', label: 'Dev', title: 'Waiting for snapshot', status: 'pending', durationSec: 0, model: 'unknown', isFallback: true },
-        { id: 'QA', label: 'QA', title: 'Waiting for snapshot', status: 'pending', durationSec: 0, model: 'unknown', isFallback: true },
-      ],
+      stages: [],
       backlog: [],
-      backlogCounts: { pending: 0, in_progress: 0, done: 0 },
+      backlogCounts: { pending: 0, in_progress: 0, done: 0, failed: 0 },
       backlogSelectedId: '',
       runnerControl: createRunnerControlModel({
         source: 'loading',
@@ -1116,9 +1468,35 @@
         runnerMode: 'unknown',
       }),
       goals: { p0: [], p1: [] },
+      goalsSnapshot: {
+        path: '',
+        exists: false,
+        mtime: null,
+        size: null,
+        raw_text: '',
+        items: { p0: [], p1: [] },
+        completion: {},
+        summary: {
+          has_goals: false,
+          project_complete: false,
+          p0_total: 0,
+          p0_done: 0,
+          p1_total: 0,
+          p1_done: 0,
+          all_total: 0,
+          all_done: 0,
+          total: 0,
+          done: 0,
+          unchecked: 0,
+          warnings: 0,
+        },
+        warnings: [],
+        completion_level: 'all',
+      },
       goalsMeta: { total: 0, done: 0 },
       goalsPath: '',
       goalsCompletion: {},
+      goalsDirty: false,
       logs: [],
       logTail: '',
       logFiles: {},
@@ -1348,9 +1726,13 @@
         tokens24h: [],
         success24h: [],
         budget: [],
-        tokens: { in: 0, out: 0 },
+        tokens: { in: null, out: null, available: false },
         last_stage: '',
-        quota_used: 0,
+        quota_used: null,
+        budget_used: null,
+        tokensAvailable: false,
+        budgetAvailable: false,
+        quotaAvailable: false,
       },
       notifications: [],
       progress: {
@@ -1359,12 +1741,16 @@
         tasks_done: 0,
         tasks_total: 0,
         tasks_failed: 0,
-        progress: 0,
+        progress: null,
+        progress_available: false,
         current_task_id: '',
         current_task_title: '',
+        attempt: null,
+        worktree_mode: '',
         goals: { p0: [], p1: [] },
         backlog: { items: [], counts: {}, selected_id: '' },
         final_reason: '',
+        final_rc: null,
         state: { done: [], failed: [], warnings: [] },
       },
       sectionState: {
@@ -1385,13 +1771,14 @@
   }
 
   function createFallbackFixture() {
+    const blank = createBlankModel();
     return {
       ok: true,
       sourceMode: 'fallback',
       snapshotStatus: 'fallback',
       snapshotLabel: 'Fallback data',
       lastSnapshotAt: nowMs(),
-      latestRunDir: 'offline-fallback',
+      latestRunDir: '',
       repo: {
         path: 'C:/Dev/AgentCLI',
         name: 'AgentCLI',
@@ -1399,24 +1786,10 @@
         branch: 'main',
       },
       activeRun: {
-        id: 'run_offline_20260426_000000',
+        ...clone(blank.activeRun),
         repo: 'C:/Dev/AgentCLI',
         repoLabel: 'AgentCLI',
         branch: 'main',
-        backend: 'codex',
-        startedAt: minutesAgo(28),
-        stage: 'Dev',
-        stageIndex: 1,
-        iteration: 1,
-        maxIterations: 3,
-        progress: 0.34,
-        budgetUsed: 0.22,
-        tokens: { in: 18420, out: 6421 },
-        quota: { window: '5h', used: 0.22 },
-        elapsedSec: 28 * 60,
-        status: 'running',
-        task: 'T-020',
-        taskTitle: 'API-backed observation path',
       },
       runnerControl: createRunnerControlModel({
         source: 'fallback',
@@ -1427,17 +1800,10 @@
         runStatus: 'idle',
         runnerMode: 'unknown',
       }),
-      stages: [
-        { id: 'PM', label: 'PM', title: 'Backlog planning', status: 'done', durationSec: 300, model: 'gpt-5.5' },
-        { id: 'Dev', label: 'Dev', title: 'API-backed observation path', status: 'running', durationSec: 1060, model: 'gpt-5.4-mini' },
-        { id: 'QA', label: 'QA', title: 'Verification', status: 'pending', durationSec: 0, model: 'gpt-5.4-mini' },
-      ],
-      backlog: [
-        { id: 'T-020', title: 'API-backed observation path', status: 'in_progress', priority: 'P0', tags: ['web', 'api'], estimate: 'M', skill: 'observability', description: 'Wire the browser console to read-only status endpoints.' },
-        { id: 'T-021', title: 'Bounded log tail', status: 'pending', priority: 'P1', tags: ['logs'], estimate: 'S', skill: '', description: 'Keep the log DOM bounded during refresh.' },
-      ],
-      backlogCounts: { pending: 1, in_progress: 1, done: 0 },
-      backlogSelectedId: 'T-020',
+      stages: clone(blank.stages),
+      backlog: clone(blank.backlog),
+      backlogCounts: clone(blank.backlogCounts),
+      backlogSelectedId: blank.backlogSelectedId,
       goals: {
         p0: [
           { done: false, text: 'Observe the current run in a browser without CLI shell access', note: '' },
@@ -1446,9 +1812,58 @@
           { done: false, text: 'Keep the browser useful when no run exists', note: '' },
         ],
       },
+      goalsSnapshot: {
+        path: '.doc/GOALS.md',
+        exists: true,
+        mtime: null,
+        size: null,
+        raw_text: '# Project Goals\n\n## P0\n- [ ] Observe the current run in a browser without CLI shell access\n\n## P1\n- [ ] Keep the browser useful when no run exists\n',
+        items: {
+          p0: [
+            {
+              done: false,
+              checked: false,
+              checkbox: '[ ]',
+              text: 'Observe the current run in a browser without CLI shell access',
+              note: '',
+              lineNumber: 4,
+              line: 4,
+            },
+          ],
+          p1: [
+            {
+              done: false,
+              checked: false,
+              checkbox: '[ ]',
+              text: 'Keep the browser useful when no run exists',
+              note: '',
+              lineNumber: 7,
+              line: 7,
+            },
+          ],
+        },
+        completion: { has_goals: true, project_complete: false, p0_total: 1, p0_done: 0, p1_total: 1, p1_done: 0, all_total: 2, all_done: 0, unmet_p0: ['Observe the current run in a browser without CLI shell access'], unmet_p1: ['Keep the browser useful when no run exists'] },
+        summary: {
+          has_goals: true,
+          project_complete: false,
+          p0_total: 1,
+          p0_done: 0,
+          p1_total: 1,
+          p1_done: 0,
+          all_total: 2,
+          all_done: 0,
+          total: 2,
+          done: 0,
+          unchecked: 2,
+          warnings: 0,
+        },
+        warnings: [],
+        completion_level: 'all',
+      },
       goalsMeta: { total: 2, done: 0 },
       goalsPath: '.doc/GOALS.md',
       goalsCompletion: { project_complete: false },
+      goalsDirty: false,
       logs: [
         { t: fmtClock(minutesAgo(28)), lvl: 'info', stage: 'boot', msg: 'Fallback fixture loaded because the API was not reachable.' },
         { t: fmtClock(minutesAgo(12)), lvl: 'warn', stage: 'Dev', msg: 'Showing local fallback data for offline rendering.' },
@@ -1537,42 +1952,44 @@
         tokens24h: [320, 480, 620, 720, 840],
         success24h: [1, 1, 1, 1, 1],
         budget: [0.12, 0.18, 0.24, 0.31, 0.34],
-        tokens: { in: 18420, out: 6421 },
+        tokens: { in: 18420, out: 6421, available: true },
         last_stage: 'Dev',
         quota_used: 0.22,
+        budget_used: 0.34,
+        tokensAvailable: true,
+        budgetAvailable: true,
+        quotaAvailable: true,
       },
       notifications: [
         { t: minutesAgo(28), kind: 'run_start', text: 'Fallback run loaded for offline rendering.', run: 'run_offline_20260426_000000' },
         { t: minutesAgo(12), kind: 'stalled', text: 'Offline fallback is not live data.', run: 'run_offline_20260426_000000' },
       ],
       progress: {
-        latest_run_dir: 'offline-fallback',
-        run_status: 'running',
-        tasks_done: 1,
-        tasks_total: 2,
+        ...clone(blank.progress),
+        latest_run_dir: '',
+        run_status: 'idle',
+        tasks_done: 0,
+        tasks_total: 0,
         tasks_failed: 0,
-        progress: 0.5,
-        current_task_id: 'T-020',
-        current_task_title: 'API-backed observation path',
-        goals: {
-          p0: { total: 1, done: 0 },
-          p1: { total: 1, done: 0 },
-        },
+        progress: null,
+        progress_available: false,
+        current_task_id: '',
+        current_task_title: '',
+        attempt: null,
+        worktree_mode: '',
         backlog: {
-          items: [
-            { id: 'T-020', title: 'API-backed observation path', status: 'in_progress', priority: 'P0', tags: ['web', 'api'], estimate: 'M', skill: 'observability', description: 'Wire the browser console to read-only status endpoints.' },
-            { id: 'T-021', title: 'Bounded log tail', status: 'pending', priority: 'P1', tags: ['logs'], estimate: 'S', skill: '', description: 'Keep the log DOM bounded during refresh.' },
-          ],
-          counts: { pending: 1, in_progress: 1, done: 0 },
-          selected_id: 'T-020',
+          items: [],
+          counts: {},
+          selected_id: '',
         },
         final_reason: '',
+        final_rc: 0,
         state: { done: [], failed: [], warnings: [] },
       },
       sectionState: {
-        activeRun: buildSectionState('activeRun', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
-        stages: buildSectionState('stages', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
-        backlog: buildSectionState('backlog', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
+        activeRun: buildSectionState('activeRun', 'empty', fallbackSectionMessage('activeRun'), 'fallback'),
+        stages: buildSectionState('stages', 'empty', fallbackSectionMessage('stages'), 'fallback'),
+        backlog: buildSectionState('backlog', 'empty', fallbackSectionMessage('backlog'), 'fallback'),
         goals: buildSectionState('goals', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         config: buildSectionState('config', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         prompts: buildSectionState('prompts', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
@@ -1624,10 +2041,13 @@
     state.backlog = toArray(next.backlog);
     state.backlogCounts = toObject(next.backlogCounts);
     state.backlogSelectedId = toText(next.backlogSelectedId, '');
-    state.goals = toObject(next.goals);
-    state.goalsMeta = toObject(next.goalsMeta);
-    state.goalsPath = toText(next.goalsPath, '');
-    state.goalsCompletion = toObject(next.goalsCompletion);
+    state.goalsSnapshot = deepMerge(clone(defaults.goalsSnapshot), toObject(next.goalsSnapshot));
+    state.goalsMeta = toObject(next.goalsMeta || state.goalsSnapshot.summary);
+    state.goalsPath = toText(next.goalsPath || state.goalsSnapshot.path, '');
+    state.goalsCompletion = toObject(next.goalsCompletion || state.goalsSnapshot.completion);
+    if (!state.goalsDirty) {
+      state.goals = deepMerge(clone(defaults.goals), toObject(next.goals));
+    }
     state.logs = toArray(next.logs).slice(-MAX_LOG_ROWS);
     state.logTail = toText(next.logTail, '');
     state.logFiles = toObject(next.logFiles);
@@ -1648,8 +2068,12 @@
     state.configSchema = clone(defaults.configSchema);
     state.serverMode = state.sourceMode === 'api';
     state.logsPaused = state.serverMode ? true : state.logsPaused;
-    if (!state.backlogSelectedId && state.backlog.length) {
-      state.backlogSelectedId = state.backlog.find((task) => task.status === 'in_progress')?.id || state.backlog[0].id;
+    const nextBacklogSelection = toText(next.backlogSelectedId, '');
+    state.backlogSelectedId = nextBacklogSelection;
+    if (nextBacklogSelection) {
+      state.backlogSelection = nextBacklogSelection;
+    } else if (state.backlogSelection && !state.backlog.some((task) => task.id === state.backlogSelection)) {
+      state.backlogSelection = '';
     }
     if (!state.historySelection && state.history.length) {
       state.historySelection = state.history[0].id;
@@ -1754,52 +2178,95 @@
   }
 
   function metricCard(label, value, sub, accent = false) {
+    const classes = ['stat-card__value'];
+    if (accent) {
+      classes.push('stat-card__value--accent');
+    }
+    if (value === 'unavailable') {
+      classes.push('stat-card__value--unavailable');
+    }
     return `
       <div class="stat-card">
         <div class="stat-card__label">${escapeHTML(label)}</div>
-        <div class="stat-card__value ${accent ? 'stat-card__value--accent' : ''}">${escapeHTML(value)}</div>
+        <div class="${classes.join(' ')}">${escapeHTML(value)}</div>
         <div class="stat-card__sub">${sub || ''}</div>
       </div>
     `;
   }
 
   function kpiCard(label, value, sub, accent = false) {
+    const classes = ['kpi-card__value'];
+    if (accent) {
+      classes.push('kpi-card__value--accent');
+    }
+    if (value === 'unavailable') {
+      classes.push('kpi-card__value--unavailable');
+    }
     return `
       <div class="kpi-card">
         <div class="kpi-card__label">${escapeHTML(label)}</div>
-        <div class="kpi-card__value ${accent ? 'kpi-card__value--accent' : ''}">${escapeHTML(value)}</div>
+        <div class="${classes.join(' ')}">${escapeHTML(value)}</div>
         <div class="kpi-card__sub">${sub || ''}</div>
       </div>
     `;
   }
 
+  function detailCard(label, value, valueClass = '') {
+    return `
+      <div class="runner-control__detail">
+        <div class="runner-control__label">${escapeHTML(label)}</div>
+        <div class="runner-control__value${valueClass ? ` ${valueClass}` : ''}">${escapeHTML(value)}</div>
+      </div>
+    `;
+  }
+
   function renderTimelineConnector(nextStatus) {
-    const cls = nextStatus === 'running' ? 'connector connector--running' : 'connector connector--done';
+    const normalized = normalizeStageStatus(nextStatus, 'pending');
+    const cls = normalized === 'running' ? 'connector connector--running' : normalized === 'failed' ? 'connector connector--warn' : 'connector connector--done';
     return `<div class="${cls}"></div>`;
   }
 
+  function renderLifecycleLane(stages, emptyMessage = 'No lifecycle records were published yet.') {
+    if (!stages.length) {
+      return `<div class="summary-note">${escapeHTML(emptyMessage)}</div>`;
+    }
+    return stages
+      .map((stage, index) => `
+        ${renderStageCard(stage)}
+        ${index < stages.length - 1 ? renderTimelineConnector(stages[index + 1].status) : ''}
+      `)
+      .join('');
+  }
+
   function renderStageCard(stage) {
-    const status = stage.status;
-    const cardClass = status === 'running' ? 'stage-card stage-card--running' : 'stage-card';
-    const iconClass =
-      status === 'done'
-        ? 'stage-icon stage-icon--done'
-        : status === 'running'
-          ? 'stage-icon stage-icon--running'
-          : 'stage-icon stage-icon--pending';
-    const iconText = status === 'done' ? 'OK' : status === 'running' ? 'RUN' : 'WAIT';
+    const status = normalizeStageStatus(stage.status, 'pending');
+    const cardClass = lifecycleStageCardClass(status);
+    const iconClass = lifecycleStageIconClass(status);
+    const iconText = lifecycleStageIconText(status);
+    const label = toText(stage.label, stage.id || 'Stage');
+    const title = toText(stage.title || stage.taskTitle || stage.label, stage.label || 'Lifecycle stage');
+    const model = toText(stage.model, '');
+    const cycleText = stage.cycle != null ? `cycle ${stage.cycle}` : 'cycle unavailable';
+    const taskIdText = stage.taskId ? `task ${stage.taskId}` : 'task unavailable';
+    const attemptText = stage.attempt != null ? `attempt ${stage.attempt}` : 'attempt unavailable';
+    const startedText = stage.startedAt ? `started ${fmtClock(stage.startedAt)}` : 'started unavailable';
+    const endedText = stage.endedAt ? `ended ${fmtClock(stage.endedAt)}` : status === 'running' ? 'in progress' : 'ended unavailable';
+    const durationText = stage.durationSec != null ? fmtDuration(stage.durationSec) : '--';
+    const recentOutput = compactText(stage.recentOutput, 180) || 'Recent output unavailable.';
     return `
       <div class="${cardClass}">
         <div class="stage-card__head">
           <div class="${iconClass}">${iconText}</div>
           <div class="stage-card__title">
-            <div class="stage-card__label">${escapeHTML(stage.label)}</div>
-            <div class="stage-card__meta">${escapeHTML(stage.status)}</div>
+            <div class="stage-card__label">${escapeHTML(label)}</div>
+            <div class="stage-card__meta">${escapeHTML(status)} | ${escapeHTML(cycleText)}</div>
           </div>
         </div>
         <div class="stage-card__body">
-          ${escapeHTML(stage.title)}<br>
-          <span class="muted">${escapeHTML(stage.model)} | ${escapeHTML(fmtDuration(stage.durationSec))}</span>
+          <div>${escapeHTML(title)}</div>
+          <div class="muted">${escapeHTML(model || 'model unavailable')} | ${escapeHTML(durationText)}</div>
+          <div class="summary-note" style="margin-top:6px;">${escapeHTML([taskIdText, attemptText, startedText, endedText].join(' | '))}</div>
+          <div class="summary-note" style="margin-top:6px;">${escapeHTML(recentOutput)}</div>
         </div>
       </div>
     `;
@@ -1807,10 +2274,16 @@
 
   function renderTaskCard(task, bucketKey) {
     const isSelected = state.backlogSelection === task.id;
-    const progress = task.status === 'in_progress' ? 0.62 : task.status === 'done' ? 1 : 0.1;
+    const status = normalizeBacklogStatus(task.status, 'pending');
+    const progress = status === 'in_progress' ? 0.62 : status === 'done' ? 1 : 0.1;
     const tags = (task.tags || []).map((tag) => chip(tag)).join('');
     const skill = task.skill ? chip(task.skill, 'chip--info') : '';
-    const meta = [skill, chip(task.estimate)].filter(Boolean).join('');
+    const meta = [chip(status.replace(/_/g, ' '), backlogStatusToneClass(status)), chip(task.estimate), skill].filter(Boolean).join('');
+    const dependencyText = task.dependsOn && task.dependsOn.length ? `Depends on ${task.dependsOn.join(', ')}` : 'Dependencies unavailable';
+    const fileScopeText = task.fileScope || (task.files && task.files.length ? task.files.join(', ') : 'File scope unavailable');
+    const failureReason = toText(task.failureReason || toObject(task.failure).reason, '');
+    const failureDetail = toText(task.failureDetail || toObject(task.failure).detail, '');
+    const recentOutput = compactText(task.recentOutput, 180) || 'Recent output unavailable.';
     return `
       <button type="button" class="task-card" data-backlog-select="${escapeHTML(task.id)}" aria-pressed="${isSelected ? 'true' : 'false'}">
         <div class="task-card__head">
@@ -1822,7 +2295,12 @@
           ${tags}
           ${meta}
         </div>
-        ${task.status === 'in_progress' ? `
+        <div class="summary-note" style="margin-top:8px;">${escapeHTML(compactText(dependencyText, 140) || 'Dependencies unavailable')}</div>
+        <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(`File scope: ${fileScopeText}`, 140) || 'File scope unavailable')}</div>
+        <div class="summary-note" style="margin-top:4px;">${escapeHTML(task.attempt != null ? `Attempt ${task.attempt}` : 'Attempt unavailable')}</div>
+        <div class="summary-note" style="margin-top:4px;">${escapeHTML(failureReason ? `Failure: ${failureReason}${failureDetail ? ` | ${compactText(failureDetail, 120)}` : ''}` : 'Failure unavailable')}</div>
+        <div class="summary-note" style="margin-top:4px;">${escapeHTML(recentOutput)}</div>
+        ${status === 'in_progress' ? `
           <div class="meter" style="margin-top:8px; width: 100%;"><div class="meter__fill meter__fill--warn" style="width:${progressWidth(progress)}"></div></div>
         ` : ''}
         ${isSelected ? `<div class="summary-note" style="margin-top:8px;">Selected for detail view</div>` : ''}
@@ -1832,6 +2310,8 @@
 
   function renderGoalItem(bucket, goal, index) {
     const done = Boolean(goal.done);
+    const sourceLine = goal.lineNumber || goal.line || 0;
+    const checkboxState = goal.checkbox || (done ? '[x]' : '[ ]');
     return `
       <div class="goal-item ${done ? 'goal-item--done' : ''}">
         <div class="goal-item__row">
@@ -1841,6 +2321,7 @@
           <div class="goal-item__body">
             <div class="goal-item__title ${done ? 'goal-item__title--done' : ''}">${escapeHTML(goal.text)}</div>
             ${goal.note ? `<div class="goal-item__note">${escapeHTML(goal.note)}</div>` : ''}
+            ${sourceLine ? `<div class="summary-note" style="margin-top:4px;">Source line ${escapeHTML(sourceLine)} · ${escapeHTML(checkboxState)}</div>` : ''}
             <div class="goal-item__actions">
               <button type="button" class="button button--tiny button--quiet" data-goal-action="edit" data-goal-bucket="${escapeHTML(bucket)}" data-goal-index="${index}">Edit</button>
               <button type="button" class="button button--tiny button--quiet" data-goal-action="move" data-goal-bucket="${escapeHTML(bucket)}" data-goal-index="${index}">
@@ -1919,10 +2400,10 @@
   function renderConfigValueSummary(path, schema, value) {
     if (!schema) return escapeHTML(JSON.stringify(value));
     if (schema.kind === 'bool') return escapeHTML(value === true ? 'enabled' : 'disabled');
-    if (schema.kind === 'enum') return escapeHTML(value == null || value === '' ? '—' : String(value));
-    if (schema.kind === 'multienum') return escapeHTML(fmtList(value || []) || '—');
-    if (schema.kind === 'number') return escapeHTML(value == null || value === '' ? '—' : String(value));
-    return escapeHTML(value == null || value === '' ? '—' : String(value));
+    if (schema.kind === 'enum') return escapeHTML(value == null || value === '' ? '--' : String(value));
+    if (schema.kind === 'multienum') return escapeHTML(fmtList(value || []) || '--');
+    if (schema.kind === 'number') return escapeHTML(value == null || value === '' ? '--' : String(value));
+    return escapeHTML(value == null || value === '' ? '--' : String(value));
   }
 
   function validateField(path, value, schema) {
@@ -2005,7 +2486,10 @@
     if (!state.backlog.length) {
       return null;
     }
-    return state.backlog.find((task) => task.id === state.backlogSelection) || state.backlog[0];
+    if (!state.backlogSelection) {
+      return null;
+    }
+    return state.backlog.find((task) => task.id === state.backlogSelection) || null;
   }
 
   function repoNameFromPath(value) {
@@ -2085,10 +2569,7 @@
   }
 
   function activeRunStatusClass() {
-    if (state.activeRun.status === 'running') return 'status-chip status-chip--running';
-    if (state.activeRun.status === 'stopping') return 'status-chip status-chip--warn';
-    if (state.activeRun.status === 'stopped') return 'status-chip status-chip--err';
-    return 'status-chip';
+    return runStatusClass(state.progress?.run_status || state.activeRun.status, state.progress?.final_reason || state.activeRun.finalReason);
   }
 
   function runnerControlBusyAction() {
@@ -2158,9 +2639,12 @@
 
   function renderTopbar() {
     const elapsed = state.activeRun.startedAt ? fmtDuration((nowMs() - state.activeRun.startedAt) / 1000) : '--';
-    const quotaPct = fmtPercent(state.activeRun.quota.used);
-    const budgetPct = fmtPercent(state.activeRun.budgetUsed);
-    const activeStatus = runStatusLabel(state.activeRun.status);
+    const quotaPct = metricText(state.activeRun.quotaAvailable, state.activeRun.quota.used, fmtPercent);
+    const budgetPct = metricText(state.activeRun.budgetAvailable, state.activeRun.budgetUsed, fmtPercent);
+    const quotaWidth = metricWidth(state.activeRun.quotaAvailable, state.activeRun.quota.used);
+    const budgetWidth = metricWidth(state.activeRun.budgetAvailable, state.activeRun.budgetUsed);
+    const activeStatus = runStatusLabel(state.progress?.run_status || state.activeRun.status, state.progress?.final_reason || state.activeRun.finalReason);
+    const activeTone = runStatusTone(state.progress?.run_status || state.activeRun.status, state.progress?.final_reason || state.activeRun.finalReason);
     const runLabel = state.activeRun.id || 'no-run';
     const snapshotLabel = state.snapshotLabel || (state.sourceMode === 'fallback' ? 'Fallback data' : 'API snapshot');
     const runnerBusyAction = runnerControlBusyAction();
@@ -2190,7 +2674,7 @@
       </div>
       <div class="topbar__status">
         <span class="${activeRunStatusClass()}">
-          <span class="${state.activeRun.status === 'running' ? 'dot dot--pulse' : 'dot'}" style="color: currentColor; background: currentColor;"></span>
+          <span class="${activeTone === 'running' ? 'dot dot--pulse' : 'dot'}" style="color: currentColor; background: currentColor;"></span>
           ${escapeHTML(activeStatus)}
         </span>
         <span class="status-chip">${escapeHTML(state.activeRun.stage || 'idle')} | iter ${escapeHTML(`${state.activeRun.iteration}/${state.activeRun.maxIterations}`)}</span>
@@ -2210,13 +2694,13 @@
         ${button(runnerControlActionLabel('stop', runnerBusyAction === 'stop'), 'runner-stop', 'button--danger', `aria-label="Stop runner" ${runnerControlButtonAttrs('stop')}`)}
         ${button(runnerControlActionLabel('reload', runnerBusyAction === 'reload'), 'runner-reload', 'button--quiet', `aria-label="Reload runner" ${runnerControlButtonAttrs('reload')}`)}
         ${button(`Command`, 'open-palette', 'button--ghost', 'aria-label="Open command palette"')}
-        <span class="meter-chip" title="Quota usage">
+        <span class="meter-chip ${state.activeRun.quotaAvailable ? '' : 'meter-chip--unavailable'}" title="Quota usage">
           quota ${escapeHTML(quotaPct)}
-          <span class="meter"><span class="meter__fill meter__fill--info" style="width:${escapeHTML(quotaPct)}"></span></span>
+          <span class="meter ${state.activeRun.quotaAvailable ? '' : 'meter--unavailable'}"><span class="meter__fill ${state.activeRun.quotaAvailable ? 'meter__fill--info' : 'meter__fill--muted'}" style="width:${escapeHTML(quotaWidth)}"></span></span>
         </span>
-        <span class="meter-chip" title="Budget usage">
+        <span class="meter-chip ${state.activeRun.budgetAvailable ? '' : 'meter-chip--unavailable'}" title="Budget usage">
           budget ${escapeHTML(budgetPct)}
-          <span class="meter"><span class="meter__fill meter__fill--warn" style="width:${escapeHTML(budgetPct)}"></span></span>
+          <span class="meter ${state.activeRun.budgetAvailable ? '' : 'meter--unavailable'}"><span class="meter__fill ${state.activeRun.budgetAvailable ? 'meter__fill--warn' : 'meter__fill--muted'}" style="width:${escapeHTML(budgetWidth)}"></span></span>
         </span>
       </div>
     `;
@@ -2226,6 +2710,8 @@
     const repoLabel = state.activeRun.repoLabel || state.repo.name || 'agentcli';
     const branchLabel = state.activeRun.branch || state.repo.branch || 'HEAD';
     const quotaWindow = state.activeRun.quota.window || '5h';
+    const quotaPct = metricText(state.activeRun.quotaAvailable, state.activeRun.quota.used, fmtPercent);
+    const quotaWidth = metricWidth(state.activeRun.quotaAvailable, state.activeRun.quota.used);
     const liveLabel =
       state.snapshotStatus === 'loading'
         ? 'loading snapshot'
@@ -2284,13 +2770,13 @@
         ${groupsHTML}
         <div class="sidebar-card">
           <div class="sidebar-card__title">
-            <span class="dot dot--pulse"></span>
+            <span class="${runStatusTone(state.progress?.run_status || state.activeRun.status) === 'running' ? 'dot dot--pulse' : 'dot'}"></span>
             ${escapeHTML(liveLabel)}
           </div>
           <div>${escapeHTML(repoLabel)} | ${escapeHTML(branchLabel)}</div>
-          <div class="sidebar-card__sub">${escapeHTML(quotaWindow)} quota | ${escapeHTML(fmtPercent(state.activeRun.quota.used))} used</div>
-          <div class="meter" style="margin-top:8px; width: 100%;">
-            <div class="meter__fill" style="width:${escapeHTML(fmtPercent(state.activeRun.quota.used))}"></div>
+          <div class="sidebar-card__sub">${escapeHTML(quotaWindow)} quota | ${escapeHTML(quotaPct)} used</div>
+          <div class="meter ${state.activeRun.quotaAvailable ? '' : 'meter--unavailable'}" style="margin-top:8px; width: 100%;">
+            <div class="meter__fill ${state.activeRun.quotaAvailable ? 'meter__fill--info' : 'meter__fill--muted'}" style="width:${escapeHTML(quotaWidth)}"></div>
           </div>
         </div>
       </div>
@@ -2369,7 +2855,40 @@
 
   function renderDashboard() {
     const run = state.activeRun;
-    const budgetCap = toNumber(state.config?.budget?.max_usd || 0, 0);
+    const progress = state.progress || {};
+    const budgetCap = toMaybeNumber(state.config?.budget?.max_usd);
+    const taskId = progress.current_task_id || run.task || '';
+    const taskTitle = progress.current_task_title || run.taskTitle || '';
+    const attempt = progress.attempt ?? run.attempt;
+    const attemptText = attempt == null ? 'unavailable' : String(attempt);
+    const branchText = progress.branch || run.branch || state.repo.branch || 'HEAD';
+    const worktreeModeText = progress.worktree_mode || run.worktreeMode || '';
+    const runDirText = run.runDir || progress.latest_run_dir || state.latestRunDir || '';
+    const finalReason = progress.final_reason || run.finalReason || '';
+    const runStatus = progress.run_status || run.status;
+    const runTone = runStatusTone(runStatus, finalReason);
+    const runLabel = runStatusLabel(runStatus, finalReason);
+    const runSummary = [
+      `task ${taskId || 'unavailable'}`,
+      taskTitle || 'task title unavailable',
+      `attempt ${attemptText}`,
+      `branch ${branchText}`,
+      `worktree ${worktreeModeText || 'unavailable'}`,
+      runDirText ? `run ${runDirText}` : 'run directory unavailable',
+      finalReason ? `reason ${finalReason}` : null,
+    ]
+      .filter(Boolean)
+      .join(' | ');
+    const hasTokenTelemetry = Boolean(
+      run.tokensAvailable ||
+        run.tokens?.available ||
+        run.tokens?.in != null ||
+        run.tokens?.out != null
+    );
+    const tokenIn = hasTokenTelemetry ? run.tokens.in : null;
+    const tokenOut = hasTokenTelemetry ? run.tokens.out : null;
+    const tokenTotal = hasTokenTelemetry && tokenIn != null && tokenOut != null ? Number(tokenIn) + Number(tokenOut) : null;
+    const budgetValue = run.budgetAvailable && run.budgetUsed != null && budgetCap != null ? run.budgetUsed * budgetCap : null;
     const doneTasks = state.backlog.filter((task) => task.status === 'done').length;
     const totalTasks = state.backlog.length;
     const p0Done = state.goals.p0.filter((goal) => goal.done).length;
@@ -2377,6 +2896,14 @@
     const selectedTask = currentBacklogTask();
     const latestLogs = state.logs.slice(-8);
     const recentNotifs = state.notifications.slice(0, 4);
+    const tokenValueText = tokenTotal != null ? fmtNumberShort(tokenTotal) : 'unavailable';
+    const tokenSubText = hasTokenTelemetry
+      ? `in ${metricText(hasTokenTelemetry, tokenIn, fmtNumberShort)} | out ${metricText(hasTokenTelemetry, tokenOut, fmtNumberShort)}`
+      : 'in unavailable | out unavailable';
+    const budgetCardValue = budgetValue != null ? fmtMoney(budgetValue) : 'unavailable';
+    const budgetCardSub = budgetCap != null
+      ? `of ${fmtMoney(budgetCap)} | ${metricText(run.budgetAvailable, run.budgetUsed, fmtPercent)}`
+      : `of unavailable | ${metricText(run.budgetAvailable, run.budgetUsed, fmtPercent)}`;
 
     const body = `
       <div class="view-grid view-grid--two">
@@ -2386,33 +2913,17 @@
           <div class="stat-grid stat-grid--four">
             ${metricCard('Stage', run.stage, `iter ${run.iteration}/${run.maxIterations}`, true)}
             ${metricCard('Tasks', `${doneTasks}/${totalTasks}`, `${totalTasks - doneTasks} remaining`)}
-            ${metricCard('Tokens', `${fmtNumberShort(run.tokens.in + run.tokens.out)}`, `in ${fmtNumberShort(run.tokens.in)} | out ${fmtNumberShort(run.tokens.out)}`)}
-            ${metricCard('Budget', fmtMoney(run.budgetUsed * budgetCap), `of ${fmtMoney(budgetCap)} | ${fmtPercent(run.budgetUsed)}`)}
+            ${metricCard('Tokens', tokenValueText, tokenSubText, false, tokenValueText === 'unavailable' ? 'unavailable' : '')}
+            ${metricCard('Budget', budgetCardValue, budgetCardSub, false, budgetCardValue === 'unavailable' ? 'unavailable' : '')}
           </div>
 
           ${panel(
             'Pipeline snapshot',
-            `active task ${escapeHTML(run.task)} | ${escapeHTML(run.backend)}`,
+            `active task ${escapeHTML(taskId || 'unavailable')} | ${escapeHTML(run.backend)}`,
             `
               <div class="pipeline">
                 <div class="pipeline__row">
-                  ${renderStageCard(state.stages[0])}
-                  ${renderTimelineConnector(state.stages[1].status)}
-                  ${renderStageCard(state.stages[1])}
-                  ${renderTimelineConnector(state.stages[2].status)}
-                  ${renderStageCard(state.stages[2])}
-                </div>
-                <div class="view-grid view-grid--three">
-                  ${state.stages.map((stage) => `
-                    <div class="task-card">
-                      <div class="task-card__head">
-                        <span class="task-card__id">[${escapeHTML(stage.label)}]</span>
-                        <span class="chip chip--${stage.status === 'done' ? 'accent' : stage.status === 'running' ? 'warn' : 'info'}">${escapeHTML(stage.status)}</span>
-                      </div>
-                      <div class="task-card__title">${escapeHTML(stage.title)}</div>
-                      <div class="task-card__meta">${escapeHTML(stage.model)} | ${escapeHTML(fmtDuration(stage.durationSec))}</div>
-                    </div>
-                  `).join('')}
+                  ${renderLifecycleLane(state.stages)}
                 </div>
               </div>
             `
@@ -2435,24 +2946,24 @@
         <div class="view-grid">
           ${panel(
             'Run facts',
-            escapeHTML(run.repo),
+            `${escapeHTML(taskId || 'unavailable')} | ${escapeHTML(taskTitle || 'task title unavailable')}`,
             `
-              <div class="compact-list">
-                <div class="compact-list__item">
-                  <span class="compact-list__bullet"></span>
-                  <div class="compact-list__body">${escapeHTML(run.branch)}</div>
+              <div class="runner-control">
+                <div class="${runBannerClass(runStatus, finalReason)}">
+                  <span class="${statusDotClass(runStatus)}" style="background: currentColor;"></span>
+                  <div>
+                    <div class="section-banner__title">${escapeHTML(runLabel)}</div>
+                    <div class="section-banner__copy">${escapeHTML(runSummary)}</div>
+                  </div>
                 </div>
-                <div class="compact-list__item">
-                  <span class="compact-list__bullet"></span>
-                  <div class="compact-list__body">Started ${escapeHTML(fmtTime(run.startedAt))} | ${escapeHTML(fmtRelative(run.startedAt))}</div>
-                </div>
-                <div class="compact-list__item">
-                  <span class="compact-list__bullet"></span>
-                  <div class="compact-list__body">Quota window ${escapeHTML(run.quota.window)} | ${escapeHTML(fmtPercent(run.quota.used))} used</div>
-                </div>
-                <div class="compact-list__item">
-                  <span class="compact-list__bullet"></span>
-                  <div class="compact-list__body">Budget used ${escapeHTML(fmtPercent(run.budgetUsed))} | elapsed ${escapeHTML(fmtDuration(run.elapsedSec))}</div>
+                <div class="runner-control__details">
+                  ${detailCard('Current task id', taskId || 'unavailable')}
+                  ${detailCard('Current task title', taskTitle || 'unavailable')}
+                  ${detailCard('Attempt', attemptText)}
+                  ${detailCard('Branch', branchText)}
+                  ${detailCard('Worktree mode', worktreeModeText || 'unavailable')}
+                  ${detailCard('Run directory', runDirText || 'unavailable')}
+                  ${finalReason ? detailCard('Final reason', finalReason, runTone === 'failed' ? 'err' : runTone === 'stopped' ? 'warn' : (runTone === 'completed' || runTone === 'success') ? 'accent' : 'muted') : ''}
                 </div>
               </div>
             `
@@ -2489,13 +3000,17 @@
                   </div>
                   <div class="task-card__title">${escapeHTML(selectedTask.title)}</div>
                   <div class="task-card__meta">
-                    ${chip(selectedTask.status, selectedTask.status === 'done' ? 'chip--accent' : selectedTask.status === 'in_progress' ? 'chip--warn' : 'chip--info')}
+                    ${chip(normalizeBacklogStatus(selectedTask.status, 'pending').replace(/_/g, ' '), backlogStatusToneClass(selectedTask.status))}
                     ${chip(selectedTask.estimate)}
                     ${selectedTask.skill ? chip(selectedTask.skill, 'chip--info') : ''}
                   </div>
+                  <div class="summary-note" style="margin-top:8px;">${escapeHTML(selectedTask.dependsOn && selectedTask.dependsOn.length ? compactText(`Depends on ${selectedTask.dependsOn.join(', ')}`, 140) : 'Dependencies unavailable')}</div>
+                  <div class="summary-note" style="margin-top:4px;">${escapeHTML(selectedTask.fileScope ? compactText(`File scope: ${selectedTask.fileScope}`, 140) : 'File scope unavailable')}</div>
+                  <div class="summary-note" style="margin-top:4px;">${escapeHTML(selectedTask.attempt != null ? `Attempt ${selectedTask.attempt}` : 'Attempt unavailable')}</div>
+                  <div class="summary-note" style="margin-top:4px;">${escapeHTML(selectedTask.failureReason ? `Failure: ${selectedTask.failureReason}${selectedTask.failureDetail ? ` | ${compactText(selectedTask.failureDetail, 120)}` : ''}` : 'Failure unavailable')}</div>
                 </div>
               `
-              : `<div class="summary-note">No task selected.</div>`
+              : state.backlog.length ? `<div class="summary-note">No task selected.</div>` : `<div class="summary-note">No backlog artifacts were published yet.</div>`
           )}
 
           ${panel(
@@ -2523,7 +3038,7 @@
     return viewShell(
       'dashboard',
       'Dashboard',
-      `${escapeHTML(run.repo)} | ${escapeHTML(run.id)} | ${escapeHTML(run.stage)} stage live`,
+      `${escapeHTML(taskId || 'unavailable')} | ${escapeHTML(taskTitle || 'task title unavailable')} | ${escapeHTML(branchText)} | ${escapeHTML(run.id)}`,
       `
         ${button('Open Pipeline', 'nav-pipeline', 'button--quiet')}
         ${button('Open Logs', 'nav-logs', 'button--quiet')}
@@ -2553,56 +3068,41 @@
   }
 
   function renderPipeline() {
-    const stageSummary = state.stages
-      .map((stage, index) => `
-        <div class="stage-card ${stage.status === 'running' ? 'stage-card--running' : ''}">
-          <div class="stage-card__head">
-            <div class="${stage.status === 'done' ? 'stage-icon stage-icon--done' : stage.status === 'running' ? 'stage-icon stage-icon--running' : 'stage-icon stage-icon--pending'}">
-              ${stage.status === 'done' ? 'OK' : stage.status === 'running' ? 'RUN' : 'WAIT'}
-            </div>
-            <div class="stage-card__title">
-              <div class="stage-card__label">${escapeHTML(stage.label)}</div>
-              <div class="stage-card__meta">${escapeHTML(stage.status)}</div>
-            </div>
+    const hasTokenTelemetry = Boolean(
+      state.activeRun.tokensAvailable ||
+        state.activeRun.tokens?.available ||
+        state.activeRun.tokens?.in != null ||
+        state.activeRun.tokens?.out != null
+    );
+    const tokenIn = hasTokenTelemetry ? state.activeRun.tokens.in : null;
+    const tokenOut = hasTokenTelemetry ? state.activeRun.tokens.out : null;
+    const tokenTotal = hasTokenTelemetry && tokenIn != null && tokenOut != null ? Number(tokenIn) + Number(tokenOut) : null;
+    const tokenInputText = metricText(hasTokenTelemetry, tokenIn, fmtNumberShort);
+    const tokenOutputText = metricText(hasTokenTelemetry, tokenOut, fmtNumberShort);
+    const tokenBudgetText = metricText(state.activeRun.budgetAvailable, state.activeRun.budgetUsed, fmtPercent);
+    const tokenSparkline = state.metrics.tokens24h.length
+      ? buildSparkline(state.metrics.tokens24h, 320, 44, 'rgba(126,227,138,0.12)', '#7ee38a')
+      : '<div class="summary-note">Token telemetry unavailable.</div>';
+    const stageSummary = renderLifecycleLane(state.stages);
+    const outputs = state.stages.length
+      ? state.stages.map((stage) => `
+        <div class="task-card">
+          <div class="task-card__head">
+            <span class="task-card__id">${escapeHTML(stage.label)}</span>
+            <span class="chip ${lifecycleStatusToneClass(stage.status)}">${escapeHTML(normalizeStageStatus(stage.status, 'pending').replace(/_/g, ' '))}</span>
           </div>
-          <div class="stage-card__body">
-            ${escapeHTML(stage.title)}<br>
-            <span class="muted">${escapeHTML(stage.model)} | ${escapeHTML(fmtDuration(stage.durationSec))}</span>
+          <div class="task-card__title">${escapeHTML(stage.taskTitle || stage.title || 'Lifecycle record')}</div>
+          <div class="task-card__meta">
+            ${chip(stage.taskId || 'task unavailable', 'chip--info')}
+            ${chip(stage.attempt != null ? `attempt ${stage.attempt}` : 'attempt unavailable', stage.attempt != null ? 'chip--accent' : 'chip--info')}
+            ${chip(stage.cycle != null ? `cycle ${stage.cycle}` : 'cycle unavailable', 'chip--info')}
+            ${stage.model ? chip(stage.model, 'chip--info') : ''}
           </div>
+          <div class="summary-note" style="margin-top:8px;">${escapeHTML(stage.startedAt ? `Started ${fmtClock(stage.startedAt)}` : 'Started unavailable')} | ${escapeHTML(stage.endedAt ? `Ended ${fmtClock(stage.endedAt)}` : normalizeStageStatus(stage.status, 'pending') === 'running' ? 'In progress' : 'Ended unavailable')}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(stage.recentOutput, 220) || 'Recent output unavailable.')}</div>
         </div>
-        ${index < state.stages.length - 1 ? renderTimelineConnector(state.stages[index + 1].status) : ''}
-      `)
-      .join('');
-
-    const latestDevLogs = state.logs.filter((line) => line.stage === 'Dev').slice(-3);
-    const latestPmLogs = state.logs.filter((line) => line.stage === 'PM').slice(-3);
-    const latestQaLogs = state.logs.filter((line) => line.stage === 'QA').slice(-3);
-    const outputs = [
-      {
-        title: 'PM output',
-        body: state.backlog.length
-          ? [
-              `${state.backlog.length} backlog items loaded`,
-              `${state.goals.p0.length} P0 goals | ${state.goals.p1.length} P1 goals`,
-              state.backlogSelectedId ? `selected ${state.backlogSelectedId}` : 'no backlog selection',
-            ]
-          : ['No backlog data yet', 'Waiting for API snapshot', 'Fallback data will appear if the API is unavailable'],
-      },
-      {
-        title: 'Dev output',
-        body: latestDevLogs.length
-          ? latestDevLogs.map((line) => `${line.lvl}: ${line.msg}`)
-          : ['No Dev log entries yet', 'Waiting for the next read-only snapshot'],
-      },
-      {
-        title: 'QA output',
-        body: latestQaLogs.length
-          ? latestQaLogs.map((line) => `${line.lvl}: ${line.msg}`)
-          : state.history.length
-            ? [`latest run ${state.history[0].status}`, state.history[0].lastCycle || 'cycle summary unavailable']
-            : ['No run history yet', 'QA output will appear after a completed cycle'],
-      },
-    ];
+      `).join('')
+      : ['<div class="summary-note">No lifecycle records were published yet.</div>'];
 
     const body = `
       <div class="view-grid view-grid--two">
@@ -2622,19 +3122,10 @@
 
           ${panel(
             'Current stage output',
-            escapeHTML(state.activeRun.task),
+            escapeHTML(state.activeRun.task || `${state.stages.length} lifecycle records`),
             `
               <div class="view-grid view-grid--three">
-                ${outputs.map((item) => `
-                  <div class="task-card">
-                    <div class="task-card__head">
-                      <span class="task-card__id">${escapeHTML(item.title)}</span>
-                    </div>
-                    <div class="task-card__meta" style="display:grid; gap:4px;">
-                      ${item.body.map((line) => `<div>${escapeHTML(line)}</div>`).join('')}
-                    </div>
-                  </div>
-                `).join('')}
+                ${outputs.join('')}
               </div>
             `
           )}
@@ -2645,21 +3136,21 @@
             'Stage guardrails',
             escapeHTML(state.activeRun.backend),
             `
-              <div class="compact-list">
-                <div class="compact-list__item">
-                  <span class="compact-list__bullet"></span>
-                  <div class="compact-list__body">Read-only shell by default. Stop, merge, and discard are not auto-applied here.</div>
-                </div>
+                <div class="compact-list">
+                  <div class="compact-list__item">
+                    <span class="compact-list__bullet"></span>
+                    <div class="compact-list__body">Read-only shell by default. Stop, merge, and discard are not auto-applied here.</div>
+                  </div>
                 <div class="compact-list__item">
                   <span class="compact-list__bullet"></span>
                   <div class="compact-list__body">Current run uses manual stop confirmation and a local review workflow.</div>
                 </div>
-                <div class="compact-list__item">
-                  <span class="compact-list__bullet"></span>
-                  <div class="compact-list__body">Dev stage: ${escapeHTML(state.activeRun.task)} | budget ${escapeHTML(fmtPercent(state.activeRun.budgetUsed))}</div>
+                  <div class="compact-list__item">
+                    <span class="compact-list__bullet"></span>
+                    <div class="compact-list__body">Dev stage: ${escapeHTML(state.activeRun.task || 'unavailable')} | budget ${escapeHTML(tokenBudgetText)}</div>
+                  </div>
                 </div>
-              </div>
-            `
+              `
           )}
 
           ${panel(
@@ -2667,11 +3158,11 @@
             '24h sparkline',
             `
               <div class="kpi-grid kpi-grid--three">
-                ${kpiCard('Input', fmtNumberShort(state.activeRun.tokens.in), 'tokens processed')}
-                ${kpiCard('Output', fmtNumberShort(state.activeRun.tokens.out), 'tokens generated')}
-                ${kpiCard('Budget', fmtPercent(state.activeRun.budgetUsed), 'used this run')}
+                ${kpiCard('Input', tokenInputText, hasTokenTelemetry ? 'tokens processed' : 'token telemetry unavailable', false, tokenInputText === 'unavailable' ? 'unavailable' : '')}
+                ${kpiCard('Output', tokenOutputText, hasTokenTelemetry ? 'tokens generated' : 'token telemetry unavailable', false, tokenOutputText === 'unavailable' ? 'unavailable' : '')}
+                ${kpiCard('Budget', tokenBudgetText, state.activeRun.budgetAvailable ? 'used this run' : 'budget telemetry unavailable', false, tokenBudgetText === 'unavailable' ? 'unavailable' : '')}
               </div>
-              <div style="margin-top:12px;">${buildSparkline(state.metrics.tokens24h, 320, 44, 'rgba(126,227,138,0.12)', '#7ee38a')}</div>
+              <div style="margin-top:12px;">${tokenSparkline}</div>
             `
           )}
         </div>
@@ -2785,6 +3276,7 @@
       { key: 'pending', label: 'Pending' },
       { key: 'in_progress', label: 'In progress' },
       { key: 'done', label: 'Done' },
+      { key: 'failed', label: 'Failed' },
     ];
     const selected = currentBacklogTask();
     const totals = buckets.map((bucket) => {
@@ -2793,16 +3285,16 @@
     });
 
     const board = `
-      <div class="board-grid">
+      <div class="board-grid board-grid--four">
         ${totals
           .map((bucket) => `
             <section class="column">
               <div class="column__head">
-                <span class="chip ${bucket.key === 'done' ? 'chip--accent' : bucket.key === 'in_progress' ? 'chip--warn' : ''}">${escapeHTML(bucket.label)}</span>
+                <span class="chip ${bucket.key === 'done' ? 'chip--accent' : bucket.key === 'in_progress' ? 'chip--warn' : bucket.key === 'failed' ? 'chip--err' : 'chip--info'}">${escapeHTML(bucket.label)}</span>
                 <span class="column__count">${escapeHTML(bucket.tasks.length)}</span>
               </div>
               <div class="column__body">
-                ${bucket.tasks.map((task) => renderTaskCard(task, bucket.key)).join('') || `<div class="summary-note">No tasks.</div>`}
+                ${bucket.tasks.length ? bucket.tasks.map((task) => renderTaskCard(task, bucket.key)).join('') : `<div class="summary-note">${escapeHTML(state.backlog.length ? 'No tasks in this bucket.' : 'No backlog artifacts were published yet.')}</div>`}
               </div>
             </section>
           `)
@@ -2819,16 +3311,20 @@
           </div>
           <div class="task-card__title">${escapeHTML(selected.title)}</div>
           <div class="task-card__meta">
-            ${chip(selected.status, selected.status === 'done' ? 'chip--accent' : selected.status === 'in_progress' ? 'chip--warn' : 'chip--info')}
+            ${chip(normalizeBacklogStatus(selected.status, 'pending').replace(/_/g, ' '), backlogStatusToneClass(selected.status))}
             ${chip(selected.estimate)}
             ${selected.skill ? chip(selected.skill, 'chip--info') : ''}
           </div>
-          <div class="summary-note" style="margin-top:10px;">
-            ${escapeHTML(selected.tags.length ? selected.tags.join(', ') : 'No tags')}
-          </div>
+          <div class="summary-note" style="margin-top:10px;">${escapeHTML(selected.dependsOn && selected.dependsOn.length ? compactText(`Depends on ${selected.dependsOn.join(', ')}`, 140) : 'Dependencies unavailable')}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.fileScope ? compactText(`File scope: ${selected.fileScope}`, 140) : 'File scope unavailable')}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.attempt != null ? `Attempt ${selected.attempt}` : 'Attempt unavailable')}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.cycle != null ? `Cycle ${selected.cycle}` : 'Cycle unavailable')}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.step != null ? `Step ${selected.step}` : 'Step unavailable')}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.failureReason ? `Failure: ${selected.failureReason}${selected.failureDetail ? ` | ${compactText(selected.failureDetail, 120)}` : ''}` : 'Failure unavailable')}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(selected.recentOutput, 220) || 'Recent output unavailable.')}</div>
         </div>
       `
-      : `<div class="summary-note">No task selected.</div>`;
+      : state.backlog.length ? `<div class="summary-note">No task selected.</div>` : `<div class="summary-note">No backlog artifacts were published yet.</div>`;
 
     const body = `
       <div class="view-grid view-grid--two">
@@ -2845,10 +3341,11 @@
             'Backlog summary',
             escapeHTML(selected ? selected.id : 'none'),
             `
-              <div class="kpi-grid kpi-grid--three">
+              <div class="kpi-grid kpi-grid--four">
                 ${kpiCard('Pending', String(state.backlog.filter((task) => task.status === 'pending').length), 'queued')}
                 ${kpiCard('Active', String(state.backlog.filter((task) => task.status === 'in_progress').length), 'in progress', true)}
                 ${kpiCard('Done', String(state.backlog.filter((task) => task.status === 'done').length), 'completed')}
+                ${kpiCard('Failed', String(state.backlog.filter((task) => task.status === 'failed').length), 'needs attention')}
               </div>
               <div style="margin-top:12px;">${detail}</div>
             `
@@ -2870,6 +3367,13 @@
   }
 
   function renderGoals() {
+    const goalSnapshot = toObject(state.goalsSnapshot);
+    const goalSummary = toObject(goalSnapshot.summary);
+    const goalWarnings = toArray(goalSnapshot.warnings);
+    const goalFilePath = toText(goalSnapshot.path || state.goalsPath || '.doc/GOALS.md', '.doc/GOALS.md');
+    const goalFileExists = Boolean(goalSnapshot.exists);
+    const goalFileSize = goalSnapshot.size;
+    const goalFileMtime = goalSnapshot.mtime;
     const total = state.goals.p0.length + state.goals.p1.length;
     const done = state.goals.p0.filter((goal) => goal.done).length + state.goals.p1.filter((goal) => goal.done).length;
     const goalEditor = state.goalEditor;
@@ -2877,7 +3381,11 @@
       ? 'Loading the read-only snapshot...'
       : state.sourceMode === 'fallback'
       ? 'Fallback data is shown locally when the read-only API is unavailable.'
-      : 'Read-only API snapshot with browser-local edits for offline annotation only.';
+      : state.goalsDirty
+      ? 'Browser-local edits are active. The read-only GOALS.md metadata stays visible below.'
+      : goalFileExists
+      ? 'Read-only GOALS.md snapshot with browser-local edits ready for later save workflow.'
+      : 'GOALS.md is missing. Browser-local edits are still kept in the browser.';
 
     const body = `
       <div class="view-grid">
@@ -2890,6 +3398,39 @@
               <div class="meter__fill" style="width:${escapeHTML(total ? progressWidth(done / total) : '0%')}"></div>
             </div>
             <div class="summary-note" style="margin-top:10px;">${escapeHTML(goalsNote)}</div>
+            <div class="summary-note" style="margin-top:4px;">Snapshot: ${escapeHTML(toNumber(goalSummary.done || 0, 0))}/${escapeHTML(toNumber(goalSummary.total || 0, 0))} checked · ${escapeHTML(toNumber(goalWarnings.length, 0))} parser warning${goalWarnings.length === 1 ? '' : 's'}</div>
+          `
+        )}
+
+        ${panel(
+          'GOALS.md snapshot',
+          goalFileExists ? `${escapeHTML(goalSummary.total || 0)} parsed` : 'missing',
+          `
+            <div class="compact-list">
+              <div class="compact-list__item">
+                <span class="compact-list__bullet" style="background:${goalFileExists ? 'var(--accent)' : 'var(--warn)'}"></span>
+                <div>
+                  <div class="compact-list__body">${escapeHTML(goalFilePath)}</div>
+                  <div class="compact-list__meta">Exists: ${escapeHTML(goalFileExists ? 'yes' : 'no')} · Size: ${escapeHTML(goalFileSize != null ? `${goalFileSize} bytes` : 'unknown')} · Mtime: ${escapeHTML(goalFileMtime != null ? fmtDateTime(goalFileMtime) : 'unknown')}</div>
+                </div>
+              </div>
+            </div>
+            <div class="summary-note" style="margin-top:10px;">Raw text preview</div>
+            <div class="summary-note" style="margin-top:4px; white-space:pre-wrap; max-height:180px; overflow:auto;">${escapeHTML((goalSnapshot.raw_text || '').trim() || '(empty)')}</div>
+            <div class="summary-note" style="margin-top:10px;">Parser warnings</div>
+            ${goalWarnings.length ? `
+              <div class="compact-list" style="margin-top:6px;">
+                ${goalWarnings.slice(0, 5).map((warning) => `
+                  <div class="compact-list__item">
+                    <span class="compact-list__bullet" style="background:var(--warn)"></span>
+                    <div>
+                      <div class="compact-list__body">Line ${escapeHTML(warning.lineNumber || '?')} · ${escapeHTML(warning.reason)}</div>
+                      <div class="compact-list__meta">${escapeHTML(warning.message || warning.line || '')}</div>
+                    </div>
+                  </div>
+                `).join('')}
+              </div>
+            ` : '<div class="summary-note" style="margin-top:4px;">No parser warnings.</div>'}
           `
         )}
 
@@ -3602,8 +4143,8 @@
                             <span class="terminal-line__text">${escapeHTML(line)}</span>
                           </div>
                         `).join('')}
-                        <div class="terminal-line"><span class="terminal-line__prompt"></span><span class="terminal-line__text terminal-line__text--accent">${escapeHTML(`${runStatusLabel(state.activeRun.status)} | backend=${state.activeRun.backend} | stage=${state.activeRun.stage}`)}</span></div>
-                        <div class="terminal-line"><span class="terminal-line__prompt"></span><span class="terminal-line__text">${escapeHTML(`PM -> Dev -> QA | quota ${fmtPercent(state.activeRun.quota.used)} | budget ${fmtPercent(state.activeRun.budgetUsed)}`)}</span></div>
+                        <div class="terminal-line"><span class="terminal-line__prompt"></span><span class="terminal-line__text terminal-line__text--accent">${escapeHTML(`${runStatusLabel(state.progress?.run_status || state.activeRun.status, state.progress?.final_reason || state.activeRun.finalReason)} | backend=${state.activeRun.backend} | stage=${state.activeRun.stage}`)}</span></div>
+                        <div class="terminal-line"><span class="terminal-line__prompt"></span><span class="terminal-line__text">${escapeHTML(`PM -> Dev -> QA | quota ${metricText(state.activeRun.quotaAvailable, state.activeRun.quota.used, fmtPercent)} | budget ${metricText(state.activeRun.budgetAvailable, state.activeRun.budgetUsed, fmtPercent)}`)}</span></div>
                       </div>
                     </div>
                   </div>
@@ -3690,15 +4231,16 @@
             <div class="phone-section">
               <div class="phone-section__title">Pipeline</div>
               <div class="phone-list">
-                ${state.stages.map((stage) => `
+                ${state.stages.length ? state.stages.map((stage) => `
                   <div class="phone-item">
-                    <span class="${stage.status === 'done' ? 'stage-icon stage-icon--done' : stage.status === 'running' ? 'stage-icon stage-icon--running' : 'stage-icon stage-icon--pending'}">${stage.status === 'done' ? 'OK' : stage.status === 'running' ? 'RUN' : 'WAIT'}</span>
+                    <span class="${lifecycleStageIconClass(stage.status)}">${escapeHTML(lifecycleStageIconText(stage.status))}</span>
                     <div class="phone-item__body">
-                      <div class="phone-item__title">${escapeHTML(stage.label)} | <span class="muted">${escapeHTML(stage.title)}</span></div>
-                      <div class="phone-item__meta">${escapeHTML(stage.model)} | ${escapeHTML(stage.status === 'running' ? 'live' : fmtDuration(stage.durationSec))}</div>
+                      <div class="phone-item__title">${escapeHTML(stage.label)} | <span class="muted">${escapeHTML(stage.taskTitle || stage.title || 'Lifecycle record')}</span></div>
+                      <div class="phone-item__meta">${escapeHTML([stage.status, stage.taskId || 'task unavailable', stage.attempt != null ? `attempt ${stage.attempt}` : 'attempt unavailable', stage.cycle != null ? `cycle ${stage.cycle}` : 'cycle unavailable'].join(' | '))}</div>
+                      <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(stage.recentOutput, 120) || 'Recent output unavailable.')}</div>
                     </div>
                   </div>
-                `).join('')}
+                `).join('') : '<div class="summary-note">No lifecycle records were published yet.</div>'}
               </div>
             </div>
             <div class="phone-section" style="flex: 1 1 auto;">
@@ -3904,7 +4446,7 @@
                 <div class="modal-field__label">Note</div>
                 <textarea class="field-control field-control--textarea" rows="3" data-goal-field="note">${escapeHTML(draft.note || '')}</textarea>
               </div>
-              ${editor.error ? `<div class="field-error">${escapeHTML(editor.error)}</div>` : '<div class="modal-copy">Changes are saved in browser storage.</div>'}
+              ${editor.error ? `<div class="field-error">${escapeHTML(editor.error)}</div>` : '<div class="modal-copy">Changes stay in browser storage until the save workflow lands.</div>'}
               <div class="modal-actions">
                 <button type="button" class="button button--quiet" data-goal-close>Cancel</button>
                 <button type="button" class="button button--primary" data-goal-save>Save goal</button>
@@ -4120,11 +4662,23 @@
       return;
     }
 
-    const nextGoal = {
-      done: false,
-      text,
-      note: String(draft.note || '').trim(),
-    };
+    const sourceGoal = mode === 'edit' && index >= 0 ? clone(state.goals[bucket][index] || {}) : null;
+    const nextGoal = sourceGoal
+      ? {
+          ...sourceGoal,
+          text,
+          note: String(draft.note || '').trim(),
+          done: Boolean(sourceGoal.done),
+          checked: Boolean(sourceGoal.checked ?? sourceGoal.done),
+          checkbox: toText(sourceGoal.checkbox, Boolean(sourceGoal.done) ? '[x]' : '[ ]'),
+        }
+      : {
+          done: false,
+          checked: false,
+          checkbox: '[ ]',
+          text,
+          note: String(draft.note || '').trim(),
+        };
 
     const nextGoals = clone(state.goals);
     if (mode === 'new' || index < 0) {
@@ -4138,15 +4692,36 @@
 
     state.goals = nextGoals;
     writeJSON(STORAGE.goals, state.goals);
+    state.goalsDirty = true;
     state.goalEditor = null;
     renderShell({ preserveScroll: true });
   }
 
   function updateGoal(bucket, index, patch) {
     const next = clone(state.goals);
-    next[bucket][index] = { ...next[bucket][index], ...patch };
+    const current = next[bucket][index] || {};
+    const nextItem = { ...current, ...patch };
+    if (Object.prototype.hasOwnProperty.call(patch, 'done')) {
+      const done = Boolean(patch.done);
+      nextItem.done = done;
+      nextItem.checked = done;
+      nextItem.checkbox = done ? '[x]' : '[ ]';
+    } else if (Object.prototype.hasOwnProperty.call(patch, 'checked')) {
+      const checked = Boolean(patch.checked);
+      nextItem.checked = checked;
+      nextItem.done = checked;
+      nextItem.checkbox = checked ? '[x]' : '[ ]';
+    } else if (Object.prototype.hasOwnProperty.call(patch, 'checkbox')) {
+      const checkbox = String(patch.checkbox || '').toLowerCase();
+      const checked = checkbox.includes('x');
+      nextItem.checkbox = checked ? '[x]' : '[ ]';
+      nextItem.done = checked;
+      nextItem.checked = checked;
+    }
+    next[bucket][index] = nextItem;
     state.goals = next;
     writeJSON(STORAGE.goals, state.goals);
+    state.goalsDirty = true;
     renderShell({ preserveScroll: true });
   }
 
@@ -4157,6 +4732,7 @@
     next[target].push(item);
     state.goals = next;
     writeJSON(STORAGE.goals, state.goals);
+    state.goalsDirty = true;
     renderShell({ preserveScroll: true });
   }
 
@@ -4165,12 +4741,14 @@
     next[bucket].splice(index, 1);
     state.goals = next;
     writeJSON(STORAGE.goals, state.goals);
+    state.goalsDirty = true;
     renderShell({ preserveScroll: true });
   }
 
   function resetGoals() {
     state.goals = clone(defaults.goals);
     writeJSON(STORAGE.goals, state.goals);
+    state.goalsDirty = true;
     renderShell({ preserveScroll: true });
   }
 
@@ -4429,6 +5007,7 @@
 
   const defaults = createBlankModel();
   const fallbackFixture = createFallbackFixture();
+  const storedGoals = readJSON(STORAGE.goals, null);
 
   const state = {
     ok: clone(defaults.ok),
@@ -4443,10 +5022,12 @@
     backlog: clone(defaults.backlog),
     backlogCounts: clone(defaults.backlogCounts),
     backlogSelectedId: defaults.backlogSelectedId,
-    goals: deepMerge(clone(defaults.goals), readJSON(STORAGE.goals, null)),
+    goals: deepMerge(clone(defaults.goals), storedGoals),
+    goalsSnapshot: clone(defaults.goalsSnapshot),
     goalsMeta: clone(defaults.goalsMeta),
     goalsPath: defaults.goalsPath,
     goalsCompletion: clone(defaults.goalsCompletion),
+    goalsDirty: storedGoals != null,
     history: clone(defaults.history),
     runs: clone(defaults.history),
     historySummary: clone(defaults.historySummary),
@@ -4614,7 +5195,7 @@
                 <div class="modal-field__label">Note</div>
                 <textarea class="field-control field-control--textarea" rows="3" data-goal-field="note">${escapeHTML(draft.note || '')}</textarea>
               </div>
-              ${editor.error ? `<div class="field-error">${escapeHTML(editor.error)}</div>` : '<div class="modal-copy">Changes are saved in browser storage.</div>'}
+              ${editor.error ? `<div class="field-error">${escapeHTML(editor.error)}</div>` : '<div class="modal-copy">Changes stay in browser storage until the save workflow lands.</div>'}
               <div class="modal-actions">
                 <button type="button" class="button button--quiet" data-goal-close>Cancel</button>
                 <button type="button" class="button button--primary" data-goal-save>Save goal</button>
@@ -4929,11 +5510,23 @@
 
     const nextGoals = clone(state.goals);
     const targetBucket = editor.draft.bucket;
-    const nextItem = {
-      done: editor.mode === 'edit' && editor.index >= 0 ? Boolean(nextGoals[editor.bucket][editor.index]?.done) : false,
-      text,
-      note: String(editor.draft.note || '').trim(),
-    };
+    const sourceItem = editor.mode === 'edit' && editor.index >= 0 ? clone(nextGoals[editor.bucket][editor.index] || {}) : null;
+    const nextItem = sourceItem
+      ? {
+          ...sourceItem,
+          text,
+          note: String(editor.draft.note || '').trim(),
+          done: Boolean(sourceItem.done),
+          checked: Boolean(sourceItem.checked ?? sourceItem.done),
+          checkbox: toText(sourceItem.checkbox, Boolean(sourceItem.done) ? '[x]' : '[ ]'),
+        }
+      : {
+          done: false,
+          checked: false,
+          checkbox: '[ ]',
+          text,
+          note: String(editor.draft.note || '').trim(),
+        };
 
     if (editor.mode === 'new' || editor.index < 0) {
       nextGoals[targetBucket].push(nextItem);
@@ -4946,6 +5539,7 @@
 
     state.goals = nextGoals;
     writeJSON(STORAGE.goals, state.goals);
+    state.goalsDirty = true;
     state.goalEditor = null;
     renderShell({ preserveScroll: true });
   }
@@ -4953,6 +5547,7 @@
   function resetGoals() {
     state.goals = clone(defaults.goals);
     writeJSON(STORAGE.goals, state.goals);
+    state.goalsDirty = true;
     renderShell({ preserveScroll: true });
   }
 
@@ -5098,8 +5693,34 @@
       const signature = JSON.stringify({
         latestRunDir: normalized.latestRunDir,
         activeRun: [normalized.activeRun.id, normalized.activeRun.status, normalized.activeRun.stage, normalized.activeRun.iteration, normalized.activeRun.maxIterations],
-        stages: normalized.stages.map((stage) => [stage.id, stage.status, stage.durationSec]),
-        backlog: normalized.backlog.map((task) => [task.id, task.status]),
+        stages: normalized.stages.map((stage) => [
+          stage.id,
+          stage.status,
+          stage.startedAt,
+          stage.endedAt,
+          stage.durationSec,
+          stage.model,
+          stage.cycle,
+          stage.taskId,
+          stage.attempt,
+          stage.recentOutput,
+          stage.reason,
+          stage.rc,
+        ]),
+        backlog: normalized.backlog.map((task) => [
+          task.id,
+          task.status,
+          task.attempt,
+          task.fileScope,
+          task.failureReason,
+          task.failureDetail,
+          task.recentOutput,
+          task.cycle,
+          task.step,
+          task.taskTitle,
+          task.model,
+          task.dependsOn,
+        ]),
         logs: normalized.logs.slice(-12).map((line) => [line.t, line.lvl, line.stage, line.msg]),
         notifications: normalized.notifications.slice(-12).map((item) => [item.t, item.kind, item.text]),
         runnerControl: [

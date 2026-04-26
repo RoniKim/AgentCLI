@@ -21,19 +21,19 @@
 
 ### P0-B. Live Run Status And Dashboard Accuracy
 
-- [ ] Define a stable web snapshot contract for idle, running, stopped, failed, and completed AgentCLI runs.
-- [ ] Dashboard prefers live `RunnerController` state when available and falls back to persisted run artifacts only when no live controller data exists.
-- [ ] Dashboard shows current task id, title, attempt, branch, worktree mode, and run directory from real AgentCLI data.
+- [x] Define a stable web snapshot contract for idle, running, stopped, failed, and completed AgentCLI runs.
+- [x] Dashboard prefers live `RunnerController` state when available and falls back to persisted run artifacts only when no live controller data exists.
+- [x] Dashboard shows current task id, title, attempt, branch, worktree mode, and run directory from real AgentCLI data.
 - [ ] Dashboard quota panel reads real 5h/7d quota state or shows an explicit unavailable state without fake percentages.
-- [ ] Dashboard budget/token panels read real metrics or show unavailable state without fabricated values.
-- [ ] PM/Dev/QA stage cards are populated from actual lifecycle events instead of synthetic stage defaults.
-- [ ] Completed, stopped, failed, and idle runs have visually distinct dashboard states and API values.
-- [ ] API tests cover no-run, live-running, completed-success, stopped, and failed run snapshots.
+- [x] Dashboard budget/token panels read real metrics or show unavailable state without fabricated values.
+- [x] PM/Dev/QA stage cards are populated from actual lifecycle events instead of synthetic stage defaults.
+- [x] Completed, stopped, failed, and idle runs have visually distinct dashboard states and API values.
+- [x] API tests cover no-run, live-running, completed-success, stopped, and failed run snapshots.
 
 ### P0-C. Core Screen Data Contracts
 
-- [ ] Pipeline screen renders actual PM/Dev/QA lifecycle records from run artifacts or control-plane events.
-- [ ] Backlog screen renders real task dependency, status, attempt, file scope, and failure information.
+- [x] Pipeline screen renders actual PM/Dev/QA lifecycle records from run artifacts or control-plane events.
+- [x] Backlog screen renders real task dependency, status, attempt, file scope, and failure information.
 - [ ] Goals screen renders the active `.doc/GOALS.md` with stable P0/P1 grouping and exact checkbox state.
 - [ ] Config screen renders all active config keys needed by this repo, including codex models, quota settings, worktree settings, and prompt paths.
 - [ ] Prompts screen renders profile-aware prompt inventory with file path, source, override/template mode, and redacted preview.
@@ -65,7 +65,7 @@
 
 ### P0-F. Goals Editing Workflow
 
-- [ ] Add backend Goals read endpoint that returns raw text, parsed P0/P1 items, and file metadata.
+- [x] Add backend Goals read endpoint that returns raw text, parsed P0/P1 items, and file metadata.
 - [ ] Add Goals editor UI for add, edit, reorder, check/uncheck, and delete with dirty state.
 - [ ] Add Goals validation that prevents deleting or downgrading unmet P0 goals without explicit confirmation.
 - [ ] Add Goals diff view before save.
@@ -80,7 +80,7 @@
 - [ ] Logs screen supports level, stage, task id, and free-text filters.
 - [ ] Logs screen supports copy selected log lines and download current filtered logs.
 - [ ] Logs screen distinguishes empty logs, missing files, read errors, and loading state.
-- [ ] API tests cover log tailing, filters, missing log file, and malformed log lines.
+- [x] API tests cover log tailing, filters, missing log file, and malformed log lines.
 
 ### P0-H. Runner Controls
 
@@ -112,9 +112,9 @@
 
 ### P0-K. Safety, LAN, And Validation
 
-- [ ] Read-only mode is the default for localhost and LAN binds.
+- [x] Read-only mode is the default for localhost and LAN binds.
 - [ ] Mutating config, prompt, goals, runner, and worktree actions require explicit server opt-in.
-- [ ] Sensitive config and prompt values are redacted by default in API responses and UI previews.
+- [x] Sensitive config and prompt values are redacted by default in API responses and UI previews.
 - [ ] LAN documentation clearly states trusted-network-only usage until authentication is implemented.
 - [ ] Playwright smoke covers Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, and mobile width.
 - [ ] Validation commands for compile, unit tests, and Playwright smoke are documented and runnable from this repo.
