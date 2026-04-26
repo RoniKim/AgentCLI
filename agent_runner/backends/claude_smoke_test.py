@@ -31,10 +31,10 @@ async def _run(prompt: str, model: str) -> int:
 
     try:
         from .claudecode import _extract_client_pid
-        from ..process_guard import register_pid, unregister_pid
+        from ..process_guard import register_pid, unregister_pid_if_exited
     except Exception:
         _extract_client_pid = None  # type: ignore[assignment]
-        register_pid = unregister_pid = None  # type: ignore[assignment]
+        register_pid = unregister_pid_if_exited = None  # type: ignore[assignment]
 
     try:
         async with ClaudeSDKClient(options=options) as client:
@@ -79,8 +79,8 @@ async def _run(prompt: str, model: str) -> int:
                             print("[result]", result[:200])
                 return 0
             finally:
-                if child_pid is not None and unregister_pid is not None:
-                    unregister_pid(child_pid)
+                if child_pid is not None and unregister_pid_if_exited is not None:
+                    unregister_pid_if_exited(child_pid)
     except Exception as ex:
         print(f"[error] Claude SDK 통신 실패: {ex}")
         _print_help_on_failure()

@@ -259,6 +259,19 @@ async def main_async(args: argparse.Namespace) -> int:
     cycle_summary_path = run_dir / "cycle_summary.log"
     last_run_summary_path = run_dir / "last_run_summary.json"
 
+    async def sleep_or_stop(seconds: float | int, *, poll_seconds: float = 1.0) -> bool:
+        """Sleep in small chunks and return True if STOP appears."""
+        total = max(0.0, float(seconds or 0))
+        deadline = time.monotonic() + total
+        poll = max(0.1, min(float(poll_seconds or 1.0), 5.0))
+        while True:
+            if stop_path.exists():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return stop_path.exists()
+            await asyncio.sleep(min(poll, remaining))
+
     # Global PM cache
     from .config import AGENT_WORK_DIR
     pm_cache_dir = repo / AGENT_WORK_DIR / "PM_CACHE"
@@ -561,7 +574,8 @@ async def main_async(args: argparse.Namespace) -> int:
                     ):
                         wait = _INITIAL_BACKOFF * (2 ** retry_attempt)
                         eprint(f"[RETRY] {label} transient error (attempt {retry_attempt + 1}/{_MAX_RETRIES}): {err_text[:200]}; retrying in {wait:.0f}s")
-                        await asyncio.sleep(wait)
+                        if await sleep_or_stop(wait):
+                            break
                         continue
                     break  # non-transient error - exit retry loop
 
@@ -2262,7 +2276,10 @@ async def main_async(args: argparse.Namespace) -> int:
                                 wait_seconds=wait_sec,
                                 resets_at_unix=int(q_reset_unix or 0),
                             )
-                            await asyncio.sleep(wait_sec)
+                            if await sleep_or_stop(wait_sec):
+                                last_reason = STOP_REASON_STOP_FILE
+                                logger.stop_event("Stop requested during quota wait.")
+                                break
                             logger.info(f"[QUOTA-WAIT] Resumed after {wait_min:.1f}min wait - continuing cycle {cycle_idx}")
                             logger.quota_event("resumed", backend="codex", limit_id=q_limit)
                         else:
@@ -2396,7 +2413,10 @@ async def main_async(args: argparse.Namespace) -> int:
                                 stop_path.unlink()
                             except Exception:
                                 pass
-                        await asyncio.sleep(wait_sec)
+                        if await sleep_or_stop(wait_sec):
+                            last_reason = STOP_REASON_STOP_FILE
+                            logger.stop_event("Stop requested during quota exhaustion wait.")
+                            break
                         eprint(f"[QUOTA-WAIT] Resumed after {wait_min:.1f}min wait - continuing next cycle")
                         logger.quota_event("exhausted_resumed", backend="codex", limit_id=q_limit)
                         consecutive_failures = 0
@@ -2467,7 +2487,9 @@ async def main_async(args: argparse.Namespace) -> int:
                         append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=idle_exit idle_accum={idle_accum}")
                         break
 
-                    await asyncio.sleep(max(0, int(args.loop_sleep_seconds)))
+                    if await sleep_or_stop(max(0, int(args.loop_sleep_seconds))):
+                        last_reason = STOP_REASON_STOP_FILE
+                        break
                 else:
                     break
         finally:

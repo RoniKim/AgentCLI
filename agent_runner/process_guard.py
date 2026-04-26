@@ -273,21 +273,37 @@ def unregister_pid(pid: int) -> None:
     logger.debug(f"[ProcessGuard] Unregistered child PID {pid}")
 
 
-def _kill_pid(pid: int) -> None:
+def unregister_pid_if_exited(pid: int) -> bool:
+    """Unregister PID only after it is no longer alive."""
+    if _pid_alive(pid):
+        logger.warning(f"[ProcessGuard] PID {pid} still appears alive; keeping session file")
+        return False
+    unregister_pid(pid)
+    return True
+
+
+def _kill_pid(pid: int) -> bool:
     """Kill a single process by PID. On Windows always uses TerminateProcess."""
     if pid <= 0 or pid == os.getpid():
-        return
+        return True
     try:
         if sys.platform == "win32":
+            _init_kernel32_types()
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             handle = kernel32.OpenProcess(_PROCESS_TERMINATE, False, pid)
             if handle:
-                kernel32.TerminateProcess(handle, 1)
+                ok = bool(kernel32.TerminateProcess(handle, 1))
                 kernel32.CloseHandle(handle)
+                return ok or not _pid_alive(pid)
+            return not _pid_alive(pid)
         else:
             os.kill(pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
+            return True
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return False
+    return False
 
 
 def _windows_child_pid_map() -> dict[int, list[int]]:
@@ -362,17 +378,23 @@ def _pid_alive(pid: int) -> bool:
     """Check if a process with given PID is still running."""
     try:
         if sys.platform == "win32":
+            _init_kernel32_types()
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             handle = kernel32.OpenProcess(_SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
             if not handle:
-                return False
+                try:
+                    return int(kernel32.GetLastError()) == 5
+                except Exception:
+                    return False
             result = kernel32.WaitForSingleObject(handle, 0)
             kernel32.CloseHandle(handle)
             return result == _WAIT_TIMEOUT
         else:
             os.kill(pid, 0)
             return True
-    except (ProcessLookupError, PermissionError, OSError):
+    except PermissionError:
+        return True
+    except (ProcessLookupError, OSError):
         return False
 
 
@@ -400,14 +422,7 @@ def _terminate_pids(pids: list[int], *, wait: bool = True) -> None:
 
     # Cleanup tracked set and session files
     for pid in pids:
-        with _lock:
-            _tracked_pids.discard(pid)
-        try:
-            sf = _session_file(pid)
-            if sf.exists():
-                sf.unlink()
-        except Exception:
-            pass
+        unregister_pid_if_exited(pid)
 
 
 def terminate_all_children(*, _from_signal: bool = False) -> None:

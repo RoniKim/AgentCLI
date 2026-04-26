@@ -233,7 +233,7 @@ async def run_cmd_async(
             tree_watch_task.cancel()
         if registered_pid is not None:
             try:
-                from .process_guard import terminate_process_tree, unregister_pid
+                from .process_guard import terminate_process_tree
 
                 terminate_process_tree(registered_pid, include_root=proc.returncode is None)
             except Exception:
@@ -253,18 +253,18 @@ async def run_cmd_async(
         log_fh.close()
         if registered_pid is not None:
             try:
-                from .process_guard import unregister_pid
+                from .process_guard import unregister_pid_if_exited
 
-                unregister_pid(registered_pid)
+                unregister_pid_if_exited(registered_pid)
             except Exception:
                 pass
         if observed_child_pids:
             try:
-                from .process_guard import unregister_pid
+                from .process_guard import unregister_pid_if_exited
 
                 for child_pid in sorted(observed_child_pids, reverse=True):
                     try:
-                        unregister_pid(child_pid)
+                        unregister_pid_if_exited(child_pid)
                     except Exception:
                         pass
             except Exception:
@@ -700,10 +700,10 @@ class _CodexAppServerClient:
                     pass
         if pid is not None:
             try:
-                from .process_guard import terminate_process_tree, unregister_pid
+                from .process_guard import terminate_process_tree, unregister_pid_if_exited
 
                 terminate_process_tree(pid, include_root=self._proc.poll() is None)
-                unregister_pid(pid)
+                unregister_pid_if_exited(pid)
             except Exception:
                 pass
             self._registered_pid = None

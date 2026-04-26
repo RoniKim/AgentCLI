@@ -18,7 +18,7 @@ from collections.abc import Callable
 from typing import Any, Optional, Tuple
 import inspect
 
-from ..process_guard import register_pid, unregister_pid
+from ..process_guard import register_pid, unregister_pid_if_exited
 from ..analysis_cache import merge_dev_hints_to_global_changelog
 from ..docs import resolve_docs_dir, generate_docs_digest
 from ..gates import run_build_gate_async, run_test_gate_async, extract_build_warnings
@@ -692,7 +692,7 @@ async def _run_claude_query(
                     if hb_task is not None:
                         hb_task.cancel()
                     if child_pid is not None:
-                        unregister_pid(child_pid)
+                        unregister_pid_if_exited(child_pid)
         except (StopRequested, BudgetExceeded):
             raise
         except Exception as ex:

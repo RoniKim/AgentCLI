@@ -454,22 +454,22 @@ async def codex_exec(
         result.is_quota_exhausted = has_quota_text(str(exc))
     finally:
         try:
-            from .process_guard import terminate_process_tree, unregister_pid
+            from .process_guard import terminate_process_tree, unregister_pid_if_exited
         except Exception:
             terminate_process_tree = None  # type: ignore[assignment]
-            unregister_pid = None  # type: ignore[assignment]
+            unregister_pid_if_exited = None  # type: ignore[assignment]
 
-        if proc is not None and proc.pid and terminate_process_tree is not None and unregister_pid is not None:
+        if proc is not None and proc.pid and terminate_process_tree is not None and unregister_pid_if_exited is not None:
             try:
                 terminate_process_tree(proc.pid, include_root=proc.returncode is None)
-                unregister_pid(proc.pid)
+                unregister_pid_if_exited(proc.pid)
             except Exception:
                 pass
-        if terminate_process_tree is not None and unregister_pid is not None:
+        if terminate_process_tree is not None and unregister_pid_if_exited is not None:
             for child_pid in sorted(observed_child_pids, reverse=True):
                 try:
                     terminate_process_tree(child_pid, include_root=True)
-                    unregister_pid(child_pid)
+                    unregister_pid_if_exited(child_pid)
                 except Exception:
                     pass
         # Clean up temp files

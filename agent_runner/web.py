@@ -44,6 +44,7 @@ from .prompts import (
     REPORTER_INSTRUCTIONS_DEFAULT,
     _read_text_robust,
 )
+from .process_guard import init_process_guard, terminate_all_children
 from .run_dir import find_latest_run_dir
 from .remote.controller import RunnerController
 from .state import TaskItem, load_backlog_json, load_state, parse_backlog_md
@@ -4721,6 +4722,10 @@ def create_app(
     enable_runner_controls: bool | None = None,
 ) -> Any:
     _ensure_fastapi()
+    try:
+        init_process_guard()
+    except Exception:
+        pass
     repo_root = _repo_root(repo)
     static_root = _resolve_web_dir(web_dir)
     cfg_path, cfg, _ = _load_config_payload(repo_root, config_path)
@@ -4754,6 +4759,24 @@ def create_app(
     app.state.runner_controls_source = controls_source
     app.state.runner_controls_disabled_reason = controls_disabled_reason
     app.state.runner_control_lock = control_lock
+
+    def _shutdown_process_guard() -> None:
+        try:
+            if controller is not None:
+                status = controller.status()
+                if isinstance(status, dict) and bool(status.get("running")):
+                    controller.stop(wait=True)
+        except Exception:
+            pass
+        try:
+            terminate_all_children()
+        except Exception:
+            pass
+
+    try:
+        app.add_event_handler("shutdown", _shutdown_process_guard)
+    except Exception:
+        pass
 
     def _snapshot(*, busy_override: bool | None = None) -> dict[str, Any]:
         return build_snapshot(

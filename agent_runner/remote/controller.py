@@ -13,7 +13,7 @@ from typing import Any, Callable, Optional
 
 from ..cli import DEFAULTS
 from ..config import AGENT_WORK_DIR, resolve_prompts_dir
-from ..process_guard import register_pid, terminate_all_children, terminate_process_tree, unregister_pid
+from ..process_guard import register_pid, terminate_all_children, terminate_process_tree, unregister_pid_if_exited
 from ..run_dir import find_latest_run_dir, make_run_dir
 from ..runner_entry import run as run_runner
 from ..utils import STOP_REASON_STOP_FILE, detect_stop_reason, rotate_log_file
@@ -109,7 +109,7 @@ class RunnerController:
         try:
             if self._runner_process.pid:
                 terminate_process_tree(int(self._runner_process.pid), include_root=False)
-                unregister_pid(int(self._runner_process.pid))
+                unregister_pid_if_exited(int(self._runner_process.pid))
         except Exception:
             pass
         self._runner_process = None

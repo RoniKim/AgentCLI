@@ -385,6 +385,31 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertFalse(body["runner_control"]["enabled"])
         self.assertFalse(app.state.runner_controller.start_calls)
 
+    def test_web_app_initializes_process_guard_and_shutdown_stops_runner(self) -> None:
+        from fastapi.testclient import TestClient
+        import agent_runner.web as web_module
+
+        controller = FakeRunnerController(repo=self.repo, base_args=type("Args", (), {"config_path": str(self.config_path)})())
+        controller.start({"repo": self.repo.as_posix(), "config_path": self.config_path.as_posix()})
+
+        with (
+            patch.object(web_module, "_build_runner_controller", return_value=controller),
+            patch.object(web_module, "init_process_guard") as init_guard,
+            patch.object(web_module, "terminate_all_children") as terminate_children,
+        ):
+            app = web_module.create_app(
+                self.repo,
+                web_dir=WEB_CONSOLE,
+                enable_runner_controls=True,
+                config_path=str(self.config_path),
+            )
+            init_guard.assert_called_once()
+            with TestClient(app) as client:
+                self.assertTrue(client.get("/api/runner/status").json()["status"]["running"])
+
+        self.assertIn(True, controller.stop_calls)
+        terminate_children.assert_called()
+
     def test_confirmation_is_required_when_controls_are_enabled(self) -> None:
         client, app = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
 
