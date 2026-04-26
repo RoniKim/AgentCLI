@@ -132,6 +132,34 @@ async def run_cmd_async(
         )
     except (OSError, FileNotFoundError) as e:
         return (127, str(e))
+    registered_pid = int(proc.pid) if proc.pid else None
+    if registered_pid is not None:
+        try:
+            from .process_guard import register_pid
+
+            register_pid(registered_pid)
+        except Exception:
+            pass
+    observed_child_pids: set[int] = set()
+    tree_watch_task: asyncio.Task[None] | None = None
+    if registered_pid is not None:
+        async def _tree_watch_loop(root_pid: int) -> None:
+            while True:
+                try:
+                    from .process_guard import process_descendant_pids, register_pid
+
+                    for child_pid in process_descendant_pids(root_pid):
+                        if child_pid not in observed_child_pids:
+                            observed_child_pids.add(child_pid)
+                            try:
+                                register_pid(child_pid)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                await asyncio.sleep(1.0)
+
+        tree_watch_task = asyncio.create_task(_tree_watch_loop(registered_pid))
     truncated = False
     written = 0
     log_fh = log_path.open("ab")
@@ -201,8 +229,46 @@ async def run_cmd_async(
                     proc.kill()
                 except ProcessLookupError:
                     pass
+        if tree_watch_task is not None:
+            tree_watch_task.cancel()
+        if registered_pid is not None:
+            try:
+                from .process_guard import terminate_process_tree, unregister_pid
+
+                terminate_process_tree(registered_pid, include_root=proc.returncode is None)
+            except Exception:
+                pass
+        if observed_child_pids:
+            try:
+                from .process_guard import terminate_process_tree
+
+                for child_pid in sorted(observed_child_pids, reverse=True):
+                    try:
+                        terminate_process_tree(child_pid, include_root=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         await asyncio.gather(*reader_tasks, return_exceptions=True)
         log_fh.close()
+        if registered_pid is not None:
+            try:
+                from .process_guard import unregister_pid
+
+                unregister_pid(registered_pid)
+            except Exception:
+                pass
+        if observed_child_pids:
+            try:
+                from .process_guard import unregister_pid
+
+                for child_pid in sorted(observed_child_pids, reverse=True):
+                    try:
+                        unregister_pid(child_pid)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
     if truncated:
         summary = (summary + " " if summary else "") + "truncated"
@@ -577,6 +643,7 @@ class _CodexAppServerClient:
         # Resolve bare name to full path — Windows can't execute .cmd shims
         # via CreateProcess without the full path.
         resolved = shutil.which(codex_path) or codex_path
+        self._registered_pid: int | None = None
         self._proc = subprocess.Popen(
             [resolved, "app-server", "--listen", "stdio://"],
             stdin=subprocess.PIPE,
@@ -594,6 +661,7 @@ class _CodexAppServerClient:
         try:
             from .process_guard import register_pid
             if self._proc.pid:
+                self._registered_pid = int(self._proc.pid)
                 register_pid(self._proc.pid)
         except Exception:
             pass
@@ -607,7 +675,11 @@ class _CodexAppServerClient:
         )
         self._reader.start()
 
-        self._initialize(timeout_s=timeout_s)
+        try:
+            self._initialize(timeout_s=timeout_s)
+        except Exception:
+            self.close()
+            raise
 
     def __enter__(self) -> "_CodexAppServerClient":
         return self
@@ -616,6 +688,7 @@ class _CodexAppServerClient:
         self.close()
 
     def close(self) -> None:
+        pid = self._registered_pid or (int(self._proc.pid) if self._proc.pid else None)
         if self._proc.poll() is None:
             try:
                 self._proc.terminate()
@@ -625,6 +698,15 @@ class _CodexAppServerClient:
                     self._proc.kill()
                 except Exception:
                     pass
+        if pid is not None:
+            try:
+                from .process_guard import terminate_process_tree, unregister_pid
+
+                terminate_process_tree(pid, include_root=self._proc.poll() is None)
+                unregister_pid(pid)
+            except Exception:
+                pass
+            self._registered_pid = None
 
     def _reader_loop(self) -> None:
         assert self._proc.stdout is not None

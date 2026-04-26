@@ -258,6 +258,8 @@ async def codex_exec(
 
     t0 = time.time()
     result = CodexExecResult()
+    proc: asyncio.subprocess.Process | None = None
+    observed_child_pids: set[int] = set()
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -277,6 +279,26 @@ async def codex_exec(
         except Exception:
             pass
 
+        tree_watch_task: asyncio.Task[None] | None = None
+        if proc.pid:
+            async def _tree_watch_loop(root_pid: int) -> None:
+                while True:
+                    try:
+                        from .process_guard import process_descendant_pids, register_pid
+
+                        for child_pid in process_descendant_pids(root_pid):
+                            if child_pid not in observed_child_pids:
+                                observed_child_pids.add(child_pid)
+                                try:
+                                    register_pid(child_pid)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1.0)
+
+            tree_watch_task = asyncio.create_task(_tree_watch_loop(int(proc.pid)))
+
         stdin_bytes = full_prompt.encode("utf-8") if use_stdin else None
 
         # Periodic heartbeat to keep metrics mtime fresh
@@ -291,19 +313,76 @@ async def codex_exec(
                         pass
             hb_task = asyncio.create_task(_hb_loop())
 
-        try:
+        async def _read_stream(stream: asyncio.StreamReader | None) -> bytes:
+            if stream is None:
+                return b""
+            chunks: list[bytes] = []
+            while True:
+                chunk = await stream.read(8192)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+
+        async def _write_stdin() -> None:
+            if proc is None or proc.stdin is None:
+                return
             try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(input=stdin_bytes),
-                    timeout=timeout_seconds,
+                if stdin_bytes:
+                    proc.stdin.write(stdin_bytes)
+                    await proc.stdin.drain()
+                proc.stdin.close()
+            except Exception:
+                pass
+
+        def _terminate_observed_tree(*, include_root: bool) -> None:
+            try:
+                from .process_guard import terminate_process_tree
+
+                if proc is not None and proc.pid:
+                    terminate_process_tree(proc.pid, include_root=include_root)
+                for child_pid in sorted(observed_child_pids, reverse=True):
+                    terminate_process_tree(child_pid, include_root=True)
+            except Exception:
+                pass
+
+        async def _collect_reader_output(
+            stdout_task: asyncio.Task[bytes],
+            stderr_task: asyncio.Task[bytes],
+            *,
+            timeout: float,
+        ) -> tuple[bytes, bytes]:
+            await asyncio.wait({stdout_task, stderr_task}, timeout=timeout)
+            for task in (stdout_task, stderr_task):
+                if not task.done():
+                    task.cancel()
+
+            def _result(task: asyncio.Task[bytes]) -> bytes:
+                if not task.done() or task.cancelled():
+                    return b""
+                try:
+                    return task.result()
+                except Exception:
+                    return b""
+
+            return _result(stdout_task), _result(stderr_task)
+
+        stdout_task = asyncio.create_task(_read_stream(proc.stdout))
+        stderr_task = asyncio.create_task(_read_stream(proc.stderr))
+
+        try:
+            await _write_stdin()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
+                _terminate_observed_tree(include_root=False)
+                stdout_bytes, stderr_bytes = await _collect_reader_output(
+                    stdout_task,
+                    stderr_task,
+                    timeout=5.0,
                 )
             except asyncio.TimeoutError:
                 result.is_timeout = True
-                # Graceful termination
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+                _terminate_observed_tree(include_root=True)
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=5)
                 except (asyncio.TimeoutError, Exception):
@@ -311,22 +390,17 @@ async def codex_exec(
                         proc.kill()
                     except Exception:
                         pass
-                stdout_bytes = b""
-                stderr_bytes = b""
-                # Try to read partial output
-                try:
-                    if proc.stdout:
-                        stdout_bytes = await asyncio.wait_for(proc.stdout.read(), timeout=2)
-                except Exception:
-                    pass
-                try:
-                    if proc.stderr:
-                        stderr_bytes = await asyncio.wait_for(proc.stderr.read(), timeout=2)
-                except Exception:
-                    pass
+                    _terminate_observed_tree(include_root=True)
+                stdout_bytes, stderr_bytes = await _collect_reader_output(
+                    stdout_task,
+                    stderr_task,
+                    timeout=2.0,
+                )
         finally:
             if hb_task is not None:
                 hb_task.cancel()
+            if tree_watch_task is not None:
+                tree_watch_task.cancel()
 
         result.duration_seconds = time.time() - t0
         result.exit_code = proc.returncode if proc.returncode is not None else -1
@@ -379,6 +453,25 @@ async def codex_exec(
         result.error = str(exc)
         result.is_quota_exhausted = has_quota_text(str(exc))
     finally:
+        try:
+            from .process_guard import terminate_process_tree, unregister_pid
+        except Exception:
+            terminate_process_tree = None  # type: ignore[assignment]
+            unregister_pid = None  # type: ignore[assignment]
+
+        if proc is not None and proc.pid and terminate_process_tree is not None and unregister_pid is not None:
+            try:
+                terminate_process_tree(proc.pid, include_root=proc.returncode is None)
+                unregister_pid(proc.pid)
+            except Exception:
+                pass
+        if terminate_process_tree is not None and unregister_pid is not None:
+            for child_pid in sorted(observed_child_pids, reverse=True):
+                try:
+                    terminate_process_tree(child_pid, include_root=True)
+                    unregister_pid(child_pid)
+                except Exception:
+                    pass
         # Clean up temp files
         if last_msg_file:
             try:

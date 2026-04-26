@@ -61,6 +61,8 @@ _JobObjectExtendedLimitInformation = 9
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
 _SYNCHRONIZE = 0x00100000
+_TH32CS_SNAPPROCESS = 0x00000002
+_MAX_PATH = 260
 
 # WaitForSingleObject return values
 _WAIT_OBJECT_0 = 0x00000000
@@ -106,6 +108,21 @@ class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
     ]
 
 
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", ctypes.c_uint32),
+        ("cntUsage", ctypes.c_uint32),
+        ("th32ProcessID", ctypes.c_uint32),
+        ("th32DefaultHeapID", ctypes.c_void_p),
+        ("th32ModuleID", ctypes.c_uint32),
+        ("cntThreads", ctypes.c_uint32),
+        ("th32ParentProcessID", ctypes.c_uint32),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", ctypes.c_uint32),
+        ("szExeFile", ctypes.c_wchar * _MAX_PATH),
+    ]
+
+
 def _init_kernel32_types() -> None:
     """Set Win32 API function signatures once (idempotent, call under _lock)."""
     if sys.platform != "win32":
@@ -130,6 +147,12 @@ def _init_kernel32_types() -> None:
     kernel32.TerminateProcess.argtypes = [_HANDLE, ctypes.c_uint]
     kernel32.WaitForSingleObject.restype = ctypes.c_uint32
     kernel32.WaitForSingleObject.argtypes = [_HANDLE, ctypes.c_uint32]
+    kernel32.CreateToolhelp32Snapshot.restype = _HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+    kernel32.Process32FirstW.restype = ctypes.c_int
+    kernel32.Process32FirstW.argtypes = [_HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+    kernel32.Process32NextW.restype = ctypes.c_int
+    kernel32.Process32NextW.argtypes = [_HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
 
 
 def _setup_job_object() -> Optional[int]:
@@ -252,6 +275,8 @@ def unregister_pid(pid: int) -> None:
 
 def _kill_pid(pid: int) -> None:
     """Kill a single process by PID. On Windows always uses TerminateProcess."""
+    if pid <= 0 or pid == os.getpid():
+        return
     try:
         if sys.platform == "win32":
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
@@ -263,6 +288,71 @@ def _kill_pid(pid: int) -> None:
             os.kill(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError):
         pass
+
+
+def _windows_child_pid_map() -> dict[int, list[int]]:
+    """Return parent PID -> child PIDs on Windows without spawning helper tools."""
+    if sys.platform != "win32":
+        return {}
+    try:
+        _init_kernel32_types()
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+        invalid = ctypes.c_void_p(-1).value
+        if not snapshot or snapshot == invalid:
+            return {}
+
+        child_map: dict[int, list[int]] = {}
+        entry = _PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+        try:
+            ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            while ok:
+                pid = int(entry.th32ProcessID)
+                parent_pid = int(entry.th32ParentProcessID)
+                child_map.setdefault(parent_pid, []).append(pid)
+                ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snapshot)
+        return child_map
+    except Exception:
+        return {}
+
+
+def _descendant_pids(root_pid: int, child_map: dict[int, list[int]]) -> list[int]:
+    """Return all descendants of root_pid using a parent->children map."""
+    descendants: list[int] = []
+    seen: set[int] = set()
+    stack = list(child_map.get(root_pid, []))
+    my_pid = os.getpid()
+    while stack:
+        pid = int(stack.pop())
+        if pid in seen or pid <= 0 or pid == my_pid:
+            continue
+        seen.add(pid)
+        descendants.append(pid)
+        stack.extend(child_map.get(pid, []))
+    return descendants
+
+
+def terminate_process_tree(pid: int, *, include_root: bool = True) -> None:
+    """Terminate a managed process and any remaining descendants."""
+    if pid <= 0 or pid == os.getpid():
+        return
+    if sys.platform == "win32":
+        for child_pid in reversed(_descendant_pids(pid, _windows_child_pid_map())):
+            _kill_pid(child_pid)
+    if include_root:
+        _kill_pid(pid)
+
+
+def process_descendant_pids(pid: int) -> list[int]:
+    """Return currently visible descendants for a process PID."""
+    if pid <= 0:
+        return []
+    if sys.platform == "win32":
+        return _descendant_pids(pid, _windows_child_pid_map())
+    return []
 
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -288,8 +378,15 @@ def _pid_alive(pid: int) -> bool:
 
 def _terminate_pids(pids: list[int], *, wait: bool = True) -> None:
     """Kill a list of PIDs. If wait=True on Unix, SIGTERM → wait → SIGKILL."""
+    seen: set[int] = set()
     for pid in pids:
-        _kill_pid(pid)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if sys.platform == "win32":
+            terminate_process_tree(pid, include_root=True)
+        else:
+            _kill_pid(pid)
 
     if wait and sys.platform != "win32":
         # On Windows, TerminateProcess is already a hard kill — no need to wait.
@@ -417,8 +514,8 @@ def install_signal_handlers(
 # L4 - Startup orphan cleanup
 # ---------------------------------------------------------------------------
 
-def _is_claude_process(pid: int) -> bool:
-    """Check if PID is a node.exe / claude.exe process via exact image-name match.
+def _is_managed_child_process(pid: int) -> bool:
+    """Check if PID still looks like a process type AgentCLI launched.
 
     WARNING: This spawns ``tasklist`` — must NEVER be called from signal
     handlers or atexit handlers.
@@ -435,20 +532,38 @@ def _is_claude_process(pid: int) -> bool:
             )
             output = result.stdout.lower()
             # Exact image-name match: tasklist CSV gives "image_name.exe","PID",...
-            # Match only known Claude-related executables.
+            # Match only process names AgentCLI launches directly or through CLI shims.
             for token in output.split(","):
                 name = token.strip().strip('"')
-                if name in ("node.exe", "node", "claude.exe", "claude"):
+                if name in (
+                    "cmd.exe",
+                    "cmd",
+                    "node.exe",
+                    "node",
+                    "codex.exe",
+                    "codex",
+                    "claude.exe",
+                    "claude",
+                    "python.exe",
+                    "python",
+                    "powershell.exe",
+                    "powershell",
+                ):
                     return True
             return False
         else:
             cmdline_path = Path(f"/proc/{pid}/cmdline")
             if cmdline_path.exists():
                 cmdline = cmdline_path.read_text(errors="replace").lower()
-                return any(name in cmdline for name in ("node", "claude"))
+                return any(name in cmdline for name in ("node", "claude", "codex", "python"))
     except Exception:
         pass
     return False
+
+
+def _is_claude_process(pid: int) -> bool:
+    """Backward-compatible alias for older tests/imports."""
+    return _is_managed_child_process(pid)
 
 
 def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
@@ -496,12 +611,12 @@ def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
 
             if not parent_alive:
                 # Parent is dead — this is a stale session file
-                if child_alive and _is_claude_process(child_pid):
+                if child_alive and _is_managed_child_process(child_pid):
                     logger.warning(
                         f"[ProcessGuard] L4: Killing orphan PID {child_pid} "
                         f"(parent {parent_pid} dead)"
                     )
-                    _kill_pid(child_pid)
+                    terminate_process_tree(child_pid, include_root=True)
                     killed += 1
                 sf.unlink(missing_ok=True)
             elif not child_alive:

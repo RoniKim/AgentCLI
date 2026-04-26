@@ -13,7 +13,7 @@ from typing import Any, Callable, Optional
 
 from ..cli import DEFAULTS
 from ..config import AGENT_WORK_DIR, resolve_prompts_dir
-from ..process_guard import terminate_all_children
+from ..process_guard import register_pid, terminate_all_children, terminate_process_tree, unregister_pid
 from ..run_dir import find_latest_run_dir, make_run_dir
 from ..runner_entry import run as run_runner
 from ..utils import STOP_REASON_STOP_FILE, detect_stop_reason, rotate_log_file
@@ -106,6 +106,12 @@ class RunnerController:
         if rc is None:
             return
         self._runner_exit_code = int(rc)
+        try:
+            if self._runner_process.pid:
+                terminate_process_tree(int(self._runner_process.pid), include_root=False)
+                unregister_pid(int(self._runner_process.pid))
+        except Exception:
+            pass
         self._runner_process = None
         if self._runner_log_handle is not None:
             try:
@@ -158,6 +164,11 @@ class RunnerController:
                 stdout=self._runner_log_handle,
                 stderr=subprocess.STDOUT,
             )
+            if self._runner_process.pid:
+                try:
+                    register_pid(int(self._runner_process.pid))
+                except Exception:
+                    pass
         except Exception:
             if self._runner_log_handle is not None:
                 try:
@@ -238,7 +249,7 @@ class RunnerController:
                     self._runner_process.wait(timeout=12)
                 except subprocess.TimeoutExpired:
                     try:
-                        self._runner_process.terminate()
+                        terminate_process_tree(int(self._runner_process.pid), include_root=True)
                         self._runner_process.wait(timeout=20)
                     except Exception:
                         try:
