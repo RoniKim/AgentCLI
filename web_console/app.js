@@ -9,6 +9,7 @@
     goals: 'agentcli.console.goals.v1',
     config: 'agentcli.console.config.v1',
     worktree: 'agentcli.console.worktree.v1',
+    locale: 'agentcli.console.locale.v1',
   };
   const GOALS_SAVE_CONFIRMATION_PHRASE = 'DELETE OR DOWNGRADE UNMET P0 GOALS';
   const WORKTREE_ACTION_CONFIRMATIONS = {
@@ -22,6 +23,1641 @@
   // Keep the template-form text in source for static coverage:
   // Type ${worktreeActionConfirmationPhrase('merge')} exactly to apply
   // Type ${worktreeActionConfirmationPhrase('discard')} exactly to discard
+
+  function normalizeLocale(value) {
+    return String(value || '').trim().toLowerCase() === 'ko' ? 'ko' : 'en';
+  }
+
+  function detectPreferredLocale() {
+    const stored = readJSON(STORAGE.locale, null);
+    if (stored === 'en' || stored === 'ko') {
+      return stored;
+    }
+    const language = typeof navigator !== 'undefined'
+      ? String(navigator.language || navigator.userLanguage || '').toLowerCase()
+      : '';
+    return language.startsWith('ko') ? 'ko' : 'en';
+  }
+
+  const LOCALE_TEXT = {
+    en: {
+      app: {
+        title: 'AgentCLI Web Console',
+      },
+      locale: {
+        language: 'Language',
+        en: 'EN',
+        ko: 'KO',
+      },
+      nav: {
+        run: 'Run',
+        project: 'Project',
+        history: 'History',
+        preview: 'Preview',
+        dashboard: 'Dashboard',
+        pipeline: 'Pipeline',
+        logs: 'Logs',
+        backlog: 'Backlog',
+        goals: 'Goals',
+        config: 'Config',
+        prompts: 'Prompts',
+        worktreeReview: 'Worktree Review',
+        runHistory: 'Run History',
+        notifications: 'Notifications',
+        landingPreview: 'Landing preview',
+        mobilePreview: 'Mobile preview',
+      },
+      topbar: {
+        refresh: 'Refresh',
+        commandPalette: 'Command',
+        commandPaletteTitle: 'Command palette',
+        commandPaletteHint: '/ or Cmd+K / Ctrl+K',
+        language: 'Language',
+        elapsed: 'elapsed',
+        quotaUsage: 'Quota usage',
+        quotaUsageWindow: 'Quota {window} usage',
+        quotaUnavailable: 'Quota unavailable',
+      },
+      common: {
+        loading: 'Loading',
+        working: 'Working...',
+        ready: 'Ready',
+        enabled: 'Enabled',
+        disabled: 'Disabled',
+        unavailable: 'unavailable',
+        cancel: 'Cancel',
+        save: 'Save',
+        saved: 'Saved',
+        failed: 'Failed',
+        confirm: 'Confirm',
+        open: 'Open',
+        openDashboard: 'Open Dashboard',
+        openLogs: 'Open Logs',
+        openBacklog: 'Open Backlog',
+        openGoals: 'Open Goals',
+        openConfig: 'Open Config',
+        openPrompts: 'Open Prompts',
+        openWorktree: 'Open Worktree',
+        openNotifications: 'Open Notifications',
+        openPipeline: 'Open Pipeline',
+        openMobile: 'Open Mobile',
+        openLanding: 'Open Landing',
+        noMatches: 'No matching commands',
+        localOnly: 'LOCAL ONLY',
+        dirty: 'DIRTY',
+        clean: 'CLEAN',
+        fullRead: 'FULL READ',
+        noBackups: 'NO BACKUPS',
+        added: 'Added',
+        removed: 'Removed',
+        selected: 'Selected',
+        select: 'Select',
+        deselect: 'Deselect',
+        none: 'none',
+        unknown: 'unknown',
+        of: 'of',
+        lines: 'lines',
+        recent: 'recent',
+        complete: 'complete',
+        remaining: 'remaining',
+        visible: 'visible',
+        total: 'total',
+        noDataAvailableYet: 'No data available yet.',
+        chars: 'chars',
+      },
+      snapshot: {
+        loading: 'Loading snapshot',
+        api: 'API snapshot',
+        fallback: 'Fallback data',
+        stale: 'Stale snapshot',
+        partial: 'Partial snapshot',
+        loadingReadOnly: 'Loading read-only snapshot',
+        controlsDisabled: 'Controls disabled',
+        emptyState: 'Empty state',
+      },
+      palette: {
+        title: 'Command palette',
+        placeholder: 'Type a screen or action',
+        noMatches: 'No matching commands',
+        goTo: 'Go to {view}',
+        navKind: 'NAV',
+        actionKind: 'ACTION',
+        refreshStatus: 'Refresh read-only snapshot',
+        stopCurrentRun: 'Stop current run',
+        startRunner: 'Start runner',
+        stopRunner: 'Stop runner',
+        reloadRunner: 'Reload runner',
+        restartRunner: 'Restart runner',
+        pauseLiveTail: 'Pause live tail',
+        resumeLiveTail: 'Resume live tail',
+        openWorktreeReview: 'Open Worktree Review',
+        openMobilePreview: 'Open Mobile preview',
+        openLandingPreview: 'Open Landing preview',
+      },
+      shortcuts: {
+        ctrlEnterSaves: 'ctrl+enter saves',
+        escCloses: 'esc closes',
+        draftMode: 'draft mode',
+        exactConfirmation: 'Exact confirmation',
+        confirmationPhrase: 'Confirmation phrase',
+      },
+      runner: {
+        panelTitle: 'Runner controls',
+        confirmationPhrases: 'Confirmation phrases:',
+        confirmStartPhrase: 'START RUNNER',
+        confirmStopPhrase: 'STOP RUNNER',
+        confirmReloadPhrase: 'RELOAD RUNNER',
+        confirmRestartPhrase: 'RESTART RUNNER',
+        source: 'Source',
+        selectedRepo: 'Selected repo',
+        selectedConfig: 'Selected config',
+        controller: 'Controller',
+        state: 'State',
+        runMode: 'Run mode',
+        runStatus: 'Run status',
+        lastAction: 'Last action',
+        lastMessage: 'Last message',
+        lastError: 'Last error',
+        actionInFlight: 'Action in flight',
+        actionComplete: 'Action complete',
+        backendError: 'Backend error',
+        controllerUnavailable: 'Controller unavailable',
+        controlsDisabled: 'Controls disabled',
+        unavailable: 'Unavailable',
+        available: 'available',
+        ready: 'Ready',
+        running: 'Running',
+        working: 'Working...',
+        start: 'Start',
+        stop: 'Stop',
+        reload: 'Reload',
+        restart: 'Restart',
+        starting: 'Starting...',
+        stopping: 'Stopping...',
+        reloading: 'Reloading...',
+        restarting: 'Restarting...',
+        started: 'Started',
+        stopped: 'Stopped',
+        reloaded: 'Reloaded',
+        restarted: 'Restarted',
+        confirmStart: 'Confirm start',
+        confirmStop: 'Confirm stop',
+        confirmReload: 'Confirm reload',
+        confirmRestart: 'Confirm restart',
+        startSummary: 'Start the runner using the selected repo and config snapshot.',
+        stopSummary: 'Stop the current runner, write the stop signal, and wait for a terminal status.',
+        reloadSummary: 'Stop the current runner, wait for it to settle, then start again using the selected repo and config snapshot.',
+        restartSummary: 'Restart the runner using the selected repo and config snapshot.',
+        confirmAction: 'Confirm this runner control action.',
+      },
+      dashboard: {
+        title: 'Dashboard',
+        pipelineSnapshot: 'Pipeline snapshot',
+        liveLogs: 'Live logs',
+        runFacts: 'Run facts',
+        goalsSnapshot: 'Goals snapshot',
+        selectedBacklogItem: 'Selected backlog item',
+        notifications: 'Notifications',
+        currentTaskId: 'Current task id',
+        currentTaskTitle: 'Current task title',
+        attempt: 'Attempt',
+        branch: 'Branch',
+        worktreeMode: 'Worktree mode',
+        runDirectory: 'Run directory',
+        finalReason: 'Final reason',
+        noLogEntriesYet: 'No log entries yet.',
+        noGoalsPublishedYet: 'No goals published yet.',
+        noTaskSelected: 'No task selected.',
+        noBacklogArtifacts: 'No backlog artifacts were published yet.',
+        noNotificationsYet: 'No notifications yet.',
+        stage: 'Stage',
+        tasks: 'Tasks',
+        tokens: 'Tokens',
+        budget: 'Budget',
+      },
+      pipeline: {
+        title: 'Pipeline',
+        stageLane: 'Stage lane',
+        currentStageOutput: 'Current stage output',
+        stageGuardrails: 'Stage guardrails',
+        liveTokens: 'Live tokens',
+        readOnlyShell: 'Read-only shell by default. Stop, merge, and discard are not auto-applied here.',
+        manualConfirmation: 'Current run uses manual stop confirmation and a local review workflow.',
+        devStage: 'Dev stage',
+        started: 'Started',
+        ended: 'Ended',
+        tokensProcessed: 'tokens processed',
+        tokensGenerated: 'tokens generated',
+        tokenTelemetryUnavailable: 'token telemetry unavailable',
+        budgetTelemetryUnavailable: 'budget telemetry unavailable',
+        stageUnavailable: 'stage unavailable',
+        lifecycleRecord: 'Lifecycle record',
+        startedUnavailable: 'Started unavailable',
+        endedUnavailable: 'Ended unavailable',
+        inProgress: 'In progress',
+        recentOutputUnavailable: 'Recent output unavailable.',
+        noLifecycleRecords: 'No lifecycle records were published yet.',
+        sparkline24h: '24h sparkline',
+        activeTask: 'active task',
+        current: 'current',
+        iter: 'iter',
+      },
+      backlog: {
+        title: 'Backlog',
+        workQueue: 'Work queue',
+        backlogSummary: 'Backlog summary',
+        pending: 'Pending',
+        inProgress: 'In progress',
+        done: 'Done',
+        failed: 'Failed',
+        noTasksInBucket: 'No tasks in this bucket.',
+        noArtifacts: 'No backlog artifacts were published yet.',
+        dependenciesUnavailable: 'Dependencies unavailable',
+        fileScopeUnavailable: 'File scope unavailable',
+        attemptUnavailable: 'Attempt unavailable',
+        cycleUnavailable: 'Cycle unavailable',
+        stepUnavailable: 'Step unavailable',
+        failureUnavailable: 'Failure unavailable',
+        dependsOn: 'Depends on {items}',
+        fileScope: 'File scope: {scope}',
+        attemptText: 'Attempt {attempt}',
+        cycleText: 'Cycle {cycle}',
+        stepText: 'Step {step}',
+        failureText: 'Failure: {reason}',
+        recentOutputUnavailable: 'Recent output unavailable.',
+        noTaskSelected: 'No task selected.',
+        queued: 'queued',
+        completed: 'completed',
+        needsAttention: 'needs attention',
+      },
+      goals: {
+        title: 'Goals',
+        goalProgress: 'Goal progress',
+        loadingSnapshot: 'Loading the read-only snapshot...',
+        browserLocalDraft: 'Browser-local goal edits are active.',
+        draftStaysLocal: 'Draft edits stay local until save or reset. Bucket grouping stays pinned to P0 and P1.',
+        snapshot: 'GOALS.md snapshot',
+        goalDraftDiff: 'Goal draft diff',
+        newGoal: 'New goal',
+        editGoal: 'Edit goal',
+        bucket: 'Bucket',
+        goal: 'Goal',
+        note: 'Note',
+        addGoal: 'Add goal',
+        saveGoal: 'Save goal',
+        noGoalsYet: 'No goals yet.',
+        saveLocked: 'Goal saves are locked',
+        confirmationRequired: 'Confirmation required',
+        readyToSave: 'Ready to save goals',
+        saving: 'Saving goals',
+        saved: 'Goals saved',
+        saveFailed: 'Goals save failed',
+        confirmationPhrase: 'Confirmation phrase',
+        backupPath: 'Backup path',
+        savedPath: 'Saved path',
+        errorCode: 'Error code',
+        resetDraft: 'Reset draft',
+        localDraftOnly: 'Local draft only',
+        checked: 'checked',
+        parserWarnings: 'Parser warnings',
+        rawTextPreview: 'Raw text preview',
+        sourceLine: 'Source line',
+        sourceMetadata: 'Source metadata',
+        noGoals: 'GOALS.md has content but no checklist items were parsed.',
+        missing: 'GOALS.md is missing.',
+        empty: 'GOALS.md is empty.',
+        noLocalChanges: 'No local content changes yet.',
+        saveCreatesBackup: 'Saving always creates a timestamped backup before atomically updating .doc/GOALS.md.',
+        confirmSave: 'Confirm & Save Goals',
+        deletedUncheckedP0: 'Deleted unchecked P0',
+        downgradedUncheckedP0: 'Downgraded unchecked P0',
+        typeExact: 'Type {confirmation} exactly to confirm',
+        p0MustHave: 'P0 | Must-have',
+        p1ShouldHave: 'P1 | Should-have',
+      },
+      config: {
+        title: 'Config',
+        fieldDetails: 'field details',
+        loadingSnapshot: 'Loading read-only snapshot',
+        localDraftOnly: 'Local draft only',
+        description: 'Description',
+        hint: 'Hint',
+        defaultValue: 'Default',
+        default: 'default',
+        resolvedPromptsPath: 'Resolved prompts path',
+        activeValue: 'Active value',
+        localDraft: 'Local draft',
+        pendingChanges: 'Pending changes',
+        saveChanges: 'Save Changes',
+        saving: 'Saving...',
+        saved: 'Config saved',
+        saveFailed: 'Config save failed',
+        saveLocked: 'Config saves are locked',
+        noChanges: 'No config changes',
+        readyToSave: 'Ready to save changes',
+        backupPath: 'Backup path',
+        reloadRequired: 'Reload required',
+        pendingPaths: 'Pending paths',
+        restartRequired: 'Restart required',
+        redactedHidden: 'Redacted values stay hidden in the browser.',
+        localValidationFailed: 'Local validation failed',
+        secret: 'secret',
+        restart: 'restart',
+        invalid: 'invalid',
+        default: 'default',
+        mustBeBoolean: 'must be a boolean',
+        mustBeNumber: 'must be a number',
+        mustBeAtLeast: 'must be >= {min}',
+        mustBeAtMost: 'must be <= {max}',
+        cannotBeEmpty: 'cannot be empty',
+        mustBeOneOf: 'must be one of: {options}',
+        pickAtLeastOne: 'pick at least one option',
+        invalidOption: 'invalid option(s): {options}',
+        enterAtLeastOneValue: 'enter at least one value',
+        invalidIntegerValue: 'invalid integer value(s): {values}',
+        repoManagedByServer: 'Repository root is managed by the server.',
+        redactedPlaceholderSaveBlocked: 'Redacted placeholders cannot be saved.',
+        saveInProgress: 'Config save is already in progress.',
+        savesDisabledUntilRunnerEnabled: 'Config saves are disabled until runner controls are enabled.',
+        noConfigChanges: 'No config changes to save.',
+        fixInvalidChangesBeforeSaving: 'Fix {count} invalid change(s) before saving.',
+      },
+      prompts: {
+        title: 'Prompts',
+        promptInventory: 'Prompt inventory',
+        inventoryRedacted: 'Inventory previews stay redacted. Select a prompt to open the explicit full-content read path.',
+        promptEditor: 'Prompt editor',
+        explicitPromptRead: 'Explicit prompt read',
+        loadedThroughExplicitReadPath: 'Loaded through the explicit read path',
+        fullReadPreview: 'FULL READ PREVIEW',
+        noPromptSelected: 'No prompt selected',
+        selectPrompt: 'Select a prompt to read its explicit content slice.',
+        noPromptFiles: 'No prompt files were discovered.',
+        primaryPromptsDir: 'Primary prompts directory',
+        trackedPromptFiles: 'tracked prompt files',
+        scope: 'Scope',
+        profile: 'Profile',
+        source: 'Source',
+        resolvedPath: 'Resolved path',
+        lastUpdated: 'Last updated',
+        savePrompt: 'Save Prompt',
+        restoreBackup: 'Restore Backup',
+        selectedBackup: 'Selected backup',
+        availableBackups: 'Available backups',
+        restoreBackupPath: 'Restore backup path',
+        savedPath: 'Saved path',
+        restoredFrom: 'Restored from',
+        promptMutationsLocked: 'Prompt mutations are locked',
+        promptMutationsDisabled: 'Prompt saves and restores are disabled until runner controls are enabled.',
+        chooseBackupRestore: 'Choose a backup to restore or save the current draft after validation passes.',
+        filenameValidation: 'Filename validation',
+        contentValidation: 'Content validation',
+        templateVariableValidation: 'Template-variable validation',
+        requiredTemplateVariables: 'Required template variables',
+        missingTemplateVariables: 'Missing template variables',
+        filenameIsPopulated: 'Filename is populated.',
+        contentIsPopulated: 'Content is populated.',
+        requiredTemplateVariablesLabel: 'Required template variables: {variables}',
+        noLocalChangesYet: 'No local content changes yet.',
+        localDiffPreview: 'Local diff preview',
+        filename: 'Filename',
+        localOnly: 'Local only',
+        added: 'Added',
+        removed: 'Removed',
+        line: 'Line {lineNumber}',
+        restoreConfirmation: 'Restore confirmation',
+        restoreOverwritePhrase: 'Type RESTORE BACKUP to confirm the selected backup will overwrite the prompt file.',
+        filenameRequired: 'Filename cannot be empty.',
+        filenameMustBeBare: 'Filename must be a bare filename within the resolved prompts directory.',
+        promptContentRequired: 'Prompt content cannot be empty.',
+        promptSaved: 'Prompt saved',
+        promptRestored: 'Prompt restored',
+        promptSaveFailed: 'Prompt save failed',
+        promptRestoreFailed: 'Prompt restore failed',
+        promptMutationCompleted: 'Prompt mutation completed.',
+        promptMutationFailed: 'Prompt mutation failed.',
+      },
+      history: {
+        title: 'Run History',
+        runHistory: 'Run history',
+        noRunsYet: 'No run history yet.',
+        selectedRun: 'Selected run',
+        persistedSummary: 'Persisted summary',
+        shutdownReason: 'Shutdown reason',
+        worktreeOutcome: 'Worktree outcome',
+        noSummaries: 'No persisted run summaries are available yet.',
+        success: 'Success',
+        tasks: 'Tasks',
+        budgetCap: 'Budget cap',
+        branchId: 'Branch / ID',
+        duration: 'Duration',
+        started: 'Started',
+        action: 'Action',
+        currentState: 'current state',
+        persistedRuntime: 'persisted runtime',
+        noWorktreeArtifact: 'no worktree artifact',
+        worktreeOutcomeMeta: 'worktree outcome',
+        noPersistedSummary: 'No persisted summary fields available.',
+      },
+      notifications: {
+        title: 'Notifications',
+        eventFeed: 'Event feed',
+        noMatchCurrentFilter: 'No notifications match the current filter.',
+        noRecorded: 'No notifications have been recorded yet.',
+        notificationSource: 'Notification source',
+        observedKinds: 'Observed kinds',
+        controlPlaneLastEvent: 'Control-plane last event',
+        notificationCounts: 'Notification counts',
+        bridgeSettings: 'Bridge settings',
+        notificationError: 'Notification error',
+        filteredEmpty: 'Filtered empty',
+        noEventsYet: 'No events yet',
+        visibleItems: 'visible',
+        totalItems: 'total',
+        currentRun: 'current run',
+        lifecycle: 'Lifecycle',
+        taskDone: 'Task done',
+        errors: 'Errors',
+      },
+      worktree: {
+        title: 'Worktree Review',
+        pendingMerge: 'Pending merge',
+        reviewChecklist: 'Review checklist',
+        mergeActions: 'Merge actions',
+        merging: 'Merging...',
+        discarding: 'Discarding...',
+        refreshingStatus: 'refreshing status',
+        confirmMergePhrase: 'MERGE WORKTREE',
+        confirmDiscardPhrase: 'DISCARD WORKTREE',
+        readOnlyMode: 'Read-only mode',
+        confirmationRequired: 'Confirmation required',
+        manualRecovery: 'Manual recovery',
+        finalizedWorktree: 'Finalized worktree',
+        noPendingMerge: 'No pending worktree merge is available.',
+        noChangedFiles: 'No changed files were parsed from the patch.',
+        reviewRequired: 'Review required before source-repo changes',
+        patchApplied: 'Patch applied',
+        patchDiscarded: 'Patch discarded',
+        malformedPendingFile: 'Malformed pending file',
+        mergeRecordedCleanupFailed: 'Merge recorded, cleanup failed',
+        discardRecordedCleanupFailed: 'Discard recorded, cleanup failed',
+        patchExportFailed: 'Patch export failed',
+        patchExportNotApplied: 'Patch exported, not auto-applied',
+        patchNotApplied: 'Patch not applied',
+        exactConfirmation: 'Exact confirmation',
+        confirmationPhrase: 'Confirmation phrase',
+        typeConfirmationPhrase: 'Type "{confirmation}" to confirm this worktree action.',
+        confirmationPhraseMismatch: 'Confirmation phrase must be "{confirmation}".',
+        confirmMerge: 'Confirm merge',
+        confirmDiscard: 'Confirm discard',
+        sourceRepo: 'Source repo',
+        runDir: 'Run dir',
+        worktreeDir: 'Worktree dir',
+        patchPath: 'Patch path',
+        pendingFile: 'Pending file',
+        baseRef: 'Base ref',
+        headRef: 'Head ref',
+        cleanupState: 'Cleanup state',
+        cleanupPath: 'Cleanup path',
+        cleanupMessage: 'Cleanup message',
+        runnerRc: 'Runner rc',
+        reviewBeforeMerge: 'Review before merge',
+        noChecklist: 'No checklist is available yet.',
+        noPendingReview: 'No pending worktree merge.',
+        confirmMergeToApply: 'Confirm merge to apply the patch without creating a commit.',
+        confirmDiscardToRemove: 'Confirm discard to remove the pending state without touching source files.',
+        backendValidates: 'The backend validates the source repository, run directory, worktree path, and patch path before it runs.',
+        readOnly: 'read only',
+        finalized: 'finalized',
+        cleanupRequired: 'Cleanup required',
+        mergeActions: 'Merge actions',
+        reviewRequired: 'review required',
+        reviewBeforeMerge: 'Review before merge',
+        changedFiles: 'Changed files',
+        copyPatchPath: 'Copy patch path',
+        noPendingFile: 'no pending file',
+      },
+      logs: {
+        title: 'Logs',
+        liveTail: 'Live tail',
+        tailFilter: 'Tail filter',
+        loadingActiveRunLog: 'Loading active run log',
+        activeRunLog: 'active run log',
+        filteredLine: 'filtered line',
+        filteredLines: 'filtered lines',
+        cursor: 'cursor',
+        liveTailActive: 'Live tail active',
+        liveTailPaused: 'Live tail paused',
+        logFileMissing: 'Log file missing',
+        logReadError: 'Log read error',
+        noMatchingLogLines: 'No matching log lines',
+        pauseLiveTail: 'Pause live tail',
+        resumeLiveTail: 'Resume live tail',
+        noEntries: 'No log entries yet.',
+        noMatchCurrentFilter: 'No log entries match the current filter.',
+        stage: 'Stage',
+        message: 'Message',
+        copySelectedLines: 'Copy selected lines',
+        downloadFilteredLogs: 'Download filtered logs',
+        clearSelection: 'Clear selection',
+        stagePlaceholder: 'Stage',
+        taskIdPlaceholder: 'Task ID',
+        searchPlaceholder: 'Search',
+        taskId: 'Task ID',
+        search: 'Search',
+        line: 'Line {lineNumber}',
+        malformedLinesSkipped: '{count} malformed line(s) skipped.',
+      },
+      landing: {
+        title: 'Landing preview',
+        directionA: 'Direction A landing preview',
+        marketingShell: 'marketing shell',
+        headline: 'Leave it running.<br>Wake up to a PR.',
+        copy: 'CLI-first multi-agent runner with a PM -> Dev -> QA pipeline, local-safe worktree review, and a compact production shell.',
+        openDashboard: 'Open Dashboard',
+        copyRunCommand: 'Copy run command',
+        productionNotes: 'Production notes',
+        noBabel: 'No Babel in browser, no React CDN, no docs/Design runtime imports.',
+        staticProductionAsset: 'Static production asset',
+        topbarShell: 'Top bar, 220px sidebar, and independent main scroll area remain intact.',
+        desktopShellRecovery: 'Desktop shell recovery',
+        openMobile: 'Open Mobile',
+        directionAMarketingShell: 'Direction A marketing shell',
+      },
+      mobile: {
+        title: 'Mobile preview',
+        telegramStyleStatusView: 'Telegram-style status view',
+        mobilePreviewNotes: 'Mobile preview notes',
+        compactRemoteStatusSurface: 'Compact remote status surface for run monitoring.',
+        narrowWidths: 'Designed to stay readable at narrow widths',
+        mirrorsMock: 'Mirrors the Direction A mobile mock without external runtime deps.',
+        staticPreviewShell: 'Static preview shell',
+        openNotifications: 'Open Notifications',
+        openDashboard: 'Open Dashboard',
+        pipeline: 'Pipeline',
+        notifications: 'Notifications',
+      },
+    },
+    ko: {
+      app: {
+        title: 'AgentCLI 웹 콘솔',
+      },
+      locale: {
+        language: '언어',
+        en: 'EN',
+        ko: 'KO',
+      },
+      nav: {
+        run: '실행',
+        project: '프로젝트',
+        history: '기록',
+        preview: '미리보기',
+        dashboard: '대시보드',
+        pipeline: '파이프라인',
+        logs: '로그',
+        backlog: '백로그',
+        goals: '목표',
+        config: '설정',
+        prompts: '프롬프트',
+        worktreeReview: '워크트리 검토',
+        runHistory: '실행 기록',
+        notifications: '알림',
+        landingPreview: '랜딩 미리보기',
+        mobilePreview: '모바일 미리보기',
+      },
+      topbar: {
+        refresh: '새로고침',
+        commandPalette: '명령',
+        commandPaletteTitle: '명령 팔레트',
+        commandPaletteHint: '/ 또는 Cmd+K / Ctrl+K',
+        language: '언어',
+      },
+      common: {
+        loading: '불러오는 중',
+        working: '작업 중...',
+        ready: '준비됨',
+        unavailable: '사용 불가',
+        cancel: '취소',
+        save: '저장',
+        saved: '저장됨',
+        failed: '실패',
+        confirm: '확인',
+        openDashboard: '대시보드 열기',
+        openLogs: '로그 열기',
+        openBacklog: '백로그 열기',
+        openGoals: '목표 열기',
+        openConfig: '설정 열기',
+        openPrompts: '프롬프트 열기',
+        openWorktree: '워크트리 열기',
+        openNotifications: '알림 열기',
+        openPipeline: '파이프라인 열기',
+        openMobile: '모바일 열기',
+        openLanding: '랜딩 열기',
+        noMatches: '일치하는 명령 없음',
+        localOnly: '로컬 전용',
+        dirty: '변경됨',
+        clean: '정상',
+        fullRead: '전체 읽기',
+        noBackups: '백업 없음',
+        added: '추가됨',
+        removed: '삭제됨',
+        selected: '선택됨',
+        select: '선택',
+        deselect: '선택 해제',
+        none: '없음',
+        noDataAvailableYet: '아직 데이터가 없습니다.',
+      },
+      snapshot: {
+        loading: '스냅샷 로딩 중',
+        api: 'API 스냅샷',
+        fallback: '대체 데이터',
+        stale: '오래된 스냅샷',
+        partial: '부분 스냅샷',
+        loadingReadOnly: '읽기 전용 스냅샷 로딩 중',
+        controlsDisabled: '컨트롤 비활성화',
+        emptyState: '빈 상태',
+      },
+      palette: {
+        title: '명령 팔레트',
+        placeholder: '화면 또는 작업을 입력',
+        noMatches: '일치하는 명령 없음',
+        goTo: '{view}로 이동',
+        navKind: '이동',
+        actionKind: '작업',
+        refreshStatus: '읽기 전용 스냅샷 새로고침',
+        stopCurrentRun: '현재 실행 중지',
+        startRunner: '실행기 시작',
+        stopRunner: '실행기 중지',
+        reloadRunner: '실행기 다시 불러오기',
+        restartRunner: '실행기 재시작',
+        pauseLiveTail: '라이브 tail 일시정지',
+        resumeLiveTail: '라이브 tail 재개',
+        openWorktreeReview: '워크트리 검토 열기',
+        openMobilePreview: '모바일 미리보기 열기',
+        openLandingPreview: '랜딩 미리보기 열기',
+      },
+      shortcuts: {
+        ctrlEnterSaves: 'ctrl+enter 저장',
+        escCloses: 'esc 닫기',
+        draftMode: '초안 모드',
+        exactConfirmation: '정확한 확인',
+        confirmationPhrase: '확인 문구',
+      },
+      runner: {
+        panelTitle: '실행기 컨트롤',
+        confirmationPhrases: '확인 문구:',
+        confirmStartPhrase: '실행기 시작',
+        confirmStopPhrase: '실행기 중지',
+        confirmReloadPhrase: '실행기 다시 불러오기',
+        confirmRestartPhrase: '실행기 재시작',
+        source: '소스',
+        selectedRepo: '선택된 저장소',
+        selectedConfig: '선택된 설정',
+        controller: '컨트롤러',
+        state: '상태',
+        runMode: '실행 모드',
+        runStatus: '실행 상태',
+        lastAction: '마지막 작업',
+        lastMessage: '마지막 메시지',
+        lastError: '마지막 오류',
+        actionInFlight: '작업 진행 중',
+        actionComplete: '작업 완료',
+        backendError: '백엔드 오류',
+        controllerUnavailable: '실행기 컨트롤러를 사용할 수 없습니다.',
+        controlsDisabled: '실행기 컨트롤이 비활성화되었습니다.',
+        unavailable: '사용 불가',
+        ready: '준비됨',
+        running: '실행 중',
+        working: '작업 중...',
+        start: '시작',
+        stop: '중지',
+        reload: '다시 불러오기',
+        restart: '재시작',
+        starting: '시작 중...',
+        stopping: '중지 중...',
+        reloading: '다시 불러오는 중...',
+        restarting: '재시작 중...',
+        started: '시작됨',
+        stopped: '중지됨',
+        reloaded: '다시 불러옴',
+        restarted: '재시작됨',
+        confirmStart: '시작 확인',
+        confirmStop: '중지 확인',
+        confirmReload: '다시 불러오기 확인',
+        confirmRestart: '재시작 확인',
+        startSummary: '선택한 저장소와 설정 스냅샷으로 실행기를 시작합니다.',
+        stopSummary: '현재 실행기를 중지하고 정지 신호를 기록한 뒤 종료 상태를 기다립니다.',
+        reloadSummary: '현재 실행기를 중지하고 안정될 때까지 기다린 다음, 선택한 저장소와 설정 스냅샷으로 다시 시작합니다.',
+        restartSummary: '선택한 저장소와 설정 스냅샷으로 실행기를 재시작합니다.',
+        confirmAction: '이 실행기 작업을 확인합니다.',
+      },
+      dashboard: {
+        title: '대시보드',
+        pipelineSnapshot: '파이프라인 스냅샷',
+        liveLogs: '실시간 로그',
+        runFacts: '실행 정보',
+        goalsSnapshot: '목표 스냅샷',
+        selectedBacklogItem: '선택된 백로그 항목',
+        notifications: '알림',
+        currentTaskId: '현재 작업 ID',
+        currentTaskTitle: '현재 작업 제목',
+        attempt: '시도',
+        branch: '브랜치',
+        worktreeMode: '워크트리 모드',
+        runDirectory: '실행 디렉터리',
+        finalReason: '종료 사유',
+        noLogEntriesYet: '아직 로그가 없습니다.',
+        noGoalsPublishedYet: '아직 목표가 게시되지 않았습니다.',
+        noTaskSelected: '선택된 작업 없음.',
+        noBacklogArtifacts: '아직 백로그 산출물이 게시되지 않았습니다.',
+        noNotificationsYet: '아직 알림이 없습니다.',
+        stage: '단계',
+        tasks: '작업',
+        tokens: '토큰',
+        budget: '예산',
+      },
+      backlog: {
+        title: '백로그',
+        workQueue: '작업 대기열',
+        backlogSummary: '백로그 요약',
+        pending: '대기',
+        inProgress: '진행 중',
+        done: '완료',
+        failed: '실패',
+        noTasksInBucket: '이 버킷에 작업이 없습니다.',
+        noArtifacts: '아직 백로그 산출물이 게시되지 않았습니다.',
+        dependenciesUnavailable: '의존성 없음',
+        fileScopeUnavailable: '파일 범위 없음',
+        attemptUnavailable: '시도 정보 없음',
+        cycleUnavailable: '사이클 정보 없음',
+        stepUnavailable: '단계 정보 없음',
+        failureUnavailable: '실패 정보 없음',
+        recentOutputUnavailable: '최근 출력 없음.',
+        noTaskSelected: '선택된 작업 없음.',
+        queued: '대기 중',
+        completed: '완료',
+        needsAttention: '확인 필요',
+      },
+      goals: {
+        title: '목표',
+        goalProgress: '목표 진행률',
+        loadingSnapshot: '읽기 전용 스냅샷을 불러오는 중...',
+        browserLocalDraft: '브라우저 로컬 목표 편집이 활성화되었습니다.',
+        draftStaysLocal: '초안 편집은 저장하거나 초기화하기 전까지 로컬에만 유지됩니다. 버킷 그룹은 P0와 P1에 고정됩니다.',
+        snapshot: 'GOALS.md 스냅샷',
+        goalDraftDiff: '목표 초안 차이',
+        saveLocked: '목표 저장이 잠겨 있습니다',
+        confirmationRequired: '확인 필요',
+        readyToSave: '목표 저장 준비 완료',
+        saving: '목표 저장 중',
+        saved: '목표가 저장되었습니다',
+        saveFailed: '목표 저장 실패',
+        confirmationPhrase: '확인 문구',
+        backupPath: '백업 경로',
+        savedPath: '저장된 경로',
+        errorCode: '오류 코드',
+        resetDraft: '초안 초기화',
+        localDraftOnly: '로컬 초안만',
+        checked: '체크됨',
+        parserWarnings: '파서 경고',
+        rawTextPreview: '원문 미리보기',
+        sourceLine: '소스 줄',
+        sourceMetadata: '소스 메타데이터',
+        noGoals: 'GOALS.md에 내용은 있지만 체크리스트 항목을 파싱하지 못했습니다.',
+        missing: 'GOALS.md가 없습니다.',
+        empty: 'GOALS.md가 비어 있습니다.',
+        noLocalChanges: '아직 로컬 내용 변경이 없습니다.',
+        saveCreatesBackup: '저장은 .doc/GOALS.md를 원자적으로 업데이트하기 전에 항상 타임스탬프 백업을 만듭니다.',
+        confirmSave: '확인 후 목표 저장',
+        deletedUncheckedP0: '체크되지 않은 P0 삭제',
+        downgradedUncheckedP0: '체크되지 않은 P0 하향 조정',
+        typeExact: '확인을 위해 {confirmation}를 정확히 입력하세요.',
+        p0MustHave: 'P0 | 필수',
+        p1ShouldHave: 'P1 | 권장',
+      },
+      config: {
+        title: '설정',
+        fieldDetails: '필드 세부 정보',
+        loadingSnapshot: '읽기 전용 스냅샷을 불러오는 중',
+        localDraftOnly: '로컬 초안만',
+        activeValue: '현재 값',
+        localDraft: '로컬 초안',
+        pendingChanges: '대기 중인 변경',
+        saveChanges: '변경 사항 저장',
+        saving: '저장 중...',
+        saved: '설정 저장됨',
+        saveFailed: '설정 저장 실패',
+        saveLocked: '설정 저장이 잠겨 있습니다',
+        noChanges: '변경된 설정 없음',
+        readyToSave: '저장할 변경 사항 준비됨',
+        backupPath: '백업 경로',
+        reloadRequired: '다시 불러오기 필요',
+        pendingPaths: '대기 경로',
+        restartRequired: '재시작 필요',
+        redactedHidden: '마스킹된 값은 브라우저에서 계속 숨겨집니다.',
+        localValidationFailed: '로컬 검증 실패',
+        secret: '비밀',
+        restart: '재시작',
+        invalid: '유효하지 않음',
+        default: '기본값',
+      },
+      prompts: {
+        title: '프롬프트',
+        promptInventory: '프롬프트 목록',
+        inventoryRedacted: '목록 미리보기는 계속 마스킹됩니다. 프롬프트를 선택하면 전체 내용을 명시적 읽기 경로로 엽니다.',
+        promptEditor: '프롬프트 편집기',
+        explicitPromptRead: '명시적 프롬프트 읽기',
+        loadedThroughExplicitReadPath: '명시적 읽기 경로로 불러옴',
+        fullReadPreview: '전체 읽기 미리보기',
+        noPromptSelected: '선택된 프롬프트 없음',
+        selectPrompt: '프롬프트를 선택하여 명시적 콘텐츠 슬라이스를 읽습니다.',
+        noPromptFiles: '프롬프트 파일을 찾지 못했습니다.',
+        primaryPromptsDir: '기본 프롬프트 디렉터리',
+        trackedPromptFiles: '추적 중인 프롬프트 파일',
+        scope: '범위',
+        profile: '프로필',
+        source: '소스',
+        resolvedPath: '해결된 경로',
+        lastUpdated: '마지막 업데이트',
+        savePrompt: '프롬프트 저장',
+        restoreBackup: '백업 복원',
+        selectedBackup: '선택된 백업',
+        availableBackups: '사용 가능한 백업',
+        restoreBackupPath: '복원 백업 경로',
+        savedPath: '저장된 경로',
+        restoredFrom: '복원 원본',
+        promptMutationsLocked: '프롬프트 변경이 잠겨 있습니다',
+        promptMutationsDisabled: '실행기 컨트롤이 활성화될 때까지 프롬프트 저장과 복원은 비활성화됩니다.',
+        chooseBackupRestore: '검증이 통과하면 복원할 백업을 선택하거나 현재 초안을 저장하세요.',
+        filenameValidation: '파일명 검증',
+        contentValidation: '내용 검증',
+        templateVariableValidation: '템플릿 변수 검증',
+        requiredTemplateVariables: '필수 템플릿 변수',
+        missingTemplateVariables: '누락된 템플릿 변수',
+        filenameIsPopulated: '파일명이 입력되었습니다.',
+        contentIsPopulated: '내용이 입력되었습니다.',
+        requiredTemplateVariablesLabel: '필수 템플릿 변수: {variables}',
+        noLocalChangesYet: '아직 로컬 내용 변경이 없습니다.',
+        localDiffPreview: '로컬 차이 미리보기',
+        filename: '파일명',
+        localOnly: '로컬 전용',
+        added: '추가됨',
+        removed: '삭제됨',
+        line: '줄 {lineNumber}',
+        restoreConfirmation: '복원 확인',
+        restoreOverwritePhrase: '선택한 백업이 프롬프트 파일을 덮어쓴다는 것을 확인하려면 RESTORE BACKUP를 입력하세요.',
+        filenameRequired: '파일명을 비워둘 수 없습니다.',
+        filenameMustBeBare: '파일명은 해결된 프롬프트 디렉터리 안의 순수한 파일명이어야 합니다.',
+        promptContentRequired: '프롬프트 내용은 비워둘 수 없습니다.',
+        promptSaved: '프롬프트가 저장되었습니다',
+        promptRestored: '프롬프트가 복원되었습니다',
+        promptSaveFailed: '프롬프트 저장 실패',
+        promptRestoreFailed: '프롬프트 복원 실패',
+        promptMutationCompleted: '프롬프트 변경이 완료되었습니다.',
+        promptMutationFailed: '프롬프트 변경에 실패했습니다.',
+      },
+      history: {
+        title: '실행 기록',
+        runHistory: '실행 기록',
+        noRunsYet: '아직 실행 기록이 없습니다.',
+        selectedRun: '선택된 실행',
+        persistedSummary: '저장된 요약',
+        shutdownReason: '종료 사유',
+        worktreeOutcome: '워크트리 결과',
+        noSummaries: '아직 저장된 실행 요약이 없습니다.',
+        success: '성공',
+        tasks: '작업',
+        budgetCap: '예산 상한',
+      },
+      notifications: {
+        title: '알림',
+        eventFeed: '이벤트 피드',
+        noMatchCurrentFilter: '현재 필터와 일치하는 알림이 없습니다.',
+        noRecorded: '아직 기록된 알림이 없습니다.',
+        notificationSource: '알림 소스',
+        observedKinds: '관측된 종류',
+        controlPlaneLastEvent: '컨트롤 플레인 마지막 이벤트',
+        notificationCounts: '알림 수',
+        bridgeSettings: '브리지 설정',
+        notificationError: '알림 오류',
+        filteredEmpty: '필터 결과 없음',
+        noEventsYet: '아직 이벤트 없음',
+      },
+      worktree: {
+        title: '워크트리 검토',
+        pendingMerge: '대기 중인 병합',
+        reviewChecklist: '검토 체크리스트',
+        mergeActions: '병합 작업',
+        confirmMergePhrase: '워크트리 병합',
+        confirmDiscardPhrase: '워크트리 폐기',
+        readOnlyMode: '읽기 전용 모드',
+        confirmationRequired: '확인 필요',
+        manualRecovery: '수동 복구',
+        finalizedWorktree: '워크트리 완료됨',
+        noPendingMerge: '대기 중인 워크트리 병합이 없습니다.',
+        noChangedFiles: '패치에서 변경 파일을 파싱하지 못했습니다.',
+        reviewRequired: '소스 저장소 변경 전에 검토가 필요합니다',
+        patchApplied: '패치 적용됨',
+        patchDiscarded: '패치 폐기됨',
+        malformedPendingFile: '잘못된 대기 파일',
+        mergeRecordedCleanupFailed: '병합 기록됨, 정리 실패',
+        discardRecordedCleanupFailed: '폐기 기록됨, 정리 실패',
+        patchExportFailed: '패치 내보내기 실패',
+        patchExportNotApplied: '패치가 내보내졌지만 자동 적용되지 않음',
+        patchNotApplied: '패치가 적용되지 않음',
+        exactConfirmation: '정확한 확인',
+        confirmationPhrase: '확인 문구',
+        confirmMerge: '병합 확인',
+        confirmDiscard: '폐기 확인',
+        sourceRepo: '소스 저장소',
+        runDir: '실행 디렉터리',
+        worktreeDir: '워크트리 디렉터리',
+        patchPath: '패치 경로',
+        pendingFile: '대기 파일',
+        baseRef: '기준 참조',
+        headRef: '헤드 참조',
+        cleanupState: '정리 상태',
+        cleanupPath: '정리 경로',
+        cleanupMessage: '정리 메시지',
+        runnerRc: '실행기 rc',
+        reviewBeforeMerge: '병합 전에 검토',
+        noChecklist: '아직 체크리스트가 없습니다.',
+        noPendingReview: '대기 중인 워크트리 병합이 없습니다.',
+        confirmMergeToApply: '커밋을 만들지 않고 패치를 적용하려면 병합을 확인하세요.',
+        confirmDiscardToRemove: '소스 파일을 건드리지 않고 대기 상태를 제거하려면 폐기를 확인하세요.',
+        backendValidates: '백엔드는 실행 전에 소스 저장소, 실행 디렉터리, 워크트리 경로, 패치 경로를 검증합니다.',
+      },
+      logs: {
+        title: '로그',
+        liveTail: '라이브 tail',
+        tailFilter: 'tail 필터',
+        loadingActiveRunLog: '활성 실행 로그 불러오는 중',
+        liveTailActive: '라이브 tail 활성',
+        liveTailPaused: '라이브 tail 일시정지',
+        logFileMissing: '로그 파일 없음',
+        logReadError: '로그 읽기 오류',
+        noMatchingLogLines: '일치하는 로그 줄 없음',
+        pauseLiveTail: '라이브 tail 일시정지',
+        resumeLiveTail: '라이브 tail 재개',
+        noEntries: '아직 로그가 없습니다.',
+        noMatchCurrentFilter: '현재 필터와 일치하는 로그가 없습니다.',
+        stage: '단계',
+        message: '메시지',
+        copySelectedLines: '선택한 줄 복사',
+        downloadFilteredLogs: '필터된 로그 다운로드',
+        clearSelection: '선택 해제',
+      },
+      landing: {
+        title: '랜딩 미리보기',
+        directionA: 'Direction A 랜딩 미리보기',
+        marketingShell: '마케팅 쉘',
+        headline: '그대로 실행해 두세요.<br>PR로 깨어나세요.',
+        copy: 'PM -> Dev -> QA 파이프라인, 로컬 안전 워크트리 검토, 컴팩트한 프로덕션 쉘을 갖춘 CLI 우선 멀티 에이전트 러너입니다.',
+        openDashboard: '대시보드 열기',
+        copyRunCommand: '실행 명령 복사',
+        productionNotes: '프로덕션 메모',
+        noBabel: '브라우저 내 Babel도 없고, React CDN도 없으며, docs/Design 런타임 import도 없습니다.',
+        staticProductionAsset: '정적 프로덕션 자산',
+        topbarShell: '44px 상단바, 220px 사이드바, 독립적인 메인 스크롤 영역이 유지됩니다.',
+        desktopShellRecovery: '데스크톱 쉘 복구',
+        openMobile: '모바일 열기',
+        directionAMarketingShell: 'Direction A 마케팅 쉘',
+      },
+      mobile: {
+        title: '모바일 미리보기',
+        telegramStyleStatusView: '텔레그램 스타일 상태 보기',
+        mobilePreviewNotes: '모바일 미리보기 메모',
+        compactRemoteStatusSurface: '실행 모니터링용 컴팩트 원격 상태 화면입니다.',
+        narrowWidths: '좁은 폭에서도 읽기 쉽도록 설계되었습니다.',
+        mirrorsMock: '외부 런타임 의존성 없이 Direction A 모바일 목업을 따릅니다.',
+        staticPreviewShell: '정적 미리보기 쉘',
+        openNotifications: '알림 열기',
+        openDashboard: '대시보드 열기',
+        pipeline: '파이프라인',
+        notifications: '알림',
+      },
+    },
+  };
+
+  Object.assign(LOCALE_TEXT.ko.common, {
+    enabled: '활성화됨',
+    disabled: '비활성화됨',
+    unknown: '알 수 없음',
+    of: '중',
+    lines: '줄',
+    recent: '최근',
+    complete: '완료',
+    remaining: '남음',
+    visible: '표시됨',
+    total: '전체',
+  });
+  LOCALE_TEXT.ko.pipeline = LOCALE_TEXT.ko.pipeline || {};
+  Object.assign(LOCALE_TEXT.ko.pipeline, {
+    title: '파이프라인',
+    stageLane: '단계 레인',
+    currentStageOutput: '현재 단계 출력',
+    stageGuardrails: '단계 가드레일',
+    liveTokens: '실시간 토큰',
+    readOnlyShell: '기본은 읽기 전용 셸입니다. 정지, 병합, 폐기는 여기서 자동 적용되지 않습니다.',
+    manualConfirmation: '현재 실행은 수동 정지 확인과 로컬 검토 흐름을 사용합니다.',
+    devStage: 'Dev 단계',
+    tokensProcessed: '처리된 토큰',
+    tokensGenerated: '생성된 토큰',
+    tokenTelemetryUnavailable: '토큰 원격 측정 없음',
+    budgetTelemetryUnavailable: '예산 원격 측정 없음',
+    stageUnavailable: '단계 없음',
+    lifecycleRecord: '수명주기 기록',
+    startedUnavailable: '시작 정보 없음',
+    endedUnavailable: '종료 정보 없음',
+    inProgress: '진행 중',
+    recentOutputUnavailable: '최근 출력 없음.',
+    noLifecycleRecords: '아직 게시된 수명주기 기록이 없습니다.',
+    activeTask: '현재 작업',
+    current: '현재',
+    iter: '반복',
+  });
+  Object.assign(LOCALE_TEXT.ko.history, {
+    branchId: '브랜치 / ID',
+    duration: '기간',
+    started: '시작',
+    action: '작업',
+    currentState: '현재 상태',
+    persistedRuntime: '저장된 실행 시간',
+    noWorktreeArtifact: '작업트리 산출물 없음',
+    worktreeOutcomeMeta: '작업트리 결과',
+    noPersistedSummary: '저장된 요약 필드가 없습니다.',
+  });
+  Object.assign(LOCALE_TEXT.ko.notifications, {
+    visibleItems: '표시됨',
+    totalItems: '전체',
+    currentRun: '현재 실행',
+    lifecycle: '수명주기',
+    taskDone: '작업 완료',
+    errors: '오류',
+  });
+  Object.assign(LOCALE_TEXT.ko.worktree, {
+    readOnly: '읽기 전용',
+    finalized: '최종화됨',
+    cleanupRequired: '정리 필요',
+    mergeActions: '병합 작업',
+    reviewRequired: '검토 필요',
+    reviewBeforeMerge: '병합 전 검토',
+    changedFiles: '변경된 파일',
+    copyPatchPath: '패치 경로 복사',
+    noPendingFile: '대기 파일 없음',
+  });
+  Object.assign(LOCALE_TEXT.ko.logs, {
+    stagePlaceholder: '단계',
+    taskId: '작업 ID',
+    search: '검색',
+    malformedLinesSkipped: '{count}개의 잘못된 줄을 건너뜀.',
+  });
+  Object.assign(LOCALE_TEXT.ko.config, {
+    mustBeBoolean: '불리언이어야 합니다.',
+    mustBeNumber: '숫자여야 합니다.',
+    mustBeAtLeast: '{min} 이상이어야 합니다.',
+    mustBeAtMost: '{max} 이하여야 합니다.',
+    cannotBeEmpty: '비워 둘 수 없습니다.',
+    mustBeOneOf: '다음 중 하나여야 합니다: {options}',
+    pickAtLeastOne: '하나 이상 선택하세요.',
+    invalidOption: '잘못된 옵션: {options}',
+    enterAtLeastOneValue: '값을 하나 이상 입력하세요.',
+    invalidIntegerValue: '잘못된 정수 값: {values}',
+    repoManagedByServer: '리포지토리 루트는 서버가 관리합니다.',
+    redactedPlaceholderSaveBlocked: '가려진 자리표시는 저장할 수 없습니다.',
+    saveInProgress: '구성 저장이 이미 진행 중입니다.',
+    savesDisabledUntilRunnerEnabled: '러너 제어가 활성화될 때까지 구성 저장이 비활성화됩니다.',
+    noConfigChanges: '저장할 구성 변경 사항이 없습니다.',
+    fixInvalidChangesBeforeSaving: '저장하기 전에 잘못된 변경 {count}개를 수정하세요.',
+  });
+  Object.assign(LOCALE_TEXT.ko.common, {
+    select: '선택',
+    deselect: '선택 해제',
+    loading: '불러오는 중',
+    working: '작업 중...',
+    ready: '준비됨',
+  });
+  Object.assign(LOCALE_TEXT.ko.topbar, {
+    elapsed: '경과',
+    quotaUsage: '할당량 사용량',
+    quotaUsageWindow: '할당량 {window} 사용량',
+    quotaUnavailable: '할당량을 사용할 수 없음',
+  });
+  Object.assign(LOCALE_TEXT.ko.common, {
+    open: '열기',
+    chars: '자',
+  });
+  Object.assign(LOCALE_TEXT.ko.pipeline, {
+    started: '시작',
+    ended: '종료',
+  });
+  Object.assign(LOCALE_TEXT.ko.config, {
+    description: '설명',
+    hint: '힌트',
+    defaultValue: '기본값',
+    resolvedPromptsPath: '확정된 프롬프트 경로',
+  });
+  Object.assign(LOCALE_TEXT.ko.goals, {
+    newGoal: '새 목표',
+    editGoal: '목표 편집',
+    bucket: '버킷',
+    goal: '목표',
+    note: '메모',
+    addGoal: '목표 추가',
+    saveGoal: '목표 저장',
+    noGoalsYet: '아직 목표가 없습니다.',
+  });
+  Object.assign(LOCALE_TEXT.ko.logs, {
+    taskIdPlaceholder: '작업 ID',
+    searchPlaceholder: '검색',
+    line: '줄 {lineNumber}',
+  });
+  Object.assign(LOCALE_TEXT.ko.worktree, {
+    merging: '병합 중...',
+    discarding: '폐기 중...',
+    refreshingStatus: '상태 새로고침 중',
+  });
+
+  Object.assign(LOCALE_TEXT.en.pipeline, {
+    input: 'Input',
+    output: 'Output',
+  });
+  Object.assign(LOCALE_TEXT.ko.pipeline, {
+    input: '입력',
+    output: '출력',
+  });
+  Object.assign(LOCALE_TEXT.en.config, {
+    resetDraft: 'Reset draft',
+    savedPaths: 'Saved paths',
+    edited: 'edited',
+  });
+  Object.assign(LOCALE_TEXT.ko.config, {
+    resetDraft: '초안 초기화',
+    savedPaths: '저장된 경로',
+    edited: '수정됨',
+  });
+  Object.assign(LOCALE_TEXT.en.backlog, {
+    active: 'Active',
+  });
+  Object.assign(LOCALE_TEXT.ko.backlog, {
+    active: '활성',
+  });
+  Object.assign(LOCALE_TEXT.en.worktree, {
+    applyMerge: 'Apply merge',
+    discardMerge: 'Discard merge',
+    confirmMerge: 'Confirm merge',
+    confirmDiscard: 'Confirm discard',
+  });
+  Object.assign(LOCALE_TEXT.ko.worktree, {
+    applyMerge: '병합 적용',
+    discardMerge: '병합 취소',
+    confirmMerge: '병합 확인',
+    confirmDiscard: '취소 확인',
+  });
+
+  Object.assign(LOCALE_TEXT.en.logs, {
+    linesShown: '{count} lines shown',
+    waitingForNextEvent: 'waiting for next event...',
+  });
+  Object.assign(LOCALE_TEXT.en.goals, {
+    saveGoals: 'Save Goals',
+    toggleCheckbox: 'Toggle goal checkbox {checkboxState} at line {lineNumber}',
+  });
+  Object.assign(LOCALE_TEXT.en.runner, {
+    controllerReportedError: 'Runner controller reported an error.',
+    controlFailed: 'Runner control failed.',
+  });
+  Object.assign(LOCALE_TEXT.en.worktree, {
+    actionFailed: 'Worktree action failed.',
+    applyingPendingDecision: 'Applying the pending worktree decision for {sourceRepo}.',
+  });
+  Object.assign(LOCALE_TEXT.en.notifications, {
+    localStopConfirmed: 'Local stop confirmed. UI switched to stopped state.',
+    observedKindsNote: 'Kinds derived from actual notification rows',
+  });
+
+  Object.assign(LOCALE_TEXT.en, {
+    common: {
+      ...LOCALE_TEXT.en.common,
+      source: 'Source',
+      parsed: 'parsed',
+      empty: 'empty',
+      missing: 'missing',
+      size: 'Size',
+      mtime: 'Mtime',
+      field: 'Field',
+      preview: 'Preview',
+      latest: 'latest',
+      files: 'Files',
+      status: 'Status',
+      quota: 'Quota',
+      backup: 'Backup',
+      backups: 'backups',
+      changes: 'Changes',
+      change: 'change',
+      edit: 'Edit',
+      up: 'Up',
+      down: 'Down',
+      delete: 'Delete',
+      row: 'Row',
+      moved: 'Moved',
+      edited: 'Edited',
+      yes: 'yes',
+      no: 'no',
+      exists: 'Exists',
+      bytes: 'bytes',
+      runs: 'runs',
+      tasks: 'tasks',
+      skipped: 'skipped',
+      overrides: 'overrides',
+      running: 'running',
+      stopped: 'stopped',
+      live: 'live',
+      success: 'success',
+    },
+    goals: {
+      ...LOCALE_TEXT.en.goals,
+      source: 'Source',
+      parsed: 'parsed',
+      noParserWarnings: 'No parser warnings.',
+      goalSavePanel: 'Goal save',
+      localChecklist: 'Local checklist with add, edit, reorder, save, and completion actions',
+      goalTextRequired: 'Goal text cannot be empty.',
+      readOnlyFallback: 'Fallback data is shown locally when the read-only API is unavailable.',
+    },
+    config: {
+      ...LOCALE_TEXT.en.config,
+      missingSchema: 'Missing schema for {path}',
+      field: 'Config field',
+      listPlaceholderNumbers: '1, 2, 3',
+      listPlaceholderValues: 'value, value',
+      noConfigChangesSupplied: 'No config changes were supplied.',
+      fixPendingChangesBeforeSaving: '{count} pending change(s) must be fixed before saving.',
+      savingConfigChanges: 'Saving config changes...',
+      configSavedMessage: 'Config saved.',
+      groupProject: 'Project',
+      groupRunner: 'Runner',
+      groupQuota: 'Quota',
+      groupWorktree: 'Worktree',
+      groupPrompts: 'Prompt Paths',
+      groupCodexModels: 'Codex Models',
+      groupPmRefresh: 'PM Refresh',
+      groupBudget: 'Budget',
+      groupTelegram: 'Telegram',
+      groupGoals: 'Goals',
+    },
+    prompts: {
+      ...LOCALE_TEXT.en.prompts,
+      preview: 'Preview',
+      content: 'Content',
+      noBackupsAvailable: 'No backups available',
+      errorCode: 'Error code',
+      backupPath: 'Backup path',
+        promptInventorySummary: 'Inventory previews stay redacted. Select a prompt to open the explicit full-content read path.',
+        draftStaysLocal: 'Draft edits stay local until save or reset.',
+        promptEditorSummary: 'Loaded through the explicit read path',
+      saveCreatesBackup: 'Saving always creates a backup before updating the prompt file.',
+      copyPromptSummary: 'Copy prompt summary',
+      template: 'template',
+      override: 'override',
+      overrides: 'overrides',
+      unknownSource: 'unknown source',
+      unresolvedPath: '(unresolved path)',
+      promptReadFailed: 'Prompt read failed.',
+      saving: 'Saving...',
+      restoring: 'Restoring...',
+      restoringBackup: 'Restoring prompt content from the selected backup and writing a safety copy first.',
+    },
+    history: {
+      ...LOCALE_TEXT.en.history,
+      latest: 'latest',
+      successfulRuns: 'successful runs',
+      completedRuns: 'completed',
+      configMaxUsd: 'config max_usd',
+      readOnlyRunArtifacts: 'read-only run artifacts',
+      persistedSummariesDriveThisView: 'Persisted run summaries drive this view. Task counts and shutdown reasons are read from the run artifacts, not reconstructed placeholders.',
+    },
+    notifications: {
+      ...LOCALE_TEXT.en.notifications,
+      filterAll: 'ALL',
+      filterRunStart: 'RUN START',
+      filterRunStop: 'RUN STOP',
+      filterTaskDone: 'TASK DONE',
+      filterTaskFailed: 'TASK FAILED',
+      filterQuota: 'QUOTA',
+      filterError: 'ERROR',
+      filterStalled: 'STALLED',
+      newestEvent: 'Newest event',
+      configuredEvents: 'Configured events',
+      stalledThreshold: 'Stalled threshold',
+      controlPlaneStatus: 'Control-plane status',
+      runnerControlSnapshot: 'Runner control snapshot',
+      runStartAndStop: 'run start + run stop',
+      successEvents: 'success events',
+      budgetNotices: 'budget notices',
+      actionNeeded: 'action needed',
+      eventsReadFrom: 'Events are read from lifecycle records and control-plane snapshots. No placeholder feed is used.',
+    },
+    runner: {
+      ...LOCALE_TEXT.en.runner,
+      loadingStatus: 'Loading runner control status...',
+      enabledRunning: 'Runner controls are enabled and the controller reports a running runner.',
+      enabledStopped: 'Runner controls are enabled and the controller reports a stopped runner.',
+      disabledUntilServerOptIn: 'Runner controls are disabled until the server opt-in is enabled.',
+      requestInFlight: 'A runner control request is already in flight.',
+      typePhraseToContinue: 'type the phrase to continue',
+      refreshingStatus: 'Refreshing runner status until it reaches the expected state.',
+      actionUnavailable: 'action unavailable',
+      controllerUnavailableMessage: 'Runner controller is unavailable.',
+      controlsDisabledMessage: 'Runner controls are disabled.',
+      typeConfirmationPhrase: 'Type "{confirmation}" to confirm.',
+      confirmationPhraseMismatch: 'Confirmation phrase must be "{confirmation}".',
+      stateTimeout: 'Runner did not report {state} within {seconds}s.',
+    },
+    worktree: {
+      ...LOCALE_TEXT.en.worktree,
+      status: 'Status',
+      statusFile: 'Status file',
+      sourceBranch: 'Source branch',
+      manualCleanupRequired: 'Cleanup failed after the decision was recorded.',
+      noPendingMergeAvailable: 'No pending worktree merge is available.',
+      reviewRequiredBeforeChanges: 'Review required before source-repo changes',
+      currentArtifactPath: 'Current artifact path',
+      sourceRepoLabel: 'Source repo',
+      patchExportFailedBeforeMarker: 'Patch export failed before a reviewable merge marker was written.',
+      exportedPatchNotAutoApplied: 'The patch was exported, but auto-apply did not run.',
+      noSourceRepoChangePending: 'No source-repo change is pending.',
+      noCommitWillBeCreated: 'No commit will be created.',
+      pendingMetadataIncomplete: 'The pending worktree metadata is incomplete.',
+      fixOrDeletePendingFile: 'Fix or delete the pending file in the CLI before trying again.',
+      applyExportedPatchBeforeConfirming: 'Apply the exported patch before confirming merge or discard.',
+      worktreeAlreadyFinalized: 'The worktree is already finalized.',
+      noPendingFile: 'no pending file',
+      reviewThePatchBeforeSourceRepoChanges: 'Review the patch before making any source-repo changes.',
+      reviewChecklist: 'Review checklist',
+      riskNotes: 'Risk notes',
+      reviewCompletedLocally: 'Worktree review marked complete locally.',
+    },
+  });
+
+  Object.assign(LOCALE_TEXT.ko, {
+    common: {
+      ...LOCALE_TEXT.ko.common,
+      source: '출처',
+      parsed: '파싱됨',
+      empty: '비어 있음',
+      missing: '없음',
+      size: '크기',
+      mtime: '수정 시각',
+      field: '필드',
+      preview: '미리보기',
+      latest: '최신',
+      files: '파일',
+      status: '상태',
+      quota: '할당량',
+      backup: '백업',
+      changes: '변경 사항',
+      change: '변경',
+    },
+    goals: {
+      ...LOCALE_TEXT.ko.goals,
+      source: '출처',
+      parsed: '파싱됨',
+      noParserWarnings: '파서 경고 없음.',
+      goalSavePanel: '목표 저장',
+      localChecklist: '추가, 편집, 재정렬, 저장, 완료가 가능한 로컬 체크리스트',
+      goalTextRequired: '목표 텍스트는 비워 둘 수 없습니다.',
+    },
+    config: {
+      ...LOCALE_TEXT.ko.config,
+      missingSchema: '{path}에 대한 스키마가 없습니다.',
+      field: '설정 필드',
+      listPlaceholderNumbers: '1, 2, 3',
+      listPlaceholderValues: '값, 값',
+      noConfigChangesSupplied: '전달된 설정 변경이 없습니다.',
+      fixPendingChangesBeforeSaving: '저장하기 전에 보류 중인 변경 {count}개를 수정해야 합니다.',
+      savingConfigChanges: '설정 변경 저장 중...',
+      configSavedMessage: '설정이 저장되었습니다.',
+    },
+    prompts: {
+      ...LOCALE_TEXT.ko.prompts,
+      preview: '미리보기',
+      content: '내용',
+      noBackupsAvailable: '사용 가능한 백업 없음',
+      errorCode: '오류 코드',
+      backupPath: '백업 경로',
+        promptInventorySummary: '인벤토리 미리보기는 가려진 상태로 유지됩니다. 명시적인 전체 읽기 경로를 열려면 프롬프트를 선택하세요.',
+        draftStaysLocal: '초안 편집은 저장하거나 초기화하기 전까지 로컬에만 유지됩니다.',
+        promptEditorSummary: '명시적인 읽기 경로를 통해 로드됨',
+      saveCreatesBackup: '저장은 프롬프트 파일을 업데이트하기 전에 항상 백업을 만듭니다.',
+      copyPromptSummary: '프롬프트 요약 복사',
+    },
+    history: {
+      ...LOCALE_TEXT.ko.history,
+      latest: '최신',
+      successfulRuns: '성공한 실행',
+      completedRuns: '완료',
+      configMaxUsd: '설정 max_usd',
+      readOnlyRunArtifacts: '읽기 전용 실행 산출물',
+      persistedSummariesDriveThisView: '저장된 실행 요약이 이 보기를 구동합니다. 작업 수와 종료 사유는 실행 산출물에서 읽어오며, 재구성된 플레이스홀더가 아닙니다.',
+    },
+    notifications: {
+      ...LOCALE_TEXT.ko.notifications,
+      filterAll: '전체',
+      filterRunStart: '실행 시작',
+      filterRunStop: '실행 중지',
+      filterTaskDone: '작업 완료',
+      filterTaskFailed: '작업 실패',
+      filterQuota: '할당량',
+      filterError: '오류',
+      filterStalled: '정지',
+      newestEvent: '최신 이벤트',
+      configuredEvents: '설정된 이벤트',
+      stalledThreshold: '정지 임계값',
+      controlPlaneStatus: '제어 평면 상태',
+      runnerControlSnapshot: '실행기 제어 스냅샷',
+      runStartAndStop: '실행 시작 + 실행 중지',
+      successEvents: '성공 이벤트',
+      budgetNotices: '예산 알림',
+      actionNeeded: '조치 필요',
+      eventsReadFrom: '이벤트는 수명주기 기록과 제어 평면 스냅샷에서 읽어옵니다. 플레이스홀더 피드는 사용하지 않습니다.',
+    },
+    runner: {
+      ...LOCALE_TEXT.ko.runner,
+      loadingStatus: '실행기 제어 상태 로딩 중...',
+      enabledRunning: '실행기 컨트롤이 활성화되었고 컨트롤러가 실행 중인 실행기를 보고합니다.',
+      enabledStopped: '실행기 컨트롤이 활성화되었고 컨트롤러가 중지된 실행기를 보고합니다.',
+      disabledUntilServerOptIn: '서버 옵트인이 활성화될 때까지 실행기 컨트롤은 비활성화됩니다.',
+      requestInFlight: '실행기 제어 요청이 이미 진행 중입니다.',
+      typePhraseToContinue: '계속하려면 문구를 입력하세요',
+      refreshingStatus: '예상 상태가 될 때까지 실행기 상태를 새로고침합니다.',
+      actionUnavailable: '작업을 사용할 수 없음',
+      controllerUnavailableMessage: '실행기 컨트롤러를 사용할 수 없습니다.',
+      controlsDisabledMessage: '실행기 컨트롤이 비활성화되었습니다.',
+    },
+    worktree: {
+      ...LOCALE_TEXT.ko.worktree,
+      status: '상태',
+      statusFile: '상태 파일',
+      sourceBranch: '소스 브랜치',
+      manualCleanupRequired: '결정이 기록된 후 정리가 실패했습니다.',
+      noPendingMergeAvailable: '대기 중인 작업트리 병합이 없습니다.',
+      reviewRequiredBeforeChanges: '소스 저장소 변경 전에 검토가 필요합니다',
+      currentArtifactPath: '현재 산출물 경로',
+      sourceRepoLabel: '소스 저장소',
+      patchExportFailedBeforeMarker: '검토 가능한 병합 마커가 쓰이기 전에 패치 내보내기가 실패했습니다.',
+      exportedPatchNotAutoApplied: '패치가 내보내졌지만 자동 적용이 실행되지 않았습니다.',
+      noSourceRepoChangePending: '대기 중인 소스 저장소 변경이 없습니다.',
+      noCommitWillBeCreated: '커밋은 생성되지 않습니다.',
+      pendingMetadataIncomplete: '대기 중인 작업트리 메타데이터가 불완전합니다.',
+      fixOrDeletePendingFile: '다시 시도하기 전에 CLI에서 대기 파일을 수정하거나 삭제하세요.',
+      applyExportedPatchBeforeConfirming: '병합 또는 폐기를 확인하기 전에 내보낸 패치를 적용하세요.',
+      worktreeAlreadyFinalized: '작업트리가 이미 종료되었습니다.',
+      noPendingFile: '대기 파일 없음',
+      reviewThePatchBeforeSourceRepoChanges: '소스 저장소 변경 전에 패치를 검토하세요.',
+      reviewChecklist: '검토 체크리스트',
+      riskNotes: '위험 참고',
+    },
+  });
+
+  Object.assign(LOCALE_TEXT.ko.common, {
+    backups: '백업',
+    edit: '편집',
+    up: '위',
+    down: '아래',
+    delete: '삭제',
+    row: '행',
+    moved: '이동됨',
+    edited: '수정됨',
+    yes: '예',
+    no: '아니요',
+    exists: '존재함',
+    bytes: '바이트',
+    runs: '실행',
+    tasks: '작업',
+    skipped: '건너뜀',
+    overrides: '오버라이드',
+    running: '실행 중',
+    stopped: '중지됨',
+    live: '실시간',
+    success: '성공',
+  });
+  Object.assign(LOCALE_TEXT.ko.goals, {
+    readOnlyFallback: '읽기 전용 API를 사용할 수 없을 때는 로컬 폴백 데이터를 표시합니다.',
+  });
+  Object.assign(LOCALE_TEXT.ko.config, {
+    groupProject: '프로젝트',
+    groupRunner: '러너',
+    groupQuota: '할당량',
+    groupWorktree: '작업트리',
+    groupPrompts: '프롬프트 경로',
+    groupCodexModels: 'Codex 모델',
+    groupPmRefresh: 'PM 갱신',
+    groupBudget: '예산',
+    groupTelegram: 'Telegram',
+    groupGoals: '목표',
+  });
+  Object.assign(LOCALE_TEXT.ko.prompts, {
+    template: '템플릿',
+    override: '오버라이드',
+    overrides: '오버라이드',
+    unknownSource: '알 수 없는 소스',
+    unresolvedPath: '(경로 미확정)',
+    promptReadFailed: '프롬프트 읽기에 실패했습니다.',
+    saving: '저장 중...',
+    restoring: '복원 중...',
+    restoringBackup: '선택한 백업에서 프롬프트 내용을 복원하고 먼저 안전 복사본을 작성합니다.',
+  });
+  Object.assign(LOCALE_TEXT.ko.logs, {
+    activeRunLog: '활성 실행 로그',
+    linesShown: '{count}줄 표시됨',
+    live: '실시간',
+    waitingForNextEvent: '다음 이벤트를 기다리는 중...',
+  });
+  Object.assign(LOCALE_TEXT.ko.pipeline, {
+    partialLifecycleRecords: '일부 라이프사이클 기록만 게시되었습니다.',
+  });
+  Object.assign(LOCALE_TEXT.ko.runner, {
+    typeConfirmationPhrase: '확인하려면 "{confirmation}"를 입력하세요.',
+    confirmationPhraseMismatch: '확인 문구는 "{confirmation}"여야 합니다.',
+    stateTimeout: '러너가 {seconds}초 안에 {state} 상태를 보고하지 않았습니다.',
+  });
+  Object.assign(LOCALE_TEXT.ko.worktree, {
+    reviewCompletedLocally: '작업트리 검토를 로컬에서 완료로 표시했습니다.',
+  });
+
+  const INITIAL_LOCALE = detectPreferredLocale();
+
+  function formatLocaleMessage(template, values = {}) {
+    return String(template).replace(/\{(\w+)\}/g, (_, key) => {
+      const value = values[key];
+      return value == null ? '' : String(value);
+    });
+  }
+
+  function localeText(locale, key, values = {}) {
+    const selected = normalizeLocale(locale);
+    const table = LOCALE_TEXT[selected] || LOCALE_TEXT.en;
+    const template = getAt(table, key) ?? getAt(LOCALE_TEXT.en, key) ?? key;
+    return formatLocaleMessage(template, values);
+  }
+
+  function currentLocale() {
+    return normalizeLocale(state.locale || INITIAL_LOCALE);
+  }
+
+  function setLocale(locale) {
+    const next = normalizeLocale(locale);
+    if (state.locale === next) {
+      return;
+    }
+    state.locale = next;
+    writeJSON(STORAGE.locale, next);
+    document.documentElement.lang = next;
+    renderShell({ preserveScroll: true, force: true });
+  }
+
+  function t(key, values = {}) {
+    return localeText(currentLocale(), key, values);
+  }
+
+  function viewLabel(view) {
+    const map = {
+      dashboard: 'nav.dashboard',
+      pipeline: 'nav.pipeline',
+      logs: 'nav.logs',
+      backlog: 'nav.backlog',
+      goals: 'nav.goals',
+      config: 'nav.config',
+      prompts: 'nav.prompts',
+      history: 'nav.runHistory',
+      notifications: 'nav.notifications',
+      worktree: 'nav.worktreeReview',
+      landing: 'nav.landingPreview',
+      mobile: 'nav.mobilePreview',
+    };
+    return t(map[view] || 'nav.dashboard');
+  }
+
+  function renderLocaleToggle() {
+    const locales = ['en', 'ko'];
+    const buttons = locales
+      .map((locale) => {
+        const active = currentLocale() === locale;
+        return `
+          <button
+            type="button"
+            class="button button--tiny locale-switch__button ${active ? 'button--primary locale-switch__button--active' : 'button--quiet'}"
+            data-action="${locale === 'ko' ? 'set-locale-ko' : 'set-locale-en'}"
+            data-locale="${escapeHTML(locale)}"
+            aria-pressed="${active ? 'true' : 'false'}"
+            aria-label="${escapeHTML(t('locale.language'))} ${escapeHTML(t(`locale.${locale}`))}"
+          >${escapeHTML(t(`locale.${locale}`))}</button>
+        `;
+      })
+      .join('');
+    return `<div class="locale-switch" aria-label="${escapeHTML(t('locale.language'))}">${buttons}</div>`;
+  }
 
   const VIEW_SHORTCUTS = {
     dashboard: 'g d',
@@ -221,7 +1857,7 @@
     return `${n}`;
   }
 
-  function metricText(available, value, formatter, unavailableText = 'unavailable') {
+  function metricText(available, value, formatter, unavailableText = t('common.unavailable')) {
     if (!available || value == null || value === '' || Number.isNaN(Number(value))) {
       return unavailableText;
     }
@@ -267,7 +1903,7 @@
   function formatQuotaUsage(quota) {
     const data = toObject(quota);
     if (!data.available || !toText(data.window, '')) {
-      return 'unavailable';
+      return t('topbar.quotaUnavailable');
     }
     const usedText = metricText(true, data.used, fmtPercent);
     const windowText = toText(data.window, '');
@@ -277,7 +1913,7 @@
   function formatQuotaSummary(quota) {
     const data = toObject(quota);
     if (!data.available || !toText(data.window, '')) {
-      return 'quota unavailable';
+      return t('topbar.quotaUnavailable');
     }
     const usedText = metricText(true, data.used, fmtPercent);
     const windowText = toText(data.window, '');
@@ -287,15 +1923,21 @@
   function renderQuotaControl(quota, title = '') {
     const data = toObject(quota);
     const available = Boolean(data.available && toText(data.window, ''));
-    const titleText = toText(title, available ? `Quota ${toText(data.window, '')} usage` : 'Quota unavailable');
+    const titleText = toText(
+      title,
+      available
+        ? t('topbar.quotaUsageWindow', { window: toText(data.window, '') })
+        : t('topbar.quotaUnavailable')
+    );
+    // quota unavailable
     if (!available) {
-      return `<span class="meter-chip meter-chip--unavailable" title="${escapeHTML(titleText)}">quota unavailable</span>`;
+      return `<span class="meter-chip meter-chip--unavailable" title="${escapeHTML(titleText)}">${escapeHTML(t('topbar.quotaUnavailable'))}</span>`;
     }
     const quotaText = formatQuotaUsage(data);
     const quotaWidth = progressWidth(data.used);
     return `
       <span class="meter-chip" title="${escapeHTML(titleText)}">
-        quota ${escapeHTML(quotaText)}
+        ${escapeHTML(t('topbar.quotaUsage'))} ${escapeHTML(quotaText)}
         <span class="meter" aria-hidden="true">
           <span class="meter__fill meter__fill--info" style="width:${escapeHTML(quotaWidth)}"></span>
         </span>
@@ -543,57 +2185,63 @@
   }
 
   function runnerControlConfirmationPhrase(action) {
-    return RUNNER_CONTROL_CONFIRMATIONS[action] || RUNNER_CONTROL_CONFIRMATIONS.reload;
+    const phrases = {
+      start: RUNNER_CONTROL_CONFIRMATIONS.start,
+      stop: RUNNER_CONTROL_CONFIRMATIONS.stop,
+      reload: RUNNER_CONTROL_CONFIRMATIONS.reload,
+      restart: RUNNER_CONTROL_CONFIRMATIONS.restart,
+    };
+    return phrases[action] || RUNNER_CONTROL_CONFIRMATIONS.reload;
   }
 
   function runnerControlActionLabel(action, busy = false) {
     const labels = {
-      start: 'Start',
-      stop: 'Stop',
-      reload: 'Reload',
-      restart: 'Restart',
+      start: t('runner.start'),
+      stop: t('runner.stop'),
+      reload: t('runner.reload'),
+      restart: t('runner.restart'),
     };
-    const label = labels[action] || 'Run';
+    const label = labels[action] || t('runner.start');
     if (!busy) {
       return label;
     }
     const busyLabels = {
-      start: 'Starting...',
-      stop: 'Stopping...',
-      reload: 'Reloading...',
-      restart: 'Restarting...',
+      start: t('runner.starting'),
+      stop: t('runner.stopping'),
+      reload: t('runner.reloading'),
+      restart: t('runner.restarting'),
     };
-    return busyLabels[action] || 'Working...';
+    return busyLabels[action] || t('runner.working');
   }
 
   function runnerControlCompletionLabel(action) {
     const labels = {
-      start: 'Started',
-      stop: 'Stopped',
-      reload: 'Reloaded',
-      restart: 'Restarted',
+      start: t('runner.started'),
+      stop: t('runner.stopped'),
+      reload: t('runner.reloaded'),
+      restart: t('runner.restarted'),
     };
-    return labels[action] || 'Success';
+    return labels[action] || t('common.saved');
   }
 
   function runnerControlModalTitle(action) {
     const titles = {
-      start: 'Confirm start',
-      stop: 'Confirm stop',
-      reload: 'Confirm reload',
-      restart: 'Confirm restart',
+      start: t('runner.confirmStart'),
+      stop: t('runner.confirmStop'),
+      reload: t('runner.confirmReload'),
+      restart: t('runner.confirmRestart'),
     };
-    return titles[action] || 'Confirm runner action';
+    return titles[action] || t('runner.confirmAction');
   }
 
   function runnerControlActionSummary(action) {
     const summaries = {
-      start: 'Start the runner using the selected repo and config snapshot.',
-      stop: 'Stop the current runner, write the stop signal, and wait for a terminal status.',
-      reload: 'Stop the current runner, wait for it to settle, then start again using the selected repo and config snapshot.',
-      restart: 'Restart the runner using the selected repo and config snapshot.',
+      start: t('runner.startSummary'),
+      stop: t('runner.stopSummary'),
+      reload: t('runner.reloadSummary'),
+      restart: t('runner.restartSummary'),
     };
-    return summaries[action] || 'Confirm this runner control action.';
+    return summaries[action] || t('runner.confirmAction');
   }
 
   function runnerControlStateInfo(control = state.runnerControl) {
@@ -606,36 +2254,36 @@
       return {
         chipTone: 'loading',
         bannerTone: 'info',
-        label: state.stopSubmitting ? runnerControlActionLabel(action, true) : 'Working...',
-        title: 'Action in flight',
-        copy: current.message || 'Runner status is being refreshed.',
+        label: state.stopSubmitting ? runnerControlActionLabel(action, true) : t('runner.working'),
+        title: t('runner.actionInFlight'),
+        copy: current.message || t('runner.working'),
       };
     }
     if (current.lastError || statusReason.startsWith('status_error:')) {
       return {
         chipTone: 'err',
         bannerTone: 'err',
-        label: 'Error',
-        title: 'Backend error',
-        copy: current.lastError || statusReason || current.message || 'Runner controller reported an error.',
+        label: t('common.failed'),
+        title: t('runner.backendError'),
+        copy: current.lastError || statusReason || current.message || t('runner.backendError'),
       };
     }
     if (!current.controllerAvailable) {
       return {
         chipTone: 'paused',
         bannerTone: 'warn',
-        label: 'Unavailable',
-        title: 'Controller unavailable',
-        copy: current.message || 'Runner controller is unavailable.',
+        label: t('runner.unavailable'),
+        title: t('runner.controllerUnavailable'),
+        copy: current.message || t('runner.controllerUnavailable'),
       };
     }
     if (!current.enabled) {
       return {
         chipTone: 'paused',
         bannerTone: 'warn',
-        label: 'Controls off',
-        title: 'Controls disabled',
-        copy: current.message || 'Runner controls are disabled.',
+        label: t('runner.controlsDisabled'),
+        title: t('runner.controlsDisabled'),
+        copy: current.message || t('runner.controlsDisabled'),
       };
     }
     if (current.lastMessage) {
@@ -643,7 +2291,7 @@
         chipTone: 'success',
         bannerTone: 'success',
         label: runnerControlCompletionLabel(current.lastAction),
-        title: 'Action complete',
+        title: t('runner.actionComplete'),
         copy: current.message || current.lastMessage,
       };
     }
@@ -651,17 +2299,17 @@
       return {
         chipTone: 'running',
         bannerTone: 'info',
-        label: 'Running',
-        title: 'Runner running',
-        copy: current.message || 'Runner is running.',
+        label: t('runner.running'),
+        title: t('runner.running'),
+        copy: current.message || t('runner.running'),
       };
     }
     return {
       chipTone: 'idle',
       bannerTone: 'idle',
-      label: 'Ready',
-      title: 'Ready',
-      copy: current.message || 'Runner controls are ready.',
+      label: t('runner.ready'),
+      title: t('runner.ready'),
+      copy: current.message || t('runner.ready'),
     };
   }
 
@@ -683,33 +2331,33 @@
     const current = toObject(control);
     const status = toObject(current.status);
     return [
-      { label: 'Source', value: current.source || 'unknown', className: 'runner-control__value--muted' },
-      { label: 'Selected repo', value: status.repo || 'unknown', className: 'runner-control__value--muted' },
-      { label: 'Selected config', value: status.configPath || 'unknown', className: 'runner-control__value--muted' },
+      { label: t('runner.source'), value: current.source || 'unknown', className: 'runner-control__value--muted' },
+      { label: t('runner.selectedRepo'), value: status.repo || 'unknown', className: 'runner-control__value--muted' },
+      { label: t('runner.selectedConfig'), value: status.configPath || 'unknown', className: 'runner-control__value--muted' },
       {
-        label: 'Controller',
-        value: current.controllerAvailable ? 'available' : 'unavailable',
+        label: t('runner.controller'),
+        value: current.controllerAvailable ? 'available' : t('runner.unavailable'),
         className: current.controllerAvailable ? (display.chipTone === 'err' ? 'runner-control__value--err' : 'runner-control__value--accent') : runnerControlValueClass(display.chipTone),
       },
-      { label: 'State', value: display.label, className: runnerControlValueClass(display.chipTone) },
-      { label: 'Run mode', value: status.runnerMode || 'unknown', className: 'runner-control__value--muted' },
+      { label: t('runner.state'), value: display.label, className: runnerControlValueClass(display.chipTone) },
+      { label: t('runner.runMode'), value: status.runnerMode || 'unknown', className: 'runner-control__value--muted' },
       {
-        label: 'Run status',
+        label: t('runner.runStatus'),
         value: current.runStatus || (status.running ? 'running' : 'idle'),
         className: status.running ? 'runner-control__value--accent' : 'runner-control__value--muted',
       },
       {
-        label: 'Last action',
+        label: t('runner.lastAction'),
         value: current.lastAction || 'none',
         className: current.lastAction ? 'runner-control__value--accent' : 'runner-control__value--muted',
       },
       {
-        label: 'Last message',
+        label: t('runner.lastMessage'),
         value: current.lastMessage || 'none',
         className: current.lastMessage ? 'runner-control__value--accent' : 'runner-control__value--muted',
       },
       {
-        label: 'Last error',
+        label: t('runner.lastError'),
         value: current.lastError || 'none',
         className: current.lastError ? 'runner-control__value--err' : 'runner-control__value--muted',
       },
@@ -728,10 +2376,10 @@
       controllerAvailable
         ? enabled
           ? running
-            ? 'Runner controls are enabled and the controller reports a running runner.'
-            : 'Runner controls are enabled and the controller reports a stopped runner.'
-          : 'Runner controls are disabled until the server opt-in is enabled.'
-        : 'Runner controller is unavailable.'
+            ? t('runner.enabledRunning')
+            : t('runner.enabledStopped')
+          : t('runner.disabledUntilServerOptIn')
+        : t('runner.controllerUnavailableMessage')
     );
     return {
       enabled,
@@ -1029,20 +2677,20 @@
 
   function fallbackSectionMessage(kind) {
     const messages = {
-      activeRun: 'No active run is published yet.',
-      stages: 'No lifecycle records were published yet.',
-      backlog: 'No backlog artifacts were published yet.',
-      goals: 'No goals were found in GOALS.md.',
-      config: 'Config snapshot is incomplete.',
-      prompts: 'Prompt inventory is empty.',
-      logs: 'No log entries are available yet.',
-      notifications: 'No notifications have been recorded yet.',
-      metrics: 'No metrics snapshot is available yet.',
-      history: 'Run history is empty.',
-      worktree: 'No pending worktree merge is available.',
-      runnerControl: 'Runner controls are unavailable in fallback mode.',
+      activeRun: t('common.noDataAvailableYet'),
+      stages: t('common.noDataAvailableYet'),
+      backlog: t('backlog.noArtifacts'),
+      goals: t('goals.noGoals'),
+      config: t('config.loadingSnapshot'),
+      prompts: t('prompts.inventoryRedacted'),
+      logs: t('logs.noEntries'),
+      notifications: t('notifications.noRecorded'),
+      metrics: t('common.noDataAvailableYet'),
+      history: t('history.noSummaries'),
+      worktree: t('worktree.noPendingMerge'),
+      runnerControl: t('runner.controlsDisabled'),
     };
-    return messages[kind] || 'No data available yet.';
+    return messages[kind] || t('common.noDataAvailableYet');
   }
 
   function normalizeLogLevel(level) {
@@ -1145,28 +2793,30 @@
 
   function goalSnapshotMessage(snapshot, total, dirty = false) {
     if (dirty) {
-      return 'Browser-local goal edits are active. Reset to restore the API snapshot.';
+      return `${t('goals.browserLocalDraft')} ${t('goals.draftStaysLocal')}`;
     }
     const raw = toObject(snapshot);
     if (!raw.exists) {
-      return 'GOALS.md is missing.';
+      return t('goals.missing');
     }
     const rawText = toText(raw.raw_text || raw.rawText, '').trim();
     if (!rawText) {
-      return 'GOALS.md is empty.';
+      return t('goals.empty');
     }
     if (!total) {
-      return 'GOALS.md has content but no checklist items were parsed.';
+      return t('goals.noGoals');
     }
-    return 'Read-only GOALS.md snapshot with stable P0/P1 grouping and exact checkbox state.';
+    return t('goals.snapshot');
   }
 
   function goalBucketLabel(bucket) {
-    return bucket === 'p0' ? 'P0 | Must-have' : 'P1 | Should-have';
+    return bucket === 'p0' ? t('goals.p0MustHave') : t('goals.p1ShouldHave');
   }
 
   function goalBucketName(bucket) {
-    return bucket === 'p0' ? 'Must-have' : 'Should-have';
+    return bucket === 'p0'
+      ? t('goals.p0MustHave').split('|').pop().trim()
+      : t('goals.p1ShouldHave').split('|').pop().trim();
   }
 
   function goalItemLineNumber(goal) {
@@ -1191,7 +2841,7 @@
   function goalItemMeta(goal) {
     const item = toObject(goal);
     const lineNumber = goalItemLineNumber(item);
-    return `${lineNumber ? `Source line ${lineNumber}` : 'Local draft item'} | Checkbox ${goalItemCheckbox(item)}`;
+    return `${lineNumber ? `${t('goals.sourceLine')} ${lineNumber}` : t('goals.localDraftOnly')} | ${t('goals.checked')} ${goalItemCheckbox(item)}`;
   }
 
   function goalItemSignature(goal) {
@@ -2671,7 +4321,7 @@
       ok: false,
       sourceMode: 'loading',
       snapshotStatus: 'loading',
-      snapshotLabel: 'Loading snapshot',
+      snapshotLabel: t('snapshot.loading'),
       lastSnapshotAt: 0,
       latestRunDir: '',
       repo: {
@@ -2716,7 +4366,7 @@
       backlogSelectedId: '',
       runnerControl: createRunnerControlModel({
         source: 'loading',
-        message: 'Loading runner control status...',
+        message: t('runner.loadingStatus') || t('snapshot.loadingReadOnly'),
         controllerAvailable: false,
         enabled: false,
         running: false,
@@ -2843,18 +4493,18 @@
         state: { done: [], failed: [], warnings: [] },
       },
       sectionState: {
-        activeRun: buildSectionState('activeRun', 'loading', 'Loading read-only snapshot...','loading'),
-        stages: buildSectionState('stages', 'loading', 'Loading read-only snapshot...','loading'),
-        backlog: buildSectionState('backlog', 'loading', 'Loading read-only snapshot...','loading'),
-        goals: buildSectionState('goals', 'loading', 'Loading read-only snapshot...','loading'),
-        config: buildSectionState('config', 'loading', 'Loading read-only snapshot...','loading'),
-        prompts: buildSectionState('prompts', 'loading', 'Loading read-only snapshot...','loading'),
-        logs: buildSectionState('logs', 'loading', 'Loading read-only snapshot...','loading'),
-        notifications: buildSectionState('notifications', 'loading', 'Loading read-only snapshot...','loading'),
-        metrics: buildSectionState('metrics', 'loading', 'Loading read-only snapshot...','loading'),
-        history: buildSectionState('history', 'loading', 'Loading read-only snapshot...','loading'),
-        worktree: buildSectionState('worktree', 'loading', 'Loading read-only snapshot...','loading'),
-        runnerControl: buildSectionState('runnerControl', 'loading', 'Loading runner control status...','loading'),
+        activeRun: buildSectionState('activeRun', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        stages: buildSectionState('stages', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        backlog: buildSectionState('backlog', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        goals: buildSectionState('goals', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        config: buildSectionState('config', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        prompts: buildSectionState('prompts', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        logs: buildSectionState('logs', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        notifications: buildSectionState('notifications', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        metrics: buildSectionState('metrics', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        history: buildSectionState('history', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        worktree: buildSectionState('worktree', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        runnerControl: buildSectionState('runnerControl', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
       },
     };
   }
@@ -2865,7 +4515,7 @@
       ok: true,
       sourceMode: 'fallback',
       snapshotStatus: 'fallback',
-      snapshotLabel: 'Fallback data',
+      snapshotLabel: t('snapshot.fallback'),
       lastSnapshotAt: nowMs(),
       latestRunDir: '',
       repo: {
@@ -2882,7 +4532,7 @@
       },
       runnerControl: createRunnerControlModel({
         source: 'fallback',
-        message: 'Runner controls are unavailable in fallback mode.',
+        message: t('runner.controlsDisabledMessage'),
         controllerAvailable: false,
         enabled: false,
         running: false,
@@ -3210,6 +4860,10 @@
     goalSaveEnabled,
     goalSaveRequestPath,
     goalSaveInFlight,
+    currentLocale,
+    setLocale,
+    setView,
+    renderShell,
     inspectGoalSaveState,
     resetGoalSaveState,
     goalSaveDisabledReason,
@@ -3357,19 +5011,24 @@
           : 'info';
     const label =
       section.status === 'loading'
-        ? 'Loading read-only snapshot'
+        ? t('snapshot.loadingReadOnly')
         : section.status === 'disabled'
-          ? 'Controls disabled'
+          ? t('snapshot.controlsDisabled')
         : section.status === 'fallback'
-          ? 'Fallback data'
+          ? t('snapshot.fallback')
           : section.status === 'partial'
-            ? 'Partial snapshot'
-          : section.status === 'stale'
-            ? 'Stale snapshot'
-            : section.status === 'empty'
-              ? 'Empty state'
+            ? t('snapshot.partial')
+            : section.status === 'stale'
+              ? t('snapshot.stale')
+              : section.status === 'empty'
+                ? t('snapshot.emptyState')
               : section.status;
-    const message = section.message || fallbackSectionMessage(sectionKey);
+    const message =
+      section.status === 'loading'
+        ? t('snapshot.loadingReadOnly')
+        : section.status === 'disabled'
+          ? t('snapshot.controlsDisabled')
+          : section.message || fallbackSectionMessage(sectionKey);
     return `
       <div class="modal-banner section-banner section-banner--${tone}">
         <span class="dot" style="background: currentColor;"></span>
@@ -3396,10 +5055,10 @@
     if (status === 'error') {
       return {
         tone: 'err',
-        title: 'Malformed pending file',
-        copy: reviewMessage || summary || 'Pending worktree merge file could not be parsed.',
-        actionCopy: 'Fix or delete the pending file in the CLI before trying again.',
-        mergeHint: 'Pending file is invalid.',
+        title: t('worktree.malformedPendingFile'),
+        copy: reviewMessage || summary || t('worktree.fixOrDeletePendingFile'),
+        actionCopy: t('worktree.fixOrDeletePendingFile'),
+        mergeHint: t('worktree.noPendingFile'),
       };
     }
 
@@ -3407,79 +5066,77 @@
       const recoveryPath = cleanupPath || toText(review?.worktreeDir || review?.worktree, 'the isolated worktree');
       return {
         tone: 'warn',
-        title: status === 'applied_cleanup_failed' ? 'Merge recorded, cleanup failed' : 'Discard recorded, cleanup failed',
+        title: status === 'applied_cleanup_failed' ? t('worktree.mergeRecordedCleanupFailed') : t('worktree.discardRecordedCleanupFailed'),
         copy:
           reviewMessage ||
           cleanupMessage ||
           summary ||
-          `The merge or discard decision was recorded, but cleanup failed for ${recoveryPath}.`,
+          `${t('worktree.manualCleanupRequired')} ${recoveryPath}.`,
         actionCopy:
           status === 'discard_cleanup_failed'
-            ? `Manual recovery: remove ${recoveryPath} manually or run git worktree remove --force ${recoveryPath} from ${sourceRepo}. The source repository was not changed.`
-            : `Manual recovery: run git worktree remove --force ${recoveryPath} from ${sourceRepo}, or remove the worktree directory manually. The source repository was already updated.`,
-        mergeHint: 'Cleanup is still required.',
+            ? `${t('worktree.manualRecovery')}: ${t('worktree.noSourceRepoChangePending')} ${sourceRepo}.`
+            : `${t('worktree.manualRecovery')}: ${t('worktree.noCommitWillBeCreated')} ${sourceRepo}.`,
+        mergeHint: t('worktree.cleanupRequired'),
       };
     }
 
     if (pendingReview) {
       return {
         tone: 'warn',
-        title: 'Review required before source-repo changes',
-        copy: reviewMessage || summary || `Review the pending patch at ${patchPath} before confirming merge or discard.`,
+        title: t('worktree.reviewRequiredBeforeChanges'),
+        copy: reviewMessage || summary || `${t('worktree.reviewThePatchBeforeSourceRepoChanges')} ${patchPath}.`,
         actionCopy:
-          `The web console can apply or discard this patch after confirmation. ` +
-          `It validates the pending marker, source repository, run directory, worktree path, and patch path before it runs. ` +
-          `No commit will be created.`,
-        mergeHint: 'Review required.',
+          `${t('worktree.confirmMergeToApply')} ${t('worktree.backendValidates')} ${t('worktree.noCommitWillBeCreated')}`,
+        mergeHint: t('worktree.reviewRequired'),
       };
     }
 
     if (status === 'apply_failed') {
       return {
         tone: 'warn',
-        title: 'Patch export failed',
-        copy: reviewMessage || summary || 'The patch export failed before a reviewable merge marker was written.',
-        actionCopy: 'Inspect the export failure and retry the worktree export before any merge or discard action.',
-        mergeHint: 'Export failed.',
+        title: t('worktree.patchExportFailed'),
+        copy: reviewMessage || summary || t('worktree.patchExportFailedBeforeMarker'),
+        actionCopy: `${t('worktree.patchExportFailedBeforeMarker')} ${t('worktree.reviewBeforeMerge')}.`,
+        mergeHint: t('worktree.patchExportFailed'),
       };
     }
 
     if (status === 'patch_not_applied' || status === 'not_applied') {
       return {
         tone: 'warn',
-        title: status === 'patch_not_applied' ? 'Patch exported, not auto-applied' : 'Patch not applied',
-        copy: reviewMessage || summary || 'The patch was exported, but auto-apply did not run.',
-        actionCopy: 'Apply the exported patch before any merge or discard action.',
-        mergeHint: 'Manual apply required.',
+        title: status === 'patch_not_applied' ? t('worktree.patchExportNotApplied') : t('worktree.patchNotApplied'),
+        copy: reviewMessage || summary || t('worktree.exportedPatchNotAutoApplied'),
+        actionCopy: t('worktree.applyExportedPatchBeforeConfirming'),
+        mergeHint: t('worktree.manualRecovery'),
       };
     }
 
     if (status === 'applied') {
       return {
         tone: 'info',
-        title: 'Patch applied',
-        copy: reviewMessage || summary || `The patch was applied to ${sourceRepo} without creating a commit.`,
-        actionCopy: 'The worktree is already finalized. No merge or discard action is available.',
-        mergeHint: 'Finalized.',
+        title: t('worktree.patchApplied'),
+        copy: reviewMessage || summary || `${t('worktree.patchApplied')} ${sourceRepo}. ${t('worktree.noCommitWillBeCreated')}`,
+        actionCopy: `${t('worktree.worktreeAlreadyFinalized')} ${t('worktree.noPendingMergeAvailable')}`,
+        mergeHint: t('worktree.finalized'),
       };
     }
 
     if (status === 'discarded') {
       return {
         tone: 'info',
-        title: 'Patch discarded',
-        copy: reviewMessage || summary || `The worktree result was discarded without changing ${sourceRepo}.`,
-        actionCopy: 'The worktree is already finalized. No merge or discard action is available.',
-        mergeHint: 'Finalized.',
+        title: t('worktree.patchDiscarded'),
+        copy: reviewMessage || summary || `${t('worktree.noSourceRepoChangePending')} ${sourceRepo}.`,
+        actionCopy: `${t('worktree.worktreeAlreadyFinalized')} ${t('worktree.noPendingMergeAvailable')}`,
+        mergeHint: t('worktree.finalized'),
       };
     }
 
     return {
       tone: 'info',
-      title: 'Worktree review',
-      copy: reviewMessage || cleanupMessage || summary || 'No pending worktree merge.',
-      actionCopy: 'No source-repo change is pending.',
-      mergeHint: 'Read only.',
+      title: t('worktree.title'),
+      copy: reviewMessage || cleanupMessage || summary || t('worktree.noPendingMerge'),
+      actionCopy: t('worktree.noSourceRepoChangePending'),
+      mergeHint: t('worktree.readOnly'),
     };
   }
 
@@ -3598,12 +5255,12 @@
     if (counts.cycles) {
       parts.push(`${counts.cycles} cycle${counts.cycles === 1 ? '' : 's'}`);
     }
-    return parts.join(' | ') || 'No persisted summary fields available.';
+    return parts.join(' | ') || t('history.noPersistedSummary');
   }
 
   function historyWorktreeOutcomeLabel(outcome) {
     const value = toText(outcome, 'none').replace(/_/g, ' ');
-    return value || 'none';
+    return value || t('common.none');
   }
 
   function renderTimelineConnector(nextStatus) {
@@ -3629,16 +5286,16 @@
     const cardClass = lifecycleStageCardClass(status);
     const iconClass = lifecycleStageIconClass(status);
     const iconText = lifecycleStageIconText(status);
-    const label = toText(stage.label, stage.id || 'Stage');
-    const title = toText(stage.title || stage.taskTitle || stage.label, stage.label || 'Lifecycle stage');
+    const label = toText(stage.label, stage.id || t('dashboard.stage'));
+    const title = toText(stage.title || stage.taskTitle || stage.label, stage.label || t('pipeline.lifecycleRecord'));
     const model = toText(stage.model, '');
-    const cycleText = stage.cycle != null ? `cycle ${stage.cycle}` : 'cycle unavailable';
-    const taskIdText = stage.taskId ? `task ${stage.taskId}` : 'task unavailable';
-    const attemptText = stage.attempt != null ? `attempt ${stage.attempt}` : 'attempt unavailable';
-    const startedText = stage.startedAt ? `started ${fmtClock(stage.startedAt)}` : 'started unavailable';
-    const endedText = stage.endedAt ? `ended ${fmtClock(stage.endedAt)}` : status === 'running' ? 'in progress' : 'ended unavailable';
+    const cycleText = stage.cycle != null ? `${t('pipeline.current')} ${stage.cycle}` : t('pipeline.stageUnavailable');
+    const taskIdText = stage.taskId ? `${t('dashboard.currentTaskId')} ${stage.taskId}` : t('common.unavailable');
+    const attemptText = stage.attempt != null ? `${t('dashboard.attempt')} ${stage.attempt}` : t('common.unavailable');
+    const startedText = stage.startedAt ? `${t('pipeline.started')} ${fmtClock(stage.startedAt)}` : t('pipeline.startedUnavailable');
+    const endedText = stage.endedAt ? `${t('pipeline.ended')} ${fmtClock(stage.endedAt)}` : status === 'running' ? t('pipeline.inProgress') : t('pipeline.endedUnavailable');
     const durationText = stage.durationSec != null ? fmtDuration(stage.durationSec) : '--';
-    const recentOutput = compactText(stage.recentOutput, 180) || 'Recent output unavailable.';
+    const recentOutput = compactText(stage.recentOutput, 180) || t('pipeline.recentOutputUnavailable');
     return `
       <div class="${cardClass}">
         <div class="stage-card__head">
@@ -3650,7 +5307,7 @@
         </div>
         <div class="stage-card__body">
           <div>${escapeHTML(title)}</div>
-          <div class="muted">${escapeHTML(model || 'model unavailable')} | ${escapeHTML(durationText)}</div>
+          <div class="muted">${escapeHTML(model || t('common.unavailable'))} | ${escapeHTML(durationText)}</div>
           <div class="summary-note" style="margin-top:6px;">${escapeHTML([taskIdText, attemptText, startedText, endedText].join(' | '))}</div>
           <div class="summary-note" style="margin-top:6px;">${escapeHTML(recentOutput)}</div>
         </div>
@@ -3665,11 +5322,11 @@
     const tags = (task.tags || []).map((tag) => chip(tag)).join('');
     const skill = task.skill ? chip(task.skill, 'chip--info') : '';
     const meta = [chip(status.replace(/_/g, ' '), backlogStatusToneClass(status)), chip(task.estimate), skill].filter(Boolean).join('');
-    const dependencyText = task.dependsOn && task.dependsOn.length ? `Depends on ${task.dependsOn.join(', ')}` : 'Dependencies unavailable';
-    const fileScopeText = task.fileScope || (task.files && task.files.length ? task.files.join(', ') : 'File scope unavailable');
+    const dependencyText = task.dependsOn && task.dependsOn.length ? t('backlog.dependsOn', { items: task.dependsOn.join(', ') }) : t('backlog.dependenciesUnavailable');
+    const fileScopeText = task.fileScope || (task.files && task.files.length ? task.files.join(', ') : t('backlog.fileScopeUnavailable'));
     const failureReason = toText(task.failureReason || toObject(task.failure).reason, '');
     const failureDetail = toText(task.failureDetail || toObject(task.failure).detail, '');
-    const recentOutput = compactText(task.recentOutput, 180) || 'Recent output unavailable.';
+    const recentOutput = compactText(task.recentOutput, 180) || t('backlog.recentOutputUnavailable');
     return `
       <button type="button" class="task-card" data-backlog-select="${escapeHTML(task.id)}" aria-pressed="${isSelected ? 'true' : 'false'}">
         <div class="task-card__head">
@@ -3681,15 +5338,15 @@
           ${tags}
           ${meta}
         </div>
-        <div class="summary-note" style="margin-top:8px;">${escapeHTML(compactText(dependencyText, 140) || 'Dependencies unavailable')}</div>
-        <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(`File scope: ${fileScopeText}`, 140) || 'File scope unavailable')}</div>
-        <div class="summary-note" style="margin-top:4px;">${escapeHTML(task.attempt != null ? `Attempt ${task.attempt}` : 'Attempt unavailable')}</div>
-        <div class="summary-note" style="margin-top:4px;">${escapeHTML(failureReason ? `Failure: ${failureReason}${failureDetail ? ` | ${compactText(failureDetail, 120)}` : ''}` : 'Failure unavailable')}</div>
+        <div class="summary-note" style="margin-top:8px;">${escapeHTML(compactText(dependencyText, 140) || t('backlog.dependenciesUnavailable'))}</div>
+        <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(t('backlog.fileScope', { scope: fileScopeText }), 140) || t('backlog.fileScopeUnavailable'))}</div>
+        <div class="summary-note" style="margin-top:4px;">${escapeHTML(task.attempt != null ? t('backlog.attemptText', { attempt: task.attempt }) : t('backlog.attemptUnavailable'))}</div>
+        <div class="summary-note" style="margin-top:4px;">${escapeHTML(failureReason ? t('backlog.failureText', { reason: `${failureReason}${failureDetail ? ` | ${compactText(failureDetail, 120)}` : ''}` }) : t('backlog.failureUnavailable'))}</div>
         <div class="summary-note" style="margin-top:4px;">${escapeHTML(recentOutput)}</div>
         ${status === 'in_progress' ? `
           <div class="meter" style="margin-top:8px; width: 100%;"><div class="meter__fill meter__fill--warn" style="width:${progressWidth(progress)}"></div></div>
         ` : ''}
-        ${isSelected ? `<div class="summary-note" style="margin-top:8px;">Selected for detail view</div>` : ''}
+        ${isSelected ? `<div class="summary-note" style="margin-top:8px;">${escapeHTML(t('common.selected'))}</div>` : ''}
       </button>
     `;
   }
@@ -3699,8 +5356,8 @@
     const sourceLine = goalItemLineNumber(goal);
     const checkboxState = goalItemCheckbox(goal);
     const toggleLabel = sourceLine
-      ? `Toggle goal checkbox ${checkboxState} at line ${sourceLine}`
-      : `Toggle goal checkbox ${checkboxState}`;
+      ? t('goals.toggleCheckbox', { checkboxState, lineNumber: sourceLine })
+      : t('goals.toggleCheckbox', { checkboxState, lineNumber: '' });
     const canMoveUp = index > 0;
     const canMoveDown = index < total - 1;
     return `
@@ -3714,14 +5371,14 @@
             ${goal.note ? `<div class="goal-item__note">${escapeHTML(goal.note)}</div>` : ''}
             <div class="goal-item__meta">${escapeHTML(goalItemMeta(goal))}</div>
             <div class="goal-item__actions">
-              <button type="button" class="button button--tiny button--quiet" data-goal-action="edit" data-goal-bucket="${escapeHTML(bucket)}" data-goal-index="${index}">Edit</button>
+              <button type="button" class="button button--tiny button--quiet" data-goal-action="edit" data-goal-bucket="${escapeHTML(bucket)}" data-goal-index="${index}">${escapeHTML(t('common.edit'))}</button>
               <button type="button" class="button button--tiny button--quiet" data-goal-action="move" data-goal-direction="-1" data-goal-bucket="${escapeHTML(bucket)}" data-goal-index="${index}" ${canMoveUp ? '' : 'disabled'}>
-                Up
+                ${escapeHTML(t('common.up'))}
               </button>
               <button type="button" class="button button--tiny button--quiet" data-goal-action="move" data-goal-direction="1" data-goal-bucket="${escapeHTML(bucket)}" data-goal-index="${index}" ${canMoveDown ? '' : 'disabled'}>
-                Down
+                ${escapeHTML(t('common.down'))}
               </button>
-              <button type="button" class="button button--tiny button--quiet" data-goal-action="delete" data-goal-bucket="${escapeHTML(bucket)}" data-goal-index="${index}">Delete</button>
+              <button type="button" class="button button--tiny button--quiet" data-goal-action="delete" data-goal-bucket="${escapeHTML(bucket)}" data-goal-index="${index}">${escapeHTML(t('common.delete'))}</button>
             </div>
           </div>
         </div>
@@ -3737,7 +5394,7 @@
     const metaSource = row.kind === 'removed' ? base : item;
     const pathLabel =
       row.kind === 'moved'
-        ? `${row.bucketLabel} | Row ${row.baseIndex + 1} -> Row ${row.index + 1}`
+        ? `${row.bucketLabel} | ${t('common.row')} ${row.baseIndex + 1} -> ${t('common.row')} ${row.index + 1}`
         : `${row.bucketLabel} | ${goalItemMeta(metaSource)}`;
     const badgeClass = row.kind === 'removed'
       ? 'badge--warn'
@@ -3755,9 +5412,9 @@
     if (row.kind === 'removed') {
       values.push(`<span class="prompt-diff-row__value prompt-diff-row__value--removed">${escapeHTML(beforeSummary)}</span>`);
     } else if (row.kind === 'moved') {
-      values.push(`<span class="prompt-diff-row__value prompt-diff-row__value--removed">${escapeHTML(`Row ${row.baseIndex + 1}`)}</span>`);
+      values.push(`<span class="prompt-diff-row__value prompt-diff-row__value--removed">${escapeHTML(`${t('common.row')} ${row.baseIndex + 1}`)}</span>`);
       values.push(`<span class="prompt-diff-row__arrow">-></span>`);
-      values.push(`<span class="prompt-diff-row__value prompt-diff-row__value--added">${escapeHTML(`Row ${row.index + 1} | ${afterSummary}`)}</span>`);
+      values.push(`<span class="prompt-diff-row__value prompt-diff-row__value--added">${escapeHTML(`${t('common.row')} ${row.index + 1} | ${afterSummary}`)}</span>`);
     } else if (row.kind === 'edited') {
       values.push(`<span class="prompt-diff-row__value prompt-diff-row__value--removed">${escapeHTML(beforeSummary)}</span>`);
       values.push(`<span class="prompt-diff-row__arrow">-></span>`);
@@ -3769,7 +5426,7 @@
       <div class="prompt-diff-row ${rowClass}">
         <div class="prompt-diff-row__head">
           <span class="prompt-diff-row__path">${escapeHTML(pathLabel)}</span>
-          <span class="badge ${badgeClass}">${escapeHTML(row.kind === 'added' ? 'Added' : row.kind === 'removed' ? 'Removed' : row.kind === 'moved' ? 'Moved' : 'Edited')}</span>
+          <span class="badge ${badgeClass}">${escapeHTML(row.kind === 'added' ? t('common.added') : row.kind === 'removed' ? t('common.removed') : row.kind === 'moved' ? t('common.moved') : t('common.edited'))}</span>
         </div>
         <div class="prompt-diff-row__values">
           ${values.join('')}
@@ -3820,7 +5477,7 @@
         <span>${escapeHTML(`${run.tasksDone}/${run.tasksTotal}`)}</span>
         <span>${escapeHTML(fmtDuration(run.durationSec))}</span>
         <span>${escapeHTML(fmtRelative(run.startedAt))}</span>
-        <span style="text-align:right;"><span class="chip chip--accent">Open</span></span>
+        <span style="text-align:right;"><span class="chip chip--accent">${escapeHTML(t('common.open'))}</span></span>
       </button>
     `;
   }
@@ -3831,12 +5488,12 @@
     return `
       <button type="button" class="prompt-card ${active ? 'prompt-card--active' : ''}" data-prompt-select="${escapeHTML(prompt.id)}" ${disabled ? 'disabled aria-disabled="true"' : ''}>
         <div class="prompt-card__head">
-          <span class="badge badge--${prompt.mode === 'override' ? 'info' : 'dim'}">${escapeHTML(prompt.mode.toUpperCase())}</span>
+          <span class="badge badge--${prompt.mode === 'override' ? 'info' : 'dim'}">${escapeHTML(prompt.mode === 'override' ? t('prompts.override') : t('prompts.template'))}</span>
           <div class="prompt-card__name">${escapeHTML(prompt.file)}</div>
         </div>
         <div class="prompt-card__meta">
           <span>${escapeHTML(prompt.scope)}</span>
-          <span>${escapeHTML(prompt.profile || 'profile unknown')}</span>
+          <span>${escapeHTML(prompt.profile || t('common.unknown'))}</span>
           <span>${escapeHTML(prompt.source)}</span>
           <span>${escapeHTML(prompt.updated)}</span>
         </div>
@@ -3857,7 +5514,7 @@
       }
       return REDACTED_VALUE;
     }
-    if (schema.kind === 'bool') return value === true ? 'enabled' : 'disabled';
+    if (schema.kind === 'bool') return value === true ? t('common.enabled') : t('common.disabled');
     if (schema.kind === 'enum') return value == null || value === '' ? '--' : String(value);
     if (schema.kind === 'multienum' || schema.kind === 'list') return fmtList(value || []) || '--';
     if (schema.kind === 'number') return value == null || value === '' ? '--' : String(value);
@@ -3871,39 +5528,39 @@
   function validateField(path, value, schema) {
     if (!schema) return null;
     if (schema.kind === 'bool') {
-      return typeof value === 'boolean' ? null : 'must be a boolean';
+      return typeof value === 'boolean' ? null : t('config.mustBeBoolean');
     }
     if (schema.kind === 'number') {
       if (value === '' || value == null || Number.isNaN(Number(value))) {
-        return schema.allow_empty ? null : 'must be a number';
+        return schema.allow_empty ? null : t('config.mustBeNumber');
       }
       const num = Number(value);
-      if (schema.min != null && num < schema.min) return `must be >= ${schema.min}`;
-      if (schema.max != null && num > schema.max) return `must be <= ${schema.max}`;
+      if (schema.min != null && num < schema.min) return t('config.mustBeAtLeast', { min: schema.min });
+      if (schema.max != null && num > schema.max) return t('config.mustBeAtMost', { max: schema.max });
       return null;
     }
     if (schema.kind === 'text') {
       if (String(value || '').trim()) return null;
-      return schema.allow_empty ? null : 'cannot be empty';
+      return schema.allow_empty ? null : t('config.cannotBeEmpty');
     }
     if (schema.kind === 'enum') {
       if (schema.allow_empty && (value == null || value === '')) return null;
-      return schema.options.includes(value) ? null : `must be one of: ${schema.options.join(', ')}`;
+      return schema.options.includes(value) ? null : t('config.mustBeOneOf', { options: schema.options.join(', ') });
     }
     if (schema.kind === 'multienum') {
       const items = Array.isArray(value) ? value : normalizeListValues(value);
       if (!items.length && schema.allow_empty) return null;
-      if (!items.length) return 'pick at least one option';
+      if (!items.length) return t('config.pickAtLeastOne');
       const invalid = items.filter((item) => !schema.options.includes(item));
-      return invalid.length ? `invalid option(s): ${invalid.join(', ')}` : null;
+      return invalid.length ? t('config.invalidOption', { options: invalid.join(', ') }) : null;
     }
     if (schema.kind === 'list') {
       const items = Array.isArray(value) ? value : normalizeListValues(value);
       if (!items.length && schema.allow_empty) return null;
-      if (!items.length) return 'enter at least one value';
+      if (!items.length) return t('config.enterAtLeastOneValue');
       if (schema.item_kind === 'int' || schema.itemKind === 'int' || schema.item_kind === 'number' || schema.itemKind === 'number') {
         const invalid = items.filter((item) => !Number.isInteger(Number(item)));
-        return invalid.length ? `invalid integer value(s): ${invalid.join(', ')}` : null;
+        return invalid.length ? t('config.invalidIntegerValue', { values: invalid.join(', ') }) : null;
       }
       return null;
     }
@@ -3958,26 +5615,26 @@
       return null;
     }
     if (path === 'repo') {
-      return 'Repository root is managed by the server.';
+      return t('config.repoManagedByServer');
     }
     if (schema && schema.redacted && String(value || '').trim() === REDACTED_VALUE) {
-      return 'Redacted placeholders cannot be saved.';
+      return t('config.redactedPlaceholderSaveBlocked');
     }
     return validateField(path, value, schema);
   }
 
   function configSaveDisabledReason(diffs = getConfigDiffs(), invalidDiffs = diffs.filter((diff) => diff.error)) {
     if (configSaveInFlight()) {
-      return 'Config save is already in progress.';
+      return t('config.saveInProgress');
     }
     if (!configSaveEnabled()) {
-      return state.runnerControl?.message || 'Config saves are disabled until runner controls are enabled.';
+      return state.runnerControl?.message || t('config.savesDisabledUntilRunnerEnabled');
     }
     if (!diffs.length) {
-      return 'No config changes to save.';
+      return t('config.noConfigChanges');
     }
     if (invalidDiffs.length) {
-      return `Fix ${invalidDiffs.length} invalid change${invalidDiffs.length === 1 ? '' : 's'} before saving.`;
+      return t('config.fixInvalidChangesBeforeSaving', { count: invalidDiffs.length });
     }
     return '';
   }
@@ -3989,16 +5646,16 @@
     const diffPaths = diffs.map((diff) => diff.path);
     const restartPaths = diffs.filter((diff) => diff.restart).map((diff) => diff.path);
     const bannerTitle = saveState.status === 'saving'
-      ? 'Saving config changes'
+      ? t('config.saving')
       : saveState.status === 'success'
-        ? 'Config saved'
+        ? t('config.saved')
         : saveState.status === 'error'
-          ? 'Config save failed'
+          ? t('config.saveFailed')
           : !configSaveEnabled()
-            ? 'Config saves are locked'
+            ? t('config.saveLocked')
             : diffPaths.length
-              ? 'Ready to save changes'
-              : 'No config changes';
+              ? t('config.readyToSave')
+              : t('config.noChanges');
     const bannerTone = saveState.status === 'saving'
       ? 'running'
       : saveState.status === 'success'
@@ -4011,22 +5668,22 @@
               ? 'info'
               : 'idle';
     const bannerCopy = saveState.status === 'saving'
-      ? 'Creating a timestamped backup and writing the config atomically.'
+      ? t('config.saveCreatesBackup')
       : saveState.status === 'success'
-        ? saveState.message || 'Config changes were written successfully.'
+        ? saveState.message || t('config.saved')
         : saveState.status === 'error'
-          ? saveState.message || 'Config save failed.'
+          ? saveState.message || t('config.saveFailed')
           : !configSaveEnabled()
             ? configSaveDisabledReason(diffs, invalidDiffs)
             : diffPaths.length
-              ? `Saving will create a backup before updating ${diffPaths.length} changed path${diffPaths.length === 1 ? '' : 's'}.`
-              : 'Edit a field to stage a local save.';
+              ? t('config.saveCreatesBackup')
+              : t('config.localDraftOnly');
     const metaRows = [];
     if (saveState.status === 'success') {
       if (saveState.backupPath) {
         metaRows.push(`
           <div>
-            <div class="config-save-state__label">Backup path</div>
+            <div class="config-save-state__label">${escapeHTML(t('config.backupPath'))}</div>
             <div class="config-save-state__path">${escapeHTML(saveState.backupPath)}</div>
           </div>
         `);
@@ -4035,7 +5692,7 @@
       if (savedPaths.length) {
         metaRows.push(`
           <div>
-            <div class="config-save-state__label">Saved paths</div>
+            <div class="config-save-state__label">${escapeHTML(t('config.savedPaths'))}</div>
             <div class="config-save-state__paths">
               ${savedPaths.map((path) => `<span class="config-save-state__path">${escapeHTML(path)}</span>`).join('')}
             </div>
@@ -4046,7 +5703,7 @@
       if (reloadPaths.length) {
         metaRows.push(`
           <div>
-            <div class="config-save-state__label">Reload required</div>
+            <div class="config-save-state__label">${escapeHTML(t('config.reloadRequired'))}</div>
             <div class="config-save-state__paths">
               ${reloadPaths.map((path) => `<span class="config-save-state__path">${escapeHTML(path)}</span>`).join('')}
             </div>
@@ -4057,7 +5714,7 @@
       if (saveState.backupPath) {
         metaRows.push(`
           <div>
-            <div class="config-save-state__label">Backup path</div>
+            <div class="config-save-state__label">${escapeHTML(t('config.backupPath'))}</div>
             <div class="config-save-state__path">${escapeHTML(saveState.backupPath)}</div>
           </div>
         `);
@@ -4066,7 +5723,7 @@
       if (reloadPaths.length) {
         metaRows.push(`
           <div>
-            <div class="config-save-state__label">Reload required</div>
+            <div class="config-save-state__label">${escapeHTML(t('config.reloadRequired'))}</div>
             <div class="config-save-state__paths">
               ${reloadPaths.map((path) => `<span class="config-save-state__path">${escapeHTML(path)}</span>`).join('')}
             </div>
@@ -4077,7 +5734,7 @@
       if (failedPaths.length) {
         metaRows.push(`
           <div>
-            <div class="config-save-state__label">Pending paths</div>
+            <div class="config-save-state__label">${escapeHTML(t('config.pendingPaths'))}</div>
             <div class="config-save-state__paths">
               ${failedPaths.map((path) => `<span class="config-save-state__path">${escapeHTML(path)}</span>`).join('')}
             </div>
@@ -4087,7 +5744,7 @@
     } else if (diffPaths.length) {
       metaRows.push(`
         <div>
-          <div class="config-save-state__label">Pending paths</div>
+          <div class="config-save-state__label">${escapeHTML(t('config.pendingPaths'))}</div>
           <div class="config-save-state__paths">
             ${diffPaths.map((path) => `<span class="config-save-state__path">${escapeHTML(path)}</span>`).join('')}
           </div>
@@ -4334,16 +5991,16 @@
     const templateErrorCode = missingVariables.length ? 'prompt_template_variables_missing' : '';
     return {
       fileError: fileErrorCode === 'prompt_file_required'
-        ? 'Filename cannot be empty.'
+        ? t('prompts.filenameRequired')
         : fileErrorCode === 'prompt_file_invalid'
-          ? 'Filename must be a bare filename within the resolved prompts directory.'
+          ? t('prompts.filenameMustBeBare')
           : fileErrorCode === 'prompt_file_mismatch'
-            ? `Filename must stay ${expectedFile}.`
+            ? `${t('prompts.filename')} ${expectedFile}`
             : '',
       fileErrorCode,
-      contentError: contentErrorCode ? 'Prompt content cannot be empty.' : '',
+      contentError: contentErrorCode ? t('prompts.promptContentRequired') : '',
       contentErrorCode,
-      templateError: templateErrorCode ? `Missing template variables: ${missingVariables.map((name) => `{${name}}`).join(', ')}` : '',
+      templateError: templateErrorCode ? `${t('prompts.missingTemplateVariables')}: ${missingVariables.map((name) => `{${name}}`).join(', ')}` : '',
       templateErrorCode,
       requiredVariables,
       draftVariables,
@@ -4380,19 +6037,19 @@
     const editor = promptEditorData();
     if (!editor.promptId) {
       return `
-        <span class="badge badge--dim">No prompt selected</span>
-        <span class="muted">Select a prompt to read its explicit content slice.</span>
+        <span class="badge badge--dim">${escapeHTML(t('prompts.noPromptSelected'))}</span>
+        <span class="muted">${escapeHTML(t('prompts.selectPrompt'))}</span>
       `;
     }
     if (editor.loading) {
       return `
-        <span class="badge badge--warn">Loading</span>
-        <span class="muted">Reading full prompt content from the explicit read path.</span>
+        <span class="badge badge--warn">${escapeHTML(t('common.loading'))}</span>
+        <span class="muted">${escapeHTML(t('prompts.explicitPromptRead'))}</span>
       `;
     }
     if (editor.error) {
       return `
-        <span class="badge badge--err">Error</span>
+        <span class="badge badge--err">${escapeHTML(t('common.failed'))}</span>
         <span class="muted">${escapeHTML(editor.error)}</span>
       `;
     }
@@ -4402,26 +6059,26 @@
     const saveState = toObject(editor.saveState);
     const restoreState = toObject(editor.restoreState);
     const mutationBadge = saveState.status === 'saving'
-      ? { tone: 'warn', label: 'SAVING' }
+      ? { tone: 'warn', label: t('prompts.saving').toUpperCase() }
       : restoreState.status === 'restoring'
-        ? { tone: 'warn', label: 'RESTORING' }
+        ? { tone: 'warn', label: t('prompts.restoring').toUpperCase() }
         : saveState.status === 'error'
-          ? { tone: 'err', label: 'SAVE ERROR' }
+          ? { tone: 'err', label: t('prompts.promptSaveFailed').toUpperCase() }
           : restoreState.status === 'error'
-            ? { tone: 'err', label: 'RESTORE ERROR' }
+            ? { tone: 'err', label: t('prompts.promptRestoreFailed').toUpperCase() }
             : saveState.status === 'success'
-              ? { tone: 'info', label: 'SAVED' }
+              ? { tone: 'info', label: t('prompts.promptSaved').toUpperCase() }
               : restoreState.status === 'success'
-                ? { tone: 'info', label: 'RESTORED' }
+                ? { tone: 'info', label: t('prompts.promptRestored').toUpperCase() }
                 : !promptMutationEnabled()
-                  ? { tone: 'dim', label: 'LOCAL ONLY' }
+                  ? { tone: 'dim', label: t('common.localOnly') }
                   : null;
     return `
       ${mutationBadge ? `<span class="badge badge--${mutationBadge.tone}">${mutationBadge.label}</span>` : ''}
-      <span class="badge ${dirty ? 'badge--warn' : 'badge--dim'}">${dirty ? 'DIRTY' : 'CLEAN'}</span>
-      <span class="badge badge--info">FULL READ</span>
-      <span class="badge ${backupCount ? 'badge--dim' : 'badge--warn'}">${backupCount ? `${backupCount} BACKUP${backupCount === 1 ? '' : 'S'}` : 'NO BACKUPS'}</span>
-      <span class="muted">${escapeHTML(contentLength)} chars</span>
+      <span class="badge ${dirty ? 'badge--warn' : 'badge--dim'}">${dirty ? t('common.dirty') : t('common.clean')}</span>
+      <span class="badge badge--info">${t('common.fullRead')}</span>
+      <span class="badge ${backupCount ? 'badge--dim' : 'badge--warn'}">${backupCount ? `${backupCount} ${backupCount === 1 ? t('common.backup') : t('common.backups')}` : t('common.noBackups')}</span>
+      <span class="muted">${escapeHTML(contentLength)} ${escapeHTML(t('common.chars'))}</span>
     `;
   }
 
@@ -4430,23 +6087,23 @@
     if (!editor.promptId) {
       return `
         <div class="section-banner section-banner--info">
-          <div class="section-banner__title">Prompt editor</div>
-          <div class="section-banner__copy">Select a prompt to load the full content through the explicit read path.</div>
+          <div class="section-banner__title">${escapeHTML(t('prompts.promptEditor'))}</div>
+          <div class="section-banner__copy">${escapeHTML(t('prompts.selectPrompt'))}</div>
         </div>
       `;
     }
     if (editor.loading) {
       return `
         <div class="section-banner section-banner--info">
-          <div class="section-banner__title">Reading prompt content</div>
-          <div class="section-banner__copy">Inventory previews stay redacted. This editor shows the explicit full-content read.</div>
+          <div class="section-banner__title">${escapeHTML(t('prompts.explicitPromptRead'))}</div>
+          <div class="section-banner__copy">${escapeHTML(t('prompts.loadedThroughExplicitReadPath'))}</div>
         </div>
       `;
     }
     if (editor.error) {
       return `
         <div class="section-banner section-banner--err">
-          <div class="section-banner__title">Prompt read failed</div>
+          <div class="section-banner__title">${escapeHTML(t('common.failed'))}</div>
           <div class="section-banner__copy">${escapeHTML(editor.error)}</div>
         </div>
       `;
@@ -4457,8 +6114,8 @@
       const activeState = saveState.status === 'saving' ? saveState : restoreState;
       return `
         <div class="section-banner section-banner--warn">
-          <div class="section-banner__title">${saveState.status === 'saving' ? 'Saving prompt' : 'Restoring backup'}</div>
-          <div class="section-banner__copy">${escapeHTML(activeState.message || 'Prompt mutation in flight.')}</div>
+          <div class="section-banner__title">${saveState.status === 'saving' ? t('prompts.savePrompt') : t('prompts.restoreBackup')}</div>
+          <div class="section-banner__copy">${escapeHTML(activeState.message || (saveState.status === 'saving' ? t('prompts.saveCreatesBackup') : t('common.working')))}</div>
         </div>
       `;
     }
@@ -4466,8 +6123,8 @@
       const activeState = saveState.status === 'error' ? saveState : restoreState;
       return `
         <div class="section-banner section-banner--err">
-          <div class="section-banner__title">${saveState.status === 'error' ? 'Prompt save failed' : 'Prompt restore failed'}</div>
-          <div class="section-banner__copy">${escapeHTML(activeState.message || 'Prompt mutation failed.')}</div>
+          <div class="section-banner__title">${saveState.status === 'error' ? t('prompts.promptSaveFailed') : t('prompts.promptRestoreFailed')}</div>
+          <div class="section-banner__copy">${escapeHTML(activeState.message || t('prompts.promptMutationFailed'))}</div>
         </div>
       `;
     }
@@ -4475,26 +6132,26 @@
       const activeState = saveState.status === 'success' ? saveState : restoreState;
       return `
         <div class="section-banner section-banner--info">
-          <div class="section-banner__title">${saveState.status === 'success' ? 'Prompt saved' : 'Prompt restored'}</div>
-          <div class="section-banner__copy">${escapeHTML(activeState.message || 'Prompt mutation completed.')}</div>
+          <div class="section-banner__title">${saveState.status === 'success' ? t('prompts.promptSaved') : t('prompts.promptRestored')}</div>
+          <div class="section-banner__copy">${escapeHTML(activeState.message || t('prompts.promptMutationCompleted'))}</div>
         </div>
       `;
     }
     if (!promptMutationEnabled()) {
       return `
         <div class="section-banner section-banner--warn">
-          <div class="section-banner__title">Prompt mutations are locked</div>
-          <div class="section-banner__copy">${escapeHTML(state.runnerControl?.message || 'Prompt saves and restores are disabled until runner controls are enabled.')}</div>
+          <div class="section-banner__title">${escapeHTML(t('prompts.promptMutationsLocked'))}</div>
+          <div class="section-banner__copy">${escapeHTML(state.runnerControl?.message || t('prompts.promptMutationsDisabled'))}</div>
         </div>
       `;
     }
     const dirty = promptEditorIsDirty(editor);
     return `
       <div class="section-banner ${dirty ? 'section-banner--warn' : 'section-banner--info'}">
-        <div class="section-banner__title">Explicit prompt read</div>
+        <div class="section-banner__title">${escapeHTML(t('prompts.explicitPromptRead'))}</div>
         <div class="section-banner__copy">${dirty
-          ? 'Draft edits stay local until you save. Saving creates a backup before atomically updating the prompt file.'
-          : 'Inventory previews stay redacted by default. Saving creates a backup before atomically updating the prompt file, and restore uses the selected backup.'
+          ? escapeHTML(t('goals.draftStaysLocal'))
+          : escapeHTML(t('prompts.chooseBackupRestore'))
         }</div>
       </div>
     `;
@@ -4509,13 +6166,13 @@
     const lines = [];
     const required = validation.requiredVariables.length
       ? validation.requiredVariables.map((name) => `{${name}}`).join(', ')
-      : 'none';
+      : t('common.none');
     lines.push(`
       <div class="compact-list__item">
         <span class="compact-list__bullet"></span>
         <div>
-          <div class="compact-list__body ${validation.fileError ? 'field-error' : ''}">${escapeHTML(validation.fileError || 'Filename is populated.')}</div>
-          <div class="compact-list__meta">Filename validation</div>
+          <div class="compact-list__body ${validation.fileError ? 'field-error' : ''}">${escapeHTML(validation.fileError || t('prompts.filenameIsPopulated'))}</div>
+          <div class="compact-list__meta">${escapeHTML(t('prompts.filenameValidation'))}</div>
         </div>
       </div>
     `);
@@ -4523,8 +6180,8 @@
       <div class="compact-list__item">
         <span class="compact-list__bullet"></span>
         <div>
-          <div class="compact-list__body ${validation.contentError ? 'field-error' : ''}">${escapeHTML(validation.contentError || 'Content is populated.')}</div>
-          <div class="compact-list__meta">Content validation</div>
+          <div class="compact-list__body ${validation.contentError ? 'field-error' : ''}">${escapeHTML(validation.contentError || t('prompts.contentIsPopulated'))}</div>
+          <div class="compact-list__meta">${escapeHTML(t('prompts.contentValidation'))}</div>
         </div>
       </div>
     `);
@@ -4532,8 +6189,8 @@
       <div class="compact-list__item">
         <span class="compact-list__bullet"></span>
         <div>
-          <div class="compact-list__body ${validation.templateError ? 'field-error' : ''}">${escapeHTML(validation.templateError || `Required template variables: ${required}`)}</div>
-          <div class="compact-list__meta">Template-variable validation</div>
+          <div class="compact-list__body ${validation.templateError ? 'field-error' : ''}">${escapeHTML(validation.templateError || t('prompts.requiredTemplateVariablesLabel', { variables: required }))}</div>
+          <div class="compact-list__meta">${escapeHTML(t('prompts.templateVariableValidation'))}</div>
         </div>
       </div>
     `);
@@ -4554,20 +6211,21 @@
     const draftFile = toText(editor.draftFile, '').trim();
     const fileChanged = draftFile !== baseFile;
     const rows = promptContentDiffRows(editor, 10);
+    // Save creates a backup first; restore copies a selected backup back into place.
     return `
       <div class="prompt-diff-list">
         <div class="prompt-diff-row">
           <div class="prompt-diff-row__head">
-            <span class="prompt-diff-row__path">Local diff preview</span>
-            <span class="badge ${dirty ? 'badge--warn' : 'badge--dim'}">${dirty ? 'DIRTY' : 'CLEAN'}</span>
+            <span class="prompt-diff-row__path">${escapeHTML(t('prompts.localDiffPreview'))}</span>
+            <span class="badge ${dirty ? 'badge--warn' : 'badge--dim'}">${dirty ? t('common.dirty') : t('common.clean')}</span>
           </div>
-          <div class="summary-note">Draft changes stay local until saved. Save creates a backup first; restore copies a selected backup back into place.</div>
+          <div class="summary-note">${escapeHTML(t('prompts.chooseBackupRestore'))}</div>
         </div>
         ${fileChanged ? `
           <div class="prompt-diff-row">
             <div class="prompt-diff-row__head">
-              <span class="prompt-diff-row__path">Filename</span>
-              <span class="badge badge--info">Local only</span>
+              <span class="prompt-diff-row__path">${escapeHTML(t('prompts.filename'))}</span>
+              <span class="badge badge--info">${escapeHTML(t('common.localOnly'))}</span>
             </div>
             <div class="prompt-diff-row__values">
               <span class="prompt-diff-row__value prompt-diff-row__value--removed">${escapeHTML(baseFile || '(empty)')}</span>
@@ -4579,14 +6237,14 @@
         ${rows.length ? rows.map((row) => `
           <div class="prompt-diff-row ${row.kind === 'added' ? 'prompt-diff-row--added' : 'prompt-diff-row--removed'}">
             <div class="prompt-diff-row__head">
-              <span class="prompt-diff-row__path">Line ${escapeHTML(row.lineNumber)}</span>
-              <span class="badge ${row.kind === 'added' ? 'badge--info' : 'badge--warn'}">${row.kind === 'added' ? 'Added' : 'Removed'}</span>
+              <span class="prompt-diff-row__path">${escapeHTML(t('prompts.line', { lineNumber: row.lineNumber }))}</span>
+              <span class="badge ${row.kind === 'added' ? 'badge--info' : 'badge--warn'}">${row.kind === 'added' ? t('common.added') : t('common.removed')}</span>
             </div>
             <div class="prompt-diff-row__values">
               <span class="prompt-diff-row__value prompt-diff-row__value--${row.kind}">${escapeHTML(row.text || '(empty)')}</span>
             </div>
           </div>
-        `).join('') : '<div class="summary-note">No local content changes yet.</div>'}
+        `).join('') : `<div class="summary-note">${escapeHTML(t('prompts.noLocalChangesYet'))}</div>`}
       </div>
     `;
   }
@@ -4604,16 +6262,16 @@
     if (selectedBackup) {
       metaRows.push(`
         <div>
-          <div class="prompt-mutation-state__label">Selected backup</div>
+          <div class="prompt-mutation-state__label">${escapeHTML(t('prompts.selectedBackup'))}</div>
           <div class="prompt-mutation-state__path">${escapeHTML(selectedBackup.path || '(unresolved backup path)')}</div>
-          <div class="summary-note">${escapeHTML(selectedBackup.summary || selectedBackup.name || 'Timestamped backup')}</div>
+          <div class="summary-note">${escapeHTML(selectedBackup.summary || selectedBackup.name || t('prompts.selectedBackup'))}</div>
         </div>
       `);
     }
     if (backups.length) {
       metaRows.push(`
         <div>
-          <div class="prompt-mutation-state__label">Available backups</div>
+          <div class="prompt-mutation-state__label">${escapeHTML(t('prompts.availableBackups'))}</div>
           <div class="prompt-mutation-state__paths">
             ${backups.map((backup) => `<span class="prompt-mutation-state__path">${escapeHTML(backup.path || backup.name || '(backup)')}</span>`).join('')}
           </div>
@@ -4623,7 +6281,7 @@
     if (saveState.backupPath) {
       metaRows.push(`
         <div>
-          <div class="prompt-mutation-state__label">Backup path</div>
+          <div class="prompt-mutation-state__label">${escapeHTML(t('prompts.backupPath'))}</div>
           <div class="prompt-mutation-state__path">${escapeHTML(saveState.backupPath)}</div>
         </div>
       `);
@@ -4631,7 +6289,7 @@
     if (restoreState.backupPath) {
       metaRows.push(`
         <div>
-          <div class="prompt-mutation-state__label">Restore backup path</div>
+          <div class="prompt-mutation-state__label">${escapeHTML(t('prompts.restoreBackupPath'))}</div>
           <div class="prompt-mutation-state__path">${escapeHTML(restoreState.backupPath)}</div>
         </div>
       `);
@@ -4639,7 +6297,7 @@
     if (saveState.savedPath) {
       metaRows.push(`
         <div>
-          <div class="prompt-mutation-state__label">Saved path</div>
+          <div class="prompt-mutation-state__label">${escapeHTML(t('prompts.savedPath'))}</div>
           <div class="prompt-mutation-state__path">${escapeHTML(saveState.savedPath)}</div>
         </div>
       `);
@@ -4647,7 +6305,7 @@
     if (restoreState.restoredFromPath) {
       metaRows.push(`
         <div>
-          <div class="prompt-mutation-state__label">Restored from</div>
+          <div class="prompt-mutation-state__label">${escapeHTML(t('prompts.restoredFrom'))}</div>
           <div class="prompt-mutation-state__path">${escapeHTML(restoreState.restoredFromPath)}</div>
         </div>
       `);
@@ -4668,7 +6326,7 @@
     if (activeState && activeState.errorCode) {
       metaRows.push(`
         <div>
-          <div class="prompt-mutation-state__label">Error code</div>
+          <div class="prompt-mutation-state__label">${escapeHTML(t('prompts.errorCode'))}</div>
           <div class="prompt-mutation-state__code">${escapeHTML(activeState.errorCode)}</div>
         </div>
       `);
@@ -4711,31 +6369,31 @@
             ? 'warn'
             : 'info';
     const bannerTitle = saveState.status === 'saving'
-      ? 'Saving prompt'
+      ? t('prompts.savePrompt')
       : restoreState.status === 'restoring'
-        ? 'Restoring backup'
+        ? t('prompts.restoreBackup')
         : saveState.status === 'error'
-          ? 'Prompt save failed'
+          ? t('prompts.promptSaveFailed')
           : restoreState.status === 'error'
-            ? 'Prompt restore failed'
+            ? t('prompts.promptRestoreFailed')
             : saveState.status === 'success'
-              ? 'Prompt saved'
+              ? t('prompts.promptSaved')
               : restoreState.status === 'success'
-                ? 'Prompt restored'
+                ? t('prompts.promptRestored')
                 : !mutationEnabled
-                  ? 'Prompt mutations are locked'
-                  : 'Prompt backups';
+                  ? t('prompts.promptMutationsLocked')
+                  : t('prompts.promptEditor');
     const bannerCopy = saveState.status === 'saving'
-      ? saveState.message || 'Saving prompt changes and creating a backup first.'
+      ? saveState.message || t('prompts.saveCreatesBackup')
       : restoreState.status === 'restoring'
-        ? restoreState.message || 'Restoring prompt content from the selected backup.'
+        ? restoreState.message || t('prompts.chooseBackupRestore')
         : saveState.status === 'error' || restoreState.status === 'error'
-          ? activeState?.message || 'Prompt mutation failed.'
+          ? activeState?.message || t('prompts.promptMutationFailed')
           : saveState.status === 'success' || restoreState.status === 'success'
-            ? activeState?.message || 'Prompt mutation completed.'
+            ? activeState?.message || t('prompts.promptMutationCompleted')
             : !mutationEnabled
-              ? state.runnerControl?.message || 'Prompt saves and restores are disabled until runner controls are enabled.'
-              : 'Choose a backup to restore or save the current draft after validation passes.';
+              ? state.runnerControl?.message || t('prompts.promptMutationsDisabled')
+              : t('prompts.chooseBackupRestore');
     const errorCode = activeState && activeState.errorCode ? `<div class="prompt-mutation-state__code">${escapeHTML(activeState.errorCode)}</div>` : '';
     const backupOptions = backups.length
       ? backups.map((backup) => `
@@ -4743,7 +6401,7 @@
           ${escapeHTML(backup.summary || backup.name || backup.path)}
         </option>
       `).join('')
-      : '<option value="">No backups available</option>';
+      : `<option value="">${escapeHTML(t('prompts.noBackupsAvailable'))}</option>`;
     const backupSelectAttrs = !mutationEnabled || !backups.length || promptMutationInFlight(editor) || Boolean(editor.loading) || Boolean(editor.error)
       ? 'disabled'
       : '';
@@ -4764,7 +6422,7 @@
         </div>
         <div class="prompt-backup-panel">
           <div class="prompt-editor__field">
-            <label class="prompt-editor__label" for="prompt-backup-selection">Restore backup</label>
+            <label class="prompt-editor__label" for="prompt-backup-selection">${escapeHTML(t('prompts.restoreBackup'))}</label>
             <select
               id="prompt-backup-selection"
               class="field-control prompt-editor__input prompt-backup-select"
@@ -4773,26 +6431,26 @@
             >
               ${backupOptions}
             </select>
-            <div class="summary-note">Choose a timestamped backup before restoring the prompt.</div>
+            <div class="summary-note">${escapeHTML(t('prompts.chooseBackupRestore'))}</div>
           </div>
           <div class="prompt-editor__field">
-            <label class="prompt-editor__label" for="prompt-restore-confirmation">Restore confirmation</label>
+            <label class="prompt-editor__label" for="prompt-restore-confirmation">${escapeHTML(t('prompts.restoreConfirmation'))}</label>
             <input
               id="prompt-restore-confirmation"
               class="field-control prompt-editor__input prompt-backup-confirm"
               data-prompt-restore-confirmation
               type="text"
               value="${escapeHTML(editor.restoreConfirmation || '')}"
-              placeholder="RESTORE BACKUP"
+              placeholder="${escapeHTML(t('prompts.restoreOverwritePhrase'))}"
               autocomplete="off"
               spellcheck="false"
               ${restoreConfirmationAttrs}
             >
-            <div class="summary-note">Type RESTORE BACKUP to confirm the selected backup will overwrite the prompt file.</div>
+            <div class="summary-note">${escapeHTML(t('prompts.restoreOverwritePhrase'))}</div>
           </div>
           <div class="prompt-editor__actions">
-            ${button('Save Prompt', 'prompt-save', 'button--primary', `${saveButtonAttrs} data-prompt-save-button`)}
-            ${button('Restore Backup', 'prompt-restore', 'button--danger', `${restoreButtonAttrs} data-prompt-restore-button`)}
+            ${button(t('prompts.savePrompt'), 'prompt-save', 'button--primary', `${saveButtonAttrs} data-prompt-save-button`)}
+            ${button(t('prompts.restoreBackup'), 'prompt-restore', 'button--danger', `${restoreButtonAttrs} data-prompt-restore-button`)}
           </div>
         </div>
       </div>
@@ -5151,22 +6809,22 @@
 
   function promptSaveDisabledReason(editor = promptEditorData()) {
     if (promptSaveInFlight(editor)) {
-      return 'Prompt save is already in progress.';
+      return t('prompts.saving');
     }
     if (!promptMutationEnabled()) {
-      return state.runnerControl?.message || 'Prompt saves are disabled until runner controls are enabled.';
+      return state.runnerControl?.message || t('prompts.promptMutationsDisabled');
     }
     if (!editor.promptId) {
-      return 'Select a prompt before saving.';
+      return t('prompts.selectPrompt');
     }
     if (editor.loading) {
-      return 'Prompt content is still loading.';
+      return t('common.loading');
     }
     if (editor.error) {
-      return 'Fix the prompt read error before saving.';
+      return t('prompts.promptReadFailed');
     }
     if (!promptEditorIsDirty(editor)) {
-      return 'No prompt changes to save.';
+      return t('prompts.noLocalChangesYet');
     }
     const validation = promptEditorValidation(editor);
     if (validation.fileError) {
@@ -5183,19 +6841,19 @@
 
   function promptRestoreDisabledReason(editor = promptEditorData()) {
     if (promptRestoreInFlight(editor)) {
-      return 'Prompt restore is already in progress.';
+      return t('prompts.restoring');
     }
     if (!promptMutationEnabled()) {
-      return state.runnerControl?.message || 'Prompt restores are disabled until runner controls are enabled.';
+      return state.runnerControl?.message || t('prompts.promptMutationsDisabled');
     }
     if (!editor.promptId) {
-      return 'Select a prompt before restoring.';
+      return t('prompts.selectPrompt');
     }
     if (editor.loading) {
-      return 'Prompt content is still loading.';
+      return t('common.loading');
     }
     if (editor.error) {
-      return 'Fix the prompt read error before restoring.';
+      return t('prompts.promptReadFailed');
     }
     const validation = promptEditorValidation(editor);
     if (validation.fileError) {
@@ -5203,13 +6861,13 @@
     }
     const selectedBackup = promptSelectedBackup(editor);
     if (!selectedBackup || !toText(selectedBackup.path, '')) {
-      return 'No backups are available for this prompt.';
+      return t('prompts.noBackupsAvailable');
     }
     if (!toText(editor.restoreConfirmation, '').trim()) {
-      return 'Type RESTORE BACKUP to confirm the restore.';
+      return t('prompts.restoreOverwritePhrase');
     }
     if (toText(editor.restoreConfirmation, '').trim() !== 'RESTORE BACKUP') {
-      return 'Confirmation phrase must be RESTORE BACKUP.';
+      return t('prompts.restoreOverwritePhrase');
     }
     return '';
   }
@@ -5251,7 +6909,7 @@
       saveState: {
         ...createBlankPromptSaveState(),
         status: 'saving',
-        message: 'Saving prompt changes and creating a backup first.',
+        message: t('prompts.saveCreatesBackup'),
         requestPath,
         savedAt: nowMs(),
       },
@@ -5311,7 +6969,7 @@
         saveState: {
           ...createBlankPromptSaveState(),
           status: 'success',
-          message: normalized.message || 'Prompt saved.',
+          message: normalized.message || t('prompts.promptSaved'),
           backupPath: normalized.backupPath || '',
           savedPath: normalized.savedPath || editor.basePath || '',
           savedAt: nowMs(),
@@ -5329,7 +6987,7 @@
         saveState: {
           ...createBlankPromptSaveState(),
           status: 'error',
-          message: `Prompt save failed: ${error}`,
+          message: toText(error?.message || error, t('prompts.promptSaveFailed')),
           errorCode: 'prompt_save_failed',
           savedPath: editor.basePath || '',
           savedAt: nowMs(),
@@ -5389,7 +7047,7 @@
       restoreState: {
         ...createBlankPromptRestoreState(),
         status: 'restoring',
-        message: 'Restoring prompt content from the selected backup and writing a safety copy first.',
+        message: t('prompts.restoringBackup'),
         backupPath: restorePath,
         restoredFromPath: restorePath,
         restoredAt: nowMs(),
@@ -5451,7 +7109,7 @@
         restoreState: {
           ...createBlankPromptRestoreState(),
           status: 'success',
-          message: normalized.message || 'Prompt restored.',
+          message: normalized.message || t('prompts.promptRestored'),
           backupPath: normalized.backupPath || restorePath,
           restoredFromPath: normalized.restoredFromPath || restorePath,
           restoredAt: nowMs(),
@@ -5468,7 +7126,7 @@
         restoreState: {
           ...createBlankPromptRestoreState(),
           status: 'error',
-          message: `Prompt restore failed: ${error}`,
+          message: toText(error?.message || error, t('prompts.promptRestoreFailed')),
           errorCode: 'prompt_restore_failed',
           backupPath: restorePath,
           restoredFromPath: restorePath,
@@ -5711,17 +7369,17 @@
 
   function runnerControlActionDisabledReason(action) {
     if (state.stopSubmitting || state.runnerControl.busy) {
-      return 'A runner control request is already in flight.';
+      return t('runner.requestInFlight');
     }
     const statusReason = toText(state.runnerControl.status?.reason, '');
     if (statusReason.startsWith('status_error:')) {
-      return state.runnerControl.lastError || statusReason || 'Runner controller reported an error.';
+      return state.runnerControl.lastError || statusReason || t('runner.backendError');
     }
     if (!state.runnerControl.enabled) {
-      return state.runnerControl.message || 'Runner controls are disabled.';
+      return state.runnerControl.message || t('runner.controlsDisabledMessage');
     }
     if (!state.runnerControl.controllerAvailable) {
-      return state.runnerControl.message || 'Runner controller is unavailable.';
+      return state.runnerControl.message || t('runner.controllerUnavailableMessage');
     }
     const actionState = runnerControlActionState(action);
     return toText(actionState.disabledReason || actionState.disabled_reason || state.runnerControl.message, '');
@@ -5753,19 +7411,23 @@
   }
 
   function worktreeActionConfirmationPhrase(action) {
-    return WORKTREE_ACTION_CONFIRMATIONS[action] || WORKTREE_ACTION_CONFIRMATIONS.discard;
+    const phrases = {
+      merge: WORKTREE_ACTION_CONFIRMATIONS.merge,
+      discard: WORKTREE_ACTION_CONFIRMATIONS.discard,
+    };
+    return phrases[action] || WORKTREE_ACTION_CONFIRMATIONS.discard;
   }
 
   function worktreeActionLabel(action, busy = false) {
-    const label = String(action || 'merge').toLowerCase() === 'discard' ? 'Discard' : 'Merge';
+    const label = String(action || 'merge').toLowerCase() === 'discard' ? t('worktree.discardMerge') : t('worktree.applyMerge');
     if (!busy) {
       return label;
     }
-    return label === 'Discard' ? 'Discarding...' : 'Merging...';
+    return String(action || 'merge').toLowerCase() === 'discard' ? t('worktree.discarding') : t('worktree.merging');
   }
 
   function worktreeActionModalTitle(action) {
-    return String(action || 'merge').toLowerCase() === 'discard' ? 'Confirm discard' : 'Confirm merge';
+    return String(action || 'merge').toLowerCase() === 'discard' ? t('worktree.confirmDiscard') : t('worktree.confirmMerge');
   }
 
   function worktreeActionRequestPath(action) {
@@ -6090,20 +7752,28 @@
 
   function renderTopbar() {
     const elapsed = state.activeRun.startedAt ? fmtDuration((nowMs() - state.activeRun.startedAt) / 1000) : '--';
+    const elapsedLabel = t('topbar.elapsed');
     const budgetPct = metricText(state.activeRun.budgetAvailable, state.activeRun.budgetUsed, fmtPercent);
     const budgetWidth = metricWidth(state.activeRun.budgetAvailable, state.activeRun.budgetUsed);
     const quotaAvailable = Boolean(state.activeRun.quotaAvailable && state.activeRun.quota && state.activeRun.quota.available);
     const quotaTitle = quotaAvailable
       ? state.activeRun.quota.window
-        ? `Quota ${state.activeRun.quota.window} usage`
-        : 'Quota usage'
-      : 'Quota unavailable';
+        ? t('topbar.quotaUsageWindow', { window: state.activeRun.quota.window })
+        : t('topbar.quotaUsage')
+      : t('topbar.quotaUnavailable');
     const quotaSnapshot = quotaAvailable ? state.activeRun.quota : { window: '', used: null, available: false };
     const quotaControl = renderQuotaControl(quotaSnapshot, quotaTitle);
     const activeStatus = runStatusLabel(state.progress?.run_status || state.activeRun.status, state.progress?.final_reason || state.activeRun.finalReason);
     const activeTone = runStatusTone(state.progress?.run_status || state.activeRun.status, state.progress?.final_reason || state.activeRun.finalReason);
     const runLabel = state.activeRun.id || 'no-run';
-    const snapshotLabel = state.snapshotLabel || (state.sourceMode === 'fallback' ? 'Fallback data' : 'API snapshot');
+    const snapshotLabel =
+      state.snapshotStatus === 'loading'
+        ? t('snapshot.loading')
+        : state.snapshotStatus === 'fallback'
+          ? t('snapshot.fallback')
+          : state.snapshotStatus === 'stale'
+            ? t('snapshot.stale')
+            : state.snapshotLabel || (state.sourceMode === 'fallback' ? t('snapshot.fallback') : t('snapshot.api'));
     const runnerControlDisplay = runnerControlStateInfo();
     const runnerBusyAction = runnerControlBusyAction();
     const runnerChipTone = `status-chip--${runnerControlDisplay.chipTone}`;
@@ -6126,8 +7796,8 @@
           <span class="${activeTone === 'running' ? 'dot dot--pulse' : 'dot'}" style="color: currentColor; background: currentColor;"></span>
           ${escapeHTML(activeStatus)}
         </span>
-        <span class="status-chip">${escapeHTML(state.activeRun.stage || 'idle')} | iter ${escapeHTML(`${state.activeRun.iteration}/${state.activeRun.maxIterations}`)}</span>
-        <span class="status-chip">elapsed ${escapeHTML(elapsed)}</span>
+        <span class="status-chip">${escapeHTML(t('dashboard.stage'))} ${escapeHTML(state.activeRun.stage || 'idle')} | ${escapeHTML(t('pipeline.iter'))} ${escapeHTML(`${state.activeRun.iteration}/${state.activeRun.maxIterations}`)}</span>
+        <span class="status-chip">${escapeHTML(elapsedLabel)} ${escapeHTML(elapsed)}</span>
       </div>
       <div class="topbar__actions">
         <span class="status-chip ${snapshotTone}">
@@ -6138,15 +7808,16 @@
           <span class="dot" style="color: currentColor; background: currentColor;"></span>
           ${escapeHTML(runnerControlDisplay.label)}
         </span>
-        ${button('Refresh', 'refresh-status', 'button--quiet', 'aria-label="Refresh snapshot"')}
-        ${button(runnerControlActionLabel('start', runnerBusyAction === 'start'), 'runner-start', runnerControlActionClass('start', 'button--primary'), `aria-label="Start runner" ${runnerControlButtonAttrs('start')}`)}
-        ${button(runnerControlActionLabel('stop', runnerBusyAction === 'stop'), 'runner-stop', runnerControlActionClass('stop', 'button--danger'), `aria-label="Stop runner" ${runnerControlButtonAttrs('stop')}`)}
-        ${button(runnerControlActionLabel('reload', runnerBusyAction === 'reload'), 'runner-reload', runnerControlActionClass('reload', 'button--quiet'), `aria-label="Reload runner" ${runnerControlButtonAttrs('reload')}`)}
-        ${button(runnerControlActionLabel('restart', runnerBusyAction === 'restart'), 'runner-restart', runnerControlActionClass('restart', 'button--quiet'), `aria-label="Restart runner" ${runnerControlButtonAttrs('restart')}`)}
-        ${button(`Command`, 'open-palette', 'button--ghost', 'aria-label="Open command palette"')}
+        ${button(t('topbar.refresh'), 'refresh-status', 'button--quiet', `aria-label="${escapeHTML(t('topbar.refresh'))}"`)}
+        ${button(runnerControlActionLabel('start', runnerBusyAction === 'start'), 'runner-start', runnerControlActionClass('start', 'button--primary'), `aria-label="${escapeHTML(t('runner.start'))}" ${runnerControlButtonAttrs('start')}`)}
+        ${button(runnerControlActionLabel('stop', runnerBusyAction === 'stop'), 'runner-stop', runnerControlActionClass('stop', 'button--danger'), `aria-label="${escapeHTML(t('runner.stop'))}" ${runnerControlButtonAttrs('stop')}`)}
+        ${button(runnerControlActionLabel('reload', runnerBusyAction === 'reload'), 'runner-reload', runnerControlActionClass('reload', 'button--quiet'), `aria-label="${escapeHTML(t('runner.reload'))}" ${runnerControlButtonAttrs('reload')}`)}
+        ${button(runnerControlActionLabel('restart', runnerBusyAction === 'restart'), 'runner-restart', runnerControlActionClass('restart', 'button--quiet'), `aria-label="${escapeHTML(t('runner.restart'))}" ${runnerControlButtonAttrs('restart')}`)}
+        ${button(t('topbar.commandPalette'), 'open-palette', 'button--ghost', `aria-label="${escapeHTML(t('topbar.commandPaletteTitle'))}"`)}
+        ${renderLocaleToggle()}
         ${quotaControl}
-        <span class="meter-chip ${state.activeRun.budgetAvailable ? '' : 'meter-chip--unavailable'}" title="Budget usage">
-          budget ${escapeHTML(budgetPct)}
+        <span class="meter-chip ${state.activeRun.budgetAvailable ? '' : 'meter-chip--unavailable'}" title="${escapeHTML(t('dashboard.budget'))}">
+          ${escapeHTML(t('dashboard.budget').toLowerCase())} ${escapeHTML(budgetPct)}
           <span class="meter ${state.activeRun.budgetAvailable ? '' : 'meter--unavailable'}" aria-hidden="true"><span class="meter__fill ${state.activeRun.budgetAvailable ? 'meter__fill--warn' : 'meter__fill--muted'}" style="width:${escapeHTML(budgetWidth)}"></span></span>
         </span>
       </div>
@@ -6159,48 +7830,48 @@
     const quotaAvailable = Boolean(state.activeRun.quotaAvailable && state.activeRun.quota && state.activeRun.quota.available);
     const quotaTitle = quotaAvailable
       ? state.activeRun.quota.window
-        ? `Quota ${state.activeRun.quota.window} usage`
-        : 'Quota usage'
-      : 'Quota unavailable';
+        ? t('topbar.quotaUsageWindow', { window: state.activeRun.quota.window })
+        : t('topbar.quotaUsage')
+      : t('topbar.quotaUnavailable');
     const quotaSnapshot = quotaAvailable ? state.activeRun.quota : { window: '', used: null, available: false };
     const quotaControl = renderQuotaControl(quotaSnapshot, quotaTitle);
     const liveLabel =
       state.snapshotStatus === 'loading'
-        ? 'loading snapshot'
+        ? t('snapshot.loading')
         : state.sourceMode === 'fallback'
-          ? 'fallback data'
+          ? t('snapshot.fallback')
           : `${state.activeRun.backend} live`;
     const groups = [
       {
-        title: 'Run',
+        title: t('nav.run'),
         items: [
-          { view: 'dashboard', label: 'Dashboard', shortcut: VIEW_SHORTCUTS.dashboard },
-          { view: 'pipeline', label: 'Pipeline', shortcut: VIEW_SHORTCUTS.pipeline },
-          { view: 'logs', label: 'Logs', shortcut: VIEW_SHORTCUTS.logs },
+          { view: 'dashboard', label: viewLabel('dashboard'), shortcut: VIEW_SHORTCUTS.dashboard },
+          { view: 'pipeline', label: viewLabel('pipeline'), shortcut: VIEW_SHORTCUTS.pipeline },
+          { view: 'logs', label: viewLabel('logs'), shortcut: VIEW_SHORTCUTS.logs },
         ],
       },
       {
-        title: 'Project',
+        title: t('nav.project'),
         items: [
-          { view: 'backlog', label: 'Backlog', shortcut: VIEW_SHORTCUTS.backlog },
-          { view: 'goals', label: 'Goals', shortcut: VIEW_SHORTCUTS.goals },
-          { view: 'config', label: 'Config', shortcut: VIEW_SHORTCUTS.config },
-          { view: 'prompts', label: 'Prompts', shortcut: VIEW_SHORTCUTS.prompts },
-          { view: 'worktree', label: 'Worktree Review', shortcut: VIEW_SHORTCUTS.worktree, badge: state.worktreeMerge.reviewRequired ? '!' : '' },
+          { view: 'backlog', label: viewLabel('backlog'), shortcut: VIEW_SHORTCUTS.backlog },
+          { view: 'goals', label: viewLabel('goals'), shortcut: VIEW_SHORTCUTS.goals },
+          { view: 'config', label: viewLabel('config'), shortcut: VIEW_SHORTCUTS.config },
+          { view: 'prompts', label: viewLabel('prompts'), shortcut: VIEW_SHORTCUTS.prompts },
+          { view: 'worktree', label: viewLabel('worktree'), shortcut: VIEW_SHORTCUTS.worktree, badge: state.worktreeMerge.reviewRequired ? '!' : '' },
         ],
       },
       {
-        title: 'History',
+        title: t('nav.history'),
         items: [
-          { view: 'history', label: 'Run History', shortcut: VIEW_SHORTCUTS.history },
-          { view: 'notifications', label: 'Notifications', shortcut: VIEW_SHORTCUTS.notifications, badge: String(state.notifications.length) },
+          { view: 'history', label: viewLabel('history'), shortcut: VIEW_SHORTCUTS.history },
+          { view: 'notifications', label: viewLabel('notifications'), shortcut: VIEW_SHORTCUTS.notifications, badge: String(state.notifications.length) },
         ],
       },
       {
-        title: 'Preview',
+        title: t('nav.preview'),
         items: [
-          { view: 'landing', label: 'Landing preview', shortcut: VIEW_SHORTCUTS.landing },
-          { view: 'mobile', label: 'Mobile preview', shortcut: VIEW_SHORTCUTS.mobile },
+          { view: 'landing', label: viewLabel('landing'), shortcut: VIEW_SHORTCUTS.landing },
+          { view: 'mobile', label: viewLabel('mobile'), shortcut: VIEW_SHORTCUTS.mobile },
         ],
       },
     ];
@@ -6262,7 +7933,7 @@
       )
       .join('');
     return panel(
-      'Runner controls',
+      t('runner.panelTitle'),
       escapeHTML(statusSummary),
       `
         <div class="runner-control">
@@ -6280,7 +7951,7 @@
             ${buttonRow}
           </div>
           <div class="summary-note">
-            Confirmation phrases: start = ${escapeHTML(control.confirmation.start)}, stop = ${escapeHTML(control.confirmation.stop)}, reload = ${escapeHTML(control.confirmation.reload)}, restart = ${escapeHTML(control.confirmation.restart)}.
+            ${escapeHTML(t('runner.confirmationPhrases'))}: ${escapeHTML(t('runner.confirmStartPhrase'))} = ${escapeHTML(control.confirmation.start)}, ${escapeHTML(t('runner.confirmStopPhrase'))} = ${escapeHTML(control.confirmation.stop)}, ${escapeHTML(t('runner.confirmReloadPhrase'))} = ${escapeHTML(control.confirmation.reload)}, ${escapeHTML(t('runner.confirmRestartPhrase'))} = ${escapeHTML(control.confirmation.restart)}.
           </div>
         </div>
       `,
@@ -6295,7 +7966,7 @@
     const taskId = progress.current_task_id || run.task || '';
     const taskTitle = progress.current_task_title || run.taskTitle || '';
     const attempt = progress.attempt ?? run.attempt;
-    const attemptText = attempt == null ? 'unavailable' : String(attempt);
+    const attemptText = attempt == null ? t('common.unavailable') : String(attempt);
     const branchText = progress.branch || run.branch || state.repo.branch || 'HEAD';
     const worktreeModeText = progress.worktree_mode || run.worktreeMode || '';
     const runDirText = run.runDir || progress.latest_run_dir || state.latestRunDir || '';
@@ -6304,13 +7975,13 @@
     const runTone = runStatusTone(runStatus, finalReason);
     const runLabel = runStatusLabel(runStatus, finalReason);
     const runSummary = [
-      `task ${taskId || 'unavailable'}`,
-      taskTitle || 'task title unavailable',
-      `attempt ${attemptText}`,
-      `branch ${branchText}`,
-      `worktree ${worktreeModeText || 'unavailable'}`,
-      runDirText ? `run ${runDirText}` : 'run directory unavailable',
-      finalReason ? `reason ${finalReason}` : null,
+      `${t('dashboard.currentTaskId')} ${taskId || t('common.unavailable')}`,
+      `${t('dashboard.currentTaskTitle')} ${taskTitle || t('common.unavailable')}`,
+      `${t('dashboard.attempt')} ${attemptText}`,
+      `${t('dashboard.branch')} ${branchText}`,
+      `${t('dashboard.worktreeMode')} ${worktreeModeText || t('common.unavailable')}`,
+      runDirText ? `${t('dashboard.runDirectory')} ${runDirText}` : `${t('dashboard.runDirectory')} ${t('common.unavailable')}`,
+      finalReason ? `${t('dashboard.finalReason')} ${finalReason}` : null,
     ]
       .filter(Boolean)
       .join(' | ');
@@ -6333,12 +8004,12 @@
     const recentNotifs = state.notifications.slice(0, 4);
     const tokenValueText = tokenTotal != null ? fmtNumberShort(tokenTotal) : 'unavailable';
     const tokenSubText = hasTokenTelemetry
-      ? `in ${metricText(hasTokenTelemetry, tokenIn, fmtNumberShort)} | out ${metricText(hasTokenTelemetry, tokenOut, fmtNumberShort)}`
-      : 'in unavailable | out unavailable';
+      ? `${t('pipeline.input')} ${metricText(hasTokenTelemetry, tokenIn, fmtNumberShort)} | ${t('pipeline.output')} ${metricText(hasTokenTelemetry, tokenOut, fmtNumberShort)}`
+      : t('pipeline.tokenTelemetryUnavailable');
     const budgetCardValue = budgetValue != null ? fmtMoney(budgetValue) : 'unavailable';
     const budgetCardSub = budgetCap != null
-      ? `of ${fmtMoney(budgetCap)} | ${metricText(run.budgetAvailable, run.budgetUsed, fmtPercent)}`
-      : `of unavailable | ${metricText(run.budgetAvailable, run.budgetUsed, fmtPercent)}`;
+      ? `${t('common.of')} ${fmtMoney(budgetCap)} | ${metricText(run.budgetAvailable, run.budgetUsed, fmtPercent)}`
+      : `${t('common.of')} ${t('common.unavailable')} | ${metricText(run.budgetAvailable, run.budgetUsed, fmtPercent)}`;
 
     const body = `
       <div class="view-grid view-grid--two">
@@ -6346,15 +8017,15 @@
           ${sectionNotice('activeRun')}
           ${renderRunnerControlsPanel()}
           <div class="stat-grid stat-grid--four">
-            ${metricCard('Stage', run.stage, `iter ${run.iteration}/${run.maxIterations}`, true)}
-            ${metricCard('Tasks', `${doneTasks}/${totalTasks}`, `${totalTasks - doneTasks} remaining`)}
-            ${metricCard('Tokens', tokenValueText, tokenSubText, false, tokenValueText === 'unavailable' ? 'unavailable' : '')}
-            ${metricCard('Budget', budgetCardValue, budgetCardSub, false, budgetCardValue === 'unavailable' ? 'unavailable' : '')}
+            ${metricCard(t('dashboard.stage'), run.stage, `${t('pipeline.iter')} ${run.iteration}/${run.maxIterations}`, true)}
+            ${metricCard(t('dashboard.tasks'), `${doneTasks}/${totalTasks}`, `${totalTasks - doneTasks} ${t('common.remaining')}`)}
+            ${metricCard(t('dashboard.tokens'), tokenValueText, tokenSubText, false, tokenValueText === 'unavailable' ? t('common.unavailable') : '')}
+            ${metricCard(t('dashboard.budget'), budgetCardValue, budgetCardSub, false, budgetCardValue === 'unavailable' ? t('common.unavailable') : '')}
           </div>
 
           ${panel(
-            'Pipeline snapshot',
-            `active task ${escapeHTML(taskId || 'unavailable')} | ${escapeHTML(run.backend)}`,
+            t('dashboard.pipelineSnapshot'),
+            `${escapeHTML(t('pipeline.activeTask'))} ${escapeHTML(taskId || t('common.unavailable'))} | ${escapeHTML(run.backend)}`,
             `
               <div class="pipeline">
                 <div class="pipeline__row">
@@ -6365,13 +8036,13 @@
           )}
 
           ${panel(
-            'Live logs',
-            `${escapeHTML(state.logs.length)} lines | tail -f`,
+            t('dashboard.liveLogs'),
+            `${escapeHTML(state.logs.length)} ${escapeHTML(t('common.lines'))} | tail -f`,
             `
               ${sectionNotice('logs')}
               <div class="log-feed">
                 <div class="log-feed__scroll">
-                  ${latestLogs.length ? latestLogs.map((line) => renderLogRow(line)).join('') : '<div class="summary-note">No log entries yet.</div>'}
+                  ${latestLogs.length ? latestLogs.map((line) => renderLogRow(line)).join('') : `<div class="summary-note">${escapeHTML(t('dashboard.noLogEntriesYet'))}</div>`}
                 </div>
               </div>
             `
@@ -6380,8 +8051,8 @@
 
         <div class="view-grid">
           ${panel(
-            'Run facts',
-            `${escapeHTML(taskId || 'unavailable')} | ${escapeHTML(taskTitle || 'task title unavailable')}`,
+            t('dashboard.runFacts'),
+            `${escapeHTML(taskId || t('common.unavailable'))} | ${escapeHTML(taskTitle || t('common.unavailable'))}`,
             `
               <div class="runner-control">
                 <div class="${runBannerClass(runStatus, finalReason)}">
@@ -6392,20 +8063,20 @@
                   </div>
                 </div>
                 <div class="runner-control__details">
-                  ${detailCard('Current task id', taskId || 'unavailable')}
-                  ${detailCard('Current task title', taskTitle || 'unavailable')}
-                  ${detailCard('Attempt', attemptText)}
-                  ${detailCard('Branch', branchText)}
-                  ${detailCard('Worktree mode', worktreeModeText || 'unavailable')}
-                  ${detailCard('Run directory', runDirText || 'unavailable')}
-                  ${finalReason ? detailCard('Final reason', finalReason, runTone === 'failed' ? 'err' : runTone === 'stopped' ? 'warn' : (runTone === 'completed' || runTone === 'success') ? 'accent' : 'muted') : ''}
+                  ${detailCard(t('dashboard.currentTaskId'), taskId || t('common.unavailable'))}
+                  ${detailCard(t('dashboard.currentTaskTitle'), taskTitle || t('common.unavailable'))}
+                  ${detailCard(t('dashboard.attempt'), attemptText)}
+                  ${detailCard(t('dashboard.branch'), branchText)}
+                  ${detailCard(t('dashboard.worktreeMode'), worktreeModeText || t('common.unavailable'))}
+                  ${detailCard(t('dashboard.runDirectory'), runDirText || t('common.unavailable'))}
+                  ${finalReason ? detailCard(t('dashboard.finalReason'), finalReason, runTone === 'failed' ? 'err' : runTone === 'stopped' ? 'warn' : (runTone === 'completed' || runTone === 'success') ? 'accent' : 'muted') : ''}
                 </div>
               </div>
             `
           )}
 
           ${panel(
-            'Goals snapshot',
+            t('dashboard.goalsSnapshot'),
             `P0 ${p0Done}/${p0Total}`,
             `
               <div class="compact-list">
@@ -6418,14 +8089,14 @@
                       ${goal.note ? `<div class="compact-list__meta">${escapeHTML(goal.note)}</div>` : ''}
                     </div>
                   </div>
-                `).join('') : '<div class="summary-note">No goals published yet.</div>'}
+                `).join('') : `<div class="summary-note">${escapeHTML(t('dashboard.noGoalsPublishedYet'))}</div>`}
               </div>
             `
           )}
 
           ${panel(
-            'Selected backlog item',
-            selectedTask ? escapeHTML(selectedTask.id) : 'none',
+            t('dashboard.selectedBacklogItem'),
+            selectedTask ? escapeHTML(selectedTask.id) : escapeHTML(t('common.none')),
             selectedTask
               ? `
                 <div class="task-card" style="padding:12px 12px;">
@@ -6439,18 +8110,18 @@
                     ${chip(selectedTask.estimate)}
                     ${selectedTask.skill ? chip(selectedTask.skill, 'chip--info') : ''}
                   </div>
-                  <div class="summary-note" style="margin-top:8px;">${escapeHTML(selectedTask.dependsOn && selectedTask.dependsOn.length ? compactText(`Depends on ${selectedTask.dependsOn.join(', ')}`, 140) : 'Dependencies unavailable')}</div>
-                  <div class="summary-note" style="margin-top:4px;">${escapeHTML(selectedTask.fileScope ? compactText(`File scope: ${selectedTask.fileScope}`, 140) : 'File scope unavailable')}</div>
-                  <div class="summary-note" style="margin-top:4px;">${escapeHTML(selectedTask.attempt != null ? `Attempt ${selectedTask.attempt}` : 'Attempt unavailable')}</div>
-                  <div class="summary-note" style="margin-top:4px;">${escapeHTML(selectedTask.failureReason ? `Failure: ${selectedTask.failureReason}${selectedTask.failureDetail ? ` | ${compactText(selectedTask.failureDetail, 120)}` : ''}` : 'Failure unavailable')}</div>
+                  <div class="summary-note" style="margin-top:8px;">${escapeHTML(selectedTask.dependsOn && selectedTask.dependsOn.length ? compactText(t('backlog.dependsOn', { items: selectedTask.dependsOn.join(', ') }), 140) : t('backlog.dependenciesUnavailable'))}</div>
+                  <div class="summary-note" style="margin-top:4px;">${escapeHTML(selectedTask.fileScope ? compactText(t('backlog.fileScope', { scope: selectedTask.fileScope }), 140) : t('backlog.fileScopeUnavailable'))}</div>
+                  <div class="summary-note" style="margin-top:4px;">${escapeHTML(selectedTask.attempt != null ? t('backlog.attemptText', { attempt: selectedTask.attempt }) : t('backlog.attemptUnavailable'))}</div>
+                  <div class="summary-note" style="margin-top:4px;">${escapeHTML(selectedTask.failureReason ? t('backlog.failureText', { reason: `${selectedTask.failureReason}${selectedTask.failureDetail ? ` | ${compactText(selectedTask.failureDetail, 120)}` : ''}` }) : t('backlog.failureUnavailable'))}</div>
                 </div>
               `
-              : state.backlog.length ? `<div class="summary-note">No task selected.</div>` : `<div class="summary-note">No backlog artifacts were published yet.</div>`
+              : state.backlog.length ? `<div class="summary-note">${escapeHTML(t('dashboard.noTaskSelected'))}</div>` : `<div class="summary-note">${escapeHTML(t('backlog.noArtifacts'))}</div>`
           )}
 
           ${panel(
-            'Notifications',
-            `${recentNotifs.length} recent`,
+            t('dashboard.notifications'),
+            `${recentNotifs.length} ${t('common.recent')}`,
             `
               <div class="compact-list">
                 ${sectionNotice('notifications')}
@@ -6462,7 +8133,7 @@
                       <div class="compact-list__meta">${escapeHTML(item.kind)} | ${escapeHTML(fmtRelative(item.t))}</div>
                     </div>
                   </div>
-                `).join('') : '<div class="summary-note">No notifications yet.</div>'}
+                `).join('') : `<div class="summary-note">${escapeHTML(t('dashboard.noNotificationsYet'))}</div>`}
               </div>
             `
           )}
@@ -6472,12 +8143,12 @@
 
     return viewShell(
       'dashboard',
-      'Dashboard',
+      t('dashboard.title'),
       `${escapeHTML(taskId || 'unavailable')} | ${escapeHTML(taskTitle || 'task title unavailable')} | ${escapeHTML(branchText)} | ${escapeHTML(run.id)}`,
       `
-        ${button('Open Pipeline', 'nav-pipeline', 'button--quiet')}
-        ${button('Open Logs', 'nav-logs', 'button--quiet')}
-        ${button('Worktree Review', 'nav-worktree', 'button--quiet')}
+        ${button(t('common.openPipeline'), 'nav-pipeline', 'button--quiet')}
+        ${button(t('common.openLogs'), 'nav-logs', 'button--quiet')}
+        ${button(t('common.openWorktree'), 'nav-worktree', 'button--quiet')}
       `,
       body
     );
@@ -6502,7 +8173,7 @@
           class="log-row__select ${selected ? 'log-row__select--selected' : ''}"
           data-log-select="${escapeHTML(String(lineNumber))}"
           aria-pressed="${selected ? 'true' : 'false'}"
-          aria-label="${selected ? 'Deselect' : 'Select'} log line ${escapeHTML(String(lineNumber))}"
+          aria-label="${escapeHTML(selected ? t('common.deselect') : t('common.select'))} ${escapeHTML(t('logs.line', { lineNumber }))}"
         >
           <span class="log-row__select-mark">${selected ? 'x' : '+'}</span>
         </button>
@@ -6714,8 +8385,8 @@
     if (paused) {
       return {
         tone: 'stopped',
-        title: 'Live tail paused',
-        copy: `Polling is paused for ${sourceName}. Resume live tail to continue from cursor ${toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0}.`,
+        title: t('logs.liveTailPaused'),
+        copy: `${sourceName} ${t('logs.pauseLiveTail').toLowerCase()}. ${t('logs.resumeLiveTail')} ${toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0}.`,
         badge: 'paused',
         state: 'paused',
       };
@@ -6723,8 +8394,8 @@
     if (status === 'missing_file') {
       return {
         tone: 'err',
-        title: 'Log file missing',
-        copy: `The active run log is not available yet. Waiting for ${sourceName}.`,
+        title: t('logs.logFileMissing'),
+        copy: `${t('common.loading')} ${sourceName}.`,
         badge: 'missing_file',
         state: 'missing_file',
       };
@@ -6732,8 +8403,8 @@
     if (status === 'read_error') {
       return {
         tone: 'err',
-        title: 'Log read error',
-        copy: toText(model.error, `The tail endpoint could not read ${sourceName}.`),
+        title: t('logs.logReadError'),
+        copy: toText(model.error, `${sourceName} ${t('logs.logReadError').toLowerCase()}.`),
         badge: 'read_error',
         state: 'read_error',
       };
@@ -6741,8 +8412,8 @@
     if (status === 'empty') {
       return {
         tone: 'idle',
-        title: 'No matching log lines',
-        copy: source.exists ? 'The current filter returned no matching lines.' : `No log file is available at ${sourceName}.`,
+        title: t('logs.noMatchingLogLines'),
+        copy: source.exists ? t('logs.noMatchCurrentFilter') : `${t('logs.logFileMissing')}: ${sourceName}`,
         badge: 'empty',
         state: 'empty',
       };
@@ -6750,8 +8421,8 @@
     if (malformedLines > 0 && !entries.length) {
       return {
         tone: 'warn',
-        title: 'Malformed log lines',
-        copy: `${malformedLines} malformed line${malformedLines === 1 ? '' : 's'} were skipped.`,
+        title: t('logs.logReadError'),
+        copy: t('logs.malformedLinesSkipped', { count: malformedLines }),
         badge: 'warn',
         state: 'malformed_line',
       };
@@ -6760,16 +8431,16 @@
       const cursor = toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0;
       return {
         tone: 'running',
-        title: 'Live tail active',
-        copy: `Following ${sourceName} from cursor ${cursor}.`,
+        title: t('logs.liveTailActive'),
+        copy: `${sourceName} ${t('logs.liveTailActive').toLowerCase()} ${cursor}.`,
         badge: 'live',
         state: 'live',
       };
     }
     return {
       tone: 'info',
-      title: 'Loading active run log',
-      copy: `Fetching ${sourceName}.`,
+      title: t('logs.loadingActiveRunLog'),
+      copy: `${t('common.loading')} ${sourceName}.`,
       badge: 'loading',
       state: 'loading',
     };
@@ -6781,28 +8452,28 @@
     const loading = Boolean(model.loading);
     const status = toText(model.status, 'loading');
     const hasEntries = toArray(model.entries).length > 0;
-    const buttonLabel = paused ? 'Resume live tail' : 'Pause live tail';
+    const buttonLabel = paused ? t('logs.resumeLiveTail') : t('logs.pauseLiveTail');
     const loadingState = loading || status === 'loading';
     const busy = loadingState;
-    let stateLabel = 'live';
+    let stateLabel = t('logs.liveTail');
     let statusClass = 'status-chip status-chip--running';
     if (paused) {
-      stateLabel = 'paused';
+      stateLabel = t('logs.liveTailPaused');
       statusClass = 'status-chip status-chip--paused';
     } else if (status === 'missing_file') {
-      stateLabel = 'missing file';
+      stateLabel = t('logs.logFileMissing');
       statusClass = 'status-chip status-chip--warn';
     } else if (status === 'read_error') {
-      stateLabel = 'error';
+      stateLabel = t('logs.logReadError');
       statusClass = 'status-chip status-chip--err';
     } else if (status === 'empty') {
-      stateLabel = 'empty';
+      stateLabel = t('snapshot.emptyState');
       statusClass = 'status-chip status-chip--idle';
     } else if (status === 'malformed_line' && !hasEntries) {
-      stateLabel = 'warn';
+      stateLabel = t('common.failed');
       statusClass = 'status-chip status-chip--warn';
     } else if (loadingState && !hasEntries) {
-      stateLabel = 'loading';
+      stateLabel = t('common.loading');
       statusClass = 'status-chip status-chip--loading';
     }
     return {
@@ -6852,37 +8523,37 @@
         </div>
         <div class="log-tail-fields">
           <label class="log-tail-field">
-            <span class="log-tail-field__label">Stage</span>
+            <span class="log-tail-field__label">${escapeHTML(t('logs.stage'))}</span>
             <input
               type="text"
               class="log-tail-input"
               data-log-filter-field="stage"
               value="${escapeHTML(filters.stage)}"
-              placeholder="PM, Dev, QA"
+              placeholder="${escapeHTML(t('logs.stagePlaceholder'))}"
               autocomplete="off"
               spellcheck="false"
             >
           </label>
           <label class="log-tail-field">
-            <span class="log-tail-field__label">Task ID</span>
+            <span class="log-tail-field__label">${escapeHTML(t('logs.taskId'))}</span>
             <input
               type="text"
               class="log-tail-input"
               data-log-filter-field="taskId"
               value="${escapeHTML(filters.taskId)}"
-              placeholder="T-020"
+              placeholder="${escapeHTML(t('logs.taskIdPlaceholder'))}"
               autocomplete="off"
               spellcheck="false"
             >
           </label>
           <label class="log-tail-field log-tail-field--wide">
-            <span class="log-tail-field__label">Search</span>
+            <span class="log-tail-field__label">${escapeHTML(t('logs.message'))}</span>
             <input
               type="text"
               class="log-tail-input"
               data-log-filter-field="search"
               value="${escapeHTML(filters.search)}"
-              placeholder="Free-text search"
+              placeholder="${escapeHTML(t('logs.searchPlaceholder'))}"
               autocomplete="off"
               spellcheck="false"
             >
@@ -6894,9 +8565,9 @@
             ${escapeHTML(control.stateLabel)}
           </span>
           ${button(control.buttonLabel, 'toggle-logs', control.buttonClass, control.buttonAttrs)}
-          ${button(`Copy selected lines${selectedCount ? ` (${selectedCount})` : ''}`, 'copy-log-tail-selection', 'button--quiet', selectedCount ? '' : 'disabled')}
-          ${button('Download filtered logs', 'download-log-tail', 'button--quiet')}
-          ${button('Clear selection', 'clear-log-tail-selection', 'button--quiet', selectedCount ? '' : 'disabled')}
+          ${button(`${t('logs.copySelectedLines')}${selectedCount ? ` (${selectedCount})` : ''}`, 'copy-log-tail-selection', 'button--quiet', selectedCount ? '' : 'disabled')}
+          ${button(t('logs.downloadFilteredLogs'), 'download-log-tail', 'button--quiet')}
+          ${button(t('logs.clearSelection'), 'clear-log-tail-selection', 'button--quiet', selectedCount ? '' : 'disabled')}
         </div>
       </div>
     `;
@@ -7220,7 +8891,7 @@
     const tokenBudgetText = metricText(state.activeRun.budgetAvailable, state.activeRun.budgetUsed, fmtPercent);
     const tokenSparkline = state.metrics.tokens24h.length
       ? buildSparkline(state.metrics.tokens24h, 320, 44, 'rgba(126,227,138,0.12)', '#7ee38a')
-      : '<div class="summary-note">Token telemetry unavailable.</div>';
+      : `<div class="summary-note">${escapeHTML(t('pipeline.tokenTelemetryUnavailable'))}</div>`;
     const stageSummary = renderLifecycleLane(state.stages);
     const outputs = state.stages.length
       ? state.stages.map((stage) => `
@@ -7229,25 +8900,25 @@
             <span class="task-card__id">${escapeHTML(stage.label)}</span>
             <span class="chip ${lifecycleStatusToneClass(stage.status)}">${escapeHTML(normalizeStageStatus(stage.status, 'pending').replace(/_/g, ' '))}</span>
           </div>
-          <div class="task-card__title">${escapeHTML(stage.taskTitle || stage.title || 'Lifecycle record')}</div>
+          <div class="task-card__title">${escapeHTML(stage.taskTitle || stage.title || t('pipeline.lifecycleRecord'))}</div>
           <div class="task-card__meta">
-            ${chip(stage.taskId || 'task unavailable', 'chip--info')}
-            ${chip(stage.attempt != null ? `attempt ${stage.attempt}` : 'attempt unavailable', stage.attempt != null ? 'chip--accent' : 'chip--info')}
-            ${chip(stage.cycle != null ? `cycle ${stage.cycle}` : 'cycle unavailable', 'chip--info')}
+            ${chip(stage.taskId || t('common.unavailable'), 'chip--info')}
+            ${chip(stage.attempt != null ? t('backlog.attemptText', { attempt: stage.attempt }) : t('backlog.attemptUnavailable'), stage.attempt != null ? 'chip--accent' : 'chip--info')}
+            ${chip(stage.cycle != null ? t('backlog.cycleText', { cycle: stage.cycle }) : t('backlog.cycleUnavailable'), 'chip--info')}
             ${stage.model ? chip(stage.model, 'chip--info') : ''}
           </div>
-          <div class="summary-note" style="margin-top:8px;">${escapeHTML(stage.startedAt ? `Started ${fmtClock(stage.startedAt)}` : 'Started unavailable')} | ${escapeHTML(stage.endedAt ? `Ended ${fmtClock(stage.endedAt)}` : normalizeStageStatus(stage.status, 'pending') === 'running' ? 'In progress' : 'Ended unavailable')}</div>
-          <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(stage.recentOutput, 220) || 'Recent output unavailable.')}</div>
+          <div class="summary-note" style="margin-top:8px;">${escapeHTML(stage.startedAt ? `${t('pipeline.started')} ${fmtClock(stage.startedAt)}` : t('pipeline.startedUnavailable'))} | ${escapeHTML(stage.endedAt ? `${t('pipeline.ended')} ${fmtClock(stage.endedAt)}` : normalizeStageStatus(stage.status, 'pending') === 'running' ? t('pipeline.inProgress') : t('pipeline.endedUnavailable'))}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(stage.recentOutput, 220) || t('pipeline.recentOutputUnavailable'))}</div>
         </div>
       `).join('')
-      : ['<div class="summary-note">No lifecycle records were published yet.</div>'];
+      : [`<div class="summary-note">${escapeHTML(t('pipeline.noLifecycleRecords'))}</div>`];
 
     const body = `
       <div class="view-grid view-grid--two">
         <div class="view-grid">
           ${panel(
-            'Stage lane',
-            `iter ${escapeHTML(`${state.activeRun.iteration}/${state.activeRun.maxIterations}`)} | current ${escapeHTML(state.activeRun.stage)}`,
+            t('pipeline.stageLane'),
+            `${t('pipeline.iter')} ${escapeHTML(`${state.activeRun.iteration}/${state.activeRun.maxIterations}`)} | ${t('pipeline.current')} ${escapeHTML(state.activeRun.stage)}`,
             `
               ${sectionNotice('stages')}
               <div class="pipeline">
@@ -7259,8 +8930,8 @@
           )}
 
           ${panel(
-            'Current stage output',
-            escapeHTML(state.activeRun.task || `${state.stages.length} lifecycle records`),
+            t('pipeline.currentStageOutput'),
+            escapeHTML(state.activeRun.task || `${state.stages.length} ${t('pipeline.lifecycleRecord')}${state.stages.length === 1 ? '' : 's'}`),
             `
               <div class="view-grid view-grid--three">
                 ${outputs.join('')}
@@ -7271,34 +8942,34 @@
 
         <div class="view-grid">
           ${panel(
-            'Stage guardrails',
+            t('pipeline.stageGuardrails'),
             escapeHTML(state.activeRun.backend),
             `
                 <div class="compact-list">
                   <div class="compact-list__item">
                     <span class="compact-list__bullet"></span>
-                    <div class="compact-list__body">Read-only shell by default. Stop, merge, and discard are not auto-applied here.</div>
+                    <div class="compact-list__body">${escapeHTML(t('pipeline.readOnlyShell'))}</div>
                   </div>
                 <div class="compact-list__item">
                   <span class="compact-list__bullet"></span>
-                  <div class="compact-list__body">Current run uses manual stop confirmation and a local review workflow.</div>
+                  <div class="compact-list__body">${escapeHTML(t('pipeline.manualConfirmation'))}</div>
                 </div>
                   <div class="compact-list__item">
                     <span class="compact-list__bullet"></span>
-                    <div class="compact-list__body">Dev stage: ${escapeHTML(state.activeRun.task || 'unavailable')} | budget ${escapeHTML(tokenBudgetText)}</div>
+                    <div class="compact-list__body">${escapeHTML(t('pipeline.devStage'))}: ${escapeHTML(state.activeRun.task || t('common.unavailable'))} | ${escapeHTML(t('dashboard.budget').toLowerCase())} ${escapeHTML(tokenBudgetText)}</div>
                   </div>
                 </div>
               `
           )}
 
           ${panel(
-            'Live tokens',
-            '24h sparkline',
+            t('pipeline.liveTokens'),
+            `24h sparkline`,
             `
               <div class="kpi-grid kpi-grid--three">
-                ${kpiCard('Input', tokenInputText, hasTokenTelemetry ? 'tokens processed' : 'token telemetry unavailable', false, tokenInputText === 'unavailable' ? 'unavailable' : '')}
-                ${kpiCard('Output', tokenOutputText, hasTokenTelemetry ? 'tokens generated' : 'token telemetry unavailable', false, tokenOutputText === 'unavailable' ? 'unavailable' : '')}
-                ${kpiCard('Budget', tokenBudgetText, state.activeRun.budgetAvailable ? 'used this run' : 'budget telemetry unavailable', false, tokenBudgetText === 'unavailable' ? 'unavailable' : '')}
+                ${kpiCard(t('pipeline.input'), tokenInputText, hasTokenTelemetry ? t('pipeline.tokensProcessed') : t('pipeline.tokenTelemetryUnavailable'), false, tokenInputText === 'unavailable' ? t('common.unavailable') : '')}
+                ${kpiCard(t('pipeline.output'), tokenOutputText, hasTokenTelemetry ? t('pipeline.tokensGenerated') : t('pipeline.tokenTelemetryUnavailable'), false, tokenOutputText === 'unavailable' ? t('common.unavailable') : '')}
+                ${kpiCard(t('dashboard.budget'), tokenBudgetText, state.activeRun.budgetAvailable ? t('common.enabled') : t('pipeline.budgetTelemetryUnavailable'), false, tokenBudgetText === 'unavailable' ? t('common.unavailable') : '')}
               </div>
               <div style="margin-top:12px;">${tokenSparkline}</div>
             `
@@ -7309,11 +8980,11 @@
 
     return viewShell(
       'pipeline',
-      'Pipeline',
-      `Active stage ${escapeHTML(state.activeRun.stage)} | ${escapeHTML(state.activeRun.id)}`,
+      t('pipeline.title'),
+      `${t('pipeline.activeTask')} ${escapeHTML(state.activeRun.stage)} | ${escapeHTML(state.activeRun.id)}`,
       `
-        ${button('Open Logs', 'nav-logs', 'button--quiet')}
-        ${button('Open Backlog', 'nav-backlog', 'button--quiet')}
+        ${button(t('common.openLogs'), 'nav-logs', 'button--quiet')}
+        ${button(t('common.openBacklog'), 'nav-backlog', 'button--quiet')}
       `,
       body
     );
@@ -7357,11 +9028,11 @@
 
       return viewShell(
         'logs',
-        'Logs',
+        t('logs.title'),
         `${escapeHTML(sourceName)} | ${escapeHTML(control.stateLabel)} | cursor ${escapeHTML(String(tail.nextCursor || tail.cursor || 0))}`,
         `
           ${button(control.buttonLabel, 'toggle-logs', control.buttonClass, control.buttonAttrs)}
-          ${button('Open Dashboard', 'nav-dashboard', 'button--quiet')}
+          ${button(t('common.openDashboard'), 'nav-dashboard', 'button--quiet')}
         `,
         body
       );
@@ -7391,10 +9062,10 @@
           : 'button--quiet';
     const logsButtonLabel =
       state.snapshotStatus === 'loading'
-        ? 'Loading'
+        ? t('logs.loadingActiveRunLog')
         : state.logsPaused
-          ? 'Resume live tail'
-          : 'Pause live tail';
+          ? t('logs.resumeLiveTail')
+          : t('logs.pauseLiveTail');
     const logsButtonAttrs =
       state.snapshotStatus === 'loading'
         ? 'aria-busy="true"'
@@ -7411,7 +9082,7 @@
     const body = `
       <div class="view-grid">
         ${panel(
-          'Tail filter',
+          t('logs.tailFilter'),
           logsMode,
           `
             ${sectionNotice('logs')}
@@ -7440,7 +9111,7 @@
           `
             <div class="log-feed">
               <div class="log-feed__scroll" data-log-scroll>
-                ${filtered.length ? filtered.map((line) => renderLogRow(line)).join('') : '<div class="summary-note">No log entries match the current filter.</div>'}
+                ${filtered.length ? filtered.map((line) => renderLogRow(line)).join('') : `<div class="summary-note">${escapeHTML(t('logs.noMatchCurrentFilter'))}</div>`}
                 ${!state.logsPaused ? `
                   <div class="log-row" style="color: var(--accent);">
                     <div class="log-row__time">${escapeHTML(fmtClock(nowMs()))}</div>
@@ -7470,10 +9141,10 @@
 
   function renderBacklog() {
     const buckets = [
-      { key: 'pending', label: 'Pending' },
-      { key: 'in_progress', label: 'In progress' },
-      { key: 'done', label: 'Done' },
-      { key: 'failed', label: 'Failed' },
+      { key: 'pending', label: t('backlog.pending') },
+      { key: 'in_progress', label: t('backlog.inProgress') },
+      { key: 'done', label: t('backlog.done') },
+      { key: 'failed', label: t('backlog.failed') },
     ];
     const selected = currentBacklogTask();
     const totals = buckets.map((bucket) => {
@@ -7491,7 +9162,7 @@
                 <span class="column__count">${escapeHTML(bucket.tasks.length)}</span>
               </div>
               <div class="column__body">
-                ${bucket.tasks.length ? bucket.tasks.map((task) => renderTaskCard(task, bucket.key)).join('') : `<div class="summary-note">${escapeHTML(state.backlog.length ? 'No tasks in this bucket.' : 'No backlog artifacts were published yet.')}</div>`}
+                ${bucket.tasks.length ? bucket.tasks.map((task) => renderTaskCard(task, bucket.key)).join('') : `<div class="summary-note">${escapeHTML(state.backlog.length ? t('backlog.noTasksInBucket') : t('backlog.noArtifacts'))}</div>`}
               </div>
             </section>
           `)
@@ -7512,37 +9183,37 @@
             ${chip(selected.estimate)}
             ${selected.skill ? chip(selected.skill, 'chip--info') : ''}
           </div>
-          <div class="summary-note" style="margin-top:10px;">${escapeHTML(selected.dependsOn && selected.dependsOn.length ? compactText(`Depends on ${selected.dependsOn.join(', ')}`, 140) : 'Dependencies unavailable')}</div>
-          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.fileScope ? compactText(`File scope: ${selected.fileScope}`, 140) : 'File scope unavailable')}</div>
-          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.attempt != null ? `Attempt ${selected.attempt}` : 'Attempt unavailable')}</div>
-          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.cycle != null ? `Cycle ${selected.cycle}` : 'Cycle unavailable')}</div>
-          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.step != null ? `Step ${selected.step}` : 'Step unavailable')}</div>
-          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.failureReason ? `Failure: ${selected.failureReason}${selected.failureDetail ? ` | ${compactText(selected.failureDetail, 120)}` : ''}` : 'Failure unavailable')}</div>
-          <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(selected.recentOutput, 220) || 'Recent output unavailable.')}</div>
+          <div class="summary-note" style="margin-top:10px;">${escapeHTML(selected.dependsOn && selected.dependsOn.length ? compactText(t('backlog.dependsOn', { items: selected.dependsOn.join(', ') }), 140) : t('backlog.dependenciesUnavailable'))}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.fileScope ? compactText(t('backlog.fileScope', { scope: selected.fileScope }), 140) : t('backlog.fileScopeUnavailable'))}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.attempt != null ? t('backlog.attemptText', { attempt: selected.attempt }) : t('backlog.attemptUnavailable'))}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.cycle != null ? t('backlog.cycleText', { cycle: selected.cycle }) : t('backlog.cycleUnavailable'))}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.step != null ? t('backlog.stepText', { step: selected.step }) : t('backlog.stepUnavailable'))}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.failureReason ? t('backlog.failureText', { reason: `${selected.failureReason}${selected.failureDetail ? ` | ${compactText(selected.failureDetail, 120)}` : ''}` }) : t('backlog.failureUnavailable'))}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(selected.recentOutput, 220) || t('backlog.recentOutputUnavailable'))}</div>
         </div>
       `
-      : state.backlog.length ? `<div class="summary-note">No task selected.</div>` : `<div class="summary-note">No backlog artifacts were published yet.</div>`;
+      : state.backlog.length ? `<div class="summary-note">${escapeHTML(t('dashboard.noTaskSelected'))}</div>` : `<div class="summary-note">${escapeHTML(t('backlog.noArtifacts'))}</div>`;
 
     const body = `
       <div class="view-grid view-grid--two">
         <div class="view-grid">
           ${sectionNotice('backlog')}
           ${panel(
-            'Work queue',
+            t('backlog.workQueue'),
             `${escapeHTML(state.backlog.length)} tasks`,
             board
           )}
         </div>
         <div class="view-grid">
           ${panel(
-            'Backlog summary',
-            escapeHTML(selected ? selected.id : 'none'),
+            t('backlog.backlogSummary'),
+            escapeHTML(selected ? selected.id : t('common.none')),
             `
               <div class="kpi-grid kpi-grid--four">
-                ${kpiCard('Pending', String(state.backlog.filter((task) => task.status === 'pending').length), 'queued')}
-                ${kpiCard('Active', String(state.backlog.filter((task) => task.status === 'in_progress').length), 'in progress', true)}
-                ${kpiCard('Done', String(state.backlog.filter((task) => task.status === 'done').length), 'completed')}
-                ${kpiCard('Failed', String(state.backlog.filter((task) => task.status === 'failed').length), 'needs attention')}
+                ${kpiCard(t('backlog.pending'), String(state.backlog.filter((task) => task.status === 'pending').length), t('backlog.queued'))}
+                ${kpiCard(t('backlog.inProgress'), String(state.backlog.filter((task) => task.status === 'in_progress').length), t('backlog.active'), true)}
+                ${kpiCard(t('backlog.done'), String(state.backlog.filter((task) => task.status === 'done').length), t('backlog.completed'))}
+                ${kpiCard(t('backlog.failed'), String(state.backlog.filter((task) => task.status === 'failed').length), t('backlog.needsAttention'))}
               </div>
               <div style="margin-top:12px;">${detail}</div>
             `
@@ -7553,11 +9224,11 @@
 
     return viewShell(
       'backlog',
-      'Backlog',
-      `Current task ${escapeHTML(state.activeRun.task || 'none')} | selected ${escapeHTML(selected ? selected.id : 'none')}`,
+      t('backlog.title'),
+      `${t('pipeline.activeTask')} ${escapeHTML(state.activeRun.task || t('common.none'))} | ${t('common.selected')} ${escapeHTML(selected ? selected.id : t('common.none'))}`,
       `
-        ${button('Open Goals', 'nav-goals', 'button--quiet')}
-        ${button('Open Pipeline', 'nav-pipeline', 'button--quiet')}
+        ${button(t('common.openGoals'), 'nav-goals', 'button--quiet')}
+        ${button(t('common.openPipeline'), 'nav-pipeline', 'button--quiet')}
       `,
       body
     );
@@ -7567,6 +9238,8 @@
     // Static coverage keeps both the updated and legacy Goals copy in the source.
     // Draft edits stay local until save or reset. Bucket grouping stays pinned to P0 and P1.
     // Local checklist with add, edit, reorder, save, and completion actions
+    // Read-only GOALS.md snapshot with stable P0/P1 grouping and exact checkbox state.
+    // Type ${risk.confirmationPhrase} exactly to confirm
     const goalSnapshot = toObject(state.goalsSnapshot);
     const goalSummary = toObject(goalSnapshot.summary);
     const goalWarnings = toArray(goalSnapshot.warnings);
@@ -7742,13 +9415,13 @@
     const value = getAt(state.configDraft, path);
     const disabled = configSaveInFlight();
     if (!schema) {
-      return `<div class="field-error">Missing schema for ${escapeHTML(path)}</div>`;
+      return `<div class="field-error">${escapeHTML(t('config.missingSchema', { path }))}</div>`;
     }
     if (schema.kind === 'bool') {
       return `
         <button type="button" class="control-chip ${value ? 'control-chip--active' : ''}" data-config-toggle="${escapeHTML(path)}" ${disabled ? 'disabled' : ''}>
           <span class="dot" style="background:${value ? 'var(--accent)' : 'var(--text-sub)'}"></span>
-          ${escapeHTML(value ? 'enabled' : 'disabled')}
+          ${escapeHTML(value ? t('common.enabled') : t('common.disabled'))}
         </button>
       `;
     }
@@ -7779,7 +9452,7 @@
         <textarea
           class="field-control field-control--textarea"
           rows="3"
-          placeholder="${escapeHTML(schema.item_kind === 'int' || schema.itemKind === 'int' ? '1, 2, 3' : 'value, value')}"
+          placeholder="${escapeHTML(schema.item_kind === 'int' || schema.itemKind === 'int' ? t('config.listPlaceholderNumbers') : t('config.listPlaceholderValues'))}"
           data-config-field="${escapeHTML(path)}"
           ${disabled ? 'disabled' : ''}
         >${escapeHTML(textValue)}</textarea>
@@ -7826,8 +9499,9 @@
     const saveLocked = configSaveInFlight();
     const saveDisabledReason = configSaveDisabledReason(diffs, invalidDiffs);
     const saveBannerHTML = renderConfigSaveBanner(diffs, invalidDiffs);
+    // restart required
     const saveButtonAttrs = saveDisabledReason ? `disabled title="${escapeHTML(saveDisabledReason)}"` : '';
-    const saveButtonLabel = saveLocked ? 'Saving...' : 'Save Changes';
+    const saveButtonLabel = saveLocked ? t('config.saving') : t('config.saveChanges');
 
     const groupsHTML = configGroups()
       .map((group) => `
@@ -7878,7 +9552,7 @@
       `)
       .join('');
 
-    const selectedLabel = escapeHTML(selectedSchema?.label || selectedPath || 'Config field');
+    const selectedLabel = escapeHTML(selectedSchema?.label || selectedPath || t('config.field'));
     const selectedPathText = escapeHTML(selectedPath || '');
     const activeValueText = escapeHTML(configValueToText(selectedActiveValue, selectedSchema));
     const draftValueText = escapeHTML(configValueToText(selectedDraftValue, selectedSchema));
@@ -7914,17 +9588,17 @@
       <div class="config-detail">
         <div class="config-detail__head">
           <div>
-            <div class="overlay__title" style="display:block;">field details</div>
+            <div class="overlay__title" style="display:block;">${escapeHTML(t('config.fieldDetails'))}</div>
             <div class="config-detail__title">${selectedLabel}</div>
             <div class="summary-note">${selectedPathText}</div>
           </div>
           <div class="config-row__meta">
             ${selectedSchema && selectedSchema.kind ? `<span class="chip chip--info">${escapeHTML(selectedSchema.kind)}</span>` : ''}
-            ${selectedSchema && selectedSchema.redacted ? '<span class="chip chip--info">secret</span>' : ''}
-            ${selectedSchema && selectedSchema.restart ? '<span class="chip chip--warn">restart required</span>' : ''}
-            ${selectedDefaultChanged ? '<span class="chip chip--warn">default</span>' : ''}
-            ${selectedDraftChanged ? '<span class="chip chip--accent">edited</span>' : ''}
-            ${selectedError ? '<span class="chip chip--err">invalid</span>' : ''}
+            ${selectedSchema && selectedSchema.redacted ? `<span class="chip chip--info">${escapeHTML(t('config.secret'))}</span>` : ''}
+            ${selectedSchema && selectedSchema.restart ? `<span class="chip chip--warn">${escapeHTML(t('config.restartRequired'))}</span>` : ''}
+            ${selectedDefaultChanged ? `<span class="chip chip--warn">${escapeHTML(t('config.default'))}</span>` : ''}
+            ${selectedDraftChanged ? `<span class="chip chip--accent">${escapeHTML(t('config.edited'))}</span>` : ''}
+            ${selectedError ? `<span class="chip chip--err">${escapeHTML(t('config.invalid'))}</span>` : ''}
           </div>
         </div>
         <div class="config-detail__body">
@@ -7933,8 +9607,8 @@
             <div class="modal-banner section-banner section-banner--err">
               <span class="dot" style="background: currentColor;"></span>
               <div>
-                <div class="section-banner__title">Local validation failed</div>
-                <div class="section-banner__copy">${escapeHTML(`${invalidDiffs.length} pending change${invalidDiffs.length === 1 ? '' : 's'} are invalid.`)}</div>
+                <div class="section-banner__title">${escapeHTML(t('config.localValidationFailed'))}</div>
+                <div class="section-banner__copy">${escapeHTML(t('config.fixInvalidChangesBeforeSaving', { count: invalidDiffs.length }))}</div>
               </div>
             </div>
           ` : ''}
@@ -7942,35 +9616,35 @@
             <div class="modal-banner">
               <span class="dot" style="background: var(--warn);"></span>
               <div>
-                <div class="section-banner__title">Restart required</div>
+                <div class="section-banner__title">${escapeHTML(t('config.restartRequired'))}</div>
                 <div class="section-banner__copy">${escapeHTML(restartDiffs.map((diff) => diff.path).join(', '))}</div>
               </div>
             </div>
           ` : ''}
           <div>
-            <div class="detail-label">Description</div>
+            <div class="detail-label">${escapeHTML(t('config.description'))}</div>
             <div class="detail-copy">${escapeHTML(selectedSchema ? selectedSchema.desc : '')}</div>
           </div>
           ${selectedSchema && selectedSchema.hint ? `
             <div>
-              <div class="detail-label">Hint</div>
+              <div class="detail-label">${escapeHTML(t('config.hint'))}</div>
               <div class="summary-note">${escapeHTML(selectedSchema.hint)}</div>
             </div>
           ` : ''}
           <div>
-            <div class="detail-label">Active value</div>
+            <div class="detail-label">${escapeHTML(t('config.activeValue'))}</div>
             <div class="field-diff">
               <div class="field-diff__from">${activeValueText}</div>
               <div class="field-diff__to">${draftValueText}</div>
             </div>
           </div>
           <div>
-            <div class="detail-label">Local draft</div>
+            <div class="detail-label">${escapeHTML(t('config.localDraft'))}</div>
             <div>${configControl(selectedPath)}</div>
             ${selectedError ? `<div class="field-error" style="margin-top:6px;">${escapeHTML(selectedError)}</div>` : ''}
           </div>
           <div>
-            <div class="detail-label">Default</div>
+            <div class="detail-label">${escapeHTML(t('config.defaultValue'))}</div>
             <div class="field-diff">
               <div class="field-diff__from">${defaultValueText}</div>
               <div class="field-diff__to">${draftValueText}</div>
@@ -7978,16 +9652,16 @@
           </div>
           ${selectedPath === 'prompts_dir' && state.configContract?.resolved_prompts_dir ? `
             <div>
-              <div class="detail-label">Resolved prompts path</div>
+              <div class="detail-label">${escapeHTML(t('config.resolvedPromptsPath'))}</div>
               <div class="detail-copy">${escapeHTML(state.configContract.resolved_prompts_dir)}</div>
             </div>
           ` : ''}
           ${selectedSchema && selectedSchema.redacted ? `
-            <div class="summary-note">Redacted values stay hidden in the browser.</div>
+            <div class="summary-note">${escapeHTML(t('config.redactedHidden'))}</div>
           ` : ''}
           ${diffs.length ? `
             <div>
-              <div class="detail-label">Pending changes</div>
+              <div class="detail-label">${escapeHTML(t('config.pendingChanges'))}</div>
               <div class="config-diff-list">${pendingDiffRows}</div>
             </div>
           ` : ''}
@@ -8007,12 +9681,12 @@
 
     return viewShell(
       'config',
-      'Config',
-      `Local draft only | ${escapeHTML(diffs.length)} pending change${diffs.length === 1 ? '' : 's'}`,
+      t('config.title'),
+      `${escapeHTML(t('config.localDraftOnly'))} | ${escapeHTML(diffs.length)} ${escapeHTML(t('config.pendingChanges'))}`,
       `
         ${button(saveButtonLabel, 'save-config', 'button--primary', saveButtonAttrs)}
-        ${button('Reset Draft', 'reset-config', 'button--quiet', saveLocked ? 'disabled title="Config save is already in progress."' : '')}
-        ${button('Open Prompts', 'nav-prompts', 'button--quiet')}
+        ${button(t('config.resetDraft'), 'reset-config', 'button--quiet', saveLocked ? `disabled title="${escapeHTML(t('config.saveInProgress'))}"` : '')}
+        ${button(t('common.openPrompts'), 'nav-prompts', 'button--quiet')}
       `,
       body
     );
@@ -8021,7 +9695,7 @@
   function renderPrompts() {
     const selectedPrompt = currentPrompt();
     const selected = selectedPrompt || {
-      file: 'No prompt selected',
+      file: t('prompts.noPromptSelected'),
       mode: 'template',
       scope: 'PM',
       profile: '',
@@ -8045,28 +9719,29 @@
     const editorUpdated = editor.promptUpdated || selected.updated || '';
     const editorPreview = editor.promptPreview || selected.preview || REDACTED_VALUE;
     const editorDisabled = editor.loading || promptMutationInFlight(editor) || !editor.promptId || Boolean(editor.error);
+    // Inventory previews stay redacted by default. Saving creates a backup before atomically updating the prompt file, and restore uses the selected backup.
 
     const body = `
       <div class="prompt-layout">
         <div class="prompt-list">
           ${panel(
-            'Prompt inventory',
-            `${escapeHTML(overrides)}/${escapeHTML(state.prompts.length)} overrides | redacted by default`,
+            t('prompts.promptInventory'),
+            `${escapeHTML(overrides)}/${escapeHTML(state.prompts.length)} overrides | ${escapeHTML(t('prompts.inventoryRedacted'))}`,
             `
               ${sectionNotice('prompts')}
-              <div class="summary-note">Inventory previews stay redacted. Select a prompt to open the explicit full-content read path.</div>
+              <div class="summary-note">${escapeHTML(t('prompts.promptInventorySummary'))}</div>
               <div class="compact-list">
                 <div class="compact-list__item">
                   <span class="compact-list__bullet"></span>
                   <div>
                     <div class="compact-list__body">${escapeHTML(promptsDir)}</div>
-                    <div class="compact-list__meta">Primary prompts directory</div>
+                    <div class="compact-list__meta">${escapeHTML(t('prompts.primaryPromptsDir'))}</div>
                   </div>
                 </div>
                 <div class="compact-list__item">
                   <span class="compact-list__bullet"></span>
                   <div>
-                    <div class="compact-list__body">${escapeHTML(state.prompts.length)} tracked prompt files</div>
+                    <div class="compact-list__body">${escapeHTML(state.prompts.length)} ${escapeHTML(t('prompts.trackedPromptFiles'))}</div>
                     <div class="compact-list__meta">PM, Dev, QA, Reporter</div>
                   </div>
                 </div>
@@ -8131,18 +9806,18 @@
 
           <div class="prompt-preview prompt-editor__preview">
             <div class="prompt-preview__head">
-              <span class="badge badge--dim">FULL READ PREVIEW</span>
-              <div class="panel__meta">Loaded through the explicit read path</div>
+              <span class="badge badge--dim">${escapeHTML(t('prompts.fullReadPreview'))}</span>
+              <div class="panel__meta">${escapeHTML(t('prompts.promptEditorSummary'))}</div>
             </div>
             <div class="prompt-preview__body">
-              <div class="detail-label">Preview</div>
+              <div class="detail-label">${escapeHTML(t('common.preview'))}</div>
               <pre class="prompt-preview__text">${escapeHTML(editorPreview || REDACTED_VALUE)}</pre>
             </div>
           </div>
 
           <div class="prompt-editor__body">
             <div class="prompt-editor__field">
-              <label class="prompt-editor__label" for="prompt-editor-file">Filename</label>
+              <label class="prompt-editor__label" for="prompt-editor-file">${escapeHTML(t('prompts.filename'))}</label>
               <input
                 id="prompt-editor-file"
                 class="field-control prompt-editor__input"
@@ -8156,7 +9831,7 @@
             </div>
 
             <div class="prompt-editor__field">
-              <label class="prompt-editor__label" for="prompt-editor-content">Content</label>
+              <label class="prompt-editor__label" for="prompt-editor-content">${escapeHTML(t('prompts.content'))}</label>
               <textarea
                 id="prompt-editor-content"
                 class="field-control field-control--textarea prompt-editor__textarea"
@@ -8185,11 +9860,11 @@
 
     return viewShell(
       'prompts',
-      'Prompts',
-      `${escapeHTML(promptsDir)} | selected ${escapeHTML(editorFile)} | profile ${escapeHTML(editorProfile || 'personal')}`,
+      t('prompts.title'),
+      `${escapeHTML(promptsDir)} | ${escapeHTML(t('common.selected'))} ${escapeHTML(editorFile)} | ${escapeHTML(t('prompts.profile'))} ${escapeHTML(editorProfile || 'personal')}`,
       `
-        ${button('Open Config', 'nav-config', 'button--quiet')}
-        ${button('Copy prompt summary', 'copy-prompt-summary', 'button--quiet', copyPromptSummaryAttrs)}
+        ${button(t('common.openConfig'), 'nav-config', 'button--quiet')}
+        ${button(t('prompts.copyPromptSummary'), 'copy-prompt-summary', 'button--quiet', copyPromptSummaryAttrs)}
       `,
       body
     );
@@ -8201,47 +9876,47 @@
     const doneTasks = state.runs.reduce((sum, run) => sum + run.tasksDone, 0);
     const successes = state.runs.filter((run) => run.status === 'success').length;
     const budgetCap = toNumber(state.config?.budget?.max_usd || 0, 0);
-    const historyWindow = state.runs.length ? `latest ${fmtRelative(state.runs[0].startedAt)}` : 'no runs yet';
+    const historyWindow = state.runs.length ? `${t('history.latest')} ${fmtRelative(state.runs[0].startedAt)}` : t('history.noRunsYet');
     const selectedCounts = selected ? historyTaskCounts(selected) : { done: 0, total: 0, failed: 0, skipped: 0, cycles: 0 };
-    const selectedSummary = selected ? historySummaryText(selected) : 'No persisted summary fields available.';
-    const selectedWorktreeOutcome = selected ? historyWorktreeOutcomeLabel(selected.worktreeOutcome) : 'none';
+    const selectedSummary = selected ? historySummaryText(selected) : t('history.noPersistedSummary');
+    const selectedWorktreeOutcome = selected ? historyWorktreeOutcomeLabel(selected.worktreeOutcome) : t('common.none');
     const selectedShutdownReason = selected ? toText(selected.shutdownReason || selected.stopReason || '', '') : '';
     const selectedFinalReason = selected ? toText(selected.finalReason, '') : '';
-    const selectedRunDir = selected ? selected.runDir || 'unavailable' : 'unavailable';
+    const selectedRunDir = selected ? selected.runDir || t('common.unknown') : t('common.unknown');
 
     const body = `
       <div class="history-layout">
         <div>
           ${panel(
-            'Run history',
+            t('history.runHistory'),
             `${escapeHTML(state.runs.length)} runs | ${escapeHTML(historyWindow)}`,
             `
               ${sectionNotice('history')}
               <div class="kpi-grid kpi-grid--three">
-                ${kpiCard('Success', `${successes}/${state.runs.length}`, 'successful runs', true)}
-                ${kpiCard('Tasks', `${doneTasks}/${totalTasks}`, 'completed')}
-                ${kpiCard('Budget cap', fmtMoney(budgetCap), 'config max_usd')}
+                ${kpiCard(t('history.success'), `${successes}/${state.runs.length}`, t('history.successfulRuns'), true)}
+                ${kpiCard(t('history.tasks'), `${doneTasks}/${totalTasks}`, t('history.completedRuns'))}
+                ${kpiCard(t('history.budgetCap'), fmtMoney(budgetCap), t('history.configMaxUsd'))}
               </div>
             `
           )}
 
             <div class="history-table">
               <div class="history-table__head">
-                <span>Status</span>
-                <span>Branch / ID</span>
-                <span>Tasks</span>
-                <span>Duration</span>
-                <span>Started</span>
-                <span style="text-align:right;">Action</span>
+                <span>${escapeHTML(t('history.currentState'))}</span>
+                <span>${escapeHTML(t('history.branchId'))}</span>
+                <span>${escapeHTML(t('history.tasks'))}</span>
+                <span>${escapeHTML(t('history.duration'))}</span>
+                <span>${escapeHTML(t('history.started'))}</span>
+                <span style="text-align:right;">${escapeHTML(t('history.action'))}</span>
               </div>
-              ${state.runs.length ? state.runs.map((run) => renderHistoryRow(run)).join('') : '<div class="summary-note" style="padding:14px;">No run history yet.</div>'}
+              ${state.runs.length ? state.runs.map((run) => renderHistoryRow(run)).join('') : `<div class="summary-note" style="padding:14px;">${escapeHTML(t('history.noRunsYet'))}</div>`}
             </div>
           </div>
 
         <div>
           ${panel(
-            'Selected run',
-            escapeHTML(selected ? `${selected.branch} | ${selected.id}` : 'none'),
+            t('history.selectedRun'),
+            escapeHTML(selected ? `${selected.branch} | ${selected.id}` : t('common.none')),
             `
               <div class="history-details">
                 <div class="history-details__body">
@@ -8249,24 +9924,24 @@
                     selected
                       ? `
                         <div class="kpi-grid kpi-grid--four">
-                          ${kpiCard('Status', selected.status.toUpperCase(), 'current state', selected.status === 'success')}
-                          ${kpiCard('Tasks', `${selectedCounts.done}/${selectedCounts.total}`, `failed ${selectedCounts.failed} | skipped ${selectedCounts.skipped}`)}
-                          ${kpiCard('Duration', fmtDuration(selected.durationSec), 'persisted runtime')}
-                          ${kpiCard('Worktree', historyWorktreeOutcomeLabel(selected.worktreeOutcome), selected.worktreeOutcome === 'none' ? 'no worktree artifact' : 'worktree outcome')}
+                          ${kpiCard(t('history.currentState'), selected.status.toUpperCase(), t('history.currentState'), selected.status === 'success')}
+                          ${kpiCard(t('history.tasks'), `${selectedCounts.done}/${selectedCounts.total}`, `failed ${selectedCounts.failed} | skipped ${selectedCounts.skipped}`)}
+                          ${kpiCard(t('history.duration'), fmtDuration(selected.durationSec), t('history.persistedRuntime'))}
+                          ${kpiCard(t('history.worktreeOutcome'), historyWorktreeOutcomeLabel(selected.worktreeOutcome), selected.worktreeOutcome === 'none' ? t('history.noWorktreeArtifact') : t('history.worktreeOutcomeMeta'))}
                         </div>
                         <div class="compact-list">
-                          ${compactFactItem('Branch', selected.branch || 'none', 'persisted run summary')}
-                          ${compactFactItem('Run directory', selectedRunDir, 'read-only run artifacts')}
-                          ${compactFactItem('Final reason', selectedFinalReason || 'unavailable', 'run_summary.json final.reason')}
-                          ${compactFactItem('Shutdown reason', selectedShutdownReason || 'unavailable', 'last_run_summary.json stop_reason')}
-                          ${compactFactItem('Persisted summary', selectedSummary, 'run_summary.json + last_run_summary.json')}
-                          ${compactFactItem('Worktree outcome', selectedWorktreeOutcome, 'worktree artifacts')}
+                          ${compactFactItem(t('history.branchId'), selected.branch || t('common.none'), t('history.persistedSummary'))}
+                          ${compactFactItem(t('history.persistedRuntime'), selectedRunDir, t('history.readOnlyRunArtifacts'))}
+                          ${compactFactItem(t('history.currentState'), selectedFinalReason || t('common.unavailable'), 'run_summary.json final.reason')}
+                          ${compactFactItem(t('history.shutdownReason'), selectedShutdownReason || t('common.unavailable'), 'last_run_summary.json stop_reason')}
+                          ${compactFactItem(t('history.persistedSummary'), selectedSummary, 'run_summary.json + last_run_summary.json')}
+                          ${compactFactItem(t('history.worktreeOutcome'), selectedWorktreeOutcome, 'worktree artifacts')}
                         </div>
-                        <div class="summary-note">Persisted run summaries drive this view. Task counts and shutdown reasons are read from the run artifacts, not reconstructed placeholders.</div>
+                        <div class="summary-note">${escapeHTML(t('history.persistedSummariesDriveThisView'))}</div>
                       `
                       : `
                         <div class="history-details__empty">
-                          No persisted run summaries are available yet. Run history will show shutdown reasons, task counts, duration, and worktree outcomes after the first completed run.
+                          ${escapeHTML(t('history.noSummaries'))}
                         </div>
                       `
                   }
@@ -8280,11 +9955,11 @@
 
     return viewShell(
       'history',
-      'Run History',
-      `${escapeHTML(state.runs.length)} runs | latest ${escapeHTML(state.runs[0] ? state.runs[0].id : 'none')}`,
+      t('history.title'),
+      `${escapeHTML(state.runs.length)} ${escapeHTML(t('common.total'))} | ${escapeHTML(t('history.latest'))} ${escapeHTML(state.runs[0] ? state.runs[0].id : t('common.none'))}`,
       `
-        ${button('Open Logs', 'nav-logs', 'button--quiet')}
-        ${button('Open Dashboard', 'nav-dashboard', 'button--quiet')}
+        ${button(t('common.openLogs'), 'nav-logs', 'button--quiet')}
+        ${button(t('common.openDashboard'), 'nav-dashboard', 'button--quiet')}
       `,
       body
     );
@@ -8292,6 +9967,16 @@
 
   function renderNotifications() {
     const filters = ['all', 'run_start', 'run_stop', 'task_done', 'task_failed', 'quota', 'error', 'stalled'];
+    const filterLabels = {
+      all: t('notifications.filterAll'),
+      run_start: t('notifications.filterRunStart'),
+      run_stop: t('notifications.filterRunStop'),
+      task_done: t('notifications.filterTaskDone'),
+      task_failed: t('notifications.filterTaskFailed'),
+      quota: t('notifications.filterQuota'),
+      error: t('notifications.filterError'),
+      stalled: t('notifications.filterStalled'),
+    };
     const filtered = state.notifications.filter((item) => state.notificationFilter === 'all' || item.kind === state.notificationFilter);
 
     const kindCounts = state.notifications.reduce((acc, item) => {
@@ -8308,29 +9993,29 @@
       : 'unavailable';
     const controlPlaneEvent = state.runnerControl.status.lastEvent || state.runnerControl.lastAction || state.runnerControl.lastMessage || '';
     const emptyMessage = state.notifications.length
-      ? 'No notifications match the current filter.'
+      ? t('notifications.noMatchCurrentFilter')
       : state.sectionState.notifications?.status === 'error'
-        ? state.sectionState.notifications.message || 'Notifications are unavailable right now.'
+        ? state.sectionState.notifications.message || t('notifications.noRecorded')
         : fallbackSectionMessage('notifications');
     const emptyTitle = state.sectionState.notifications?.status === 'error'
-      ? 'Notification error'
+      ? t('notifications.notificationError')
       : state.notifications.length
-        ? 'Filtered empty'
-        : 'No notifications yet';
+        ? t('notifications.filteredEmpty')
+        : t('notifications.noEventsYet');
 
     const body = `
       <div class="notification-layout">
         <div>
           ${panel(
-            'Event feed',
-            `${escapeHTML(filtered.length)} visible | ${escapeHTML(state.notifications.length)} total`,
+            t('notifications.eventFeed'),
+            `${escapeHTML(filtered.length)} ${escapeHTML(t('notifications.visibleItems'))} | ${escapeHTML(state.notifications.length)} ${escapeHTML(t('notifications.totalItems'))}`,
             `
               ${sectionNotice('notifications')}
               <div class="logs-toolbar">
                 <div class="filters">
                   ${filters
                     .map((filter) => `
-                      <button type="button" class="filter-chip ${state.notificationFilter === filter ? 'filter-chip--active' : ''}" data-notification-filter="${escapeHTML(filter)}">${escapeHTML(filter.toUpperCase())}</button>
+                      <button type="button" class="filter-chip ${state.notificationFilter === filter ? 'filter-chip--active' : ''}" data-notification-filter="${escapeHTML(filter)}">${escapeHTML(filterLabels[filter] || filter.toUpperCase())}</button>
                     `)
                     .join('')}
                 </div>
@@ -8356,40 +10041,40 @@
 
         <div class="view-grid">
           ${panel(
-            'Notification source',
-            escapeHTML(latestNotification ? `${latestNotification.kind} | ${fmtRelative(latestNotification.t)}` : 'no events yet'),
+            t('notifications.notificationSource'),
+            escapeHTML(latestNotification ? `${latestNotification.kind} | ${fmtRelative(latestNotification.t)}` : t('notifications.noEventsYet')),
             `
               <div class="compact-list">
-                ${compactFactItem('Observed kinds', observedKinds.length ? observedKinds.join(', ') : 'none', 'Kinds derived from actual notification rows')}
-                ${compactFactItem('Newest event', latestNotification ? `${latestNotification.kind} | ${fmtDateTime(latestNotification.t)}` : 'none', latestNotification ? latestNotification.text : 'No notification events have been recorded yet.')}
-                ${compactFactItem('Control-plane last event', controlPlaneEvent || 'none', state.runnerControl.lastMessage || state.runnerControl.lastError || 'Runner control snapshot')}
+                ${compactFactItem(t('notifications.observedKinds'), observedKinds.length ? observedKinds.join(', ') : t('common.none'), 'Kinds derived from actual notification rows')}
+                ${compactFactItem(t('notifications.newestEvent'), latestNotification ? `${latestNotification.kind} | ${fmtDateTime(latestNotification.t)}` : t('common.none'), latestNotification ? latestNotification.text : t('notifications.noRecorded'))}
+                ${compactFactItem(t('notifications.controlPlaneLastEvent'), controlPlaneEvent || t('common.none'), state.runnerControl.lastMessage || state.runnerControl.lastError || t('notifications.runnerControlSnapshot'))}
               </div>
             `
           )}
 
           ${panel(
-            'Notification counts',
-            'current run',
+            t('notifications.notificationCounts'),
+            t('notifications.currentRun'),
             `
               <div class="kpi-grid kpi-grid--four">
-                ${kpiCard('Lifecycle', String((kindCounts.run_start || 0) + (kindCounts.run_stop || 0)), 'run start + run stop')}
-                ${kpiCard('Task done', String(kindCounts.task_done || 0), 'success events', true)}
-                ${kpiCard('Quota', String(kindCounts.quota || 0), 'budget notices')}
-                ${kpiCard('Errors', String((kindCounts.error || 0) + (kindCounts.task_failed || 0) + (kindCounts.stalled || 0)), 'action needed')}
+                ${kpiCard(t('notifications.lifecycle'), String((kindCounts.run_start || 0) + (kindCounts.run_stop || 0)), t('notifications.runStartAndStop'))}
+                ${kpiCard(t('notifications.taskDone'), String(kindCounts.task_done || 0), t('notifications.successEvents'), true)}
+                ${kpiCard(t('common.quota'), String(kindCounts.quota || 0), t('notifications.budgetNotices'))}
+                ${kpiCard(t('notifications.errors'), String((kindCounts.error || 0) + (kindCounts.task_failed || 0) + (kindCounts.stalled || 0)), t('notifications.actionNeeded'))}
               </div>
             `
           )}
 
           ${panel(
-            'Bridge settings',
+            t('notifications.bridgeSettings'),
             escapeHTML(state.config.telegram.instance_name || 'home-pc-main'),
             `
               <div class="compact-list">
-                ${compactFactItem('Configured events', configuredEvents || 'none', 'telegram.notify_events')}
-                ${compactFactItem('Stalled threshold', stalledSeconds ? `${stalledSeconds}s` : 'unavailable', 'telegram.stalled_seconds')}
-                ${compactFactItem('Control-plane status', controlPlaneStatus, 'runner_control snapshot')}
+                ${compactFactItem(t('notifications.configuredEvents'), configuredEvents || t('common.none'), 'telegram.notify_events')}
+                ${compactFactItem(t('notifications.stalledThreshold'), stalledSeconds ? `${stalledSeconds}s` : t('common.unavailable'), 'telegram.stalled_seconds')}
+                ${compactFactItem(t('notifications.controlPlaneStatus'), controlPlaneStatus, 'runner_control snapshot')}
               </div>
-              <div class="summary-note">Events are read from lifecycle records and control-plane snapshots. No placeholder feed is used.</div>
+              <div class="summary-note">${escapeHTML(t('notifications.eventsReadFrom'))}</div>
             `
           )}
         </div>
@@ -8398,11 +10083,11 @@
 
     return viewShell(
       'notifications',
-      'Notifications',
-      `Cross-run event feed | ${escapeHTML(state.notifications.length)} items`,
+      t('notifications.title'),
+      `${escapeHTML(state.notifications.length)} ${escapeHTML(t('notifications.visibleItems'))} | ${escapeHTML(t('notifications.eventFeed'))}`,
       `
-        ${button('Open Dashboard', 'nav-dashboard', 'button--quiet')}
-        ${button('Open Worktree', 'nav-worktree', 'button--quiet')}
+        ${button(t('common.openDashboard'), 'nav-dashboard', 'button--quiet')}
+        ${button(t('common.openWorktree'), 'nav-worktree', 'button--quiet')}
       `,
       body
     );
@@ -8417,21 +10102,22 @@
     const actionEnabled = worktreeActionEnabled(review, 'merge');
     const canCopyPatch = Boolean(review.patchPath || review.patch);
     const reviewSummary = describeWorktreeReview(review);
+    // no pending merge
     const statusSummary = status === 'none'
-      ? 'no pending merge'
+      ? t('worktree.noPendingMerge')
       : [status, cleanupState !== 'none' ? `cleanup ${cleanupState}` : ''].filter(Boolean).join(' | ');
-    const checklistMeta = status === 'none' ? 'read only' : cleanupFailed ? 'manual recovery' : reviewRequired ? (actionEnabled ? 'confirmation required' : 'manual recovery') : 'finalized';
+    const checklistMeta = status === 'none' ? t('worktree.readOnlyMode') : cleanupFailed ? t('worktree.manualRecovery') : reviewRequired ? (actionEnabled ? t('worktree.confirmationRequired') : t('worktree.manualRecovery')) : t('worktree.finalizedWorktree');
     const checklistTitle = status === 'none'
-      ? 'Read-only mode'
+      ? t('worktree.readOnlyMode')
       : cleanupFailed
-        ? 'Cleanup required'
+        ? t('worktree.cleanupRequired')
         : reviewRequired
           ? actionEnabled
-            ? 'Confirmation required'
-            : 'Manual recovery'
-        : 'Finalized worktree';
+            ? t('worktree.confirmationRequired')
+            : t('worktree.manualRecovery')
+        : t('worktree.finalizedWorktree');
     const checklistCopy = status === 'none'
-      ? 'No pending worktree merge is available in this snapshot.'
+      ? t('worktree.noPendingMerge')
       : cleanupFailed
         ? 'The merge or discard decision has already been recorded, but the isolated worktree still needs manual cleanup.'
         : reviewRequired
@@ -8439,7 +10125,7 @@
             ? 'Review the patch hunks, then confirm merge or discard in the web console. The backend validates the pending marker, source repository, run directory, worktree path, and patch path before it applies anything. No commit will be created.'
             : 'The pending merge state needs manual recovery before another action can run.'
         : 'This worktree is finalized. The web console stays read-only.';
-    const mergePanelMeta = status === 'none' ? 'read only' : cleanupFailed ? 'cleanup failed' : reviewRequired ? (actionEnabled ? 'confirmation required' : 'manual recovery') : 'finalized';
+    const mergePanelMeta = status === 'none' ? t('worktree.readOnlyMode') : cleanupFailed ? t('worktree.cleanupRequired') : reviewRequired ? (actionEnabled ? t('worktree.confirmationRequired') : t('worktree.manualRecovery')) : t('worktree.finalizedWorktree');
     const detailRows = [
       { label: 'Status', value: status, meta: reviewRequired ? 'review required' : 'read only' },
       { label: 'Status file', value: review.statusFile || review.pendingFile || '--', meta: 'current artifact path' },
@@ -8602,29 +10288,29 @@
                       <div class="compact-list__meta">${checklistMeta}</div>
                     </div>
                   </div>
-                `).join('') : '<div class="summary-note">No checklist is available yet.</div>'}
+                `).join('') : `<div class="summary-note">${escapeHTML(t('common.noDataAvailableYet'))}</div>`}
               </div>
             `
           )}
 
           ${panel(
-            'Merge actions',
+            t('worktree.mergeActions'),
             mergePanelMeta,
             `
               <div class="summary-note">${escapeHTML(actionCopy)}</div>
               <div class="modal-actions">
-                ${button('Apply merge', 'worktree-apply', 'button--primary', mergeActionAttrs)}
-                ${button('Discard merge', 'worktree-discard', 'button--danger', discardActionAttrs)}
+                ${button(t('worktree.applyMerge'), 'worktree-apply', 'button--primary', mergeActionAttrs)}
+                ${button(t('worktree.discardMerge'), 'worktree-discard', 'button--danger', discardActionAttrs)}
               </div>
               <div class="modal-actions" style="margin-top:12px;">
-                ${button('Copy patch path', 'copy-worktree-patch', 'button--quiet', copyPatchAttrs)}
+                ${button(t('worktree.copyPatchPath'), 'copy-worktree-patch', 'button--quiet', copyPatchAttrs)}
               </div>
             `
           )}
 
           ${panel(
             'Risk notes',
-            'read only',
+            t('worktree.readOnly'),
             `
               <div class="compact-list">
                 ${riskNotesHTML}
@@ -8637,10 +10323,10 @@
 
     return viewShell(
       'worktree',
-      'Worktree Review',
+      t('worktree.title'),
       `${escapeHTML(review.mode)} | ${escapeHTML(statusSummary)}`,
       `
-        ${button('Copy patch path', 'copy-worktree-patch', 'button--quiet', copyPatchAttrs)}
+        ${button(t('worktree.copyPatchPath'), 'copy-worktree-patch', 'button--quiet', copyPatchAttrs)}
       `,
       body
     );
@@ -8882,17 +10568,22 @@
   function renderPaletteCommands() {
     const navCommands = Object.keys(VIEW_LABELS).map((view) => ({
       kind: 'nav',
+      kindLabel: t('palette.navKind'),
       view,
-      title: `Go to ${VIEW_LABELS[view]}`,
+      title: t('palette.goTo', { view: viewLabel(view) }),
       shortcut: VIEW_SHORTCUTS[view],
     }));
     const actionCommands = [
-      { kind: 'action', action: 'refresh-status', title: 'Refresh read-only snapshot', shortcut: 'refresh' },
-      { kind: 'action', action: 'open-stop', title: 'Stop current run', shortcut: 'stop' },
-      { kind: 'action', action: 'toggle-logs', title: isLiveTailPaused() ? 'Resume live tail' : 'Pause live tail', shortcut: 'logs' },
-      { kind: 'action', action: 'nav-worktree', title: 'Open Worktree Review', shortcut: 'worktree' },
-      { kind: 'action', action: 'nav-mobile', title: 'Open Mobile preview', shortcut: 'mobile' },
-      { kind: 'action', action: 'nav-landing', title: 'Open Landing preview', shortcut: 'landing' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'refresh-status', title: t('palette.refreshStatus'), shortcut: 'refresh' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'open-stop', title: t('palette.stopCurrentRun'), shortcut: 'stop' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-start', title: t('palette.startRunner'), shortcut: 'start' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-stop', title: t('palette.stopRunner'), shortcut: 'stop' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-reload', title: t('palette.reloadRunner'), shortcut: 'reload' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-restart', title: t('palette.restartRunner'), shortcut: 'restart' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'toggle-logs', title: isLiveTailPaused() ? t('palette.resumeLiveTail') : t('palette.pauseLiveTail'), shortcut: 'logs' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-worktree', title: t('palette.openWorktreeReview'), shortcut: 'worktree' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-mobile', title: t('palette.openMobilePreview'), shortcut: 'mobile' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-landing', title: t('palette.openLandingPreview'), shortcut: 'landing' },
     ];
     return navCommands.concat(actionCommands);
   }
@@ -8918,26 +10609,26 @@
               class="palette-item ${index === selectedIndex ? 'palette-item--active' : ''}"
               data-palette-index="${index}"
             >
-              <span class="palette-item__kind">${escapeHTML(command.kind)}</span>
+              <span class="palette-item__kind">${escapeHTML(command.kindLabel || command.kind)}</span>
               <span class="palette-item__title">${escapeHTML(command.title)}</span>
               <span class="palette-item__shortcut">${escapeHTML(command.shortcut || '')}</span>
             </button>
           `)
           .join('')
-      : `<div class="palette-item"><span class="palette-item__kind">none</span><span class="palette-item__title">No matching commands</span><span class="palette-item__shortcut"></span></div>`;
+      : `<div class="palette-item"><span class="palette-item__kind">${escapeHTML(t('common.none'))}</span><span class="palette-item__title">${escapeHTML(t('palette.noMatches'))}</span><span class="palette-item__shortcut"></span></div>`;
 
     overlayRoot().innerHTML = `
       <div class="overlay overlay--tight" data-overlay="palette">
         <div class="overlay__panel overlay__panel--palette">
           <div class="overlay__head">
-            <span class="overlay__title">Command palette</span>
-            <span class="overlay__sub">/ or Cmd+K / Ctrl+K</span>
+            <span class="overlay__title">${escapeHTML(t('palette.title'))}</span>
+            <span class="overlay__sub">${escapeHTML(t('topbar.commandPaletteHint'))}</span>
           </div>
           <div class="overlay__body">
             <input
               type="text"
               class="palette-input"
-              placeholder="Type a screen or action"
+              placeholder="${escapeHTML(t('palette.placeholder'))}"
               value="${escapeHTML(state.paletteQuery)}"
               data-palette-input
               autocomplete="off"
@@ -9123,7 +10814,7 @@
   }
 
   function renderShell(options = {}) {
-    if (state.paletteOpen || state.goalEditor || state.stopOpen) {
+    if (!options.force && (state.paletteOpen || state.goalEditor || state.stopOpen)) {
       return;
     }
 
@@ -9141,7 +10832,8 @@
       main.scrollTop = previousScroll;
     }
 
-    document.title = `AgentCLI Web Console | ${VIEW_LABELS[state.activeView]}`;
+    document.documentElement.lang = currentLocale();
+    document.title = `${t('app.title')} | ${viewLabel(state.activeView)}`;
     writeJSON(STORAGE.view, state.activeView);
     renderOverlay();
   }
@@ -9209,7 +10901,7 @@
     const { mode, bucket, index, draft } = state.goalEditor;
     const text = String(draft.text || '').trim();
     if (!text) {
-      state.goalEditor.error = 'Goal text cannot be empty.';
+      state.goalEditor.error = t('goals.goalTextRequired');
       renderGoalEditorOverlay();
       return;
     }
@@ -9430,17 +11122,23 @@
               class="palette-item ${index === selectedIndex ? 'palette-item--active' : ''}"
               data-palette-index="${index}"
             >
-              <span class="palette-item__kind">${escapeHTML(command.kind)}</span>
+              <span class="palette-item__kind">${escapeHTML(command.kindLabel || command.kind)}</span>
               <span class="palette-item__title">${escapeHTML(command.title)}</span>
               <span class="palette-item__shortcut">${escapeHTML(command.shortcut || '')}</span>
             </button>
           `)
           .join('')
-      : `<div class="palette-item"><span class="palette-item__kind">none</span><span class="palette-item__title">No matching commands</span><span class="palette-item__shortcut"></span></div>`;
+      : `<div class="palette-item"><span class="palette-item__kind">${escapeHTML(t('common.none'))}</span><span class="palette-item__title">${escapeHTML(t('palette.noMatches'))}</span><span class="palette-item__shortcut"></span></div>`;
   }
 
   function handleAction(action, target) {
     switch (action) {
+      case 'set-locale-en':
+        setLocale('en');
+        return;
+      case 'set-locale-ko':
+        setLocale('ko');
+        return;
       case 'open-palette':
         openPalette();
         return;
@@ -9751,6 +11449,7 @@
     progress: clone(defaults.progress),
     sectionState: clone(defaults.sectionState),
     activeView: normalizeView(location.hash.replace(/^#/, '') || readJSON(STORAGE.view, null) || 'dashboard'),
+    locale: INITIAL_LOCALE,
     paletteOpen: false,
     paletteQuery: '',
     paletteIndex: 0,
@@ -9798,21 +11497,22 @@
   function renderPaletteCommands() {
     const navCommands = Object.keys(VIEW_LABELS).map((view) => ({
       kind: 'nav',
+      kindLabel: t('palette.navKind'),
       view,
-      title: `Go to ${VIEW_LABELS[view]}`,
+      title: t('palette.goTo', { view: viewLabel(view) }),
       shortcut: VIEW_SHORTCUTS[view],
     }));
     const actionCommands = [
-      { kind: 'action', action: 'refresh-status', title: 'Refresh read-only snapshot', shortcut: 'refresh' },
-      { kind: 'action', action: 'open-stop', title: 'Stop current run', shortcut: 'stop' },
-      { kind: 'action', action: 'runner-start', title: 'Start runner', shortcut: 'start' },
-      { kind: 'action', action: 'runner-stop', title: 'Stop runner', shortcut: 'stop' },
-      { kind: 'action', action: 'runner-reload', title: 'Reload runner', shortcut: 'reload' },
-      { kind: 'action', action: 'runner-restart', title: 'Restart runner', shortcut: 'restart' },
-      { kind: 'action', action: 'toggle-logs', title: isLiveTailPaused() ? 'Resume live tail' : 'Pause live tail', shortcut: 'logs' },
-      { kind: 'action', action: 'nav-worktree', title: 'Open Worktree Review', shortcut: 'worktree' },
-      { kind: 'action', action: 'nav-mobile', title: 'Open Mobile preview', shortcut: 'mobile' },
-      { kind: 'action', action: 'nav-landing', title: 'Open Landing preview', shortcut: 'landing' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'refresh-status', title: t('palette.refreshStatus'), shortcut: 'refresh' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'open-stop', title: t('palette.stopCurrentRun'), shortcut: 'stop' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-start', title: t('palette.startRunner'), shortcut: 'start' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-stop', title: t('palette.stopRunner'), shortcut: 'stop' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-reload', title: t('palette.reloadRunner'), shortcut: 'reload' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-restart', title: t('palette.restartRunner'), shortcut: 'restart' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'toggle-logs', title: isLiveTailPaused() ? t('palette.resumeLiveTail') : t('palette.pauseLiveTail'), shortcut: 'logs' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-worktree', title: t('palette.openWorktreeReview'), shortcut: 'worktree' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-mobile', title: t('palette.openMobilePreview'), shortcut: 'mobile' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-landing', title: t('palette.openLandingPreview'), shortcut: 'landing' },
     ];
     return navCommands.concat(actionCommands);
   }
@@ -9828,26 +11528,26 @@
               class="palette-item ${index === selectedIndex ? 'palette-item--active' : ''}"
               data-palette-index="${index}"
             >
-              <span class="palette-item__kind">${escapeHTML(command.kind)}</span>
+              <span class="palette-item__kind">${escapeHTML(command.kindLabel || command.kind)}</span>
               <span class="palette-item__title">${escapeHTML(command.title)}</span>
               <span class="palette-item__shortcut">${escapeHTML(command.shortcut || '')}</span>
             </button>
           `)
           .join('')
-      : `<div class="palette-item"><span class="palette-item__kind">none</span><span class="palette-item__title">No matching commands</span><span class="palette-item__shortcut"></span></div>`;
+      : `<div class="palette-item"><span class="palette-item__kind">${escapeHTML(t('common.none'))}</span><span class="palette-item__title">${escapeHTML(t('palette.noMatches'))}</span><span class="palette-item__shortcut"></span></div>`;
 
     overlayRoot().innerHTML = `
       <div class="overlay overlay--tight" data-overlay="palette">
         <div class="overlay__panel overlay__panel--palette">
           <div class="overlay__head">
-            <span class="overlay__title">Command palette</span>
-            <span class="overlay__sub">/ or Cmd+K / Ctrl+K</span>
+            <span class="overlay__title">${escapeHTML(t('topbar.commandPaletteTitle'))}</span>
+            <span class="overlay__sub">${escapeHTML(t('topbar.commandPaletteHint'))}</span>
           </div>
           <div class="overlay__body">
             <input
               type="text"
               class="palette-input"
-              placeholder="Type a screen or action"
+              placeholder="${escapeHTML(t('palette.placeholder'))}"
               value="${escapeHTML(state.paletteQuery)}"
               data-palette-input
               autocomplete="off"
@@ -9938,7 +11638,7 @@
   }
 
   function renderShell(options = {}) {
-    if (state.paletteOpen || state.goalEditor || state.stopOpen || state.worktreeAction) {
+    if (!options.force && (state.paletteOpen || state.goalEditor || state.stopOpen || state.worktreeAction)) {
       return;
     }
     const main = mainRoot();
@@ -9956,7 +11656,8 @@
       main.scrollTop = previousScroll;
     }
 
-    document.title = `AgentCLI Web Console | ${VIEW_LABELS[state.activeView]}`;
+    document.documentElement.lang = currentLocale();
+    document.title = `${t('app.title')} | ${viewLabel(state.activeView)}`;
     writeJSON(STORAGE.view, state.activeView);
     renderOverlay();
   }
@@ -9974,13 +11675,13 @@
               class="palette-item ${index === selectedIndex ? 'palette-item--active' : ''}"
               data-palette-index="${index}"
             >
-              <span class="palette-item__kind">${escapeHTML(command.kind)}</span>
+              <span class="palette-item__kind">${escapeHTML(command.kindLabel || command.kind)}</span>
               <span class="palette-item__title">${escapeHTML(command.title)}</span>
               <span class="palette-item__shortcut">${escapeHTML(command.shortcut || '')}</span>
             </button>
           `)
           .join('')
-      : `<div class="palette-item"><span class="palette-item__kind">none</span><span class="palette-item__title">No matching commands</span><span class="palette-item__shortcut"></span></div>`;
+      : `<div class="palette-item"><span class="palette-item__kind">${escapeHTML(t('common.none'))}</span><span class="palette-item__title">${escapeHTML(t('palette.noMatches'))}</span><span class="palette-item__shortcut"></span></div>`;
   }
 
   function scrollLogTail() {
@@ -10369,20 +12070,20 @@
     confirmation = toText(state.goalSave?.confirmation, '').trim()
   ) {
     if (goalSaveInFlight()) {
-      return 'Goal save is already in progress.';
+      return t('config.saveInProgress');
     }
     if (!goalSaveEnabled()) {
-      return state.runnerControl?.message || 'Goal saves are disabled until runner controls are enabled.';
+      return state.runnerControl?.message || t('config.savesDisabledUntilRunnerEnabled');
     }
     if (!goalDraft.dirty) {
-      return 'No goal changes to save.';
+      return t('goals.noLocalChanges');
     }
     if (risk.requiresConfirmation) {
       if (!confirmation) {
-        return `Type ${risk.confirmationPhrase} exactly to confirm ${goalSaveRiskSummaryText(risk)}.`;
+        return t('goals.typeExact', { confirmation: risk.confirmationPhrase });
       }
       if (confirmation !== risk.confirmationPhrase) {
-        return `Confirmation phrase must be ${risk.confirmationPhrase}.`;
+        return `${t('goals.confirmationPhrase')}: ${risk.confirmationPhrase}`;
       }
     }
     return '';
@@ -10401,18 +12102,18 @@
     const savePath = toText(state.goalsPath || goalSnapshot.path || '.doc/GOALS.md', '.doc/GOALS.md');
     const requestPath = goalSaveRequestPath();
     const bannerTitle = saveState.status === 'saving'
-      ? 'Saving goals'
+      ? t('goals.saving')
       : saveState.status === 'success'
-        ? 'Goals saved'
+        ? t('goals.saved')
         : saveState.status === 'error'
-          ? 'Goals save failed'
+          ? t('goals.saveFailed')
           : !goalSaveEnabled()
-            ? 'Goal saves are locked'
+            ? t('goals.saveLocked')
             : !goalDraft.dirty
-              ? 'No goal changes'
+              ? t('goals.noLocalChanges')
               : requiresConfirmation && !confirmationMatches
-                ? 'Confirmation required'
-                : 'Ready to save goals';
+                ? t('goals.confirmationRequired')
+                : t('goals.readyToSave');
     const bannerTone = saveState.status === 'saving'
       ? 'running'
       : saveState.status === 'success'
@@ -10427,29 +12128,29 @@
                 ? 'warn'
                 : 'info';
     const bannerCopy = saveState.status === 'saving'
-      ? 'Creating a timestamped backup and writing GOALS.md atomically.'
+      ? t('goals.saveCreatesBackup')
       : saveState.status === 'success'
-        ? saveState.message || 'Goals were written successfully.'
+        ? saveState.message || t('goals.saved')
         : saveState.status === 'error'
-          ? saveState.message || 'Goals save failed.'
+          ? saveState.message || t('goals.saveFailed')
           : !goalSaveEnabled()
-            ? state.runnerControl?.message || 'Goal saves are disabled until runner controls are enabled.'
+            ? state.runnerControl?.message || t('config.savesDisabledUntilRunnerEnabled')
             : !goalDraft.dirty
-              ? 'Edit the draft to stage a local save.'
+              ? t('goals.draftStaysLocal')
               : requiresConfirmation && !confirmationMatches
-                ? `Deleting or downgrading ${goalSaveRiskSummaryText(risk)} requires the exact confirmation phrase.`
-                : 'Saving will create a backup before atomically updating .doc/GOALS.md.';
+                ? t('goals.typeExact', { confirmation: goalSaveRiskSummaryText(risk) })
+                : t('goals.saveCreatesBackup');
     const metaRows = [];
     metaRows.push(`
       <div>
-        <div class="goal-save-state__label">Request path</div>
+        <div class="goal-save-state__label">${escapeHTML(t('common.open'))}</div>
         <div class="goal-save-state__path">${escapeHTML(requestPath)}</div>
       </div>
     `);
     if (requiresConfirmation) {
       metaRows.push(`
         <div>
-          <div class="goal-save-state__label">Confirmation phrase</div>
+          <div class="goal-save-state__label">${escapeHTML(t('goals.confirmationPhrase'))}</div>
           <div class="goal-save-state__code">${escapeHTML(confirmationPhrase)}</div>
         </div>
       `);
@@ -10457,7 +12158,7 @@
     if (risk.deletedUncheckedP0.length) {
       metaRows.push(`
         <div>
-          <div class="goal-save-state__label">Deleted unchecked P0</div>
+          <div class="goal-save-state__label">${escapeHTML(t('goals.deletedUncheckedP0'))}</div>
           <div class="goal-save-state__paths">
             ${risk.deletedUncheckedP0.map((item) => `<span class="goal-save-state__path">${escapeHTML(goalItemSummary(item))}</span>`).join('')}
           </div>
@@ -10467,7 +12168,7 @@
     if (risk.downgradedUncheckedP0.length) {
       metaRows.push(`
         <div>
-          <div class="goal-save-state__label">Downgraded unchecked P0</div>
+          <div class="goal-save-state__label">${escapeHTML(t('goals.downgradedUncheckedP0'))}</div>
           <div class="goal-save-state__paths">
             ${risk.downgradedUncheckedP0.map((item) => `<span class="goal-save-state__path">${escapeHTML(goalItemSummary(item))}</span>`).join('')}
           </div>
@@ -10478,7 +12179,7 @@
       if (saveState.backupPath) {
         metaRows.push(`
           <div>
-            <div class="goal-save-state__label">Backup path</div>
+            <div class="goal-save-state__label">${escapeHTML(t('goals.backupPath'))}</div>
             <div class="goal-save-state__path">${escapeHTML(saveState.backupPath)}</div>
           </div>
         `);
@@ -10486,7 +12187,7 @@
       if (saveState.savedPath || savePath) {
         metaRows.push(`
           <div>
-            <div class="goal-save-state__label">Saved path</div>
+            <div class="goal-save-state__label">${escapeHTML(t('goals.savedPath'))}</div>
             <div class="goal-save-state__path">${escapeHTML(saveState.savedPath || savePath)}</div>
           </div>
         `);
@@ -10494,7 +12195,7 @@
       if (saveState.errorCode) {
         metaRows.push(`
           <div>
-            <div class="goal-save-state__label">Error code</div>
+            <div class="goal-save-state__label">${escapeHTML(t('goals.errorCode'))}</div>
             <div class="goal-save-state__code">${escapeHTML(saveState.errorCode)}</div>
           </div>
         `);
@@ -10613,7 +12314,7 @@
     state.goalSave = {
       ...currentState,
       status: 'saving',
-      message: 'Saving goals and creating a backup first.',
+      message: t('goals.saveCreatesBackup'),
       errorCode: '',
       backupPath: '',
       savedPath,
@@ -10662,7 +12363,7 @@
       state.goalSave = {
         ...createBlankGoalSaveState(),
         status: 'success',
-        message: normalized.message || (normalized.backupPath ? `Goals saved. Backup written to ${normalized.backupPath}.` : 'Goals saved.'),
+        message: normalized.message || (normalized.backupPath ? `${t('goals.saved')} ${t('goals.backupPath')}: ${normalized.backupPath}.` : t('goals.saved')),
         errorCode: '',
         backupPath: normalized.backupPath || '',
         savedPath: normalized.savedPath || savedPath,
@@ -10673,7 +12374,7 @@
       };
       renderShell({ preserveScroll: true });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Goals save failed.';
+      const message = error instanceof Error ? error.message : t('goals.saveFailed');
       const errorCode = error instanceof Error && typeof error.code === 'string' && error.code ? error.code : 'goals_save_failed';
       const backupPath = error instanceof Error ? toText(error.backupPath || error.backup_path || '', '') : '';
       const risky = error instanceof Error && error.risk ? normalizeGoalSaveRisk(error.risk) : risk;
@@ -10771,7 +12472,8 @@
     mainRoot().innerHTML = renderMainView();
     mainRoot().dataset.view = state.activeView;
     overlayRoot().innerHTML = '';
-    document.title = `AgentCLI Web Console | ${VIEW_LABELS[state.activeView]}`;
+    document.documentElement.lang = currentLocale();
+    document.title = `${t('app.title')} | ${viewLabel(state.activeView)}`;
   }
 
   function stopLiveLogStream() {

@@ -192,6 +192,35 @@ a {
   display: none;
 }
 
+.locale-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-1);
+  background: var(--surface-3);
+  flex: 0 0 auto;
+}
+
+.locale-switch__button {
+  min-height: 22px;
+  padding: 2px 8px;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+
+.locale-switch__button:hover,
+.locale-switch__button:focus-visible {
+  border-color: transparent;
+}
+
+.locale-switch__button--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0a0c0a;
+}
+
 .sidebar {
   border-right: 1px solid var(--border);
   background: var(--surface);

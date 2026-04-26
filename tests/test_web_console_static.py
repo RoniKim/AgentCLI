@@ -46,6 +46,9 @@ class WebConsoleStaticTests(unittest.TestCase):
             ".sidebar",
             ".main",
             ".overlay",
+            ".locale-switch",
+            ".locale-switch__button",
+            ".locale-switch__button--active",
             ".section-banner",
             ".section-banner--warn",
             ".section-banner--err",
@@ -633,6 +636,43 @@ class WebConsoleStaticTests(unittest.TestCase):
         self.assertNotIn("docs/design/project", lowered)
         self.assertNotIn("text/babel", lowered)
         self.assertNotIn("quota 5h", lowered)
+
+    def test_locale_persistence_and_bilingual_dashboard_config_palette_copy(self) -> None:
+        locale_tokens = [
+            "agentcli.console.locale.v1",
+            "function normalizeLocale",
+            "function detectPreferredLocale",
+            "function renderLocaleToggle",
+            "readJSON(STORAGE.locale, null)",
+            "writeJSON(STORAGE.locale, next)",
+            "locale: INITIAL_LOCALE",
+            "document.documentElement.lang = currentLocale()",
+            "set-locale-en",
+            "set-locale-ko",
+            "renderLocaleToggle()",
+        ]
+        copy_tokens = [
+            "t('dashboard.title')",
+            "t('dashboard.pipelineSnapshot')",
+            "t('config.title')",
+            "t('config.saveChanges')",
+            "t('config.restartRequired')",
+            "t('palette.title')",
+            "t('palette.placeholder')",
+            "t('topbar.commandPaletteTitle')",
+            "t('topbar.commandPaletteHint')",
+            "title: 'Dashboard'",
+            "title: '대시보드'",
+            "title: 'Config'",
+            "title: '설정'",
+            "title: 'Command palette'",
+            "title: '명령 팔레트'",
+            "placeholder: 'Type a screen or action'",
+            "placeholder: '화면 또는 작업을 입력'",
+        ]
+
+        for token in locale_tokens + copy_tokens:
+            self.assertIn(token, self.app_js)
 
     def test_required_views_have_nonblank_render_content(self) -> None:
         render_markers = {
