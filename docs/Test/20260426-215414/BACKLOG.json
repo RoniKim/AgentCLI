@@ -1,0 +1,120 @@
+{
+  "generated_at": "2026-04-26T22:02:04",
+  "tasks": [
+    {
+      "id": "T42",
+      "title": "Add a locale state model with `en` and `ko` options and persisted browser preference — shell-wide i18n slice",
+      "prompt": "GOALS: Add a locale state model with `en` and `ko` options and persisted browser preference\n\nImplement a production locale layer in `web_console/app.js` without adding dependencies. Add a persisted `en`/`ko` browser preference, translation helpers, and a visible language toggle in the shell header or settings area. Translate primary navigation, page titles, buttons, badges, empty/loading/error states, validation errors, confirmation text, runner-control text, command palette labels, and keyboard shortcut labels across Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, and Worktree Review. Keep Direction A layout stable and do not mutate `docs/Design/project/`. Add/update focused tests proving locale persistence and that Dashboard, Config, and command palette text can render in both English and Korean.",
+      "files": [
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/web_console/app.js",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/web_console/styles.css",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/tests/test_web_console_static.py"
+      ],
+      "done_when": "The UI has a visible EN/KO toggle, locale persists across reloads, primary strings switch without layout breakage, command palette labels use the active locale, and focused static/adapter tests cover Dashboard and Config in both locales.",
+      "skills": [],
+      "skills_rationale": "Skills disabled for this planning run.",
+      "depends_on": []
+    },
+    {
+      "id": "T43",
+      "title": "Playwright smoke covers Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, and mobile width — checked-in smoke harness and validation docs",
+      "prompt": "GOALS: Playwright smoke covers Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, and mobile width.\n\nAdd a checked-in browser smoke path under `tests/` that starts `agent_runner.web` against fixture data and uses Playwright, if already available, to visit Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, and a mobile-width viewport. Also cover the EN/KO Dashboard and Config locale checks from T42. If Playwright is not available, do not install packages; add a clear dependency-required failure/skip message and document the exact optional setup command. Update `docs/WEB_CONSOLE.md` so LAN usage clearly says trusted-network-only until authentication exists, and so compile, unit, worktree, and browser smoke validation commands are documented and runnable from this repo.",
+      "files": [
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/tests/test_web_console_static.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/tests/web_console_playwright_smoke.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/docs/WEB_CONSOLE.md"
+      ],
+      "done_when": "A repo command exists for the web smoke, it exercises all primary views plus mobile width and EN/KO Dashboard/Config when Playwright is installed, missing Playwright is reported clearly without installing dependencies, and `docs/WEB_CONSOLE.md` includes trusted-LAN and validation commands.",
+      "skills": [],
+      "skills_rationale": "Skills disabled for this planning run.",
+      "depends_on": [
+        "T42"
+      ]
+    },
+    {
+      "id": "T44",
+      "title": "Worktree merge preflight blocks unsafe apply when the source repo is dirty, source `HEAD` differs from `base_ref`, the patch hash does not match metadata, or `git apply --check` fails.",
+      "prompt": "GOALS: Worktree merge preflight blocks unsafe apply when the source repo is dirty, source `HEAD` differs from `base_ref`, the patch hash does not match metadata, or `git apply --check` fails.\n\nHarden `agent_runner/gitops.py` pending worktree merge handling. Record a patch hash in new pending metadata, preserve compatibility by treating older missing-hash pending markers as unsafe for automated web merge, and add preflight checks before apply: source repo must be clean, source HEAD must match `base_ref`, patch hash must match metadata, and `git apply --check --binary` must pass. Surface preflight failures through CLI/web action responses without applying the patch or deleting pending files. Update caller behavior and tests for success, dirty source, HEAD mismatch, hash mismatch, and apply-check failure.",
+      "files": [
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/gitops.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/web.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/shell.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/tests/test_worktree_manual_merge.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/tests/test_web_console_worktree.py"
+      ],
+      "done_when": "Unsafe worktree merge attempts fail before `git apply`, leave source files untouched, keep pending review visible, return actionable preflight messages, and focused unit/API tests cover all required block conditions plus the happy path.",
+      "skills": [],
+      "skills_rationale": "Skills disabled for this planning run.",
+      "depends_on": []
+    },
+    {
+      "id": "T45",
+      "title": "Worktree cleanup on Windows retries locked-path removal, records exact permission failures, and keeps cleanup-failed states visible until reconciled.",
+      "prompt": "GOALS: Worktree cleanup on Windows retries locked-path removal, records exact permission failures, and keeps cleanup-failed states visible until reconciled.\n\nImprove worktree cleanup in `agent_runner/gitops.py` for Windows locked-path behavior. Add bounded retry/backoff around `git worktree remove`, `git worktree prune`, and generated worktree directory removal. Capture exact failed path, operation, exception/rc, and manual cleanup instruction in cleanup-failed artifacts. Ensure `agent_runner/web.py` and `web_console/app.js` keep cleanup-failed states visible as recoverable warnings until a later status artifact or reconciliation clears them. Add tests simulating cleanup failures and verifying exact path/message propagation.",
+      "files": [
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/gitops.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/web.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/web_console/app.js",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/tests/test_worktree_manual_merge.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/tests/test_web_console_worktree.py"
+      ],
+      "done_when": "Cleanup retries are deterministic, cleanup-failed artifacts include exact paths and manual instructions, the Worktree Review UI shows recoverable warnings, and tests cover merge/discard cleanup failure visibility.",
+      "skills": [],
+      "skills_rationale": "Skills disabled for this planning run.",
+      "depends_on": [
+        "T44"
+      ]
+    },
+    {
+      "id": "T46",
+      "title": "Shell, web, and remote-controller starts create a new `run_dir` by default; latest run reuse requires explicit resume or `--run-dir` intent.",
+      "prompt": "GOALS: Shell, web, and remote-controller starts create a new `run_dir` by default; latest run reuse requires explicit resume or `--run-dir` intent.\n\nChange run-dir selection so shell starts, web runner-control starts, and `RunnerController` starts create a fresh `run_dir` unless `--run-dir`, explicit resume, or an explicit resume-latest control option is supplied. Remove implicit latest-run reuse caused only by `loop`, `continuous`, or `autopilot`. Keep true resume flows working and visible in status payloads. Update UI copy if a resume option is exposed. Add tests proving default starts create new run dirs and explicit resume/latest reuse still works.",
+      "files": [
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/shell.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/remote/controller.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/web.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/web_console/app.js",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/tests/test_web_console_safety.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/tests/test_web_console_readonly.py"
+      ],
+      "done_when": "Default shell/web/remote starts do not reuse the latest run directory, explicit resume and `--run-dir` still reuse intentionally, and tests cover both paths without relying on operator-local config.",
+      "skills": [],
+      "skills_rationale": "Skills disabled for this planning run.",
+      "depends_on": []
+    },
+    {
+      "id": "T47",
+      "title": "`STATE.json` done/failed counts are scoped to the current backlog generation so stale task ids from previous backlogs cannot inflate progress or history.",
+      "prompt": "GOALS: `STATE.json` done/failed counts are scoped to the current backlog generation so stale task ids from previous backlogs cannot inflate progress or history.\n\nScope `STATE.json` done, failed, skipped, progress, and history counts to the active backlog generation/task ids. Fix any failed-count paths that still count stale ids from previous backlogs. Update web snapshot/history/progress payloads so execution status is separate from project completion status: `rc=0`/`reason=ok` may mean runner success, but must not appear as project success while required goals or active backlog items remain incomplete. Add regression fixtures with stale state entries and incomplete goals/backlog.",
+      "files": [
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/cycle.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/state.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/web.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/tests/test_web_console_readonly.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/tests/test_web_console_safety.py"
+      ],
+      "done_when": "Stale task ids in `STATE.json` no longer inflate done/failed counts, history/progress show scoped counts, snapshots expose distinct execution/project completion status, and tests cover stale-state and `reason=ok` with incomplete work.",
+      "skills": [],
+      "skills_rationale": "Skills disabled for this planning run.",
+      "depends_on": []
+    },
+    {
+      "id": "T48",
+      "title": "Goals parsing treats missing or malformed required priority sections as invalid/incomplete instead of silently completing P0/P1 modes.",
+      "prompt": "GOALS: Goals parsing treats missing or malformed required priority sections as invalid/incomplete instead of silently completing P0/P1 modes.\n\nHarden `agent_runner/goals.py`, runner completion checks, and web goal snapshots so missing or malformed required P0/P1 sections are invalid and incomplete. Ensure goals auto-refresh and completion checks use the same configured `goals_completion_level` in shell, runner, web snapshots, and tests, with `goals_completion_level=all` as the repo-safe default. Align web console tests so they pass without operator-specific local config. Include docs/test updates only where needed to make validation clear.",
+      "files": [
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/goals.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/cycle.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/shell.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/agent_runner/web.py",
+        "D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/tests/test_web_console_readonly.py"
+      ],
+      "done_when": "Malformed or missing P0/P1 sections produce invalid/incomplete goal status, all runner/web completion paths honor the configured completion level, tests use `all` defaults, and no local operator config is required for the web console tests.",
+      "skills": [],
+      "skills_rationale": "Skills disabled for this planning run.",
+      "depends_on": [
+        "T47"
+      ]
+    }
+  ]
+}

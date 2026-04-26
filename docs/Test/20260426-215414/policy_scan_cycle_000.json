@@ -1,0 +1,17 @@
+{
+  "cycle": 0,
+  "step": 0,
+  "task_id": "T42",
+  "ok": true,
+  "violations": [],
+  "rules_count": 6,
+  "stats": {
+    "scope": "quick",
+    "files_scanned": 0,
+    "bytes_scanned": 0,
+    "files_skipped": 0,
+    "skipped": {}
+  },
+  "fail_severity": "high",
+  "fail_violations": []
+}
