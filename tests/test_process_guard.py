@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import shutil
+from types import SimpleNamespace
 import time
 import unittest
 import uuid
@@ -88,6 +89,23 @@ class ProcessGuardTests(unittest.TestCase):
             descendants = process_guard.process_descendant_pids(30)
 
         self.assertEqual({31, 32}, set(descendants))
+
+    def test_startup_orphan_detection_excludes_interactive_shell_images(self) -> None:
+        def _looks_managed(image_name: str) -> bool:
+            output = f'"{image_name}","1234","Console","1","10,000 K"\r\n'
+            with (
+                patch.object(process_guard.sys, "platform", "win32"),
+                patch("subprocess.run", return_value=SimpleNamespace(stdout=output)),
+            ):
+                return process_guard._is_managed_child_process(1234)
+
+        for image_name in ("cmd.exe", "powershell.exe", "python.exe"):
+            with self.subTest(image_name=image_name):
+                self.assertFalse(_looks_managed(image_name))
+
+        for image_name in ("node.exe", "codex.exe", "claude.exe"):
+            with self.subTest(image_name=image_name):
+                self.assertTrue(_looks_managed(image_name))
 
     @unittest.skipUnless(sys.platform == "win32", "Windows process-tree smoke test")
     def test_run_cmd_async_cleans_inherited_stdout_child_process(self) -> None:

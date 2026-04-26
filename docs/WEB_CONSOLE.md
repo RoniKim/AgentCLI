@@ -33,8 +33,8 @@ Known blockers:
 Use the project virtual environment:
 
 ```powershell
-cd D:\999.AgentCLI
-& "D:\999.AgentCLI\.venv\Scripts\python.exe" -m pip install -r requirements.txt
+cd D:\000.Work\001.Private\000.API\agent_cli
+python -m pip install -r requirements.txt
 ```
 
 The web server requires `fastapi` and `uvicorn`. If the venv points to a missing base Python, recreate the venv or repair it before serving.
@@ -42,10 +42,9 @@ The web server requires `fastapi` and `uvicorn`. If the venv points to a missing
 ## Localhost
 
 ```powershell
-cd D:\999.AgentCLI
-& "D:\999.AgentCLI\.venv\Scripts\python.exe" -m agent_runner.web `
-  --repo "D:\999.AgentCLI" `
-  --config-path "D:\999.AgentCLI\configs\AgentCLI-86741102.json" `
+cd D:\000.Work\001.Private\000.API\agent_cli
+python -m agent_runner.web `
+  --repo "." `
   --host 127.0.0.1 `
   --port 8000
 ```
@@ -61,9 +60,8 @@ http://127.0.0.1:8000
 Bind to all interfaces only on a trusted network. Do not expose the console on an untrusted LAN until authentication exists:
 
 ```powershell
-& "D:\999.AgentCLI\.venv\Scripts\python.exe" -m agent_runner.web `
-  --repo "D:\999.AgentCLI" `
-  --config-path "D:\999.AgentCLI\configs\AgentCLI-86741102.json" `
+python -m agent_runner.web `
+  --repo "." `
   --host 0.0.0.0 `
   --port 8000
 ```
@@ -79,18 +77,18 @@ http://<notebook-ip>:8000
 Run the checked-in Playwright smoke against fixture data:
 
 ```powershell
-& "D:\999.AgentCLI\.venv\Scripts\python.exe" "D:\999.AgentCLI\tests\web_console_playwright_smoke.py"
+python .\tests\web_console_playwright_smoke.py
 ```
 
-If Playwright is missing, the smoke skips cleanly and prints the optional setup command instead of installing packages.
+If Playwright or the browser runtime is unavailable, the smoke skips cleanly and prints the optional setup command instead of installing packages.
 
 ## Optional Playwright Setup
 
 Install the optional browser test dependency and Chromium binary only if you want to run the smoke locally:
 
 ```powershell
-& "D:\999.AgentCLI\.venv\Scripts\python.exe" -m pip install playwright
-& "D:\999.AgentCLI\.venv\Scripts\python.exe" -m playwright install chromium
+python -m pip install playwright
+python -m playwright install chromium
 ```
 
 ## Runner Controls
@@ -98,9 +96,8 @@ Install the optional browser test dependency and Chromium binary only if you wan
 Runner controls are disabled by default. Enable them explicitly:
 
 ```powershell
-& "D:\999.AgentCLI\.venv\Scripts\python.exe" -m agent_runner.web `
-  --repo "D:\999.AgentCLI" `
-  --config-path "D:\999.AgentCLI\configs\AgentCLI-86741102.json" `
+python -m agent_runner.web `
+  --repo "." `
   --host 127.0.0.1 `
   --port 8000 `
   --enable-runner-controls
@@ -112,10 +109,10 @@ The guarded config save endpoint uses the same opt-in, rejects unsafe or redacte
 ## Validation
 
 ```powershell
-& "D:\999.AgentCLI\.venv\Scripts\python.exe" -m compileall agent_runner agent_cli.py
-& "D:\999.AgentCLI\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_web_console*.py"
-& "D:\999.AgentCLI\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_worktree*.py"
-& "D:\999.AgentCLI\.venv\Scripts\python.exe" "D:\999.AgentCLI\tests\web_console_playwright_smoke.py"
+python -B -m py_compile agent_runner\web.py tests\web_console_playwright_smoke.py
+python -B -m unittest discover -s tests -p "test_web_console*.py"
+python -B -m unittest discover -s tests -p "test_worktree*.py"
+python -B .\tests\web_console_playwright_smoke.py
 ```
 
 The web smoke path should cover the primary views, Dashboard and Config locale switching, prompt read loading, worktree review, and the mobile-width layout before marking the product complete.

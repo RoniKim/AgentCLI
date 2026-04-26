@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+from contextlib import asynccontextmanager
 from copy import deepcopy
 import json
 import os
@@ -4743,23 +4744,6 @@ def create_app(
     }
     control_lock = threading.Lock()
 
-    app = FastAPI(
-        title="AgentCLI Web Console",
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
-    )
-    app.state.repo = repo_root
-    app.state.web_dir = static_root
-    app.state.config_path = config_path
-    app.state.bind_host = bind_host
-    app.state.trusted_network = trusted_network
-    app.state.runner_controller = controller
-    app.state.runner_controls_enabled = controls_enabled
-    app.state.runner_controls_source = controls_source
-    app.state.runner_controls_disabled_reason = controls_disabled_reason
-    app.state.runner_control_lock = control_lock
-
     def _shutdown_process_guard() -> None:
         try:
             if controller is not None:
@@ -4773,10 +4757,30 @@ def create_app(
         except Exception:
             pass
 
-    try:
-        app.add_event_handler("shutdown", _shutdown_process_guard)
-    except Exception:
-        pass
+    @asynccontextmanager
+    async def _lifespan(_app: Any) -> Any:
+        try:
+            yield
+        finally:
+            _shutdown_process_guard()
+
+    app = FastAPI(
+        title="AgentCLI Web Console",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=_lifespan,
+    )
+    app.state.repo = repo_root
+    app.state.web_dir = static_root
+    app.state.config_path = config_path
+    app.state.bind_host = bind_host
+    app.state.trusted_network = trusted_network
+    app.state.runner_controller = controller
+    app.state.runner_controls_enabled = controls_enabled
+    app.state.runner_controls_source = controls_source
+    app.state.runner_controls_disabled_reason = controls_disabled_reason
+    app.state.runner_control_lock = control_lock
 
     def _snapshot(*, busy_override: bool | None = None) -> dict[str, Any]:
         return build_snapshot(
@@ -6503,7 +6507,8 @@ def create_app(
                 target = static_root / "index.html"
         if not target.exists() or not target.is_file():
             target = static_root / "index.html"
-        return FileResponse(target)
+        media_type = "application/javascript" if target.suffix.lower() == ".js" else None
+        return FileResponse(target, media_type=media_type)
 
     @app.get("/")
     def root() -> Any:

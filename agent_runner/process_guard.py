@@ -547,22 +547,19 @@ def _is_managed_child_process(pid: int) -> bool:
             )
             output = result.stdout.lower()
             # Exact image-name match: tasklist CSV gives "image_name.exe","PID",...
-            # Match only process names AgentCLI launches directly or through CLI shims.
+            # Keep startup orphan cleanup conservative.  Shell/runtime names
+            # such as cmd.exe, powershell.exe, and python.exe are too generic:
+            # a stale session file plus PID reuse could otherwise terminate an
+            # unrelated interactive terminal or Python process.
             for token in output.split(","):
                 name = token.strip().strip('"')
                 if name in (
-                    "cmd.exe",
-                    "cmd",
                     "node.exe",
                     "node",
                     "codex.exe",
                     "codex",
                     "claude.exe",
                     "claude",
-                    "python.exe",
-                    "python",
-                    "powershell.exe",
-                    "powershell",
                 ):
                     return True
             return False

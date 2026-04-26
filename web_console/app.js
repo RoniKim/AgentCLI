@@ -230,6 +230,7 @@
         noTaskSelected: 'No task selected.',
         noBacklogArtifacts: 'No backlog artifacts were published yet.',
         noNotificationsYet: 'No notifications yet.',
+        goalsSnapshotReady: 'Read-only GOALS.md snapshot with stable P0/P1 grouping and exact checkbox state.',
         stage: 'Stage',
         tasks: 'Tasks',
         tokens: 'Tokens',
@@ -441,6 +442,7 @@
         title: 'Run History',
         runHistory: 'Run history',
         noRunsYet: 'No run history yet.',
+        emptyState: 'Run history is empty.',
         selectedRun: 'Selected run',
         persistedSummary: 'Persisted summary',
         shutdownReason: 'Shutdown reason',
@@ -771,6 +773,7 @@
         noTaskSelected: '선택된 작업 없음.',
         noBacklogArtifacts: '아직 백로그 산출물이 게시되지 않았습니다.',
         noNotificationsYet: '아직 알림이 없습니다.',
+        goalsSnapshotReady: '안정적인 P0/P1 그룹과 정확한 체크박스 상태가 포함된 읽기 전용 GOALS.md 스냅샷입니다.',
         stage: '단계',
         tasks: '작업',
         tokens: '토큰',
@@ -920,6 +923,7 @@
         title: '실행 기록',
         runHistory: '실행 기록',
         noRunsYet: '아직 실행 기록이 없습니다.',
+        emptyState: '실행 기록이 비어 있습니다.',
         selectedRun: '선택된 실행',
         persistedSummary: '저장된 요약',
         shutdownReason: '종료 사유',
@@ -1587,6 +1591,7 @@
   });
 
   const INITIAL_LOCALE = detectPreferredLocale();
+  let activeLocale = INITIAL_LOCALE;
 
   function formatLocaleMessage(template, values = {}) {
     return String(template).replace(/\{(\w+)\}/g, (_, key) => {
@@ -1603,22 +1608,29 @@
   }
 
   function currentLocale() {
-    return normalizeLocale(state.locale || INITIAL_LOCALE);
+    return normalizeLocale(activeLocale || INITIAL_LOCALE);
   }
 
   function setLocale(locale) {
     const next = normalizeLocale(locale);
-    if (state.locale === next) {
+    if (activeLocale === next) {
       return;
     }
+    activeLocale = next;
     state.locale = next;
     writeJSON(STORAGE.locale, next);
-    document.documentElement.lang = next;
+    syncDocumentLocale();
     renderShell({ preserveScroll: true, force: true });
   }
 
   function t(key, values = {}) {
     return localeText(currentLocale(), key, values);
+  }
+
+  function syncDocumentLocale() {
+    if (document.documentElement) {
+      document.documentElement.lang = currentLocale();
+    }
   }
 
   function viewLabel(view) {
@@ -2678,7 +2690,7 @@
   function fallbackSectionMessage(kind) {
     const messages = {
       activeRun: t('common.noDataAvailableYet'),
-      stages: t('common.noDataAvailableYet'),
+      stages: t('pipeline.noLifecycleRecords'),
       backlog: t('backlog.noArtifacts'),
       goals: t('goals.noGoals'),
       config: t('config.loadingSnapshot'),
@@ -2686,7 +2698,7 @@
       logs: t('logs.noEntries'),
       notifications: t('notifications.noRecorded'),
       metrics: t('common.noDataAvailableYet'),
-      history: t('history.noSummaries'),
+      history: t('history.emptyState'),
       worktree: t('worktree.noPendingMerge'),
       runnerControl: t('runner.controlsDisabled'),
     };
@@ -2806,7 +2818,7 @@
     if (!total) {
       return t('goals.noGoals');
     }
-    return t('goals.snapshot');
+    return t('dashboard.goalsSnapshotReady');
   }
 
   function goalBucketLabel(bucket) {
@@ -6063,9 +6075,9 @@
       : restoreState.status === 'restoring'
         ? { tone: 'warn', label: t('prompts.restoring').toUpperCase() }
         : saveState.status === 'error'
-          ? { tone: 'err', label: t('prompts.promptSaveFailed').toUpperCase() }
+          ? { tone: 'err', label: 'SAVE ERROR' }
           : restoreState.status === 'error'
-            ? { tone: 'err', label: t('prompts.promptRestoreFailed').toUpperCase() }
+            ? { tone: 'err', label: 'RESTORE ERROR' }
             : saveState.status === 'success'
               ? { tone: 'info', label: t('prompts.promptSaved').toUpperCase() }
               : restoreState.status === 'success'
@@ -6073,11 +6085,14 @@
                 : !promptMutationEnabled()
                   ? { tone: 'dim', label: t('common.localOnly') }
                   : null;
+    const backupBadge = backupCount
+      ? `${backupCount} ${backupCount === 1 ? t('common.backup') : t('common.backups')}`.toUpperCase()
+      : t('common.noBackups');
     return `
       ${mutationBadge ? `<span class="badge badge--${mutationBadge.tone}">${mutationBadge.label}</span>` : ''}
       <span class="badge ${dirty ? 'badge--warn' : 'badge--dim'}">${dirty ? t('common.dirty') : t('common.clean')}</span>
       <span class="badge badge--info">${t('common.fullRead')}</span>
-      <span class="badge ${backupCount ? 'badge--dim' : 'badge--warn'}">${backupCount ? `${backupCount} ${backupCount === 1 ? t('common.backup') : t('common.backups')}` : t('common.noBackups')}</span>
+      <span class="badge ${backupCount ? 'badge--dim' : 'badge--warn'}">${escapeHTML(backupBadge)}</span>
       <span class="muted">${escapeHTML(contentLength)} ${escapeHTML(t('common.chars'))}</span>
     `;
   }
@@ -8383,10 +8398,11 @@
     const sourceName = tailSourceName(source.path || source.name || '') || 'active run log';
     const malformedLines = toNumber(model.malformedLines, 0);
     if (paused) {
+      const cursor = toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0;
       return {
         tone: 'stopped',
         title: t('logs.liveTailPaused'),
-        copy: `${sourceName} ${t('logs.pauseLiveTail').toLowerCase()}. ${t('logs.resumeLiveTail')} ${toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0}.`,
+        copy: `${sourceName} ${t('logs.pauseLiveTail').toLowerCase()}. ${t('logs.resumeLiveTail')} ${t('logs.cursor')} ${cursor}.`,
         badge: 'paused',
         state: 'paused',
       };
@@ -8432,7 +8448,7 @@
       return {
         tone: 'running',
         title: t('logs.liveTailActive'),
-        copy: `${sourceName} ${t('logs.liveTailActive').toLowerCase()} ${cursor}.`,
+        copy: `${sourceName} ${t('logs.liveTailActive').toLowerCase()} ${t('logs.cursor')} ${cursor}.`,
         badge: 'live',
         state: 'live',
       };
@@ -10832,7 +10848,7 @@
       main.scrollTop = previousScroll;
     }
 
-    document.documentElement.lang = currentLocale();
+    syncDocumentLocale();
     document.title = `${t('app.title')} | ${viewLabel(state.activeView)}`;
     writeJSON(STORAGE.view, state.activeView);
     renderOverlay();
@@ -11656,7 +11672,7 @@
       main.scrollTop = previousScroll;
     }
 
-    document.documentElement.lang = currentLocale();
+    syncDocumentLocale();
     document.title = `${t('app.title')} | ${viewLabel(state.activeView)}`;
     writeJSON(STORAGE.view, state.activeView);
     renderOverlay();
@@ -12472,7 +12488,7 @@
     mainRoot().innerHTML = renderMainView();
     mainRoot().dataset.view = state.activeView;
     overlayRoot().innerHTML = '';
-    document.documentElement.lang = currentLocale();
+    syncDocumentLocale();
     document.title = `${t('app.title')} | ${viewLabel(state.activeView)}`;
   }
 
