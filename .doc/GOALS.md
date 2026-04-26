@@ -132,7 +132,8 @@
 
 ## Completion Criteria
 
-- All P0 items are checked from real browser and API validation, not visual inspection alone.
+- All P0 and P1 items are checked from real browser and API validation, not visual inspection alone.
+- AgentCLI self-runs use `goals_completion_level=all`, so P0-only completion must not stop unattended web-console work.
 - The production page runs from `web_console/` and `agent_runner.web`; `docs/Design/project/` remains reference-only.
 - A user can monitor a real run, inspect logs, edit Goals/Config/Prompts safely, operate the runner, and review worktree merges from the browser with confirmations.
 - The page has no blank primary views, no uncaught JavaScript errors, and no obvious layout overlap on desktop or mobile.
