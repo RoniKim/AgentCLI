@@ -64,15 +64,24 @@ class RunnerController:
         raw = str(getattr(self.base_args, "stop_file", "STOP") or "STOP").strip()
         return raw or "STOP"
 
+    def _config_path_name(self) -> str:
+        raw = str(getattr(self.base_args, "config_path", getattr(self.base_args, "config", "")) or "").strip()
+        if not raw:
+            return ""
+        try:
+            return Path(raw).expanduser().as_posix()
+        except Exception:
+            return raw.replace("\\", "/")
+
     def _effective_dict(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         eff: dict[str, Any] = {}
         for key, default_value in DEFAULTS.items():
             eff[key] = getattr(self.base_args, key, default_value)
         if overrides:
             eff.update(overrides)
-        eff["repo"] = str(self.repo)
+        eff["repo"] = self.repo.as_posix()
         try:
-            eff["prompts_dir"] = str(resolve_prompts_dir(self.repo, str(eff.get("prompts_dir") or "")))
+            eff["prompts_dir"] = resolve_prompts_dir(self.repo, str(eff.get("prompts_dir") or "")).as_posix()
         except Exception:
             pass
         return eff
@@ -160,18 +169,19 @@ class RunnerController:
             raise
 
     def start(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+        context = {"repo": self.repo.as_posix(), "config_path": self._config_path_name()}
         if not self._start_lock.acquire(blocking=False):
-            return {"ok": False, "message": "\ub7ec\ub108 \uc2dc\uc791\uc774 \uc774\ubbf8 \uc9c4\ud589 \uc911\uc785\ub2c8\ub2e4."}
+            return {"ok": False, "message": "\ub7ec\ub108 \uc2dc\uc791\uc774 \uc774\ubbf8 \uc9c4\ud589 \uc911\uc785\ub2c8\ub2e4.", **context}
 
         try:
             if self._runner_is_alive():
-                return {"ok": False, "message": "\ub7ec\ub108\uac00 \uc774\ubbf8 \uc2e4\ud589 \uc911\uc785\ub2c8\ub2e4."}
+                return {"ok": False, "message": "\ub7ec\ub108\uac00 \uc774\ubbf8 \uc2e4\ud589 \uc911\uc785\ub2c8\ub2e4.", **context}
 
             eff = self._effective_dict(overrides)
             run_dir = self._ensure_run_dir(eff)
             run_dir.mkdir(parents=True, exist_ok=True)
             self.run_dir = run_dir
-            eff["run_dir"] = str(run_dir)
+            eff["run_dir"] = run_dir.as_posix()
 
             stop_paths = {run_dir / self._stop_file_name(), run_dir / "STOP"}
             for stop_path in stop_paths:
@@ -194,22 +204,24 @@ class RunnerController:
                 "ok": True,
                 "message": "\ub7ec\ub108\uac00 \uc2dc\uc791\ub418\uc5c8\uc2b5\ub2c8\ub2e4.",
                 "runner_mode": self.runner_mode,
-                "run_dir": str(run_dir),
+                "run_dir": run_dir.as_posix(),
+                **context,
             }
         finally:
             self._start_lock.release()
 
     def stop(self, *, wait: bool = False) -> dict[str, Any]:
+        context = {"repo": self.repo.as_posix(), "config_path": self._config_path_name()}
         run_dir = self.run_dir or find_latest_run_dir(self.repo)
         if run_dir is None:
-            return {"ok": False, "message": "\uc2e4\ud589 \ub514\ub809\ud1a0\ub9ac\ub97c \ucc3e\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4."}
+            return {"ok": False, "message": "\uc2e4\ud589 \ub514\ub809\ud1a0\ub9ac\ub97c \ucc3e\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.", **context}
         self.run_dir = run_dir
 
         stop_path = run_dir / self._stop_file_name()
         try:
             stop_path.write_text(STOP_REASON_STOP_FILE + "\n", encoding="utf-8", errors="replace")
         except Exception as ex:
-            return {"ok": False, "message": f"\uc815\uc9c0 \ud30c\uc77c \uc0dd\uc131 \uc2e4\ud328: {ex}"}
+            return {"ok": False, "message": f"\uc815\uc9c0 \ud30c\uc77c \uc0dd\uc131 \uc2e4\ud328: {ex}", **context}
 
         if self.runner_mode == "thread":
             try:
@@ -237,9 +249,10 @@ class RunnerController:
 
         return {
             "ok": True,
-            "message": f"\uc911\uc9c0 \uc694\uccad\ub428: {stop_path}",
+            "message": f"\uc911\uc9c0 \uc694\uccad\ub428: {stop_path.as_posix()}",
             "running": self._runner_is_alive(),
-            "run_dir": str(run_dir),
+            "run_dir": run_dir.as_posix(),
+            **context,
         }
 
     def _load_json(self, path: Path, fallback: Any) -> Any:
@@ -342,7 +355,7 @@ class RunnerController:
         cycle_tail = self._tail_lines(run_dir / "cycle_summary.log", 1)
         return {
             "run_id": run_dir.name,
-            "run_dir": str(run_dir),
+            "run_dir": run_dir.as_posix(),
             "done": counts["done"],
             "failed": counts["failed"],
             "warnings": counts["warnings"],
@@ -467,6 +480,7 @@ class RunnerController:
     def status(self) -> dict[str, Any]:
         running = self._runner_is_alive()
         run_dir = self.run_dir or find_latest_run_dir(self.repo)
+        config_path = self._config_path_name()
         if run_dir is not None:
             self.run_dir = run_dir
 
@@ -477,8 +491,9 @@ class RunnerController:
         status: dict[str, Any] = {
             "running": running,
             "runner_mode": self.runner_mode,
-            "repo": str(self.repo),
-            "run_dir": str(run_dir) if run_dir else "",
+            "repo": self.repo.as_posix(),
+            "config_path": config_path,
+            "run_dir": run_dir.as_posix() if run_dir else "",
             "uptime_seconds": uptime_seconds,
             "exit_code": self._runner_exit_code,
             "stop_file": self._stop_file_name(),

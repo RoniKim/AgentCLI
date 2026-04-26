@@ -16,18 +16,44 @@ WEB_CONSOLE = ROOT / "web_console"
 
 
 class FakeRunnerController:
-    def __init__(self, status: dict[str, object]) -> None:
+    def __init__(self, status: dict[str, object], *, status_error: str | None = None) -> None:
         self._status = dict(status)
+        self.status_error = status_error
         run_dir = self._status.get("run_dir")
         self.run_dir = Path(str(run_dir)).expanduser().resolve() if run_dir else None
 
     def status(self) -> dict[str, object]:
+        if self.status_error:
+            raise RuntimeError(self.status_error)
         return dict(self._status)
 
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8", errors="replace")
+
+
+def _write_config(path: Path, repo: Path, **overrides: object) -> None:
+    payload = {
+        "repo": repo.as_posix(),
+        "profile": "personal",
+        "execution_backend": "codex",
+        "roles": ["PM", "Dev", "QA"],
+        "iterations": 2,
+        "prompts_dir": "prompts/agentcli",
+        "goals_completion_level": "all",
+        "telegram": {
+            "enabled": True,
+            "bot_token": "secret-token",
+            "pairing_code": "pairing-code",
+        },
+    }
+    for key, value in overrides.items():
+        if key == "telegram" and isinstance(value, dict):
+            payload.setdefault("telegram", {}).update(value)
+        else:
+            payload[key] = value
+    _write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def _make_log_entries(count):
@@ -469,6 +495,8 @@ def _make_partial_snapshot():
             "budget": [0.1, 0.2, 0.3],
             "tokens": {"in": 1200, "out": 450},
             "last_stage": "Dev",
+            "quota": {"window": "5h", "used": 0.4},
+            "quota_window": "5h",
             "quota_used": 0.4,
         },
         "worktree": {
@@ -773,6 +801,8 @@ def _make_normal_snapshot():
             "budget": [0.1, 0.2, 0.35, 0.56],
             "tokens": {"in": 18420, "out": 6421},
             "last_stage": "Dev",
+            "quota": {"window": "5h", "used": 0.41},
+            "quota_window": "5h",
             "quota_used": 0.41,
         },
         "worktree": {
@@ -909,6 +939,15 @@ def _run_adapter_harness(fixtures):
           if (fixture.kind === 'fallback') {
             return adapters.createFallbackFixture();
           }
+          if (fixture.kind === 'call') {
+            const name = fixture.name || fixture.fn;
+            const fn = adapters[name];
+            if (typeof fn !== 'function') {
+              throw new Error('Unknown adapter function: ' + name);
+            }
+            const args = Array.isArray(fixture.args) ? fixture.args : [];
+            return fn(...args);
+          }
           throw new Error('Unknown fixture kind: ' + fixture.kind);
         });
         process.stdout.write(JSON.stringify(results));
@@ -916,7 +955,356 @@ def _run_adapter_harness(fixtures):
     ).replace("__SOURCE_PATH__", json.dumps(str(WEB_CONSOLE / "app.js"))).replace(
         "__FIXTURES__", json.dumps(fixtures, ensure_ascii=False)
     )
-    completed = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True)
+    completed = subprocess.run([node, "-"], input=script, capture_output=True, text=True, check=True)
+    return json.loads(completed.stdout)
+
+
+def _run_log_tail_harness(ops):
+    node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
+    script = textwrap.dedent(
+        """
+        const fs = require('fs');
+        const vm = require('vm');
+        const sourcePath = __SOURCE_PATH__;
+        const source = fs.readFileSync(sourcePath, 'utf8');
+        const root = { innerHTML: '' };
+        const document = {
+          title: '',
+          body: {
+            appendChild() {},
+            removeChild() {},
+          },
+          createElement(tag) {
+            return {
+              tagName: String(tag).toUpperCase(),
+              style: {},
+              value: '',
+              setAttribute() {},
+              select() {},
+              focus() {},
+              setSelectionRange() {},
+            };
+          },
+          execCommand() { return true; },
+          getElementById() { return root; },
+          addEventListener() {},
+          querySelector() { return null; },
+        };
+        const context = {
+          console,
+          JSON,
+          Date,
+          Math,
+          Number,
+          String,
+          Boolean,
+          Array,
+          Object,
+          RegExp,
+          Error,
+          Promise,
+          setTimeout() { return 1; },
+          clearTimeout() {},
+          setInterval() { return 1; },
+          clearInterval() {},
+          fetch() { throw new Error('fetch should not run during adapter import'); },
+          navigator: { clipboard: { writeText() { return Promise.resolve(); } } },
+          history: { replaceState() {} },
+          location: { hash: '' },
+          localStorage: {
+            _data: Object.create(null),
+            getItem(key) {
+              return Object.prototype.hasOwnProperty.call(this._data, key) ? this._data[key] : null;
+            },
+            setItem(key, value) {
+              this._data[key] = String(value);
+            },
+            removeItem(key) {
+              delete this._data[key];
+            },
+          },
+          document,
+          addEventListener() {},
+          removeEventListener() {},
+        };
+        context.window = context;
+        context.globalThis = context;
+        context.__AGENTCLI_SKIP_BOOTSTRAP__ = true;
+        vm.runInNewContext(source, context, { filename: sourcePath });
+        const adapters = context.__AGENTCLI_ADAPTERS__;
+        if (!adapters) {
+          throw new Error('Missing __AGENTCLI_ADAPTERS__ export');
+        }
+        const ops = __OPS__;
+        const results = ops.map((op) => {
+          if (op.kind === 'state') {
+            return adapters.createBlankLogTailState();
+          }
+          if (op.kind === 'query') {
+            return {
+              query: adapters.buildLogTailQuery(op.filters || {}, op.options || {}),
+              url: adapters.buildLogTailRequestUrl(op.filters || {}, op.options || {}),
+            };
+          }
+          if (op.kind === 'apply') {
+            return adapters.applyLogTailPayload(op.previous, op.payload, op.options || {});
+          }
+          if (op.kind === 'describe') {
+            return adapters.describeLogTailState(op.tail || {});
+          }
+          if (op.kind === 'banner') {
+            return {
+              description: adapters.describeLogTailState(op.tail || {}),
+              banner: adapters.renderLogTailBanner(op.tail || {}),
+              filters: adapters.renderLogTailFilters(op.tail || {}),
+            };
+          }
+          if (op.kind === 'clipboard') {
+            return adapters.buildLogTailClipboardText(op.entries || [], op.selected || []);
+          }
+          if (op.kind === 'download') {
+            return adapters.buildLogTailDownloadArtifact(op.tail || {}, op.context || {});
+          }
+          if (op.kind === 'format') {
+            return adapters.formatLogTailLine(op.entry || {});
+          }
+          throw new Error('Unknown op kind: ' + op.kind);
+        });
+        process.stdout.write(JSON.stringify(results));
+        """
+    ).replace("__SOURCE_PATH__", json.dumps(str(WEB_CONSOLE / "app.js"))).replace(
+        "__OPS__", json.dumps(ops, ensure_ascii=False)
+    )
+    completed = subprocess.run([node, "-"], input=script, capture_output=True, text=True, check=True)
+    return json.loads(completed.stdout)
+
+
+def _run_log_tail_session_harness(steps, fetch_responses=None):
+    node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
+    script = "(async () => {\n" + textwrap.dedent(
+        """
+        const fs = require('fs');
+        const vm = require('vm');
+
+        const sourcePath = __SOURCE_PATH__;
+        const source = fs.readFileSync(sourcePath, 'utf8');
+        const fetchResponses = __FETCH_RESPONSES__;
+        const steps = __STEPS__;
+        const clipboard = [];
+        const downloads = [];
+        const fetchCalls = [];
+        const intervals = [];
+        const cleared = [];
+        const roots = {
+          app: { innerHTML: '' },
+          topbar: { innerHTML: '' },
+          sidebar: { innerHTML: '' },
+          main: {
+            innerHTML: '',
+            dataset: {},
+            scrollTop: 0,
+            querySelector() {
+              return { scrollTop: 0, scrollHeight: 0 };
+            },
+          },
+          'overlay-root': { innerHTML: '' },
+        };
+
+        class TestBlob {
+          constructor(parts, options) {
+            this.parts = Array.isArray(parts) ? parts : [parts];
+            this.options = options || {};
+            this.textValue = this.parts
+              .map((part) => (typeof part === 'string' ? part : String(part)))
+              .join('');
+          }
+
+          async text() {
+            return this.textValue;
+          }
+        }
+
+        const document = {
+          title: '',
+          body: {
+            appendChild() {},
+            removeChild() {},
+          },
+          createElement(tag) {
+            const name = String(tag).toLowerCase();
+            if (name === 'a') {
+              return {
+                href: '',
+                download: '',
+                rel: '',
+                style: {},
+                click() {
+                  downloads.push({
+                    kind: 'click',
+                    download: this.download,
+                    href: this.href,
+                  });
+                },
+                setAttribute() {},
+              };
+            }
+            return {
+              tagName: String(tag).toUpperCase(),
+              style: {},
+              value: '',
+              setAttribute() {},
+              select() {},
+              focus() {},
+              setSelectionRange() {},
+              click() {},
+            };
+          },
+          execCommand() {
+            return true;
+          },
+          getElementById(id) {
+            return roots[id] || null;
+          },
+          addEventListener() {},
+          querySelector() {
+            return null;
+          },
+        };
+
+        let intervalSeq = 0;
+        const defaultResponse = {
+          ok: true,
+          state: 'loading',
+          entries: [],
+          next_cursor: 0,
+          cursor: 0,
+          source: {
+            path: '',
+            name: '',
+            exists: true,
+          },
+        };
+
+        const context = {
+          console,
+          JSON,
+          Date,
+          Math,
+          Number,
+          String,
+          Boolean,
+          Array,
+          Object,
+          RegExp,
+          Error,
+          Promise,
+          Blob: TestBlob,
+          setTimeout() {
+            return 1;
+          },
+          clearTimeout() {},
+          setInterval(_, delay) {
+            const id = ++intervalSeq;
+            intervals.push({ id, delay });
+            return id;
+          },
+          clearInterval(id) {
+            cleared.push(id);
+          },
+          fetch(url) {
+            fetchCalls.push(url);
+            const response = fetchResponses.length ? fetchResponses.shift() : defaultResponse;
+            if (typeof response === 'function') {
+              return Promise.resolve(response(url));
+            }
+            return Promise.resolve({
+              ok: response.ok !== false,
+              status: response.status || (response.ok === false ? 500 : 200),
+              json() {
+                return Promise.resolve(response.body || response);
+              },
+            });
+          },
+          navigator: {
+            clipboard: {
+              writeText(text) {
+                clipboard.push(text);
+                return Promise.resolve();
+              },
+            },
+          },
+          URL: {
+            createObjectURL(blob) {
+              downloads.push({
+                kind: 'blob',
+                type: blob && blob.options ? blob.options.type : '',
+                text: blob && typeof blob.textValue === 'string'
+                  ? blob.textValue
+                  : Array.isArray(blob && blob.parts)
+                    ? blob.parts.join('')
+                    : '',
+              });
+              return `blob:${downloads.length}`;
+            },
+            revokeObjectURL(url) {
+              downloads.push({ kind: 'revoke', url });
+            },
+          },
+          history: { replaceState() {} },
+          location: { hash: '' },
+          localStorage: {
+            _data: Object.create(null),
+            getItem(key) {
+              return Object.prototype.hasOwnProperty.call(this._data, key) ? this._data[key] : null;
+            },
+            setItem(key, value) {
+              this._data[key] = String(value);
+            },
+            removeItem(key) {
+              delete this._data[key];
+            },
+          },
+          document,
+          addEventListener() {},
+          removeEventListener() {},
+        };
+
+        context.window = context;
+        context.globalThis = context;
+        context.__AGENTCLI_SKIP_BOOTSTRAP__ = true;
+
+        vm.runInNewContext(source, context, { filename: sourcePath });
+
+        const adapters = context.__AGENTCLI_ADAPTERS__;
+        if (!adapters) {
+          throw new Error('Missing __AGENTCLI_ADAPTERS__ export');
+        }
+
+        const results = [];
+        for (const step of steps) {
+          if (step.kind !== 'call') {
+            throw new Error('Unknown step kind: ' + step.kind);
+          }
+          const fn = adapters[step.name];
+          if (typeof fn !== 'function') {
+            throw new Error('Missing adapter: ' + step.name);
+          }
+          let value = fn(...(step.args || []));
+          if (value && typeof value.then === 'function') {
+            value = await value;
+          }
+          results.push(value);
+          await Promise.resolve();
+          await Promise.resolve();
+        }
+
+        process.stdout.write(JSON.stringify({ results, clipboard, downloads, fetchCalls, intervals, cleared }));
+        """
+    ) + "\n})().catch((error) => {\n  console.error(error);\n  process.exit(1);\n});\n"
+    script = script.replace("__SOURCE_PATH__", json.dumps(str(WEB_CONSOLE / "app.js"))).replace(
+        "__FETCH_RESPONSES__", json.dumps(fetch_responses or [], ensure_ascii=False)
+    ).replace("__STEPS__", json.dumps(steps, ensure_ascii=False))
+    completed = subprocess.run([node, "-"], input=script, capture_output=True, text=True, check=True)
     return json.loads(completed.stdout)
 
 
@@ -928,6 +1316,44 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             import fastapi  # noqa: F401
         except Exception as exc:
             raise unittest.SkipTest(f"FastAPI is unavailable: {exc}") from exc
+
+    def _create_app(self, repo: Path):
+        from agent_runner.web import create_app
+
+        kwargs = {"web_dir": WEB_CONSOLE}
+        if repo == self.repo:
+            kwargs["config_path"] = str(self.config_path)
+        return create_app(repo, **kwargs)
+
+    def _write_worktree_artifact(self, relative: str, text: str) -> Path:
+        path = self.run_dir / relative
+        _write(path, text)
+        return path
+
+    def _clear_worktree_artifacts(self) -> None:
+        for relative in [
+            "WORKTREE_MERGE_PENDING.json",
+            "WORKTREE_MERGE_PENDING.md",
+            "WORKTREE_MERGE_APPLIED.json",
+            "WORKTREE_MERGE_DISCARDED.json",
+            "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json",
+            "WORKTREE_MERGE_DISCARD_CLEANUP_FAILED.json",
+            "WORKTREE_APPLY_FAILURE.md",
+            "WORKTREE_PATCH_NOT_APPLIED.md",
+            "WORKTREE_NOT_APPLIED.md",
+            "worktree.patch",
+        ]:
+            path = self.run_dir / relative
+            if path.exists():
+                path.unlink()
+        central_dir = self.repo / ".AgentCLI"
+        for relative in [
+            "WORKTREE_MERGE_PENDING.json",
+            "WORKTREE_MERGE_PENDING.md",
+        ]:
+            path = central_dir / relative
+            if path.exists():
+                path.unlink()
 
     def setUp(self) -> None:
         self._tmp_root = ROOT / ".test-scratch"
@@ -945,6 +1371,8 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self._old_home = os.environ.get("AGENTCLI_HOME")
         os.environ["AGENTCLI_HOME"] = str(self.home)
         self.addCleanup(self._restore_home)
+        self.config_path = self.home / "configs" / "agentcli.json"
+        self.prompts_dir = self.home / "prompts" / "agentcli"
 
         self.run_dir = self.repo / ".AgentCLI" / "agent_runs" / "20260426-120000"
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -1284,10 +1712,37 @@ class WebConsoleReadonlyTests(unittest.TestCase):
 """,
         )
 
-        from agent_runner.web import create_app
+        _write(
+            self.config_path,
+            json.dumps(
+                {
+                    "repo": self.repo.as_posix(),
+                    "profile": "personal",
+                    "execution_backend": "codex",
+                    "prompts_dir": "prompts/agentcli",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        _write(
+            self.prompts_dir / "pm_instructions.md",
+            textwrap.dedent(
+                """\
+                # Local PM Instructions
+
+                Profile: {profile}
+                Repo: {repo}
+
+                Keep inventory previews redacted and use the explicit read path for the editor.
+                """
+            ),
+        )
+
         from fastapi.testclient import TestClient
 
-        self.app = create_app(self.repo, web_dir=WEB_CONSOLE)
+        self.app = self._create_app(self.repo)
         self.client = TestClient(self.app)
 
     def _make_live_run_dir(self, name: str) -> Path:
@@ -1300,6 +1755,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             "running": True,
             "runner_mode": "thread",
             "repo": str(self.repo),
+            "config_path": self.config_path.as_posix(),
             "run_dir": str(run_dir),
             "uptime_seconds": 600,
             "exit_code": None,
@@ -1324,12 +1780,11 @@ class WebConsoleReadonlyTests(unittest.TestCase):
 
     def _api_status(self, repo: Path, controller_status: dict[str, object] | None) -> dict[str, object]:
         from agent_runner import web as web_module
-        from agent_runner.web import create_app
         from fastapi.testclient import TestClient
 
         controller = FakeRunnerController(controller_status) if controller_status is not None else None
         with patch.object(web_module, "_build_runner_controller", return_value=controller):
-            client = TestClient(create_app(repo, web_dir=WEB_CONSOLE))
+            client = TestClient(self._create_app(repo))
         response = client.get("/api/status")
         self.assertEqual(200, response.status_code)
         return response.json()
@@ -1421,6 +1876,33 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIsNone(payload["metrics"]["budget_used"])
         self.assertIsNone(payload["metrics"]["quota_used"])
 
+        history_response = self.client.get("/api/history")
+        self.assertEqual(200, history_response.status_code)
+        history_payload = history_response.json()
+        self.assertIn("items", history_payload)
+        self.assertIn("summary", history_payload)
+        self.assertGreaterEqual(len(history_payload["items"]), 1)
+        history_item = next(item for item in history_payload["items"] if item["id"] == self.run_dir.name)
+        self.assertEqual("project_complete", history_item["finalReason"])
+        self.assertEqual("project_complete", history_item["shutdownReason"])
+        self.assertEqual("project_complete", history_item["stopReason"])
+        self.assertEqual(1, history_item["tasksDone"])
+        self.assertEqual(2, history_item["tasksTotal"])
+        self.assertEqual(0, history_item["tasksFailed"])
+        self.assertEqual(0, history_item["tasksSkipped"])
+        self.assertEqual({"done": 1, "failed": 0, "skipped": 0, "total": 2, "cycles": 1}, history_item["taskCounts"])
+        self.assertEqual(120, history_item["durationSec"])
+        self.assertEqual("main", history_item["branch"])
+        self.assertEqual(self.run_dir.as_posix(), history_item["runDir"])
+        self.assertEqual("pending", history_item["worktreeOutcome"])
+        self.assertIn("runSummary", history_item)
+        self.assertIn("lastRunSummary", history_item)
+
+        self.assertGreaterEqual(len(payload["notifications"]), 1)
+        kinds = {item["kind"] for item in payload["notifications"]}
+        self.assertIn("run_start", kinds)
+        self.assertIn("task_done", kinds)
+
     def test_empty_latest_timestamp_run_dir_does_not_mask_real_run(self) -> None:
         empty_run = self.repo / ".AgentCLI" / "agent_runs" / "20260426-130000"
         empty_run.mkdir(parents=True, exist_ok=True)
@@ -1447,8 +1929,15 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertFalse(no_run["active_run"]["quotaAvailable"])
         self.assertFalse(no_run["active_run"]["progressAvailable"])
         self.assertEqual({"in": None, "out": None, "available": False}, no_run["active_run"]["tokens"])
-        self.assertEqual({"window": "5h", "used": None, "available": False}, no_run["active_run"]["quota"])
+        self.assertEqual({"window": "", "used": None, "available": False}, no_run["active_run"]["quota"])
         self.assertIsNone(no_run["active_run"]["budgetUsed"])
+        self.assertEqual({"window": "", "used": None, "available": False}, no_run["metrics"]["quota"])
+        self.assertFalse(no_run["metrics"]["quotaAvailable"])
+        self.assertFalse(no_run["metrics"]["quota_available"])
+        self.assertEqual("", no_run["metrics"]["quotaWindow"])
+        self.assertEqual("", no_run["metrics"]["quota_window"])
+        self.assertIsNone(no_run["metrics"]["quotaUsed"])
+        self.assertIsNone(no_run["metrics"]["quota_used"])
 
         live_run_dir = self._make_live_run_dir("20260426-110000")
         later_run_dir = self._make_live_run_dir("20260426-140000")
@@ -1474,6 +1963,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("running", live["progress"]["run_status"])
         self.assertEqual("running", live["active_run"]["status"])
         self.assertEqual("feature/live-run", live["active_run"]["branch"])
+        self.assertEqual(self.config_path.as_posix(), live["runner_control"]["status"]["config_path"])
         self.assertEqual("T-LIVE-1", live["active_run"]["task"])
         self.assertEqual("Live running task", live["active_run"]["taskTitle"])
         self.assertEqual(7, live["active_run"]["attempt"])
@@ -1490,8 +1980,75 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertFalse(live["active_run"]["quotaAvailable"])
         self.assertFalse(live["active_run"]["progressAvailable"])
         self.assertEqual({"in": None, "out": None, "available": False}, live["active_run"]["tokens"])
-        self.assertEqual({"window": "5h", "used": None, "available": False}, live["active_run"]["quota"])
+        self.assertEqual({"window": "", "used": None, "available": False}, live["active_run"]["quota"])
         self.assertIsNone(live["active_run"]["budgetUsed"])
+        self.assertEqual({"window": "", "used": None, "available": False}, live["metrics"]["quota"])
+        self.assertFalse(live["metrics"]["quotaAvailable"])
+        self.assertFalse(live["metrics"]["quota_available"])
+        self.assertEqual("", live["metrics"]["quotaWindow"])
+        self.assertEqual("", live["metrics"]["quota_window"])
+        self.assertIsNone(live["metrics"]["quotaUsed"])
+        self.assertIsNone(live["metrics"]["quota_used"])
+
+    def test_api_status_prefers_active_run_quota_over_metrics_when_both_are_real(self) -> None:
+        from agent_runner import web as web_module
+        from agent_runner.web import create_app
+        from fastapi.testclient import TestClient
+
+        run_dir = self._make_live_run_dir("20260426-115500")
+        _write_run_bundle(run_dir, status="success", final_rc=0, final_reason="project_complete", branch="main")
+
+        controller = FakeRunnerController(
+            self._controller_status(
+                run_dir,
+                running=False,
+                reason="project_complete",
+                exit_code=0,
+                current_task_id="T-SUCC-2",
+                current_task_title="Controller quota wins",
+                branch="main",
+                attempt=4,
+                worktree_mode="manual",
+                stage="QA",
+                startedAt=1714137600000,
+                elapsedSec=1800,
+                progress=1.0,
+                tokens={"in": 1024, "out": 256},
+                quota={"window": "5h", "used": 0.41},
+                budget_used=0.41,
+            )
+        )
+
+        original_build_metrics = web_module._build_metrics_payload
+
+        def fake_build_metrics_payload(*args: object, **kwargs: object) -> dict[str, object]:
+            metrics = dict(original_build_metrics(*args, **kwargs))
+            metrics["quota"] = {"window": "7d", "used": 0.33, "available": True}
+            metrics["quota_available"] = True
+            metrics["quotaAvailable"] = True
+            metrics["quota_window"] = "7d"
+            metrics["quotaWindow"] = "7d"
+            metrics["quota_used"] = 0.33
+            metrics["quotaUsed"] = 0.33
+            return metrics
+
+        with patch.object(web_module, "_build_runner_controller", return_value=controller), patch.object(
+            web_module,
+            "_build_metrics_payload",
+            side_effect=fake_build_metrics_payload,
+        ):
+            client = TestClient(self._create_app(self.repo))
+            payload = client.get("/api/status").json()
+
+        expected_quota = {"window": "5h", "used": 0.41, "available": True}
+        self.assertEqual(expected_quota, payload["active_run"]["quota"])
+        self.assertEqual(expected_quota, payload["metrics"]["quota"])
+        self.assertEqual("5h", payload["active_run"]["quotaWindow"])
+        self.assertEqual("5h", payload["metrics"]["quotaWindow"])
+        self.assertEqual(0.41, payload["active_run"]["quotaUsed"])
+        self.assertEqual(0.41, payload["metrics"]["quotaUsed"])
+        self.assertTrue(payload["active_run"]["quotaAvailable"])
+        self.assertTrue(payload["metrics"]["quotaAvailable"])
 
     def test_api_status_normalizes_terminal_snapshots(self) -> None:
         success_run_dir = self._make_live_run_dir("20260426-111000")
@@ -1512,7 +2069,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
                 elapsedSec=1800,
                 progress=1.0,
                 tokens={"in": 4096, "out": 1024},
-                quota={"window": "5h", "used": 0.33},
+                quota={"window": "7d", "used": 0.33},
                 budget_used=0.33,
             ),
         )
@@ -1532,9 +2089,16 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertTrue(success["active_run"]["budgetAvailable"])
         self.assertTrue(success["active_run"]["quotaAvailable"])
         self.assertEqual({"in": 4096, "out": 1024, "available": True}, success["active_run"]["tokens"])
-        self.assertEqual({"window": "5h", "used": 0.33, "available": True}, success["active_run"]["quota"])
+        self.assertEqual({"window": "7d", "used": 0.33, "available": True}, success["active_run"]["quota"])
         self.assertEqual(0.33, success["active_run"]["budgetUsed"])
         self.assertEqual(0.33, success["active_run"]["quota"]["used"])
+        self.assertTrue(success["metrics"]["quotaAvailable"])
+        self.assertTrue(success["metrics"]["quota_available"])
+        self.assertEqual({"window": "7d", "used": 0.33, "available": True}, success["metrics"]["quota"])
+        self.assertEqual("7d", success["metrics"]["quotaWindow"])
+        self.assertEqual("7d", success["metrics"]["quota_window"])
+        self.assertEqual(0.33, success["metrics"]["quotaUsed"])
+        self.assertEqual(0.33, success["metrics"]["quota_used"])
 
         stopped_run_dir = self._make_live_run_dir("20260426-112000")
         stopped = self._api_status(
@@ -1570,8 +2134,11 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertFalse(stopped["active_run"]["quotaAvailable"])
         self.assertFalse(stopped["active_run"]["progressAvailable"])
         self.assertEqual({"in": None, "out": None, "available": False}, stopped["active_run"]["tokens"])
-        self.assertEqual({"window": "5h", "used": None, "available": False}, stopped["active_run"]["quota"])
+        self.assertEqual({"window": "", "used": None, "available": False}, stopped["active_run"]["quota"])
         self.assertIsNone(stopped["active_run"]["budgetUsed"])
+        self.assertEqual({"window": "", "used": None, "available": False}, stopped["metrics"]["quota"])
+        self.assertFalse(stopped["metrics"]["quotaAvailable"])
+        self.assertFalse(stopped["metrics"]["quota_available"])
 
         failed_run_dir = self._make_live_run_dir("20260426-113000")
         _write_run_bundle(failed_run_dir, status="failed", final_rc=3, final_reason="build_failed", branch="main")
@@ -1608,8 +2175,11 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertFalse(failed["active_run"]["quotaAvailable"])
         self.assertFalse(failed["active_run"]["progressAvailable"])
         self.assertEqual({"in": None, "out": None, "available": False}, failed["active_run"]["tokens"])
-        self.assertEqual({"window": "5h", "used": None, "available": False}, failed["active_run"]["quota"])
+        self.assertEqual({"window": "", "used": None, "available": False}, failed["active_run"]["quota"])
         self.assertIsNone(failed["active_run"]["budgetUsed"])
+        self.assertEqual({"window": "", "used": None, "available": False}, failed["metrics"]["quota"])
+        self.assertFalse(failed["metrics"]["quotaAvailable"])
+        self.assertFalse(failed["metrics"]["quota_available"])
         self.assertEqual(3, len(failed["stages"]))
         self.assertEqual("failed", failed["stages"][2]["status"])
         self.assertEqual("failed", failed["stages"][1]["status"])
@@ -1618,6 +2188,39 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("build_failed", failed["backlog"]["items"][0]["failure_reason"])
         self.assertEqual("agent_runner/web.py, web_console/app.js, tests/test_web_console_readonly.py", failed["backlog"]["items"][0]["file_scope"])
         self.assertEqual(["T-020"], failed["backlog"]["items"][1]["depends_on"])
+
+    def test_api_status_surfaces_runner_control_controller_errors(self) -> None:
+        from agent_runner import web as web_module
+        from fastapi.testclient import TestClient
+
+        controller = FakeRunnerController(
+            self._controller_status(
+                self.run_dir,
+                running=False,
+                reason="",
+                exit_code=0,
+                current_task_id="T-ERROR-1",
+                current_task_title="Broken controller task",
+                branch="main",
+                attempt=1,
+                worktree_mode="manual",
+                stage="Dev",
+                startedAt=1714137600000,
+                elapsedSec=120,
+            ),
+            status_error="controller unavailable",
+        )
+
+        with patch.object(web_module, "_build_runner_controller", return_value=controller):
+            client = TestClient(self._create_app(self.repo))
+
+        payload = client.get("/api/status").json()
+        self.assertEqual("error", payload["sectionState"]["runnerControl"]["state"])
+        self.assertEqual("status_error: controller unavailable", payload["runner_control"]["message"])
+        self.assertFalse(payload["runner_control"]["actions"]["start"]["enabled"])
+        self.assertFalse(payload["runner_control"]["actions"]["restart"]["enabled"])
+        self.assertEqual("status_error: controller unavailable", payload["runner_control"]["status"]["reason"])
+        self.assertEqual(self.config_path.as_posix(), payload["runner_control"]["status"]["config_path"])
 
     def test_section_endpoints_return_stable_shapes(self) -> None:
         progress = self.client.get("/api/progress").json()
@@ -1639,8 +2242,34 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(4, goals["items"]["p0"][0]["line_number"])
 
         config = self.client.get("/api/config").json()
-        self.assertIn("data", config)
+        self.assertIn("values", config)
+        self.assertIn("defaults", config)
+        self.assertIn("schema", config)
+        self.assertIn("groups", config)
+        self.assertIn("redaction", config)
+        self.assertIn("restart_required_paths", config)
+        self.assertIn("meta", config)
         self.assertIn("resolved_prompts_dir", config)
+        self.assertEqual(config["path"], config["meta"]["path"])
+        self.assertEqual(config["source"], config["meta"]["source"])
+        self.assertEqual(config["resolved_prompts_dir"], config["meta"]["resolved_prompts_dir"])
+        self.assertFalse(config["meta"]["save_enabled"])
+        self.assertEqual("/api/config/save", config["meta"]["save_endpoint"])
+        self.assertTrue(config["meta"]["save_requires_opt_in"])
+        self.assertEqual("Repository", config["schema"]["repo"]["label"])
+        self.assertTrue(config["schema"]["repo"]["restart"])
+        self.assertEqual(self.repo.as_posix(), config["values"]["repo"])
+        self.assertIn("pm_model", config["values"])
+        self.assertIn("pm_model", config["schema"])
+        self.assertIn("prompts_dir", config["defaults"])
+        group_titles = {group["title"] for group in config["groups"]}
+        self.assertTrue({"Project", "Runner", "Quota", "Worktree", "Prompt Paths", "Codex Models", "PM Refresh", "Budget", "Telegram", "Goals"}.issubset(group_titles))
+        self.assertTrue(config["schema"]["telegram.bot_token"]["redacted"])
+        self.assertTrue(config["schema"]["prompts_dir"]["restart"])
+        self.assertEqual("[redacted]", config["redaction"]["placeholder"])
+        self.assertIn("telegram.bot_token", config["redaction"]["paths"])
+        self.assertIn("telegram.pairing_code", config["redaction"]["paths"])
+        self.assertIn("prompts_dir", config["restart_required_paths"])
 
         prompts = self.client.get("/api/prompts").json()
         self.assertIn("items", prompts)
@@ -1652,7 +2281,501 @@ class WebConsoleReadonlyTests(unittest.TestCase):
 
         worktree = self.client.get("/api/worktree").json()
         self.assertEqual("pending review", worktree["status"])
+        self.assertTrue(worktree["reviewRequired"])
+        self.assertEqual(self.repo.resolve(), Path(worktree["sourceRepo"]).resolve())
+        self.assertEqual("main", worktree["sourceBranch"])
+        self.assertEqual("main", worktree["baseRef"])
+        self.assertEqual("abc12345", worktree["headRef"])
+        self.assertEqual(self.run_dir.resolve(), Path(worktree["runDir"]).resolve())
+        self.assertEqual(self.run_dir / "WORKTREE_MERGE_PENDING.json", Path(worktree["statusFile"]))
+        self.assertEqual(self.run_dir / "WORKTREE_MERGE_PENDING.json", Path(worktree["pendingFile"]))
+        self.assertEqual(self.repo / "worktree", Path(worktree["cleanupPath"]))
+        self.assertEqual("pending", worktree["cleanupState"])
+        self.assertEqual("Cleanup has not run yet.", worktree["cleanupMessage"])
+        self.assertIn("Review patch from main to abc12345", worktree["risk"])
         self.assertTrue(worktree["changedFiles"])
+        self.assertEqual("agent_runner/web.py", worktree["changedFiles"][0]["path"])
+        self.assertIn("merge-worktree", worktree["reviewRequiredMessage"])
+        self.assertIn("discard-worktree", worktree["reviewRequiredMessage"])
+
+    def test_api_worktree_normalizes_empty_malformed_applied_and_failed_states(self) -> None:
+        patch_text = "\n".join(
+            [
+                "diff --git a/agent_runner/web.py b/agent_runner/web.py",
+                "--- a/agent_runner/web.py",
+                "+++ b/agent_runner/web.py",
+                "@@ -1 +1 @@",
+                "-old",
+                "+new",
+                "",
+            ]
+        )
+
+        def write_status_artifact(name: str, payload: dict[str, object]) -> None:
+            _write(self.run_dir / name, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+        def write_patch() -> Path:
+            return self._write_worktree_artifact("worktree.patch", patch_text)
+
+        with self.subTest("no-pending"):
+            self._clear_worktree_artifacts()
+            worktree = self.client.get("/api/worktree").json()
+            self.assertEqual("none", worktree["status"])
+            self.assertFalse(worktree["reviewRequired"])
+            self.assertEqual("", worktree["statusFile"])
+            self.assertEqual("none", worktree["cleanupState"])
+            self.assertEqual("No pending worktree merge.", worktree["reviewRequiredMessage"])
+            self.assertEqual([], worktree["changedFiles"])
+
+        with self.subTest("malformed"):
+            self._clear_worktree_artifacts()
+            self._write_worktree_artifact("WORKTREE_MERGE_PENDING.json", "{ not-json }\n")
+            worktree = self.client.get("/api/worktree").json()
+            self.assertEqual("error", worktree["status"])
+            self.assertTrue(worktree["reviewRequired"])
+            self.assertEqual(self.run_dir / "WORKTREE_MERGE_PENDING.json", Path(worktree["statusFile"]))
+            self.assertEqual("none", worktree["cleanupState"])
+            self.assertIn("malformed", worktree["reviewRequiredMessage"].lower())
+            self.assertEqual([], worktree["changedFiles"])
+
+        for status_name, artifact_name, expected_cleanup_state in [
+            ("applied", "WORKTREE_MERGE_APPLIED.json", "done"),
+            ("discarded", "WORKTREE_MERGE_DISCARDED.json", "done"),
+        ]:
+            with self.subTest(status_name):
+                self._clear_worktree_artifacts()
+                write_patch()
+                write_status_artifact(
+                    artifact_name,
+                    {
+                        "schema_version": 1,
+                        "status": status_name,
+                        "created_at": "2026-04-26T12:03:00",
+                        "source_repo": self.repo.as_posix(),
+                        "run_dir": self.run_dir.as_posix(),
+                        "worktree_dir": (self.repo / "worktree").as_posix(),
+                        "patch_path": (self.run_dir / "worktree.patch").as_posix(),
+                        "base_ref": "main",
+                        "head_ref": "abc12345",
+                        "last_rc": 0,
+                    },
+                )
+                worktree = self.client.get("/api/worktree").json()
+                self.assertEqual(status_name, worktree["status"])
+                self.assertFalse(worktree["reviewRequired"])
+                self.assertEqual(self.run_dir / artifact_name, Path(worktree["statusFile"]))
+                self.assertEqual(expected_cleanup_state, worktree["cleanupState"])
+                self.assertEqual(self.repo / "worktree", Path(worktree["cleanupPath"]))
+                self.assertTrue(worktree["changedFiles"])
+                self.assertEqual("agent_runner/web.py", worktree["changedFiles"][0]["path"])
+                self.assertIn(status_name.split("_")[0], worktree["summary"].lower())
+
+        for status_name, artifact_name in [
+            ("applied_cleanup_failed", "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json"),
+            ("discard_cleanup_failed", "WORKTREE_MERGE_DISCARD_CLEANUP_FAILED.json"),
+        ]:
+            with self.subTest(status_name):
+                self._clear_worktree_artifacts()
+                write_patch()
+                write_status_artifact(
+                    artifact_name,
+                    {
+                        "schema_version": 1,
+                        "status": status_name,
+                        "created_at": "2026-04-26T12:04:00",
+                        "source_repo": self.repo.as_posix(),
+                        "run_dir": self.run_dir.as_posix(),
+                        "worktree_dir": (self.repo / "worktree").as_posix(),
+                        "patch_path": (self.run_dir / "worktree.patch").as_posix(),
+                        "base_ref": "main",
+                        "head_ref": "abc12345",
+                        "last_rc": 0,
+                        "cleanup_message": f"{status_name} cleanup failed",
+                    },
+                )
+                worktree = self.client.get("/api/worktree").json()
+                self.assertEqual(status_name, worktree["status"])
+                self.assertTrue(worktree["reviewRequired"])
+                self.assertEqual(self.run_dir / artifact_name, Path(worktree["statusFile"]))
+                self.assertEqual("failed", worktree["cleanupState"])
+                self.assertIn("cleanup failed", worktree["cleanupMessage"].lower())
+                self.assertTrue(worktree["changedFiles"])
+
+        with self.subTest("stale-central-marker"):
+            self._clear_worktree_artifacts()
+            _write(
+                self.repo / ".AgentCLI" / "WORKTREE_MERGE_PENDING.json",
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "pending",
+                        "created_at": "2026-04-26T12:05:00",
+                        "source_repo": self.repo.as_posix(),
+                        "run_dir": self.run_dir.as_posix(),
+                        "worktree_dir": (self.repo / "worktree").as_posix(),
+                        "patch_path": (self.run_dir / "worktree.patch").as_posix(),
+                        "base_ref": "main",
+                        "head_ref": "abc12345",
+                        "last_rc": 0,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+            )
+            write_patch()
+            worktree = self.client.get("/api/worktree").json()
+            self.assertEqual("error", worktree["status"])
+            self.assertTrue(worktree["reviewRequired"])
+            self.assertIn("stale", worktree["reviewRequiredMessage"].lower())
+            self.assertTrue(worktree["statusFile"].endswith("WORKTREE_MERGE_PENDING.json"))
+            self.assertEqual([], worktree["changedFiles"])
+
+    def test_prompt_inventory_is_redacted_and_profile_aware(self) -> None:
+        prompts = self.client.get("/api/prompts").json()
+        items = {item["id"]: item for item in prompts["items"]}
+
+        self.assertIn("pm_instructions", items)
+        self.assertIn("pm_bootstrap", items)
+
+        override = items["pm_instructions"]
+        self.assertEqual("personal", override["profile"])
+        self.assertEqual("override", override["mode"])
+        self.assertEqual("[redacted]", override["preview"])
+        self.assertTrue(override["path"].endswith("pm_instructions.md"))
+        self.assertTrue(override["source"].endswith("prompts/agentcli"))
+
+        template = items["pm_bootstrap"]
+        self.assertEqual("personal", template["profile"])
+        self.assertEqual("template", template["mode"])
+        self.assertEqual("[redacted]", template["preview"])
+        self.assertTrue(template["path"].endswith("pm_bootstrap_prompt.md"))
+        self.assertEqual("templates/agent_prompts", template["source"])
+
+    def test_prompt_read_returns_full_content_for_override_and_template_prompts(self) -> None:
+        override = self.client.get(
+            "/api/prompts/read",
+            params={"id": "pm_instructions", "file": "pm_instructions.md"},
+        )
+        self.assertEqual(200, override.status_code)
+        override_payload = override.json()
+        self.assertTrue(override_payload["ok"])
+        self.assertEqual("pm_instructions", override_payload["id"])
+        self.assertEqual("personal", override_payload["profile"])
+        self.assertEqual("override", override_payload["mode"])
+        self.assertTrue(override_payload["source"].endswith("prompts/agentcli"))
+        self.assertEqual(
+            textwrap.dedent(
+                """\
+                # Local PM Instructions
+
+                Profile: {profile}
+                Repo: {repo}
+
+                Keep inventory previews redacted and use the explicit read path for the editor.
+                """
+            ),
+            override_payload["content"],
+        )
+        self.assertEqual(["profile", "repo"], override_payload["template_variables"])
+
+        template = self.client.get(
+            "/api/prompts/read",
+            params={"id": "pm_bootstrap", "file": "pm_bootstrap_prompt.md"},
+        )
+        self.assertEqual(200, template.status_code)
+        template_payload = template.json()
+        self.assertTrue(template_payload["ok"])
+        self.assertEqual("pm_bootstrap", template_payload["id"])
+        self.assertEqual("personal", template_payload["profile"])
+        self.assertEqual("template", template_payload["mode"])
+        self.assertEqual("templates/agent_prompts", template_payload["source"])
+        self.assertIn("{analysis_md}", template_payload["content"])
+        self.assertIn("{repo}", template_payload["content"])
+        self.assertIn("PROJECT_ANALYSIS.md", template_payload["content"])
+        self.assertIn("analysis_md", template_payload["template_variables"])
+
+    def test_prompt_read_validates_request_shape_and_rejects_traversal(self) -> None:
+        missing_id = self.client.get("/api/prompts/read", params={"file": "pm_instructions.md"})
+        self.assertEqual(400, missing_id.status_code)
+        self.assertEqual("prompt_id_required", missing_id.json()["error"]["code"])
+
+        missing_file = self.client.get("/api/prompts/read", params={"id": "pm_instructions"})
+        self.assertEqual(400, missing_file.status_code)
+        self.assertEqual("prompt_file_required", missing_file.json()["error"]["code"])
+
+        mismatch = self.client.get(
+            "/api/prompts/read",
+            params={"id": "pm_instructions", "file": "pm_bootstrap_prompt.md"},
+        )
+        self.assertEqual(400, mismatch.status_code)
+        self.assertEqual("prompt_file_mismatch", mismatch.json()["error"]["code"])
+
+        traversal = self.client.get(
+            "/api/prompts/read",
+            params={"id": "pm_instructions", "file": "../secrets.md"},
+        )
+        self.assertEqual(400, traversal.status_code)
+        self.assertEqual("prompt_path_outside_prompts_dir", traversal.json()["error"]["code"])
+
+    def test_prompt_editor_validation_panel_and_dirty_reset(self) -> None:
+        backup_path = (self.home / "prompts" / "agentcli" / "pm_bootstrap_prompt.20260426-120000.bak.md").as_posix()
+        prompt = {
+            "id": "pm_bootstrap",
+            "file": "pm_bootstrap_prompt.md",
+            "path": (self.home / "prompts" / "agentcli" / "pm_bootstrap_prompt.md").as_posix(),
+            "scope": "PM",
+            "profile": "personal",
+            "source": "templates/agent_prompts",
+            "mode": "template",
+            "updated": "template",
+            "summary": "PM bootstrap prompt",
+            "preview": "[redacted]",
+        }
+        backup = {
+            "path": backup_path,
+            "name": Path(backup_path).name,
+            "updated": "2026-04-26 12:00",
+            "size": 42,
+            "summary": "2026-04-26 12:00 | 42 bytes",
+        }
+        invalid_content = "Valid prompt {repo}\n"
+        valid_content = "Valid prompt {repo} {analysis_md}\n"
+        invalid_payload = {
+            **prompt,
+            "content": invalid_content,
+            "template_variables": ["repo"],
+            "required_template_variables": ["repo", "analysis_md"],
+            "backups": [backup],
+        }
+        valid_payload = {
+            **prompt,
+            "content": valid_content,
+            "template_variables": ["repo", "analysis_md"],
+            "required_template_variables": ["repo", "analysis_md"],
+            "backups": [backup],
+        }
+
+        results = _run_adapter_harness(
+            [
+                {"kind": "call", "name": "applyPromptEditorPayload", "args": [prompt, invalid_payload]},
+                {"kind": "call", "name": "promptEditorValidation", "args": []},
+                {"kind": "call", "name": "renderPromptEditorValidation", "args": []},
+                {"kind": "call", "name": "inspectPromptEditorState", "args": []},
+                {
+                    "kind": "call",
+                    "name": "applyPromptEditorPayload",
+                    "args": [prompt, valid_payload, {"backupSelection": backup_path, "restoreConfirmation": "RESTORE BACKUP"}],
+                },
+                {"kind": "call", "name": "renderPromptEditorMutationPanel", "args": []},
+                {"kind": "call", "name": "inspectPromptEditorState", "args": []},
+                {"kind": "call", "name": "updatePromptEditorDraft", "args": ["draftContent", valid_content + "Changed in browser.\n"]},
+                {"kind": "call", "name": "inspectPromptEditorState", "args": []},
+                {
+                    "kind": "call",
+                    "name": "applyPromptEditorPayload",
+                    "args": [prompt, valid_payload, {"backupSelection": backup_path}],
+                },
+                {"kind": "call", "name": "inspectPromptEditorState", "args": []},
+            ]
+        )
+
+        validation = results[1]
+        self.assertIn("Missing template variables", validation["templateError"])
+        self.assertIn("{analysis_md}", validation["templateError"])
+        self.assertEqual(["repo", "analysis_md"], validation["requiredVariables"])
+
+        validation_html = results[2]
+        self.assertIn("Template-variable validation", validation_html)
+        self.assertIn("field-error", validation_html)
+
+        initial_state = results[3]
+        self.assertFalse(initial_state["dirty"])
+        self.assertEqual("pm_bootstrap", initial_state["promptId"])
+        self.assertEqual([backup_path], [item["path"] for item in initial_state["backups"]])
+
+        mutation_panel = results[5]
+        self.assertIn("data-prompt-backup-select", mutation_panel)
+        self.assertIn("data-prompt-restore-confirmation", mutation_panel)
+        self.assertIn("Save Prompt", mutation_panel)
+        self.assertIn("Restore Backup", mutation_panel)
+        self.assertIn("Selected backup", mutation_panel)
+        self.assertIn("Available backups", mutation_panel)
+        self.assertIn("Prompt mutations are locked", mutation_panel)
+        self.assertTrue(
+            "Loading runner control status..." in mutation_panel
+            or "Prompt saves and restores are disabled until runner controls are enabled." in mutation_panel
+        )
+
+        ready_state = results[6]
+        self.assertFalse(ready_state["dirty"])
+        self.assertEqual(backup_path, ready_state["backupSelection"])
+        self.assertEqual("RESTORE BACKUP", ready_state["restoreConfirmation"])
+        self.assertEqual("idle", ready_state["saveState"]["status"])
+        self.assertEqual("idle", ready_state["restoreState"]["status"])
+
+        dirty_state = results[8]
+        self.assertTrue(dirty_state["dirty"])
+        self.assertEqual("idle", dirty_state["saveState"]["status"])
+        self.assertEqual("idle", dirty_state["restoreState"]["status"])
+
+        reset_state = results[10]
+        self.assertFalse(reset_state["dirty"])
+        self.assertEqual(backup_path, reset_state["backupSelection"])
+        self.assertEqual("", reset_state["restoreConfirmation"])
+        self.assertEqual("idle", reset_state["saveState"]["status"])
+        self.assertEqual("idle", reset_state["restoreState"]["status"])
+
+    def test_prompt_editor_banner_surfaces_save_and_restore_outcomes(self) -> None:
+        backup_path = (self.home / "prompts" / "agentcli" / "pm_bootstrap_prompt.20260426-120000.bak.md").as_posix()
+        prompt = {
+            "id": "pm_bootstrap",
+            "file": "pm_bootstrap_prompt.md",
+            "path": (self.home / "prompts" / "agentcli" / "pm_bootstrap_prompt.md").as_posix(),
+            "scope": "PM",
+            "profile": "personal",
+            "source": "templates/agent_prompts",
+            "mode": "template",
+            "updated": "template",
+            "summary": "PM bootstrap prompt",
+            "preview": "[redacted]",
+        }
+        backup = {
+            "path": backup_path,
+            "name": Path(backup_path).name,
+            "updated": "2026-04-26 12:00",
+            "size": 42,
+            "summary": "2026-04-26 12:00 | 42 bytes",
+        }
+        payload = {
+            **prompt,
+            "content": "Valid prompt {repo} {analysis_md}\n",
+            "template_variables": ["repo", "analysis_md"],
+            "required_template_variables": ["repo", "analysis_md"],
+            "backups": [backup],
+        }
+        results = _run_adapter_harness(
+            [
+                {
+                    "kind": "call",
+                    "name": "applyPromptEditorPayload",
+                    "args": [
+                        prompt,
+                        payload,
+                        {
+                            "saveState": {
+                                "status": "success",
+                                "message": "Prompt saved.",
+                                "errorCode": "",
+                                "backupPath": backup_path,
+                                "savedPath": prompt["path"],
+                                "savedAt": 1,
+                                "requestPath": "/api/prompts/save",
+                            },
+                        },
+                    ],
+                },
+                {"kind": "call", "name": "renderPromptEditorState", "args": []},
+                {"kind": "call", "name": "renderPromptEditorMutationPanel", "args": []},
+                {"kind": "call", "name": "renderPromptEditorBanner", "args": []},
+                {
+                    "kind": "call",
+                    "name": "applyPromptEditorPayload",
+                    "args": [
+                        prompt,
+                        payload,
+                        {
+                            "saveState": {
+                                "status": "error",
+                                "message": "Prompt save failed.",
+                                "errorCode": "prompt_save_failed",
+                                "backupPath": backup_path,
+                                "savedPath": prompt["path"],
+                                "savedAt": 2,
+                                "requestPath": "/api/prompts/save",
+                            },
+                        },
+                    ],
+                },
+                {"kind": "call", "name": "renderPromptEditorState", "args": []},
+                {"kind": "call", "name": "renderPromptEditorBanner", "args": []},
+                {
+                    "kind": "call",
+                    "name": "applyPromptEditorPayload",
+                    "args": [
+                        prompt,
+                        payload,
+                        {
+                            "restoreState": {
+                                "status": "success",
+                                "message": "Prompt restored.",
+                                "errorCode": "",
+                                "backupPath": backup_path,
+                                "restoredFromPath": backup_path,
+                                "restoredAt": 3,
+                                "requestPath": "/api/prompts/restore",
+                            },
+                        },
+                    ],
+                },
+                {"kind": "call", "name": "renderPromptEditorState", "args": []},
+                {"kind": "call", "name": "renderPromptEditorMutationPanel", "args": []},
+                {"kind": "call", "name": "renderPromptEditorBanner", "args": []},
+            ]
+        )
+
+        save_state = results[1]
+        self.assertIn("SAVED", save_state)
+        self.assertIn("BACKUP", save_state)
+        save_panel = results[2]
+        self.assertIn("Backup path", save_panel)
+        save_banner = results[3]
+        self.assertIn("Prompt saved", save_banner)
+
+        save_error_state = results[5]
+        self.assertIn("SAVE ERROR", save_error_state)
+        save_error_banner = results[6]
+        self.assertIn("Prompt save failed", save_error_banner)
+
+        restore_state = results[8]
+        self.assertIn("RESTORED", restore_state)
+        self.assertIn("BACKUP", restore_state)
+        restore_panel = results[9]
+        self.assertIn("Restored from", restore_panel)
+        self.assertIn("Restore backup path", restore_panel)
+        restore_banner = results[10]
+        self.assertIn("Prompt restored", restore_banner)
+
+    def test_prompt_read_surfaces_validation_failures_for_empty_and_partial_templates(self) -> None:
+        _write_config(self.config_path, self.repo)
+        prompts_dir = self.home / "prompts" / "agentcli"
+        prompt_path = prompts_dir / "pm_bootstrap_prompt.md"
+        from fastapi.testclient import TestClient
+
+        client = TestClient(self._create_app(self.repo))
+
+        _write(prompt_path, "")
+        empty_response = client.get("/api/prompts/read", params={"id": "pm_bootstrap", "file": "pm_bootstrap_prompt.md"})
+        self.assertEqual(200, empty_response.status_code)
+        empty_payload = empty_response.json()
+        self.assertTrue(empty_payload["ok"])
+        self.assertFalse(empty_payload["validation"]["ok"])
+        self.assertEqual("Prompt content cannot be empty.", empty_payload["validation"]["content_error"])
+        self.assertEqual("prompt_content_required", empty_payload["validation"]["content_error_code"])
+        self.assertIn("prompt_content_required", [error["code"] for error in empty_payload["validation"]["errors"]])
+        self.assertIn("prompt_template_variables_missing", [error["code"] for error in empty_payload["validation"]["errors"]])
+
+        _write(prompt_path, "Repo: {repo}\n")
+        partial_response = client.get("/api/prompts/read", params={"id": "pm_bootstrap", "file": "pm_bootstrap_prompt.md"})
+        self.assertEqual(200, partial_response.status_code)
+        partial_payload = partial_response.json()
+        self.assertTrue(partial_payload["ok"])
+        self.assertFalse(partial_payload["validation"]["ok"])
+        self.assertEqual("", partial_payload["validation"]["content_error"])
+        self.assertEqual("", partial_payload["validation"]["content_error_code"])
+        self.assertGreater(len(partial_payload["validation"]["missing_variables"]), 0)
+        self.assertIn("analysis_md", partial_payload["validation"]["missing_variables"])
+        self.assertEqual("prompt_template_variables_missing", partial_payload["validation"]["template_error_code"])
 
     def test_api_logs_tail_supports_incremental_cursor_reads_filters_and_malformed_state(self) -> None:
         _write(
@@ -1871,7 +2994,7 @@ Another unsupported line.
         self.assertIn("Expose read-only progress views", payload["raw_text"])
         self.assertGreater(payload["size"], 0)
         self.assertIsNotNone(payload["mtime"])
-        self.assertEqual("p0", payload["completion_level"])
+        self.assertEqual("all", payload["completion_level"])
         self.assertEqual(2, len(payload["items"]["p0"]))
         self.assertEqual(3, len(payload["items"]["p1"]))
         self.assertEqual(6, payload["items"]["p0"][0]["line_number"])
@@ -1945,8 +3068,26 @@ Another unsupported line.
         self.assertEqual({"p0": [], "p1": []}, payload["items"])
         self.assertFalse(payload["completion"]["has_goals"])
         self.assertFalse(payload["completion"]["project_complete"])
-        self.assertEqual("p0", payload["completion_level"])
+        self.assertEqual("all", payload["completion_level"])
         self.assertEqual(0, payload["summary"]["total"])
+        self.assertEqual(0, payload["summary"]["warnings"])
+        self.assertEqual([], payload["warnings"])
+
+    def test_api_goals_handles_empty_goals_file(self) -> None:
+        _write(self.repo / ".doc" / "GOALS.md", "")
+
+        payload = self.client.get("/api/goals").json()
+
+        self.assertTrue(payload["exists"])
+        self.assertTrue(payload["path"].endswith(".doc/GOALS.md"))
+        self.assertEqual("", payload["raw_text"])
+        self.assertEqual({"p0": [], "p1": []}, payload["items"])
+        self.assertFalse(payload["completion"]["has_goals"])
+        self.assertFalse(payload["completion"]["project_complete"])
+        self.assertEqual("all", payload["completion_level"])
+        self.assertEqual(0, payload["summary"]["total"])
+        self.assertEqual(0, payload["summary"]["done"])
+        self.assertEqual(0, payload["summary"]["unchecked"])
         self.assertEqual(0, payload["summary"]["warnings"])
         self.assertEqual([], payload["warnings"])
 
@@ -1980,8 +3121,15 @@ Another unsupported line.
             self.assertFalse(no_run["activeRun"]["quotaAvailable"])
             self.assertFalse(no_run["activeRun"]["progressAvailable"])
             self.assertEqual({"in": None, "out": None, "available": False}, no_run["activeRun"]["tokens"])
-            self.assertEqual({"window": "5h", "used": None, "available": False}, no_run["activeRun"]["quota"])
+            self.assertEqual({"window": "", "used": None, "available": False}, no_run["activeRun"]["quota"])
             self.assertIsNone(no_run["activeRun"]["budgetUsed"])
+            self.assertEqual({"window": "", "used": None, "available": False}, no_run["metrics"]["quota"])
+            self.assertEqual([], no_run["history"])
+            self.assertEqual([], no_run["notifications"])
+            self.assertEqual("empty", no_run["sectionState"]["history"]["status"])
+            self.assertEqual("Run history is empty.", no_run["sectionState"]["history"]["message"])
+            self.assertEqual("empty", no_run["sectionState"]["notifications"]["status"])
+            self.assertEqual("No notifications have been recorded yet.", no_run["sectionState"]["notifications"]["message"])
 
         with self.subTest("partial-run"):
             self.assertEqual("partial", partial["sectionState"]["stages"]["status"])
@@ -1992,12 +3140,15 @@ Another unsupported line.
             self.assertEqual("agent_runner/web.py, web_console/app.js", partial["backlog"][0]["fileScope"])
             self.assertEqual(120, len(partial["logs"]))
             self.assertEqual("running", partial["activeRun"]["status"])
+            self.assertEqual({"window": "5h", "used": 0.4, "available": True}, partial["activeRun"]["quota"])
+            self.assertEqual("5h", partial["activeRun"]["quotaWindow"])
+            self.assertEqual(0.4, partial["activeRun"]["quotaUsed"])
 
         with self.subTest("normal-run"):
             self.assertEqual("api", normal["sourceMode"])
             self.assertEqual("ready", normal["sectionState"]["stages"]["status"])
             self.assertEqual("ready", normal["sectionState"]["backlog"]["status"])
-            self.assertEqual("ready", normal["sectionState"]["worktree"]["status"])
+            self.assertEqual("partial", normal["sectionState"]["worktree"]["status"])
             self.assertEqual(3, len(normal["stages"]))
             self.assertEqual(2, len(normal["backlog"]))
             self.assertEqual(["T-020"], normal["backlog"][1]["dependsOn"])
@@ -2012,10 +3163,14 @@ Another unsupported line.
             self.assertEqual("", normal["activeRun"]["finalReason"])
             self.assertEqual("T-020", normal["progress"]["current_task_id"])
             self.assertEqual("API-backed observation path", normal["progress"]["current_task_title"])
+
             self.assertEqual("", normal["progress"]["final_reason"])
             self.assertTrue(normal["activeRun"]["tokensAvailable"])
             self.assertTrue(normal["activeRun"]["budgetAvailable"])
             self.assertTrue(normal["activeRun"]["quotaAvailable"])
+            self.assertEqual({"window": "5h", "used": 0.41, "available": True}, normal["activeRun"]["quota"])
+            self.assertEqual("5h", normal["activeRun"]["quotaWindow"])
+            self.assertEqual(0.41, normal["activeRun"]["quotaUsed"])
             self.assertEqual("pending", normal["worktreeMerge"]["status"])
 
         with self.subTest("fallback-fixture"):
@@ -2023,11 +3178,494 @@ Another unsupported line.
             self.assertEqual("Fallback data", fallback["snapshotLabel"])
             self.assertEqual("no-run", fallback["activeRun"]["id"])
             self.assertEqual("idle", fallback["activeRun"]["status"])
+            self.assertEqual({"window": "", "used": None, "available": False}, fallback["activeRun"]["quota"])
+            self.assertEqual({"window": "", "used": None, "available": False}, fallback["metrics"]["quota"])
             self.assertEqual([], fallback["stages"])
             self.assertEqual([], fallback["backlog"])
             self.assertEqual("empty", fallback["sectionState"]["activeRun"]["status"])
             self.assertEqual("empty", fallback["sectionState"]["stages"]["status"])
             self.assertEqual("empty", fallback["sectionState"]["backlog"]["status"])
+
+    def test_log_tail_helpers_build_queries_and_cursor_updates(self) -> None:
+        blank = _run_log_tail_harness([{"kind": "state"}])[0]
+        query_result = _run_log_tail_harness(
+            [
+                {
+                    "kind": "query",
+                    "filters": {"level": "WARN", "stage": " Dev ", "taskId": "T-020", "search": " error path "},
+                    "options": {"cursor": 12, "maxLines": 25},
+                }
+            ]
+        )[0]
+
+        self.assertEqual(
+            {"max_lines": 25, "cursor": 12, "level": "warn", "stage": "Dev", "task_id": "T-020", "search": "error path"},
+            query_result["query"],
+        )
+        self.assertEqual(
+            "/api/logs/tail?max_lines=25&cursor=12&level=warn&stage=Dev&task_id=T-020&search=error%20path",
+            query_result["url"],
+        )
+
+        previous = {
+            **blank,
+            "status": "loading",
+            "loading": False,
+            "paused": False,
+            "entries": [
+                {
+                    "cursor": 4,
+                    "line_number": 4,
+                    "t": "12:04:00",
+                    "stage": "Dev",
+                    "lvl": "warn",
+                    "msg": "existing warn line",
+                }
+            ],
+            "cursor": 4,
+            "nextCursor": 5,
+            "selected": [4],
+            "filters": {"level": "warn", "stage": "Dev", "taskId": "T-020", "search": "error path"},
+            "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": True},
+        }
+        first_payload = {
+            "ok": True,
+            "state": "loading",
+            "entries": [
+                {
+                    "cursor": 5,
+                    "line_number": 5,
+                    "t": "12:05:00",
+                    "stage": "Dev",
+                    "lvl": "info",
+                    "msg": "fresh info line",
+                }
+            ],
+            "next_cursor": 6,
+            "cursor": 5,
+            "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": True},
+            "malformed_lines": 0,
+        }
+        applied_first = _run_log_tail_harness(
+            [{"kind": "apply", "previous": previous, "payload": first_payload, "options": {"reset": False}}]
+        )[0]
+        second_payload = {
+            "ok": True,
+            "state": "loading",
+            "entries": [
+                {
+                    "cursor": 6,
+                    "line_number": 6,
+                    "t": "12:06:00",
+                    "stage": "QA",
+                    "lvl": "warn",
+                    "msg": "fresh warning line",
+                }
+            ],
+            "next_cursor": 7,
+            "cursor": 6,
+            "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": True},
+            "malformed_lines": 0,
+        }
+        applied_second = _run_log_tail_harness(
+            [{"kind": "apply", "previous": applied_first, "payload": second_payload, "options": {"reset": False}}]
+        )[0]
+
+        self.assertEqual(5, applied_first["cursor"])
+        self.assertEqual(6, applied_first["nextCursor"])
+        self.assertEqual([4], applied_first["selected"])
+        self.assertEqual(2, len(applied_first["entries"]))
+        self.assertEqual(6, applied_second["cursor"])
+        self.assertEqual(7, applied_second["nextCursor"])
+        self.assertEqual([4], applied_second["selected"])
+        self.assertEqual(3, len(applied_second["entries"]))
+
+        clipboard = _run_log_tail_harness(
+            [
+                {
+                    "kind": "clipboard",
+                    "entries": applied_second["entries"],
+                    "selected": applied_second["selected"],
+                }
+            ]
+        )[0]
+        download = _run_log_tail_harness(
+            [
+                {
+                    "kind": "download",
+                    "tail": applied_second,
+                    "context": {
+                        "runId": "run_20260426_120000",
+                        "latestRunDir": ".AgentCLI/agent_runs/20260426-120000",
+                    },
+                }
+            ]
+        )[0]
+
+        self.assertIn("#4 12:04:00 [Dev] warn existing warn line", clipboard)
+        self.assertEqual("agentcli-run_20260426_120000-logs.txt", download["filename"])
+        self.assertIn("# Filters: level=warn | stage=Dev | task_id=T-020 | search=error path", download["text"])
+        self.assertIn("fresh warning line", download["text"])
+
+    def test_log_tail_live_polling_advances_cursor_and_stops_when_paused(self) -> None:
+        session = _run_log_tail_session_harness(
+            [
+                {
+                    "kind": "call",
+                    "name": "seedLogTailState",
+                    "args": [
+                        {
+                            "activeView": "logs",
+                            "sourceMode": "api",
+                            "runId": self.run_dir.name,
+                            "latestRunDir": self.run_dir.as_posix(),
+                            "logTail": {
+                                "status": "loading",
+                                "loading": False,
+                                "paused": False,
+                                "entries": [
+                                    {
+                                        "cursor": 5,
+                                        "line_number": 5,
+                                        "t": "12:05:00",
+                                        "stage": "Dev",
+                                        "lvl": "warn",
+                                        "msg": "existing warn line",
+                                    }
+                                ],
+                                "cursor": 5,
+                                "nextCursor": 6,
+                                "selected": [5],
+                                "filters": {
+                                    "level": "warn",
+                                    "stage": "Dev",
+                                    "taskId": "T-020",
+                                    "search": "build failure",
+                                },
+                                "source": {
+                                    "path": "C:/runs/run.log",
+                                    "name": "run.log",
+                                    "exists": True,
+                                },
+                            },
+                        }
+                    ],
+                },
+                {
+                    "kind": "call",
+                    "name": "startServerLogTail",
+                    "args": [{"silent": True}],
+                },
+                {
+                    "kind": "call",
+                    "name": "inspectLogTailState",
+                    "args": [],
+                },
+                {
+                    "kind": "call",
+                    "name": "setLiveTailPaused",
+                    "args": [True],
+                },
+                {
+                    "kind": "call",
+                    "name": "syncLogTailStreaming",
+                    "args": [],
+                },
+                {
+                    "kind": "call",
+                    "name": "inspectLogTailState",
+                    "args": [],
+                },
+                {
+                    "kind": "call",
+                    "name": "setLiveTailPaused",
+                    "args": [False],
+                },
+                {
+                    "kind": "call",
+                    "name": "syncLogTailStreaming",
+                    "args": [],
+                },
+                {
+                    "kind": "call",
+                    "name": "inspectLogTailState",
+                    "args": [],
+                },
+            ],
+            fetch_responses=[
+                {
+                    "ok": True,
+                    "body": {
+                        "ok": True,
+                        "state": "loading",
+                        "entries": [
+                            {
+                                "cursor": 6,
+                                "line_number": 6,
+                                "t": "12:06:00",
+                                "stage": "QA",
+                                "lvl": "info",
+                                "msg": "fresh info line",
+                            }
+                        ],
+                        "next_cursor": 7,
+                        "cursor": 6,
+                        "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": True},
+                        "malformed_lines": 0,
+                    },
+                },
+                {
+                    "ok": True,
+                    "body": {
+                        "ok": True,
+                        "state": "loading",
+                        "entries": [
+                            {
+                                "cursor": 7,
+                                "line_number": 7,
+                                "t": "12:07:00",
+                                "stage": "PM",
+                                "lvl": "debug",
+                                "msg": "fresh resume line",
+                            }
+                        ],
+                        "next_cursor": 8,
+                        "cursor": 7,
+                        "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": True},
+                        "malformed_lines": 0,
+                    },
+                },
+            ],
+        )
+        started = session["results"][2]
+        paused = session["results"][5]
+        resumed = session["results"][8]
+
+        self.assertEqual(
+            "/api/logs/tail?max_lines=120&cursor=6&level=warn&stage=Dev&task_id=T-020&search=build%20failure",
+            session["fetchCalls"][0],
+        )
+        self.assertEqual(
+            "/api/logs/tail?max_lines=120&cursor=7&level=warn&stage=Dev&task_id=T-020&search=build%20failure",
+            session["fetchCalls"][1],
+        )
+        self.assertEqual([{"id": 1, "delay": 2400}, {"id": 2, "delay": 2400}], session["intervals"])
+        self.assertEqual([1], session["cleared"])
+        self.assertTrue(started["timerActive"])
+        self.assertFalse(started["paused"])
+        self.assertEqual("loading", started["status"])
+        self.assertEqual(6, started["cursor"])
+        self.assertEqual(7, started["nextCursor"])
+        self.assertEqual(2, len(started["entries"]))
+        self.assertFalse(started["loading"])
+        self.assertEqual([5], started["selected"])
+
+        self.assertTrue(paused["paused"])
+        self.assertFalse(paused["loading"])
+        self.assertFalse(paused["timerActive"])
+        self.assertEqual(6, paused["cursor"])
+        self.assertEqual(7, paused["nextCursor"])
+        self.assertEqual(2, len(paused["entries"]))
+        self.assertEqual([5], paused["selected"])
+        self.assertEqual({"level": "warn", "stage": "Dev", "taskId": "T-020", "search": "build failure"}, paused["filters"])
+        self.assertGreater(paused["requestSeq"], started["requestSeq"])
+
+        self.assertFalse(resumed["paused"])
+        self.assertTrue(resumed["timerActive"])
+        self.assertEqual(7, resumed["cursor"])
+        self.assertEqual(8, resumed["nextCursor"])
+        self.assertEqual(3, len(resumed["entries"]))
+        self.assertEqual([5], resumed["selected"])
+        self.assertEqual({"level": "warn", "stage": "Dev", "taskId": "T-020", "search": "build failure"}, resumed["filters"])
+        self.assertGreater(resumed["requestSeq"], paused["requestSeq"])
+
+    def test_log_tail_state_banners_and_toolbar_rendering(self) -> None:
+        blank = _run_log_tail_harness([{"kind": "state"}])[0]
+        active_tail = {
+            **blank,
+            "loading": False,
+            "paused": False,
+            "status": "loading",
+            "entries": [
+                {
+                    "cursor": 4,
+                    "line_number": 4,
+                    "t": "12:04:00",
+                    "stage": "Dev",
+                    "lvl": "warn",
+                    "msg": "existing warn line",
+                }
+            ],
+            "cursor": 4,
+            "nextCursor": 5,
+            "selected": [4],
+            "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": True},
+        }
+        paused_tail = {**active_tail, "paused": True, "selected": [4, 6]}
+        missing_tail = {**blank, "status": "missing_file", "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": False}}
+        empty_tail = {**blank, "status": "empty", "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": True}}
+        read_error_tail = {
+            **blank,
+            "status": "read_error",
+            "error": "permission denied",
+            "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": False},
+        }
+
+        describe_results = _run_log_tail_harness(
+            [
+                {"kind": "describe", "tail": active_tail},
+                {"kind": "describe", "tail": paused_tail},
+                {"kind": "describe", "tail": empty_tail},
+                {"kind": "describe", "tail": missing_tail},
+                {"kind": "describe", "tail": read_error_tail},
+            ]
+        )
+
+        self.assertEqual("Live tail active", describe_results[0]["title"])
+        self.assertEqual("live", describe_results[0]["state"])
+        self.assertEqual("Live tail paused", describe_results[1]["title"])
+        self.assertEqual("paused", describe_results[1]["state"])
+        self.assertEqual("No matching log lines", describe_results[2]["title"])
+        self.assertEqual("empty", describe_results[2]["state"])
+        self.assertEqual("Log file missing", describe_results[3]["title"])
+        self.assertEqual("missing_file", describe_results[3]["state"])
+        self.assertEqual("Log read error", describe_results[4]["title"])
+        self.assertEqual("read_error", describe_results[4]["state"])
+        self.assertIn("permission denied", describe_results[4]["copy"])
+        self.assertIn("Resume live tail", describe_results[1]["copy"])
+        self.assertIn("cursor 5", describe_results[1]["copy"])
+
+        loading_tail = {**blank, "status": "loading", "loading": True, "paused": False, "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": True}}
+        loading_banner = _run_log_tail_harness([{"kind": "banner", "tail": loading_tail}])[0]
+        self.assertIn("Loading active run log", loading_banner["banner"])
+        self.assertIn("Pause live tail", loading_banner["filters"])
+        self.assertIn('aria-busy="true"', loading_banner["filters"])
+        self.assertIn("button--loading", loading_banner["filters"])
+        self.assertIn("status-chip--loading", loading_banner["filters"])
+
+        banner_result = _run_log_tail_harness([{"kind": "banner", "tail": paused_tail}])[0]
+        self.assertIn("Live tail paused", banner_result["banner"])
+        self.assertIn("Resume live tail", banner_result["filters"])
+        self.assertIn("Copy selected lines (2)", banner_result["filters"])
+        self.assertIn("Download filtered logs", banner_result["filters"])
+        self.assertIn("Clear selection", banner_result["filters"])
+        self.assertIn('data-log-filter-field="stage"', banner_result["filters"])
+        self.assertIn('data-log-filter-field="taskId"', banner_result["filters"])
+        self.assertIn('data-log-filter-field="search"', banner_result["filters"])
+        self.assertIn('data-log-level="warn"', banner_result["filters"])
+        self.assertIn("status-chip--paused", banner_result["filters"])
+        self.assertIn("button--paused", banner_result["filters"])
+        self.assertIn('aria-pressed="true"', banner_result["filters"])
+
+        live_banner = _run_log_tail_harness([{"kind": "banner", "tail": active_tail}])[0]
+        self.assertIn("Live tail active", live_banner["banner"])
+        self.assertIn("Pause live tail", live_banner["filters"])
+        self.assertIn("Copy selected lines", live_banner["filters"])
+        self.assertIn("status-chip--running", live_banner["filters"])
+        self.assertIn("button--quiet", live_banner["filters"])
+        self.assertIn('aria-pressed="false"', live_banner["filters"])
+
+    def test_adapter_normalizes_history_and_notification_contracts(self) -> None:
+        populated_snapshot = self.client.get("/api/status").json()
+        populated, empty = _run_adapter_harness(
+            [
+                {"kind": "snapshot", "data": populated_snapshot},
+                {"kind": "snapshot", "data": _make_no_run_snapshot()},
+            ]
+        )
+
+        self.assertEqual("ready", populated["sectionState"]["history"]["status"])
+        self.assertEqual("ready", populated["sectionState"]["notifications"]["status"])
+        self.assertGreaterEqual(len(populated["history"]), 1)
+        history_item = next(item for item in populated["history"] if item["id"] == self.run_dir.name)
+        self.assertEqual("project_complete", history_item["finalReason"])
+        self.assertEqual("project_complete", history_item["shutdownReason"])
+        self.assertEqual("project_complete", history_item["stopReason"])
+        self.assertEqual({"done": 1, "failed": 0, "skipped": 0, "total": 2, "cycles": 1}, history_item["taskCounts"])
+        self.assertEqual("main", history_item["branch"])
+        self.assertEqual(120, history_item["durationSec"])
+        self.assertEqual("pending", history_item["worktreeOutcome"])
+        self.assertIn("runSummary", history_item)
+        self.assertIn("lastRunSummary", history_item)
+        self.assertEqual(1, populated["historySummary"]["runs"])
+        self.assertEqual(1, populated["historySummary"]["tasksDone"])
+        self.assertEqual(0, populated["historySummary"]["tasksFailed"])
+        self.assertGreaterEqual(len(populated["notifications"]), 1)
+        notification_kinds = {item["kind"] for item in populated["notifications"]}
+        self.assertIn("run_start", notification_kinds)
+        self.assertIn("task_done", notification_kinds)
+
+        self.assertEqual([], empty["history"])
+        self.assertEqual(0, empty["historySummary"]["runs"])
+        self.assertEqual([], empty["notifications"])
+        self.assertEqual("empty", empty["sectionState"]["history"]["status"])
+        self.assertEqual("Run history is empty.", empty["sectionState"]["history"]["message"])
+        self.assertEqual("empty", empty["sectionState"]["notifications"]["status"])
+        self.assertEqual("No notifications have been recorded yet.", empty["sectionState"]["notifications"]["message"])
+
+    def test_adapter_rejects_partial_quota_sources_without_mixing_fields(self) -> None:
+        snapshot = _make_partial_snapshot()
+        snapshot["active_run"]["quota"] = {"used": 0.4}
+        snapshot["active_run"]["quota_used"] = 0.4
+        snapshot["active_run"]["quotaUsed"] = 0.4
+        snapshot["active_run"]["quota_window"] = ""
+        snapshot["active_run"]["quotaWindow"] = ""
+        snapshot["active_run"]["quotaAvailable"] = False
+        snapshot["active_run"]["quota_available"] = False
+        snapshot["metrics"]["quota"] = {"window": "5h"}
+        snapshot["metrics"]["quota_window"] = "5h"
+        snapshot["metrics"]["quotaWindow"] = "5h"
+        snapshot["metrics"]["quota_used"] = None
+        snapshot["metrics"]["quotaUsed"] = None
+        snapshot["metrics"]["quotaAvailable"] = False
+        snapshot["metrics"]["quota_available"] = False
+
+        normalized = _run_adapter_harness([{"kind": "snapshot", "data": snapshot}])[0]
+
+        self.assertEqual("running", normalized["activeRun"]["status"])
+        self.assertFalse(normalized["activeRun"]["quotaAvailable"])
+        self.assertFalse(normalized["activeRun"]["quota_available"])
+        self.assertEqual({"window": "", "used": None, "available": False}, normalized["activeRun"]["quota"])
+        self.assertEqual("", normalized["activeRun"]["quotaWindow"])
+        self.assertEqual("", normalized["activeRun"]["quota_window"])
+        self.assertIsNone(normalized["activeRun"]["quotaUsed"])
+        self.assertIsNone(normalized["activeRun"]["quota_used"])
+        self.assertFalse(normalized["metrics"]["quotaAvailable"])
+        self.assertFalse(normalized["metrics"]["quota_available"])
+        self.assertEqual({"window": "", "used": None, "available": False}, normalized["metrics"]["quota"])
+        self.assertEqual("", normalized["metrics"]["quotaWindow"])
+        self.assertEqual("", normalized["metrics"]["quota_window"])
+        self.assertIsNone(normalized["metrics"]["quotaUsed"])
+        self.assertIsNone(normalized["metrics"]["quota_used"])
+
+    def test_adapter_prefers_active_run_quota_when_metrics_disagree(self) -> None:
+        snapshot = _make_partial_snapshot()
+        snapshot["active_run"]["quota"] = {"window": "5h", "used": 0.41}
+        snapshot["active_run"]["quota_window"] = "5h"
+        snapshot["active_run"]["quotaWindow"] = "5h"
+        snapshot["active_run"]["quota_used"] = 0.41
+        snapshot["active_run"]["quotaUsed"] = 0.41
+        snapshot["active_run"]["quotaAvailable"] = True
+        snapshot["active_run"]["quota_available"] = True
+        snapshot["metrics"]["quota"] = {"window": "7d", "used": 0.33}
+        snapshot["metrics"]["quota_window"] = "7d"
+        snapshot["metrics"]["quotaWindow"] = "7d"
+        snapshot["metrics"]["quota_used"] = 0.33
+        snapshot["metrics"]["quotaUsed"] = 0.33
+        snapshot["metrics"]["quotaAvailable"] = True
+        snapshot["metrics"]["quota_available"] = True
+
+        normalized = _run_adapter_harness([{"kind": "snapshot", "data": snapshot}])[0]
+
+        expected_quota = {"window": "5h", "used": 0.41, "available": True}
+        self.assertEqual(expected_quota, normalized["activeRun"]["quota"])
+        self.assertEqual(expected_quota, normalized["metrics"]["quota"])
+        self.assertEqual("5h", normalized["activeRun"]["quotaWindow"])
+        self.assertEqual("5h", normalized["metrics"]["quotaWindow"])
+        self.assertEqual(0.41, normalized["activeRun"]["quotaUsed"])
+        self.assertEqual(0.41, normalized["metrics"]["quotaUsed"])
+        self.assertTrue(normalized["activeRun"]["quotaAvailable"])
+        self.assertTrue(normalized["metrics"]["quotaAvailable"])
 
     def test_adapter_preserves_goals_metadata_and_browser_local_items(self) -> None:
         snapshot = _make_no_run_snapshot()
@@ -2111,20 +3749,491 @@ Another unsupported line.
         self.assertEqual(1, len(normalized["goalsSnapshot"]["warnings"]))
         self.assertEqual("unsupported_goal_line", normalized["goalsSnapshot"]["warnings"][0]["reason"])
         self.assertEqual(8, normalized["goalsSnapshot"]["warnings"][0]["line_number"])
+        self.assertEqual("ready", normalized["sectionState"]["goals"]["status"])
+        self.assertEqual(
+            "Read-only GOALS.md snapshot with stable P0/P1 grouping and exact checkbox state.",
+            normalized["sectionState"]["goals"]["message"],
+        )
+
+        with self.subTest("missing-file"):
+            missing = _make_no_run_snapshot()
+            missing["goals"] = {
+                "path": ".doc/GOALS.md",
+                "exists": False,
+                "mtime": None,
+                "size": None,
+                "raw_text": "",
+                "completion_level": "all",
+                "items": {"p0": [], "p1": []},
+                "completion": {
+                    "has_goals": False,
+                    "project_complete": False,
+                    "p0_total": 0,
+                    "p0_done": 0,
+                    "p1_total": 0,
+                    "p1_done": 0,
+                    "all_total": 0,
+                    "all_done": 0,
+                },
+                "summary": {
+                    "has_goals": False,
+                    "project_complete": False,
+                    "p0_total": 0,
+                    "p0_done": 0,
+                    "p1_total": 0,
+                    "p1_done": 0,
+                    "all_total": 0,
+                    "all_done": 0,
+                    "total": 0,
+                    "done": 0,
+                    "unchecked": 0,
+                    "warnings": 0,
+                },
+                "warnings": [],
+            }
+
+            normalized_missing = _run_adapter_harness([{"kind": "snapshot", "data": missing}])[0]
+
+            self.assertFalse(normalized_missing["goalsSnapshot"]["exists"])
+            self.assertEqual("", normalized_missing["goalsSnapshot"]["raw_text"])
+            self.assertEqual({"p0": [], "p1": []}, normalized_missing["goals"])
+            self.assertEqual(0, normalized_missing["goalsMeta"]["total"])
+            self.assertEqual(0, normalized_missing["goalsMeta"]["done"])
+            self.assertEqual("GOALS.md is missing.", normalized_missing["sectionState"]["goals"]["message"])
+
+        with self.subTest("empty-file"):
+            empty = _make_no_run_snapshot()
+            empty["goals"] = {
+                "path": ".doc/GOALS.md",
+                "exists": True,
+                "mtime": 1714132800.0,
+                "size": 0,
+                "raw_text": "",
+                "completion_level": "all",
+                "items": {"p0": [], "p1": []},
+                "completion": {
+                    "has_goals": False,
+                    "project_complete": False,
+                    "p0_total": 0,
+                    "p0_done": 0,
+                    "p1_total": 0,
+                    "p1_done": 0,
+                    "all_total": 0,
+                    "all_done": 0,
+                },
+                "summary": {
+                    "has_goals": False,
+                    "project_complete": False,
+                    "p0_total": 0,
+                    "p0_done": 0,
+                    "p1_total": 0,
+                    "p1_done": 0,
+                    "all_total": 0,
+                    "all_done": 0,
+                    "total": 0,
+                    "done": 0,
+                    "unchecked": 0,
+                    "warnings": 0,
+                },
+                "warnings": [],
+            }
+
+            normalized_empty = _run_adapter_harness([{"kind": "snapshot", "data": empty}])[0]
+
+            self.assertTrue(normalized_empty["goalsSnapshot"]["exists"])
+            self.assertEqual("", normalized_empty["goalsSnapshot"]["raw_text"])
+            self.assertEqual({"p0": [], "p1": []}, normalized_empty["goals"])
+            self.assertEqual(0, normalized_empty["goalsMeta"]["total"])
+            self.assertEqual(0, normalized_empty["goalsMeta"]["done"])
+            self.assertEqual("GOALS.md is empty.", normalized_empty["sectionState"]["goals"]["message"])
+
+    def test_adapter_builds_goal_draft_diff_without_losing_metadata(self) -> None:
+        snapshot = _make_no_run_snapshot()
+        snapshot["goals"] = {
+            "path": ".doc/GOALS.md",
+            "exists": True,
+            "mtime": 1714132800.0,
+            "size": 256,
+            "raw_text": "# Project Goals\n\n## P0\n- [x] Expose read-only progress views\n- [ ] Add FastAPI goals endpoint\n\n## P1\n- [ ] Keep browser-local edits\n",
+            "completion_level": "all",
+            "items": {
+                "p0": [
+                    {
+                        "done": True,
+                        "checked": True,
+                        "checkbox": "[x]",
+                        "text": "Expose read-only progress views",
+                        "note": "",
+                        "line_number": 4,
+                        "lineNumber": 4,
+                        "line": 4,
+                    },
+                    {
+                        "done": False,
+                        "checked": False,
+                        "checkbox": "[ ]",
+                        "text": "Add FastAPI goals endpoint",
+                        "note": "",
+                        "line_number": 5,
+                        "lineNumber": 5,
+                        "line": 5,
+                    },
+                ],
+                "p1": [
+                    {
+                        "done": False,
+                        "checked": False,
+                        "checkbox": "[ ]",
+                        "text": "Keep browser-local edits",
+                        "note": "",
+                        "line_number": 8,
+                        "lineNumber": 8,
+                        "line": 8,
+                    }
+                ],
+            },
+            "completion": {
+                "has_goals": True,
+                "project_complete": False,
+                "p0_total": 2,
+                "p0_done": 1,
+                "p1_total": 1,
+                "p1_done": 0,
+                "all_total": 3,
+                "all_done": 1,
+            },
+            "summary": {
+                "has_goals": True,
+                "project_complete": False,
+                "p0_total": 2,
+                "p0_done": 1,
+                "p1_total": 1,
+                "p1_done": 0,
+                "all_total": 3,
+                "all_done": 1,
+                "total": 3,
+                "done": 1,
+                "unchecked": 2,
+                "warnings": 0,
+            },
+            "warnings": [],
+        }
+        draft = {
+            "p0": [
+                {**snapshot["goals"]["items"]["p0"][1]},
+                {**snapshot["goals"]["items"]["p0"][0]},
+                {
+                    "done": False,
+                    "checked": False,
+                    "checkbox": "[ ]",
+                    "text": "Add browser-local goal draft",
+                    "note": "",
+                    "line_number": 0,
+                    "lineNumber": 0,
+                    "line": 0,
+                },
+            ],
+            "p1": [
+                {**snapshot["goals"]["items"]["p1"][0], "note": "Editable drafts preserve line metadata"},
+            ],
+        }
+
+        normalized, draft_summary = _run_adapter_harness(
+            [
+                {"kind": "snapshot", "data": snapshot},
+                {"kind": "call", "name": "buildGoalDraftSummary", "args": [snapshot["goals"]["items"], draft]},
+            ]
+        )
+
+        self.assertEqual(4, normalized["goals"]["p0"][0]["lineNumber"])
+        self.assertTrue(normalized["goals"]["p0"][0]["checked"])
+        self.assertEqual(5, normalized["goals"]["p0"][1]["lineNumber"])
+        self.assertFalse(normalized["goals"]["p0"][1]["checked"])
+        self.assertEqual(8, normalized["goals"]["p1"][0]["lineNumber"])
+        self.assertFalse(normalized["goals"]["p1"][0]["checked"])
+
+        self.assertTrue(draft_summary["dirty"])
+        self.assertEqual(1, draft_summary["added"])
+        self.assertEqual(1, draft_summary["edited"])
+        self.assertEqual(2, draft_summary["moved"])
+        self.assertEqual(0, draft_summary["removed"])
+
+        moved = next(row for row in draft_summary["rows"] if row["kind"] == "moved" and row["base"]["lineNumber"] == 4)
+        self.assertEqual(4, moved["item"]["lineNumber"])
+        self.assertEqual("[x]", moved["item"]["checkbox"])
+        self.assertEqual("Expose read-only progress views", moved["item"]["text"])
+
+        edited = next(row for row in draft_summary["rows"] if row["kind"] == "edited")
+        self.assertEqual(8, edited["base"]["lineNumber"])
+        self.assertEqual("[ ]", edited["base"]["checkbox"])
+        self.assertEqual("Editable drafts preserve line metadata", edited["item"]["note"])
+        self.assertEqual(8, edited["item"]["lineNumber"])
+        self.assertEqual("[ ]", edited["item"]["checkbox"])
+
+        added = next(row for row in draft_summary["rows"] if row["kind"] == "added")
+        self.assertEqual(0, added["item"]["lineNumber"])
+        self.assertEqual("[ ]", added["item"]["checkbox"])
+        self.assertEqual("Add browser-local goal draft", added["item"]["text"])
+
+    def test_adapter_builds_goal_save_risk_summary_and_normalizes_save_response(self) -> None:
+        snapshot_goals = {
+            "p0": [
+                {
+                    "done": False,
+                    "checked": False,
+                    "checkbox": "[ ]",
+                    "text": "Keep the launch blocker",
+                    "note": "",
+                    "lineNumber": 4,
+                    "line_number": 4,
+                    "line": 4,
+                },
+                {
+                    "done": False,
+                    "checked": False,
+                    "checkbox": "[ ]",
+                    "text": "Preserve backup safety",
+                    "note": "",
+                    "lineNumber": 5,
+                    "line_number": 5,
+                    "line": 5,
+                },
+                {
+                    "done": True,
+                    "checked": True,
+                    "checkbox": "[x]",
+                    "text": "Expose read-only progress views",
+                    "note": "",
+                    "lineNumber": 6,
+                    "line_number": 6,
+                    "line": 6,
+                },
+            ],
+            "p1": [
+                {
+                    "done": False,
+                    "checked": False,
+                    "checkbox": "[ ]",
+                    "text": "Keep browser-local edits",
+                    "note": "",
+                    "lineNumber": 9,
+                    "line_number": 9,
+                    "line": 9,
+                }
+            ],
+        }
+        draft_goals = {
+            "p0": [dict(snapshot_goals["p0"][2])],
+            "p1": [
+                dict(snapshot_goals["p1"][0]),
+                dict(snapshot_goals["p0"][1]),
+            ],
+        }
+        backup_path = ".doc/GOALS.20260426-120000-000000Z.bak.md"
+        responses = _run_adapter_harness(
+            [
+                {"kind": "call", "name": "buildGoalSaveRiskSummary", "args": [snapshot_goals, draft_goals]},
+                {
+                    "kind": "call",
+                    "name": "normalizeGoalSaveResponse",
+                    "args": [
+                        {
+                            "ok": False,
+                            "action": "goals-save",
+                            "status": "error",
+                            "message": "Deleting or downgrading unmet P0 goals requires the exact confirmation phrase.",
+                            "error": {
+                                "code": "goals_confirmation_required",
+                                "message": "Deleting or downgrading unmet P0 goals requires the exact confirmation phrase.",
+                                "details": {
+                                    "backup_path": backup_path,
+                                    "confirmation_phrase": "DELETE OR DOWNGRADE UNMET P0 GOALS",
+                                    "risk": {
+                                        "requires_confirmation": True,
+                                        "confirmation_phrase": "DELETE OR DOWNGRADE UNMET P0 GOALS",
+                                        "deleted_unchecked_p0": [snapshot_goals["p0"][0]],
+                                        "downgraded_unchecked_p0": [snapshot_goals["p0"][1]],
+                                        "risk_count": 2,
+                                    },
+                                },
+                            },
+                        }
+                    ],
+                },
+                {"kind": "call", "name": "createBlankGoalSaveState", "args": []},
+                {"kind": "call", "name": "goalSaveRequestPath", "args": []},
+            ]
+        )
+
+        risk, normalized, blank_state, request_path = responses
+        self.assertTrue(risk["requiresConfirmation"])
+        self.assertEqual(2, risk["riskCount"])
+        self.assertEqual(1, len(risk["deletedUncheckedP0"]))
+        self.assertEqual(1, len(risk["downgradedUncheckedP0"]))
+        self.assertEqual("Keep the launch blocker", risk["deletedUncheckedP0"][0]["text"])
+        self.assertEqual("Preserve backup safety", risk["downgradedUncheckedP0"][0]["text"])
+        self.assertTrue(normalized["error"]["code"].startswith("goals_confirmation"))
+        self.assertEqual(backup_path, normalized["backupPath"])
+        self.assertEqual(2, normalized["risk"]["riskCount"])
+        self.assertEqual("DELETE OR DOWNGRADE UNMET P0 GOALS", normalized["risk"]["confirmationPhrase"])
+        self.assertEqual("/api/goals/save", request_path)
+        self.assertEqual("/api/goals/save", blank_state["requestPath"])
+        self.assertEqual("DELETE OR DOWNGRADE UNMET P0 GOALS", blank_state["risk"]["confirmationPhrase"])
 
     def test_adapter_normalizes_string_config_values_for_schema_fields(self) -> None:
         snapshot = _make_no_run_snapshot()
         snapshot["config"]["data"] = {
             "roles": "PM,Dev,QA",
             "telegram": {"enabled": "false"},
-            "budget": {"max_iters": "7"},
+            "budgets": {"max_dev_continuations_per_task": "7"},
         }
 
         normalized = _run_adapter_harness([{"kind": "snapshot", "data": snapshot}])[0]
 
         self.assertEqual(["PM", "Dev", "QA"], normalized["config"]["roles"])
         self.assertFalse(normalized["config"]["telegram"]["enabled"])
-        self.assertEqual(7, normalized["config"]["budget"]["max_iters"])
+        self.assertEqual(7, normalized["config"]["budgets"]["max_dev_continuations_per_task"])
+
+    def test_goal_save_helpers_round_trip_notes_and_required_sections(self) -> None:
+        from agent_runner.web import _goal_save_has_required_sections, _goal_save_serialize_draft, _parse_goal_items_and_warnings
+
+        raw_text = """# Project Goals
+
+## P0
+- [ ] Keep the release checklist stable
+<!-- goal-note: "Escalate if this slips" -->
+
+## P1
+- [x] Draft the follow-up note
+"""
+
+        items, warnings = _parse_goal_items_and_warnings(raw_text)
+        self.assertTrue(_goal_save_has_required_sections(raw_text))
+        self.assertEqual([], warnings)
+        self.assertEqual("Escalate if this slips", items["p0"][0]["note"])
+
+        serialized = _goal_save_serialize_draft(items)
+        self.assertIn('<!-- goal-note: "Escalate if this slips" -->', serialized)
+        round_trip_items, round_trip_warnings = _parse_goal_items_and_warnings(serialized)
+        self.assertEqual("Keep the release checklist stable", round_trip_items["p0"][0]["text"])
+        self.assertEqual("Escalate if this slips", round_trip_items["p0"][0]["note"])
+        self.assertEqual([], round_trip_warnings)
+        self.assertFalse(_goal_save_has_required_sections("# Project Goals\n\n## P0\n- [ ] Missing P1\n"))
+        self.assertFalse(_goal_save_has_required_sections("# Project Goals\n\n## P1\n- [ ] Missing P0\n"))
+
+    def test_adapter_normalizes_config_contract_shape_and_redaction(self) -> None:
+        snapshot = _make_no_run_snapshot()
+        snapshot["config_contract"] = {
+            "path": "config/agentcli.json",
+            "source": "api",
+            "resolved_prompts_dir": "prompts/agentcli",
+            "values": {
+                "repo": "C:/Dev/AgentCLI",
+                "profile": "personal",
+                "execution_backend": "codex",
+                "roles": ["PM", "Dev", "QA"],
+                "autopilot": True,
+                "continuous": True,
+                "iterations": 4,
+                "prompts_dir": "prompts/agentcli",
+                "pm_model": "gpt-5.5",
+                "dev_model": "gpt-5.4",
+                "dev_model_tier1": "gpt-5.4-mini",
+                "dev_model_tier2": "gpt-5.1",
+                "qa_model": "gpt-5.4-mini",
+                "reporter_model": "gpt-5.4-mini",
+                "quota_five_hour_max_utilization": 80,
+                "quota_seven_day_max_utilization": 90,
+                "telegram": {
+                    "bot_token": "[redacted]",
+                    "instance_name": "agentcli",
+                },
+                "goals_completion_level": "all",
+            },
+            "defaults": {
+                "repo": "",
+                "profile": "personal",
+                "execution_backend": "codex",
+                "roles": ["PM", "Dev", "QA"],
+                "autopilot": True,
+                "continuous": True,
+                "iterations": 1,
+                "prompts_dir": "prompts/agentcli",
+                "pm_model": "gpt-5.5",
+                "dev_model": "gpt-5.4",
+                "dev_model_tier1": "gpt-5.4-mini",
+                "dev_model_tier2": "gpt-5.1",
+                "qa_model": "gpt-5.4-mini",
+                "reporter_model": "gpt-5.4-mini",
+                "telegram": {
+                    "bot_token": "[redacted]",
+                    "instance_name": "home-pc-main",
+                },
+                "goals_completion_level": "all",
+            },
+            "schema": {
+                "repo": {
+                    "path": "repo",
+                    "kind": "text",
+                    "label": "Repository",
+                    "group": "project",
+                    "desc": "Repository root the runner targets.",
+                    "hint": "Set automatically from the repo the server serves.",
+                    "restart": True,
+                    "editable": True,
+                    "redacted": False,
+                    "allow_empty": False,
+                },
+                "prompts_dir": {
+                    "path": "prompts_dir",
+                    "kind": "text",
+                    "label": "Prompts directory",
+                    "group": "prompts",
+                    "restart": True,
+                    "editable": True,
+                    "redacted": False,
+                    "allow_empty": True,
+                },
+                "telegram.bot_token": {
+                    "path": "telegram.bot_token",
+                    "kind": "text",
+                    "label": "Bot token",
+                    "group": "telegram",
+                    "restart": True,
+                    "editable": True,
+                    "redacted": True,
+                    "allow_empty": True,
+                },
+            },
+            "groups": [
+                {"id": "prompts", "title": "Prompt Paths", "paths": ["prompts_dir"]},
+                {"id": "telegram", "title": "Telegram", "paths": ["telegram.bot_token"]},
+            ],
+            "redaction": {
+                "placeholder": "[redacted]",
+                "paths": ["telegram.bot_token"],
+                "tokens": ["token"],
+            },
+            "restart_required_paths": ["repo", "prompts_dir", "telegram.bot_token"],
+            "meta": {
+                "path": "config/agentcli.json",
+                "source": "api",
+                "resolved_prompts_dir": "prompts/agentcli",
+            },
+        }
+
+        normalized = _run_adapter_harness([{"kind": "snapshot", "data": snapshot}])[0]
+
+        self.assertEqual("config/agentcli.json", normalized["configMeta"]["path"])
+        self.assertEqual("prompts/agentcli", normalized["configMeta"]["resolved_prompts_dir"])
+        self.assertEqual("C:/Dev/AgentCLI", normalized["config"]["repo"])
+        self.assertEqual("gpt-5.5", normalized["config"]["pm_model"])
+        self.assertEqual("[redacted]", normalized["config"]["telegram"]["bot_token"])
+        self.assertEqual("[redacted]", normalized["configDefault"]["telegram"]["bot_token"])
+        self.assertEqual("Prompt Paths", normalized["configContract"]["groups"][0]["title"])
+        self.assertEqual(["prompts_dir"], normalized["configContract"]["groups"][0]["paths"])
+        self.assertIn("telegram.bot_token", normalized["configContract"]["redaction"]["paths"])
+        self.assertIn("telegram.bot_token", normalized["configContract"]["restart_required_paths"])
 
 
 if __name__ == "__main__":

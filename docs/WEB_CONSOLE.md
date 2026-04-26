@@ -13,13 +13,14 @@ Verified on 2026-04-26 with a local server and Playwright:
 - Additional read-only contracts now cover Goals metadata and backend log tailing.
 - The UI has first-pass routes for Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, and Worktree Review.
 - Runner controls are disabled by default and require explicit opt-in.
+- Config saves now reuse that opt-in and create a timestamped backup before atomic disk writes.
 - Config rendering now tolerates `roles` as either `PM,Dev,QA` or `["PM", "Dev", "QA"]`.
 - Empty timestamped run directories are ignored so they do not appear as active runs.
 - Completed runs with final reason `ok`, `prepared_only`, `project_complete`, or `all_tasks_done` are no longer displayed as still running.
 
 Known blockers:
 
-- Goals, Config, and Prompts are not yet full edit/save workflows.
+- Goals and Prompts are not yet full edit/save workflows.
 - The Logs view still needs frontend live-tail fetch, pause/resume, filtering, copy, and download behavior.
 - English/Korean locale switching is not implemented.
 - Runner controls need end-to-end validation against a real AgentCLI process before they should be considered usable.
@@ -86,6 +87,7 @@ Runner controls are disabled by default. Enable them explicitly:
 ```
 
 Mutating actions require confirmation phrases. Use localhost first before enabling controls on a LAN bind.
+The guarded config save endpoint uses the same opt-in, rejects unsafe or redacted placeholder writes, and writes a timestamped backup before replacing the config atomically.
 
 ## Validation
 
