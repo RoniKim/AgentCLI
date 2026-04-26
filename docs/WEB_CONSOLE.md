@@ -12,6 +12,7 @@ Verified on 2026-04-26 with a local server and Playwright:
 - Read-only endpoints exist for health, status, progress, config, prompts, logs, history, and worktree review state.
 - Additional read-only contracts now cover Goals metadata and backend log tailing.
 - The UI has first-pass routes for Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, and Worktree Review.
+- Checked-in Playwright smoke coverage now exercises Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, EN/KO Dashboard and Config locale switching, and a mobile-width viewport.
 - Runner controls are disabled by default and require explicit opt-in.
 - Config saves now reuse that opt-in and create a timestamped backup before atomic disk writes.
 - Config rendering now tolerates `roles` as either `PM,Dev,QA` or `["PM", "Dev", "QA"]`.
@@ -22,10 +23,10 @@ Known blockers:
 
 - Goals and Prompts are not yet full edit/save workflows.
 - The Logs view still needs frontend live-tail fetch, pause/resume, filtering, copy, and download behavior.
-- English/Korean locale switching is not implemented.
+- Broader English/Korean locale coverage still needs more views and copy polish.
 - Runner controls need end-to-end validation against a real AgentCLI process before they should be considered usable.
-- The UI still needs Playwright coverage across primary views, mobile width, and both future locales.
-- There is no authentication layer. Do not expose this server to an untrusted network.
+- The UI still needs broader Playwright coverage beyond the checked-in smoke path.
+- There is no authentication layer. Treat LAN binds as trusted-network-only until authentication exists.
 
 ## Install Dependencies
 
@@ -57,7 +58,7 @@ http://127.0.0.1:8000
 
 ## LAN Viewing
 
-Bind to all interfaces only on a trusted private network:
+Bind to all interfaces only on a trusted network. Do not expose the console on an untrusted LAN until authentication exists:
 
 ```powershell
 & "D:\999.AgentCLI\.venv\Scripts\python.exe" -m agent_runner.web `
@@ -71,6 +72,25 @@ Open from another device:
 
 ```text
 http://<notebook-ip>:8000
+```
+
+## Browser Smoke
+
+Run the checked-in Playwright smoke against fixture data:
+
+```powershell
+& "D:\999.AgentCLI\.venv\Scripts\python.exe" "D:\999.AgentCLI\tests\web_console_playwright_smoke.py"
+```
+
+If Playwright is missing, the smoke skips cleanly and prints the optional setup command instead of installing packages.
+
+## Optional Playwright Setup
+
+Install the optional browser test dependency and Chromium binary only if you want to run the smoke locally:
+
+```powershell
+& "D:\999.AgentCLI\.venv\Scripts\python.exe" -m pip install playwright
+& "D:\999.AgentCLI\.venv\Scripts\python.exe" -m playwright install chromium
 ```
 
 ## Runner Controls
@@ -95,6 +115,7 @@ The guarded config save endpoint uses the same opt-in, rejects unsafe or redacte
 & "D:\999.AgentCLI\.venv\Scripts\python.exe" -m compileall agent_runner agent_cli.py
 & "D:\999.AgentCLI\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_web_console*.py"
 & "D:\999.AgentCLI\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_worktree*.py"
+& "D:\999.AgentCLI\.venv\Scripts\python.exe" "D:\999.AgentCLI\tests\web_console_playwright_smoke.py"
 ```
 
-The web smoke path should cover desktop/mobile layout, navigation, command palette, Config rendering, Goals/Prompts views, log filtering, runner controls, and worktree review before marking the product complete.
+The web smoke path should cover the primary views, Dashboard and Config locale switching, prompt read loading, worktree review, and the mobile-width layout before marking the product complete.
