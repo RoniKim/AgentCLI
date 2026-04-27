@@ -53,6 +53,7 @@ _watchdog_process: Optional[subprocess.Popen[object]] = None
 # Session files older than this (seconds) are unconditionally cleaned up,
 # regardless of PID liveness — guards against PID-recycling false positives.
 _SESSION_TTL_SECONDS = 24 * 60 * 60  # 24 hours
+_KILL_RETRY_BACKOFF_SECONDS = 15 * 60  # Avoid noisy retries for kernel-stuck processes.
 
 # ---------------------------------------------------------------------------
 # L1 - Windows Job Object
@@ -430,15 +431,35 @@ def _descendant_pids(root_pid: int, child_map: dict[int, list[int]]) -> list[int
     return descendants
 
 
-def terminate_process_tree(pid: int, *, include_root: bool = True) -> None:
-    """Terminate a managed process and any remaining descendants."""
+def _process_tree_kill_order(pid: int, *, include_root: bool = True) -> list[int]:
+    """Return descendants-first kill order for a managed process tree."""
     if pid <= 0 or pid == os.getpid():
-        return
+        return []
+    pids: list[int] = []
     if sys.platform == "win32":
-        for child_pid in reversed(_descendant_pids(pid, _windows_child_pid_map())):
-            _kill_pid(child_pid)
+        pids.extend(reversed(_descendant_pids(pid, _windows_child_pid_map())))
     if include_root:
-        _kill_pid(pid)
+        pids.append(pid)
+    return [p for p in pids if p > 0 and p != os.getpid()]
+
+
+def terminate_process_tree(
+    pid: int,
+    *,
+    include_root: bool = True,
+    wait: bool = False,
+    timeout_seconds: float = 3.0,
+) -> bool:
+    """Terminate a managed process and any remaining descendants."""
+    kill_order = _process_tree_kill_order(pid, include_root=include_root)
+    if not kill_order:
+        return True
+    for target_pid in kill_order:
+        _kill_pid(target_pid)
+    if not wait:
+        return True
+    _wait_for_pids_exit(kill_order, timeout_seconds=timeout_seconds)
+    return not any(_pid_alive(target_pid) for target_pid in kill_order)
 
 
 def process_descendant_pids(pid: int) -> list[int]:
@@ -481,7 +502,7 @@ def _summarize_pids(pids: list[int], *, limit: int = 40) -> str:
     return f"[{head}, ...] ({len(pids)} total)"
 
 
-def _terminate_windows_pids_bulk(pids: list[int]) -> None:
+def _terminate_windows_pids_bulk(pids: list[int]) -> list[int]:
     """Terminate tracked Windows PIDs using a single process snapshot."""
     child_map = _windows_child_pid_map()
     seen: set[int] = set()
@@ -503,6 +524,7 @@ def _terminate_windows_pids_bulk(pids: list[int]) -> None:
 
     for pid in kill_order:
         _kill_pid(pid)
+    return kill_order
 
 
 def _wait_for_pids_exit(
@@ -532,15 +554,16 @@ def _terminate_pids(pids: list[int], *, wait: bool = True) -> None:
             seen.add(pid)
             unique_pids.append(pid)
 
+    wait_pids = unique_pids
     if sys.platform == "win32":
-        _terminate_windows_pids_bulk(unique_pids)
+        wait_pids = _terminate_windows_pids_bulk(unique_pids)
     else:
         for pid in unique_pids:
             _kill_pid(pid)
 
     if wait:
         if sys.platform == "win32":
-            _wait_for_pids_exit(unique_pids)
+            _wait_for_pids_exit(wait_pids)
         else:
             time.sleep(0.5)
             for pid in unique_pids:
@@ -722,6 +745,49 @@ def _session_allows_child_cleanup(data: dict[str, object], child_pid: int) -> bo
     return _is_managed_child_process(child_pid)
 
 
+def _session_parent_alive(data: dict[str, object], parent_pid: int) -> bool:
+    """Return True only when the recorded parent still appears to be the same process."""
+    if not _pid_alive(parent_pid):
+        return False
+    expected_parent_time = data.get("parent_create_time")
+    if expected_parent_time not in (None, ""):
+        actual = _pid_create_time_ticks(parent_pid)
+        if actual is not None:
+            try:
+                return actual == int(expected_parent_time)
+            except Exception:
+                return False
+    return True
+
+
+def _cleanup_attempt_due(data: dict[str, object], now: float) -> bool:
+    """Throttle repeated kill attempts for processes that remain stuck after termination."""
+    if str(data.get("cleanup_status") or "") != "kill_pending":
+        return True
+    try:
+        last = float(data.get("last_cleanup_attempt_at") or 0)
+    except Exception:
+        last = 0.0
+    return (now - last) >= _KILL_RETRY_BACKOFF_SECONDS
+
+
+def _mark_cleanup_pending(sf: Path, data: dict[str, object], message: str) -> None:
+    payload = dict(data)
+    attempts = payload.get("cleanup_attempts")
+    try:
+        attempt_count = int(attempts or 0) + 1
+    except Exception:
+        attempt_count = 1
+    payload["cleanup_status"] = "kill_pending"
+    payload["cleanup_message"] = message
+    payload["last_cleanup_attempt_at"] = time.time()
+    payload["cleanup_attempts"] = attempt_count
+    try:
+        sf.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _cleanup_session_files_for_parent(session_dir: Path, parent_pid: int) -> int:
     """Kill signed child sessions for a parent that is known to be gone."""
     killed = 0
@@ -754,8 +820,13 @@ def _cleanup_session_files_for_parent(session_dir: Path, parent_pid: int) -> int
                     f"[ProcessGuard] L5: Killing child PID {child_pid_int} "
                     f"after parent {parent_pid} exited"
                 )
-                terminate_process_tree(child_pid_int, include_root=True)
-                killed += 1
+                terminated = terminate_process_tree(child_pid_int, include_root=True, wait=True)
+                if terminated or not _pid_alive(child_pid_int):
+                    killed += 1
+                    sf.unlink(missing_ok=True)
+                else:
+                    _mark_cleanup_pending(sf, data, "kill attempted but process remained alive")
+                continue
             sf.unlink(missing_ok=True)
         except Exception as ex:
             logger.debug(f"[ProcessGuard] L5: Error processing {sf}: {ex}")
@@ -791,9 +862,15 @@ def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
             if child_pid is None or parent_pid is None:
                 sf.unlink(missing_ok=True)
                 continue
+            try:
+                child_pid_int = int(child_pid)
+                parent_pid_int = int(parent_pid)
+            except Exception:
+                sf.unlink(missing_ok=True)
+                continue
 
             # Skip our own session files — they belong to the current process
-            if parent_pid == my_pid:
+            if parent_pid_int == my_pid:
                 continue
 
             # TTL guard: unconditionally remove very old session files to prevent
@@ -806,19 +883,26 @@ def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
                 sf.unlink(missing_ok=True)
                 continue
 
-            parent_alive = _pid_alive(parent_pid)
-            child_alive = _pid_alive(child_pid)
+            parent_alive = _session_parent_alive(data, parent_pid_int)
+            child_alive = _pid_alive(child_pid_int)
 
             if not parent_alive:
                 # Parent is dead — this is a stale session file
-                if child_alive and _session_allows_child_cleanup(data, child_pid):
+                if child_alive and _session_allows_child_cleanup(data, child_pid_int):
+                    if not _cleanup_attempt_due(data, now):
+                        continue
                     logger.warning(
-                        f"[ProcessGuard] L4: Killing orphan PID {child_pid} "
-                        f"(parent {parent_pid} dead)"
+                        f"[ProcessGuard] L4: Killing orphan PID {child_pid_int} "
+                        f"(parent {parent_pid_int} dead)"
                     )
-                    terminate_process_tree(child_pid, include_root=True)
-                    killed += 1
-                sf.unlink(missing_ok=True)
+                    terminated = terminate_process_tree(child_pid_int, include_root=True, wait=True)
+                    if terminated or not _pid_alive(child_pid_int):
+                        killed += 1
+                        sf.unlink(missing_ok=True)
+                    else:
+                        _mark_cleanup_pending(sf, data, "kill attempted but process remained alive")
+                else:
+                    sf.unlink(missing_ok=True)
             elif not child_alive:
                 # Parent alive but child already exited — stale file
                 sf.unlink(missing_ok=True)
@@ -841,7 +925,7 @@ def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
 # L5 - Parent watchdog
 # ---------------------------------------------------------------------------
 
-def _wait_for_parent_exit(parent_pid: int) -> None:
+def _wait_for_parent_exit(parent_pid: int, parent_create_time: Optional[int] = None) -> None:
     """Block until parent_pid exits, falling back to polling when needed."""
     if parent_pid <= 0 or parent_pid == os.getpid():
         return
@@ -859,12 +943,16 @@ def _wait_for_parent_exit(parent_pid: int) -> None:
         except Exception:
             pass
     while _pid_alive(parent_pid):
+        if parent_create_time is not None:
+            actual = _pid_create_time_ticks(parent_pid)
+            if actual is not None and actual != parent_create_time:
+                return
         time.sleep(1.0)
 
 
-def _run_parent_watchdog(parent_pid: int, session_dir: Path) -> int:
+def _run_parent_watchdog(parent_pid: int, session_dir: Path, parent_create_time: Optional[int] = None) -> int:
     """Watch a parent process and clean registered children after parent death."""
-    _wait_for_parent_exit(parent_pid)
+    _wait_for_parent_exit(parent_pid, parent_create_time)
     time.sleep(0.25)
     killed = _cleanup_session_files_for_parent(session_dir, parent_pid)
     if killed:
@@ -905,6 +993,7 @@ def _start_parent_watchdog(session_dir: Path) -> None:
         "--watch-parent",
         str(os.getpid()),
         str(session_dir),
+        str(_pid_create_time_ticks(os.getpid()) or ""),
     ]
     env = dict(os.environ)
     env["AGENTCLI_PROCESS_GUARD_WATCHDOG"] = "1"
@@ -924,6 +1013,11 @@ def _start_parent_watchdog(session_dir: Path) -> None:
                 "[ProcessGuard] L5: Parent watchdog started "
                 f"(pid={_watchdog_process.pid}, breakaway={allow_breakaway})"
             )
+            if not allow_breakaway:
+                logger.warning(
+                    "[ProcessGuard] L5: Parent watchdog started without breakaway; "
+                    "it may exit with the parent Job Object."
+                )
             return
         except OSError as ex:
             logger.debug(f"[ProcessGuard] L5: Watchdog start failed (breakaway={allow_breakaway}): {ex}")
@@ -1000,13 +1094,14 @@ def init_process_guard(
 
 
 def _main(argv: list[str]) -> int:
-    if len(argv) == 4 and argv[1] == "--watch-parent":
+    if len(argv) in (4, 5) and argv[1] == "--watch-parent":
         try:
             parent_pid = int(argv[2])
             session_dir = Path(argv[3]).expanduser().resolve()
+            parent_create_time = int(argv[4]) if len(argv) == 5 and str(argv[4]).strip() else None
         except Exception:
             return 2
-        return _run_parent_watchdog(parent_pid, session_dir)
+        return _run_parent_watchdog(parent_pid, session_dir, parent_create_time)
     return 2
 
 

@@ -631,7 +631,8 @@ class RunnerShell:
                 except KeyboardInterrupt:
                     print("[STOP] Stop is already in progress; keep waiting for cleanup.", flush=True)
             alive = self._runner_thread.is_alive()
-            close_all_loggers()
+            if not alive:
+                close_all_loggers()
             self._print_stop_progress(
                 write_stop_progress(
                     self.run_dir,

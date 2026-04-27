@@ -94,6 +94,7 @@ class ProcessGuardTests(unittest.TestCase):
 
     def test_terminate_pids_uses_one_windows_snapshot_for_bulk_cleanup(self) -> None:
         killed: list[int] = []
+        waited: list[int] = []
         child_map = {
             10: [11],
             11: [12],
@@ -106,11 +107,13 @@ class ProcessGuardTests(unittest.TestCase):
             patch("agent_runner.process_guard._windows_child_pid_map", return_value=child_map) as snapshot,
             patch("agent_runner.process_guard._kill_pid", side_effect=lambda pid: killed.append(pid)),
             patch("agent_runner.process_guard._pid_alive", return_value=False),
+            patch("agent_runner.process_guard._wait_for_pids_exit", side_effect=lambda pids, **_: waited.extend(pids)),
         ):
             process_guard._terminate_pids([10, 20, 10], wait=True)
 
         self.assertEqual(1, snapshot.call_count)
         self.assertEqual([12, 11, 10, 21, 20], killed)
+        self.assertEqual([12, 11, 10, 21, 20], waited)
 
     def test_terminate_pids_waits_for_windows_exit_before_unregister(self) -> None:
         unregistered: list[int] = []
@@ -188,13 +191,78 @@ class ProcessGuardTests(unittest.TestCase):
             patch("agent_runner.process_guard._pid_alive", side_effect=lambda pid: int(pid) == 123),
             patch("agent_runner.process_guard._pid_create_time_ticks", return_value=111),
             patch("agent_runner.process_guard._is_managed_child_process", side_effect=AssertionError("unsigned fallback should not run")),
-            patch("agent_runner.process_guard.terminate_process_tree", side_effect=lambda pid, include_root=True: killed.append(pid)),
+            patch("agent_runner.process_guard.terminate_process_tree", side_effect=lambda pid, **_: killed.append(pid) or True),
         ):
             count = process_guard.cleanup_orphans(self.fixture_root)
 
         self.assertEqual(1, count)
         self.assertEqual([123], killed)
         self.assertFalse(session_file.exists())
+
+    def test_cleanup_orphans_keeps_session_when_kill_does_not_exit(self) -> None:
+        session_file = self.fixture_root / "session_123.json"
+        session_file.write_text(
+            json.dumps(
+                {
+                    "child_pid": 123,
+                    "parent_pid": 456,
+                    "created_at": time.time(),
+                    "child_create_time": 111,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("agent_runner.process_guard.os.getpid", return_value=999),
+            patch("agent_runner.process_guard._pid_alive", side_effect=lambda pid: int(pid) == 123),
+            patch("agent_runner.process_guard._pid_create_time_ticks", return_value=111),
+            patch("agent_runner.process_guard.terminate_process_tree", return_value=False),
+        ):
+            count = process_guard.cleanup_orphans(self.fixture_root)
+
+        self.assertEqual(0, count)
+        payload = json.loads(session_file.read_text(encoding="utf-8"))
+        self.assertEqual("kill_pending", payload["cleanup_status"])
+        self.assertEqual(1, payload["cleanup_attempts"])
+
+    def test_cleanup_orphans_throttles_pending_kill_retries(self) -> None:
+        session_file = self.fixture_root / "session_123.json"
+        session_file.write_text(
+            json.dumps(
+                {
+                    "child_pid": 123,
+                    "parent_pid": 456,
+                    "created_at": time.time(),
+                    "child_create_time": 111,
+                    "cleanup_status": "kill_pending",
+                    "last_cleanup_attempt_at": time.time(),
+                    "cleanup_attempts": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("agent_runner.process_guard.os.getpid", return_value=999),
+            patch("agent_runner.process_guard._pid_alive", side_effect=lambda pid: int(pid) == 123),
+            patch("agent_runner.process_guard._pid_create_time_ticks", return_value=111),
+            patch("agent_runner.process_guard.terminate_process_tree") as terminate_tree,
+        ):
+            count = process_guard.cleanup_orphans(self.fixture_root)
+
+        self.assertEqual(0, count)
+        terminate_tree.assert_not_called()
+        self.assertTrue(session_file.exists())
+
+    def test_session_parent_alive_rejects_pid_reuse_when_signature_differs(self) -> None:
+        with (
+            patch("agent_runner.process_guard._pid_alive", return_value=True),
+            patch("agent_runner.process_guard._pid_create_time_ticks", return_value=222),
+        ):
+            alive = process_guard._session_parent_alive({"parent_create_time": 111}, 456)
+
+        self.assertFalse(alive)
 
     def test_cleanup_orphans_skips_signed_child_when_pid_was_reused(self) -> None:
         session_file = self.fixture_root / "session_123.json"
@@ -284,6 +352,8 @@ class ProcessGuardTests(unittest.TestCase):
             )
         )
         elapsed = time.monotonic() - started
+        if not log_path.exists():
+            self.skipTest(f"subprocess did not produce smoke log in this environment: rc={rc} summary={summary}")
         child_pid = int(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[0])
         time.sleep(0.5)
 

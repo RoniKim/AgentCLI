@@ -8,7 +8,7 @@ import shutil
 import unittest
 from pathlib import Path
 
-from agent_runner.logger import create_logger
+from agent_runner.logger import close_all_loggers, create_logger
 
 
 def _assert_exclusive_open(path: Path) -> None:
@@ -50,6 +50,23 @@ class StructuredLoggerTests(unittest.TestCase):
             self.assertIsNone(logger._events_fh)
             for name in ("run.log", "error.log", "debug.log", "events.jsonl"):
                 _assert_exclusive_open(run_dir / "logs" / name)
+        finally:
+            shutil.rmtree(run_dir, ignore_errors=True)
+
+    def test_close_all_loggers_releases_active_handlers(self) -> None:
+        run_dir = Path.cwd() / ".test-scratch" / "logger-close-all-test"
+        shutil.rmtree(run_dir, ignore_errors=True)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                logger = create_logger(run_dir, debug=False)
+                logger.info("runner started")
+
+            close_all_loggers()
+
+            self.assertEqual([], logger.logger.handlers)
+            _assert_exclusive_open(run_dir / "logs" / "run.log")
+            _assert_exclusive_open(run_dir / "logs" / "events.jsonl")
         finally:
             shutil.rmtree(run_dir, ignore_errors=True)
 

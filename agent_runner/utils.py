@@ -95,6 +95,7 @@ def run_cmd(cmd: Sequence[str], cwd: Path, timeout_sec: int = 600) -> Tuple[int,
             timeout=timeout_sec,
             check=False,
             stdin=subprocess.DEVNULL,
+            **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
         )
         out = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
         return r.returncode, out.strip()
@@ -638,6 +639,7 @@ class _CodexAppServerClient:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
         )
         if self._proc.stdin is None or self._proc.stdout is None:
             raise CodexAppServerError("Failed to start codex app-server (stdio unavailable)")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import threading
 import traceback
 import weakref
 from datetime import datetime
@@ -15,6 +16,7 @@ from .utils import now_iso
 
 
 _ACTIVE_LOGGERS: "weakref.WeakSet[StructuredLogger]" = weakref.WeakSet()
+_ACTIVE_LOGGERS_LOCK = threading.RLock()
 
 
 class _ProcessGuardFilter(logging.Filter):
@@ -108,7 +110,8 @@ class StructuredLogger:
 
         # Cached file handle for events.jsonl
         self._events_fh: Optional[Any] = None
-        _ACTIVE_LOGGERS.add(self)
+        with _ACTIVE_LOGGERS_LOCK:
+            _ACTIVE_LOGGERS.add(self)
 
     def set_context(self, **kwargs: Any) -> None:
         """Set context information for error tracking."""
@@ -349,10 +352,11 @@ class StructuredLogger:
                 self.logger.removeHandler(handler)
             except Exception:
                 pass
-        try:
-            _ACTIVE_LOGGERS.discard(self)
-        except Exception:
-            pass
+        with _ACTIVE_LOGGERS_LOCK:
+            try:
+                _ACTIVE_LOGGERS.discard(self)
+            except Exception:
+                pass
 
     def _write_error_detail(self, error_context: Dict[str, Any]) -> None:
         """Write detailed error information to error.log."""
@@ -392,7 +396,9 @@ def create_logger(run_dir: Path, debug: bool = False) -> StructuredLogger:
 
 def close_all_loggers() -> None:
     """Close every active AgentCLI structured logger in this process."""
-    for logger in list(_ACTIVE_LOGGERS):
+    with _ACTIVE_LOGGERS_LOCK:
+        loggers = list(_ACTIVE_LOGGERS)
+    for logger in loggers:
         try:
             logger.close()
         except Exception:

@@ -42,9 +42,11 @@ class RunnerController:
         self._runner_thread: Optional[threading.Thread] = None
         self._runner_process: Optional[subprocess.Popen[bytes]] = None
         self._runner_log_handle: Optional[Any] = None
+        self._runner_watch_thread: Optional[threading.Thread] = None
         self._runner_exit_code: Optional[int] = None
         self._runner_started_at: Optional[float] = None
         self._start_lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self.run_dir: Optional[Path] = None
         self._on_done_callbacks: list[Callable[[int], None]] = []
 
@@ -109,25 +111,48 @@ class RunnerController:
         return latest if latest is not None else make_run_dir(self.repo)
 
     def _refresh_process_state(self) -> None:
-        if self._runner_process is None:
+        proc = self._runner_process
+        if proc is None:
             return
-        rc = self._runner_process.poll()
+        rc = proc.poll()
         if rc is None:
             return
-        self._runner_exit_code = int(rc)
-        try:
-            if self._runner_process.pid:
-                terminate_process_tree(int(self._runner_process.pid), include_root=False)
-                unregister_pid_if_exited(int(self._runner_process.pid))
-        except Exception:
-            pass
-        self._runner_process = None
-        if self._runner_log_handle is not None:
+        self._finalize_runner_process(proc, int(rc))
+
+    def _finalize_runner_process(self, proc: subprocess.Popen[bytes], rc: int) -> None:
+        with self._state_lock:
+            if self._runner_process is not proc:
+                return
+            self._runner_exit_code = int(rc)
             try:
-                self._runner_log_handle.close()
+                if proc.pid:
+                    terminate_process_tree(int(proc.pid), include_root=False, wait=True)
+                    unregister_pid_if_exited(int(proc.pid))
             except Exception:
                 pass
-            self._runner_log_handle = None
+            self._runner_process = None
+            if self._runner_log_handle is not None:
+                try:
+                    self._runner_log_handle.close()
+                except Exception:
+                    pass
+                self._runner_log_handle = None
+
+    def _start_subprocess_watch(self, proc: subprocess.Popen[bytes]) -> None:
+        def _watch() -> None:
+            try:
+                rc = proc.wait()
+            except Exception:
+                rc = 1
+            self._finalize_runner_process(proc, int(rc))
+            self._fire_on_done(int(rc))
+
+        self._runner_watch_thread = threading.Thread(
+            target=_watch,
+            name="agentcli-runner-subprocess-watch",
+            daemon=True,
+        )
+        self._runner_watch_thread.start()
 
     def _runner_is_alive(self) -> bool:
         if self.runner_mode == "subprocess":
@@ -172,12 +197,14 @@ class RunnerController:
                 stdin=subprocess.DEVNULL,
                 stdout=self._runner_log_handle,
                 stderr=subprocess.STDOUT,
+                **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
             )
             if self._runner_process.pid:
                 try:
                     register_pid(int(self._runner_process.pid))
                 except Exception:
                     pass
+            self._start_subprocess_watch(self._runner_process)
         except Exception:
             if self._runner_log_handle is not None:
                 try:
@@ -369,7 +396,7 @@ class RunnerController:
                 self._refresh_process_state()
 
         running = self._runner_is_alive()
-        if wait:
+        if wait and not running:
             close_all_loggers()
         if running:
             final_phase = "timeout" if wait else "stop_requested"
@@ -391,8 +418,8 @@ class RunnerController:
         )
 
         return {
-            "ok": True,
-            "message": f"\uc911\uc9c0 \uc694\uccad\ub428: {stop_path.as_posix()}",
+            "ok": not (wait and running),
+            "message": final_message if wait and running else f"\uc911\uc9c0 \uc694\uccad\ub428: {stop_path.as_posix()}",
             "running": running,
             "run_dir": run_dir.as_posix(),
             "stop_progress": read_stop_progress(run_dir),

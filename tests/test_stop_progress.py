@@ -6,6 +6,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_runner.remote.controller import RunnerController
 from agent_runner.stop_progress import (
@@ -86,13 +87,15 @@ class StopProgressTests(unittest.TestCase):
         thread.start()
 
         try:
-            result = controller.stop(wait=True)
+            with patch("agent_runner.remote.controller.close_all_loggers") as close_loggers:
+                result = controller.stop(wait=True)
         finally:
             release.set()
             thread.join(timeout=2)
 
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
         self.assertTrue(result["running"])
+        close_loggers.assert_not_called()
         progress = read_stop_progress(run_dir)
         self.assertEqual("timeout", progress["phase"])
         self.assertIn("1s stop wait timeout", progress["message"])
