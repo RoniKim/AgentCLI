@@ -129,6 +129,7 @@ async def run_cmd_async(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.DEVNULL,
+            **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
         )
     except (OSError, FileNotFoundError) as e:
         return (127, str(e))

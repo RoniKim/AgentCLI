@@ -879,6 +879,16 @@ def _watchdog_creationflags(*, allow_breakaway: bool) -> int:
     return flags
 
 
+def _watchdog_executable() -> str:
+    """Use pythonw.exe for the watchdog on Windows so no console is shown."""
+    exe = Path(sys.executable)
+    if sys.platform == "win32" and exe.name.lower() == "python.exe":
+        pythonw = exe.with_name("pythonw.exe")
+        if pythonw.exists():
+            return str(pythonw)
+    return str(exe)
+
+
 def _start_parent_watchdog(session_dir: Path) -> None:
     """Start a detached helper that survives parent crashes where possible."""
     global _watchdog_process
@@ -890,7 +900,7 @@ def _start_parent_watchdog(session_dir: Path) -> None:
         return
 
     cmd = [
-        sys.executable,
+        _watchdog_executable(),
         str(Path(__file__).resolve()),
         "--watch-parent",
         str(os.getpid()),

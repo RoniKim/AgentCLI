@@ -249,6 +249,18 @@ class ProcessGuardTests(unittest.TestCase):
         flags = int(calls[0]["creationflags"])
         self.assertTrue(flags & process_guard._CREATE_BREAKAWAY_FROM_JOB)
 
+    def test_watchdog_executable_prefers_pythonw_on_windows(self) -> None:
+        fake_python = self.fixture_root / "python.exe"
+        fake_pythonw = self.fixture_root / "pythonw.exe"
+        fake_python.write_text("", encoding="utf-8")
+        fake_pythonw.write_text("", encoding="utf-8")
+
+        with (
+            patch.object(process_guard.sys, "platform", "win32"),
+            patch.object(process_guard.sys, "executable", str(fake_python)),
+        ):
+            self.assertEqual(str(fake_pythonw), process_guard._watchdog_executable())
+
     @unittest.skipUnless(sys.platform == "win32", "Windows process-tree smoke test")
     def test_run_cmd_async_cleans_inherited_stdout_child_process(self) -> None:
         from agent_runner.utils import run_cmd_async
