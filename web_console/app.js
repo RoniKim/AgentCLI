@@ -185,12 +185,22 @@
         confirmStopPhrase: 'STOP RUNNER',
         confirmReloadPhrase: 'RELOAD RUNNER',
         confirmRestartPhrase: 'RESTART RUNNER',
+        startOptions: 'Start options',
+        startOptionsSummary: 'These controls are normalized before the runner starts.',
         source: 'Source',
         selectedRepo: 'Selected repo',
         selectedConfig: 'Selected config',
         controller: 'Controller',
         state: 'State',
         runMode: 'Run mode',
+        autopilot: 'Autopilot',
+        continuous: 'Continuous',
+        loop: 'Loop',
+        oneShot: 'One-shot',
+        maxCycles: 'Max cycles',
+        profile: 'Profile',
+        backend: 'Backend',
+        configPath: 'Config path',
         runStatus: 'Run status',
         stopProgress: 'Stop progress',
         lastAction: 'Last action',
@@ -2491,6 +2501,181 @@
     return labels[action] || t('common.saved');
   }
 
+  function normalizeRunnerControlStartMode(value) {
+    const raw = toText(value, '').replace(/_/g, '-').toLowerCase();
+    if (raw === 'continuous' || raw === 'loop') {
+      return raw;
+    }
+    return 'one-shot';
+  }
+
+  function normalizeRunnerControlStartOptionsContract(contract) {
+    const raw = toObject(contract);
+    return {
+      path: toText(raw.path, ''),
+      defaultsPath: toText(raw.defaults_path || raw.defaultsPath, ''),
+      values: toObject(raw.values),
+      defaults: toObject(raw.defaults),
+      schema: toObject(raw.schema),
+      choices: toObject(raw.choices),
+    };
+  }
+
+  function runnerControlStartOptionsContract(control = state.runnerControl) {
+    const current = toObject(control);
+    return normalizeRunnerControlStartOptionsContract(current.startOptions || current.start_options);
+  }
+
+  function runnerControlStartOptionsDraftFrom(raw = {}, fallback = {}, control = state.runnerControl) {
+    const source = toObject(raw);
+    const base = toObject(fallback);
+    const status = toObject(toObject(control).status);
+    const fallbackConfigPath = toText(
+      source.config_path ||
+        source.configPath ||
+        source.config ||
+        base.config_path ||
+        base.configPath ||
+        base.config ||
+        status.configPath ||
+        status.config_path ||
+        '',
+      ''
+    );
+    const modeSource = source.run_mode || source.runMode || source.mode || base.run_mode || base.runMode || base.mode || (source.loop || base.loop ? 'loop' : source.continuous || base.continuous ? 'continuous' : '');
+    const runMode = normalizeRunnerControlStartMode(modeSource);
+    const loopMaxCycles = toText(
+      source.loop_max_cycles ??
+        source.loopMaxCycles ??
+        source.max_cycles ??
+        source.maxCycles ??
+        base.loop_max_cycles ??
+        base.loopMaxCycles ??
+        base.max_cycles ??
+        base.maxCycles ??
+        '0',
+      '0'
+    );
+    return {
+      autopilot: source.autopilot == null ? Boolean(base.autopilot) : Boolean(source.autopilot),
+      run_mode: runMode,
+      continuous: runMode === 'continuous' || runMode === 'loop',
+      loop: runMode === 'loop',
+      one_shot: runMode === 'one-shot',
+      loop_max_cycles: loopMaxCycles,
+      profile: toText(source.profile || base.profile || 'personal', 'personal'),
+      execution_backend: toText(
+        source.execution_backend ||
+          source.executionBackend ||
+          source.backend ||
+          base.execution_backend ||
+          base.executionBackend ||
+          base.backend ||
+          'codex',
+        'codex'
+      ),
+      config_path: fallbackConfigPath,
+    };
+  }
+
+  function runnerControlStartOptionsDraft(control = state.runnerControl) {
+    const contract = runnerControlStartOptionsContract(control);
+    return runnerControlStartOptionsDraftFrom(contract.values, contract.defaults, control);
+  }
+
+  function runnerControlStartOptionsDefaultDraft(control = state.runnerControl) {
+    const contract = runnerControlStartOptionsContract(control);
+    return runnerControlStartOptionsDraftFrom(contract.defaults, contract.values, control);
+  }
+
+  function runnerControlStartOptionDisplayValue(path, value) {
+    const normalizedPath = String(path || '');
+    if (normalizedPath === 'autopilot') {
+      return Boolean(value) ? t('common.enabled') : t('common.disabled');
+    }
+    if (normalizedPath === 'run_mode') {
+      const mode = normalizeRunnerControlStartMode(value);
+      if (mode === 'continuous') {
+        return t('runner.continuous');
+      }
+      if (mode === 'loop') {
+        return t('runner.loop');
+      }
+      return t('runner.oneShot');
+    }
+    if (normalizedPath === 'loop_max_cycles') {
+      const text = toText(value, '');
+      return text || t('common.none');
+    }
+    const text = toText(value, '');
+    return text || t('common.none');
+  }
+
+  function runnerControlStartOptionsPayload(draft = state.stopStartOptions) {
+    const current = toObject(draft);
+    const runMode = normalizeRunnerControlStartMode(current.run_mode || current.runMode || current.mode);
+    const profile = toText(current.profile, 'personal').trim().toLowerCase() || 'personal';
+    const executionBackend = toText(current.execution_backend || current.executionBackend || current.backend, 'codex').trim().toLowerCase() || 'codex';
+    const configPath = toText(current.config_path || current.configPath || current.config, '');
+    const loopMaxCycles = toText(current.loop_max_cycles ?? current.loopMaxCycles ?? current.max_cycles ?? current.maxCycles ?? '', '');
+    return {
+      autopilot: Boolean(current.autopilot),
+      run_mode: runMode,
+      continuous: runMode === 'continuous' || runMode === 'loop',
+      loop: runMode === 'loop',
+      one_shot: runMode === 'one-shot',
+      loop_max_cycles: loopMaxCycles,
+      profile,
+      execution_backend: executionBackend,
+      config_path: configPath,
+    };
+  }
+
+  function runnerControlStartOptionsState() {
+    return toObject(
+      state.stopStartOptions && typeof state.stopStartOptions === 'object'
+        ? state.stopStartOptions
+        : runnerControlStartOptionsDraft(state.runnerControl)
+    );
+  }
+
+  function updateRunnerControlStartOptionsDraft(updates = {}, { rerender = true } = {}) {
+    state.stopStartOptions = {
+      ...runnerControlStartOptionsState(),
+      ...toObject(updates),
+    };
+    state.stopError = '';
+    if (rerender && state.stopOpen) {
+      renderStopOverlay();
+    }
+  }
+
+  function updateRunnerControlStartMode(mode) {
+    const normalized = normalizeRunnerControlStartMode(mode);
+    updateRunnerControlStartOptionsDraft({
+      run_mode: normalized,
+      continuous: normalized === 'continuous' || normalized === 'loop',
+      loop: normalized === 'loop',
+      one_shot: normalized === 'one-shot',
+    });
+  }
+
+  function toggleRunnerControlAutopilot() {
+    const current = runnerControlStartOptionsState();
+    updateRunnerControlStartOptionsDraft({ autopilot: !Boolean(current.autopilot) });
+  }
+
+  function updateRunnerControlStartField(field, value, { rerender = false } = {}) {
+    const normalizedField = String(field || '');
+    let normalizedValue = value;
+    if (normalizedField === 'loop_max_cycles' || normalizedField === 'config_path') {
+      normalizedValue = toText(value, '');
+    } else if (normalizedField === 'profile' || normalizedField === 'execution_backend') {
+      normalizedValue = toText(value, '').trim().toLowerCase();
+    }
+    updateRunnerControlStartOptionsDraft({ [normalizedField]: normalizedValue }, { rerender });
+  }
+
   function runnerControlModalTitle(action) {
     const titles = {
       start: t('runner.confirmStart'),
@@ -2746,6 +2931,7 @@
         reload: runnerControlConfirmationPhrase('reload'),
         restart: runnerControlConfirmationPhrase('restart'),
       },
+      startOptions: normalizeRunnerControlStartOptionsContract(overrides.startOptions),
       lastAction: toText(overrides.lastAction, ''),
       lastMessage: toText(overrides.lastMessage, ''),
       lastError: toText(overrides.lastError, ''),
@@ -2802,6 +2988,7 @@
       busy,
       message: message || (controllerAvailable ? (enabled ? (running ? t('runner.enabledRunning') : t('runner.enabledStopped')) : t('runner.disabledUntilServerOptIn')) : t('runner.controllerUnavailableMessage')),
       runStatus: toText(raw.run_status || raw.runStatus || '', running ? 'running' : 'idle'),
+      startOptions: normalizeRunnerControlStartOptionsContract(raw.start_options || raw.startOptions),
       status: {
         running,
         runnerMode: toText(status.runner_mode || status.runnerMode, 'unknown'),
@@ -8483,6 +8670,7 @@
       button(runnerControlActionLabel('restart', busyAction === 'restart'), 'runner-restart', runnerControlActionClass('restart', 'button--quiet'), `aria-label="${escapeHTML(t('runner.restart'))}" ${runnerControlButtonAttrs('restart')}`),
     ].join('');
     const detailItems = runnerControlDetailRows(control, display);
+    const startOptionsChips = runnerControlStartOptionsSummaryChips(control);
     const detailHTML = detailItems
       .map(
         (item) => `
@@ -8507,6 +8695,12 @@
           </div>
           <div class="runner-control__details">
             ${detailHTML}
+          </div>
+          <div class="runner-control__chips">
+            ${startOptionsChips}
+          </div>
+          <div class="summary-note">
+            ${escapeHTML(t('runner.startOptionsSummary'))}
           </div>
           <div class="runner-control__buttons">
             ${buttonRow}
@@ -9149,6 +9343,199 @@
           ${button(`${t('logs.copySelectedLines')}${selectedCount ? ` (${selectedCount})` : ''}`, 'copy-log-tail-selection', 'button--quiet', selectedCount ? '' : 'disabled')}
           ${button(t('logs.downloadFilteredLogs'), 'download-log-tail', 'button--quiet')}
           ${button(t('logs.clearSelection'), 'clear-log-tail-selection', 'button--quiet', selectedCount ? '' : 'disabled')}
+        </div>
+      </div>
+    `;
+  }
+
+  function runnerControlStartOptionMetaText(path, currentValue, defaultValue, hint = '') {
+    const parts = [
+      `${t('config.activeValue')}: ${runnerControlStartOptionDisplayValue(path, currentValue)}`,
+      `${t('config.defaultValue')}: ${runnerControlStartOptionDisplayValue(path, defaultValue)}`,
+    ];
+    if (hint) {
+      parts.push(hint);
+    }
+    return parts.join(' | ');
+  }
+
+  function runnerControlStartOptionsSummaryChips(control = state.runnerControl, draft = state.stopStartOptions) {
+    const values = draft && typeof draft === 'object' ? draft : runnerControlStartOptionsDraft(control);
+    return [
+      chip(`${t('runner.autopilot')}: ${runnerControlStartOptionDisplayValue('autopilot', values.autopilot)}`, values.autopilot ? 'chip--accent' : 'chip--muted'),
+      chip(`${t('runner.runMode')}: ${runnerControlStartOptionDisplayValue('run_mode', values.run_mode)}`, 'chip--info'),
+      chip(`${t('runner.maxCycles')}: ${runnerControlStartOptionDisplayValue('loop_max_cycles', values.loop_max_cycles)}`, 'chip--warn'),
+      chip(`${t('runner.profile')}: ${runnerControlStartOptionDisplayValue('profile', values.profile)}`, 'chip--info'),
+      chip(`${t('runner.backend')}: ${runnerControlStartOptionDisplayValue('execution_backend', values.execution_backend)}`, 'chip--info'),
+    ].join('');
+  }
+
+  function runnerControlStartOptionCard({
+    path,
+    label,
+    currentValue,
+    defaultValue,
+    hint = '',
+    controlHTML = '',
+    disabled = false,
+    extraClass = '',
+  }) {
+    return `
+      <div class="runner-control__option ${escapeHTML(extraClass)}">
+        <div class="runner-control__option-head">
+          <div class="runner-control__label">${escapeHTML(label)}</div>
+        </div>
+        <div class="runner-control__option-meta">${escapeHTML(runnerControlStartOptionMetaText(path, currentValue, defaultValue, hint))}</div>
+        <div class="runner-control__option-control ${disabled ? 'runner-control__option-control--disabled' : ''}">
+          ${controlHTML}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderRunnerControlStartOptionsSection(control = state.runnerControl, actionEnabled = false) {
+    const contract = runnerControlStartOptionsContract(control);
+    const current = state.stopStartOptions && typeof state.stopStartOptions === 'object'
+      ? state.stopStartOptions
+      : runnerControlStartOptionsDraft(control);
+    const defaults = runnerControlStartOptionsDefaultDraft(control);
+    const values = toObject(current);
+    const defaultValues = toObject(defaults);
+    const schema = toObject(contract.schema);
+    const disabled = !actionEnabled || state.stopSubmitting;
+    const selectedRunMode = normalizeRunnerControlStartMode(values.run_mode);
+    const runModeOptions = toArray(schema.run_mode?.options || contract.choices?.run_mode || ['one-shot', 'continuous', 'loop']);
+    const profileOptions = toArray(schema.profile?.options || contract.choices?.profile || ['personal', 'enterprise']);
+    const backendOptions = toArray(schema.execution_backend?.options || contract.choices?.execution_backend || ['codex', 'claudecode']);
+    const runModeButtons = runModeOptions
+      .map((option) => `
+        <button
+          type="button"
+          class="modal-tab ${selectedRunMode === option ? 'modal-tab--active' : ''}"
+          data-runner-option-mode="${escapeHTML(option)}"
+          ${disabled ? 'disabled' : ''}
+        >${escapeHTML(runnerControlStartOptionDisplayValue('run_mode', option))}</button>
+      `)
+      .join('');
+    const autopilotControl = `
+      <button
+        type="button"
+        class="control-chip ${values.autopilot ? 'control-chip--active' : ''}"
+        data-runner-option-toggle="autopilot"
+        ${disabled ? 'disabled' : ''}
+      >
+        <span class="dot" style="background:${values.autopilot ? 'var(--accent)' : 'var(--text-sub)'}"></span>
+        ${escapeHTML(runnerControlStartOptionDisplayValue('autopilot', values.autopilot))}
+      </button>
+    `;
+    const maxCyclesControl = `
+      <input
+        type="number"
+        class="field-control"
+        min="${escapeHTML(toText(schema.loop_max_cycles?.min, '0'))}"
+        step="1"
+        value="${escapeHTML(toText(values.loop_max_cycles, '0'))}"
+        data-runner-option-field="loop_max_cycles"
+        ${disabled ? 'disabled' : ''}
+      >
+    `;
+    const profileControl = `
+      <select class="field-control" data-runner-option-field="profile" ${disabled ? 'disabled' : ''}>
+        ${profileOptions
+          .map((option) => `<option value="${escapeHTML(option)}" ${String(option) === String(values.profile) ? 'selected' : ''}>${escapeHTML(option)}</option>`)
+          .join('')}
+      </select>
+    `;
+    const backendControl = `
+      <select class="field-control" data-runner-option-field="execution_backend" ${disabled ? 'disabled' : ''}>
+        ${backendOptions
+          .map((option) => `<option value="${escapeHTML(option)}" ${String(option) === String(values.execution_backend) ? 'selected' : ''}>${escapeHTML(option)}</option>`)
+          .join('')}
+      </select>
+    `;
+    const configPathControl = `
+      <input
+        type="text"
+        class="field-control"
+        value="${escapeHTML(toText(values.config_path, ''))}"
+        placeholder="${escapeHTML(contract.path || contract.defaultsPath || t('runner.configPath'))}"
+        autocomplete="off"
+        spellcheck="false"
+        data-runner-option-field="config_path"
+        ${disabled ? 'disabled' : ''}
+      >
+    `;
+    const cards = [
+      runnerControlStartOptionCard({
+        path: 'autopilot',
+        label: t('runner.autopilot'),
+        currentValue: values.autopilot,
+        defaultValue: defaultValues.autopilot,
+        hint: schema.autopilot?.hint || '',
+        controlHTML: autopilotControl,
+        disabled,
+      }),
+      runnerControlStartOptionCard({
+        path: 'run_mode',
+        label: t('runner.runMode'),
+        currentValue: values.run_mode,
+        defaultValue: defaultValues.run_mode,
+        hint: schema.run_mode?.hint || '',
+        controlHTML: `<div class="modal-tabs runner-control__run-modes">${runModeButtons}</div>`,
+        disabled,
+      }),
+      runnerControlStartOptionCard({
+        path: 'loop_max_cycles',
+        label: t('runner.maxCycles'),
+        currentValue: values.loop_max_cycles,
+        defaultValue: defaultValues.loop_max_cycles,
+        hint: schema.loop_max_cycles?.hint || '',
+        controlHTML: maxCyclesControl,
+        disabled,
+      }),
+      runnerControlStartOptionCard({
+        path: 'profile',
+        label: t('runner.profile'),
+        currentValue: values.profile,
+        defaultValue: defaultValues.profile,
+        hint: schema.profile?.hint || '',
+        controlHTML: profileControl,
+        disabled,
+      }),
+      runnerControlStartOptionCard({
+        path: 'execution_backend',
+        label: t('runner.backend'),
+        currentValue: values.execution_backend,
+        defaultValue: defaultValues.execution_backend,
+        hint: schema.execution_backend?.hint || '',
+        controlHTML: backendControl,
+        disabled,
+      }),
+      runnerControlStartOptionCard({
+        path: 'config_path',
+        label: t('runner.configPath'),
+        currentValue: values.config_path,
+        defaultValue: defaultValues.config_path,
+        hint: schema.config_path?.hint || '',
+        controlHTML: configPathControl,
+        disabled,
+        extraClass: 'runner-control__option--wide',
+      }),
+    ].join('');
+
+    return `
+      <div class="runner-control__options">
+        <div class="runner-control__options-head">
+          <div>
+            <div class="runner-control__options-title">${escapeHTML(t('runner.startOptions'))}</div>
+            <div class="summary-note">${escapeHTML(t('runner.startOptionsSummary'))}</div>
+          </div>
+        </div>
+        <div class="runner-control__chips">
+          ${runnerControlStartOptionsSummaryChips(control, values)}
+        </div>
+        <div class="runner-control__options-grid">
+          ${cards}
         </div>
       </div>
     `;
@@ -11324,6 +11711,7 @@
     const confirmation = runnerControlConfirmationPhrase(action);
     const confirmationValue = state.stopConfirmation.trim();
     const actionEnabled = runnerControlActionEnabled(action);
+    const startAction = action === 'start' || action === 'reload' || action === 'restart';
     const confirmEnabled = actionEnabled && confirmationValue === confirmation && !state.stopSubmitting;
     const bannerTone = state.stopSubmitting ? 'info' : state.stopError ? 'err' : !actionEnabled ? 'warn' : 'idle';
     const actionTitle = runnerControlModalTitle(action);
@@ -11349,6 +11737,7 @@
         `
       )
       .join('');
+    const startOptionsHTML = startAction ? renderRunnerControlStartOptionsSection(control, actionEnabled) : '';
     const bannerTitle = state.stopSubmitting ? t('runner.actionInFlight') : state.stopError ? t('runner.actionFailed') : !actionEnabled ? t('runner.actionDisabled') : t('runner.confirmationRequired');
     const bannerMessage = state.stopSubmitting
       ? control.message || t('runner.refreshingStatus')
@@ -11378,6 +11767,7 @@
             <div class="runner-control__details" style="margin-top:12px;">
               ${detailHTML}
             </div>
+            ${startOptionsHTML}
             <div class="modal-field" style="margin-top:12px;">
               <div class="modal-field__label">${escapeHTML(t('runner.confirmationPhrase'))}</div>
               <input
@@ -12078,6 +12468,7 @@
     stopConfirmation: '',
     stopError: '',
     stopSubmitting: false,
+    stopStartOptions: null,
     goalEditor: null,
     logsPaused: true,
     logFilter: 'all',
@@ -12451,13 +12842,18 @@
     renderStopOverlay();
 
     try {
+      const requestBody = { confirmation: provided };
+      if (action !== 'stop') {
+        requestBody.start_options = runnerControlStartOptionsPayload(state.stopStartOptions);
+        requestBody.startOptions = requestBody.start_options;
+      }
       const response = await fetch(runnerControlRequestPath(action), {
         method: 'POST',
         headers: {
           Accept: 'application/json',
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ confirmation: provided }),
+        body: JSON.stringify(requestBody),
       });
       let payload = {};
       try {
@@ -12493,6 +12889,7 @@
       state.stopSubmitting = false;
       state.stopConfirmation = '';
       state.stopError = '';
+      state.stopStartOptions = null;
       renderShell({ preserveScroll: true });
     } catch (error) {
       const message = toText(error?.message || error, t('runner.controlFailed'));
@@ -12545,6 +12942,9 @@
     state.stopConfirmation = '';
     state.stopError = '';
     state.stopSubmitting = false;
+    state.stopStartOptions = (state.stopAction === 'start' || state.stopAction === 'reload' || state.stopAction === 'restart')
+      ? runnerControlStartOptionsDraft(state.runnerControl)
+      : null;
     state.paletteOpen = false;
     state.goalEditor = null;
     state.worktreeAction = null;
@@ -12556,6 +12956,7 @@
     state.stopOpen = false;
     state.stopConfirmation = '';
     state.stopError = '';
+    state.stopStartOptions = null;
     renderOverlay();
     renderShell({ preserveScroll: true });
   }
@@ -13370,6 +13771,18 @@
       return;
     }
 
+    const runnerOptionMode = event.target.closest('[data-runner-option-mode]');
+    if (runnerOptionMode && state.stopOpen && !state.stopSubmitting) {
+      updateRunnerControlStartMode(runnerOptionMode.dataset.runnerOptionMode);
+      return;
+    }
+
+    const runnerOptionToggle = event.target.closest('[data-runner-option-toggle]');
+    if (runnerOptionToggle && state.stopOpen && !state.stopSubmitting) {
+      toggleRunnerControlAutopilot();
+      return;
+    }
+
     const configSelect = event.target.closest('[data-config-select]');
     if (configSelect) {
       selectConfigPath(configSelect.dataset.configSelect);
@@ -13448,6 +13861,11 @@
       return;
     }
 
+    if (state.stopOpen && event.target.matches('[data-runner-option-field]')) {
+      updateRunnerControlStartField(event.target.dataset.runnerOptionField, event.target.value);
+      return;
+    }
+
     if (event.target.matches('[data-worktree-action-confirmation]')) {
       updateWorktreeActionConfirmation(event.target.value);
       return;
@@ -13476,6 +13894,10 @@
 
     if (event.target.matches('[data-prompt-backup-select]')) {
       updatePromptEditorMutationField('backupSelection', event.target.value);
+    }
+
+    if (state.stopOpen && event.target.matches('[data-runner-option-field]')) {
+      updateRunnerControlStartField(event.target.dataset.runnerOptionField, event.target.value, { rerender: true });
     }
   });
 

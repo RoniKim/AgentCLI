@@ -1326,11 +1326,13 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         except Exception as exc:
             raise unittest.SkipTest(f"FastAPI is unavailable: {exc}") from exc
 
-    def _create_app(self, repo: Path):
+    def _create_app(self, repo: Path, *, config_path: Path | None = None):
         from agent_runner.web import create_app
 
         kwargs = {"web_dir": WEB_CONSOLE}
-        if repo == self.repo:
+        if config_path is not None:
+            kwargs["config_path"] = str(config_path)
+        elif repo == self.repo:
             kwargs["config_path"] = str(self.config_path)
         return create_app(repo, **kwargs)
 
@@ -1386,9 +1388,10 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.run_dir = self.repo / ".AgentCLI" / "agent_runs" / "20260426-120000"
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / "logs").mkdir(parents=True, exist_ok=True)
+        self.goals_path = self.repo / ".doc" / "GOALS.md"
 
         _write(
-            self.repo / ".doc" / "GOALS.md",
+            self.goals_path,
             """# Project Goals
 
 ## P0
@@ -1986,6 +1989,10 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("running", live["active_run"]["status"])
         self.assertEqual("feature/live-run", live["active_run"]["branch"])
         self.assertEqual(self.config_path.as_posix(), live["runner_control"]["status"]["config_path"])
+        self.assertEqual(self.config_path.as_posix(), live["runner_control"]["startOptions"]["values"]["config_path"])
+        self.assertEqual(["one-shot", "continuous", "loop"], live["runner_control"]["startOptions"]["choices"]["run_mode"])
+        self.assertEqual(["personal", "enterprise"], live["runner_control"]["startOptions"]["choices"]["profile"])
+        self.assertEqual(["codex", "claudecode"], live["runner_control"]["startOptions"]["choices"]["execution_backend"])
         self.assertEqual("T-LIVE-1", live["active_run"]["task"])
         self.assertEqual("Live running task", live["active_run"]["taskTitle"])
         self.assertEqual(7, live["active_run"]["attempt"])
@@ -4796,7 +4803,9 @@ Another unsupported line.
                 self.assertIn(f"goals_completion_level: {level}", doctor_output)
                 self.assertIn(f"project_complete: {expected}", doctor_output)
 
-                client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=config_path)
+                from fastapi.testclient import TestClient
+
+                client = TestClient(self._create_app(self.repo, config_path=config_path))
                 status_payload = client.get("/api/status").json()
                 self.assertEqual(expected, status_payload["goals"]["completion"]["project_complete"])
                 self.assertEqual(expected, status_payload["progress"]["goals_complete"])

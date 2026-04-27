@@ -3010,6 +3010,86 @@ a {
   flex-wrap: wrap;
 }
 
+.runner-control__options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 2px;
+  min-width: 0;
+}
+
+.runner-control__options-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.runner-control__options-title {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.25;
+  font-weight: 500;
+}
+
+.runner-control__options-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+.runner-control__option {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-1);
+  background: var(--surface-2);
+}
+
+.runner-control__option-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.runner-control__option-meta {
+  color: var(--text-sub);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.runner-control__option-control {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.runner-control__option-control--disabled {
+  opacity: 0.72;
+}
+
+.runner-control__option-control .field-control {
+  width: 100%;
+}
+
+.runner-control__option-control .modal-tabs {
+  width: 100%;
+}
+
+.runner-control__option--wide {
+  grid-column: 1 / -1;
+}
+
 .modal-tabs {
   display: flex;
   align-items: center;
@@ -3324,6 +3404,14 @@ a {
 
   .runner-control__details {
     grid-template-columns: 1fr;
+  }
+
+  .runner-control__options-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .runner-control__option--wide {
+    grid-column: auto;
   }
 
   .config-row__meta,

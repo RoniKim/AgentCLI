@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..cli import DEFAULTS
-from ..config import AGENT_WORK_DIR, resolve_prompts_dir
+from ..config import AGENT_WORK_DIR, default_config_path, resolve_config_path, resolve_prompts_dir
 from ..logger import close_all_loggers
 from ..process_guard import register_pid, terminate_all_children, terminate_process_tree, unregister_pid_if_exited
 from ..run_dir import find_latest_run_dir, make_run_dir
@@ -20,6 +20,402 @@ from ..runner_entry import run as run_runner
 from ..stop_progress import clear_stop_progress, read_stop_progress, write_stop_progress
 from ..state import count_state_task_ids, load_backlog_task_ids, load_state
 from ..utils import STOP_REASON_STOP_FILE, detect_stop_reason, rotate_log_file
+
+
+RUNNER_START_MODE_CHOICES = ("one-shot", "continuous", "loop")
+RUNNER_START_PROFILE_CHOICES = ("personal", "enterprise")
+RUNNER_START_BACKEND_CHOICES = ("codex", "claudecode")
+RUNNER_START_BOOL_CHOICES = (True, False)
+RUNNER_START_TRUTHY = {"1", "true", "yes", "on", "enabled"}
+RUNNER_START_FALSY = {"0", "false", "no", "off", "disabled"}
+
+
+def _runner_start_path_text(value: Path | str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return Path(raw).expanduser().resolve().as_posix()
+    except Exception:
+        return raw.replace("\\", "/")
+
+
+def _runner_start_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    raw = str(value).strip().lower()
+    if not raw:
+        return None
+    if raw in RUNNER_START_TRUTHY:
+        return True
+    if raw in RUNNER_START_FALSY:
+        return False
+    return None
+
+
+def _runner_start_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        number = int(float(raw))
+    except Exception:
+        return None
+    return number
+
+
+def _runner_start_mode_from_flags(continuous: bool, loop: bool) -> str:
+    if loop:
+        return "loop"
+    if continuous:
+        return "continuous"
+    return "one-shot"
+
+
+def _runner_start_mode_from_contract(values: dict[str, Any]) -> str:
+    if bool(values.get("loop")):
+        return "loop"
+    if bool(values.get("continuous")):
+        return "continuous"
+    return "one-shot"
+
+
+def _runner_start_profile(value: Any, default: str = "personal") -> str:
+    raw = str(value or "").strip().lower()
+    if raw in RUNNER_START_PROFILE_CHOICES:
+        return raw
+    return default if default in RUNNER_START_PROFILE_CHOICES else "personal"
+
+
+def _runner_start_backend(value: Any, default: str = "codex") -> str:
+    raw = str(value or "").strip().lower()
+    if raw in RUNNER_START_BACKEND_CHOICES:
+        return raw
+    return default if default in RUNNER_START_BACKEND_CHOICES else "codex"
+
+
+def build_runner_start_options_contract(repo: Path, base_args: argparse.Namespace | None = None) -> dict[str, Any]:
+    repo_root = repo.expanduser().resolve()
+    args = base_args or argparse.Namespace()
+    default_cfg_path = default_config_path(repo_root)
+
+    current_continuous = bool(getattr(args, "continuous", DEFAULTS.get("continuous", False)))
+    current_loop = bool(getattr(args, "loop", DEFAULTS.get("loop", False)))
+    default_continuous = bool(DEFAULTS.get("continuous", False))
+    default_loop = bool(DEFAULTS.get("loop", False))
+
+    current_config_path = _runner_start_path_text(
+        getattr(args, "config_path", getattr(args, "config", "")) or default_cfg_path
+    )
+    default_config_path_text = _runner_start_path_text(default_cfg_path)
+
+    values = {
+        "autopilot": bool(getattr(args, "autopilot", DEFAULTS.get("autopilot", False))),
+        "run_mode": _runner_start_mode_from_flags(current_continuous, current_loop),
+        "continuous": current_continuous,
+        "loop": current_loop,
+        "one_shot": not current_continuous and not current_loop,
+        "loop_max_cycles": max(0, int(_runner_start_int(getattr(args, "loop_max_cycles", DEFAULTS.get("loop_max_cycles", 0))) or 0)),
+        "profile": _runner_start_profile(getattr(args, "profile", DEFAULTS.get("profile", "personal")), str(DEFAULTS.get("profile", "personal") or "personal")),
+        "execution_backend": _runner_start_backend(
+            getattr(args, "execution_backend", DEFAULTS.get("execution_backend", "codex")),
+            str(DEFAULTS.get("execution_backend", "codex") or "codex"),
+        ),
+        "config_path": current_config_path,
+    }
+    defaults = {
+        "autopilot": bool(DEFAULTS.get("autopilot", False)),
+        "run_mode": _runner_start_mode_from_flags(default_continuous, default_loop),
+        "continuous": default_continuous,
+        "loop": default_loop,
+        "one_shot": not default_continuous and not default_loop,
+        "loop_max_cycles": max(0, int(_runner_start_int(DEFAULTS.get("loop_max_cycles", 0)) or 0)),
+        "profile": _runner_start_profile(DEFAULTS.get("profile", "personal"), "personal"),
+        "execution_backend": _runner_start_backend(DEFAULTS.get("execution_backend", "codex"), "codex"),
+        "config_path": default_config_path_text,
+    }
+    schema = {
+        "autopilot": {
+            "kind": "bool",
+            "label": "Autopilot",
+            "choices": list(RUNNER_START_BOOL_CHOICES),
+            "desc": "Skip interactive confirmation prompts.",
+            "hint": "When off, the runner pauses between stages.",
+            "group": "mode",
+        },
+        "run_mode": {
+            "kind": "enum",
+            "label": "Run mode",
+            "options": list(RUNNER_START_MODE_CHOICES),
+            "choices": list(RUNNER_START_MODE_CHOICES),
+            "desc": "Practical shell-equivalent run mode.",
+            "hint": "One-shot runs once; continuous chains cycles; loop repeats runs.",
+            "group": "mode",
+        },
+        "continuous": {
+            "kind": "bool",
+            "label": "Continuous",
+            "choices": list(RUNNER_START_BOOL_CHOICES),
+            "desc": "Keep chaining cycles without manual stopping.",
+            "hint": "Pair with autopilot for unattended runs.",
+            "group": "mode",
+            "derived": True,
+        },
+        "loop": {
+            "kind": "bool",
+            "label": "Loop",
+            "choices": list(RUNNER_START_BOOL_CHOICES),
+            "desc": "Keep the runner cycling after a run completes.",
+            "hint": "Pair with loop max cycles to avoid infinite loops.",
+            "group": "mode",
+            "derived": True,
+        },
+        "one_shot": {
+            "kind": "bool",
+            "label": "One-shot",
+            "choices": list(RUNNER_START_BOOL_CHOICES),
+            "desc": "Run once and stop.",
+            "hint": "One-shot means both continuous and loop are off.",
+            "group": "mode",
+            "derived": True,
+        },
+        "loop_max_cycles": {
+            "kind": "number",
+            "label": "Max cycles",
+            "min": 0,
+            "allow_empty": False,
+            "desc": "Hard cap on loop cycles.",
+            "hint": "Zero means no extra cap beyond the rest of the runner.",
+            "group": "mode",
+        },
+        "profile": {
+            "kind": "enum",
+            "label": "Profile",
+            "options": list(RUNNER_START_PROFILE_CHOICES),
+            "choices": list(RUNNER_START_PROFILE_CHOICES),
+            "desc": "Default safety profile used to derive runner limits.",
+            "hint": "Enterprise raises several guardrails.",
+            "group": "project",
+        },
+        "execution_backend": {
+            "kind": "enum",
+            "label": "Backend",
+            "options": list(RUNNER_START_BACKEND_CHOICES),
+            "choices": list(RUNNER_START_BACKEND_CHOICES),
+            "desc": "Backend used for Dev and QA stages.",
+            "hint": "codex = OpenAI Codex CLI, claudecode = Claude Code.",
+            "group": "project",
+        },
+        "config_path": {
+            "kind": "text",
+            "label": "Config path",
+            "allow_empty": False,
+            "desc": "Config JSON path to load before starting.",
+            "hint": "Leave blank to keep the current config path.",
+            "group": "project",
+        },
+    }
+    return {
+        "path": current_config_path,
+        "defaults_path": default_config_path_text,
+        "values": values,
+        "defaults": defaults,
+        "schema": schema,
+        "choices": {
+            "run_mode": list(RUNNER_START_MODE_CHOICES),
+            "profile": list(RUNNER_START_PROFILE_CHOICES),
+            "execution_backend": list(RUNNER_START_BACKEND_CHOICES),
+            "autopilot": list(RUNNER_START_BOOL_CHOICES),
+            "continuous": list(RUNNER_START_BOOL_CHOICES),
+            "loop": list(RUNNER_START_BOOL_CHOICES),
+            "one_shot": list(RUNNER_START_BOOL_CHOICES),
+        },
+    }
+
+
+def normalize_runner_start_options(
+    repo: Path,
+    raw_options: dict[str, Any] | None,
+    *,
+    base_args: argparse.Namespace | None = None,
+    contract: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    repo_root = repo.expanduser().resolve()
+    contract = contract or build_runner_start_options_contract(repo_root, base_args)
+    current_values = dict(contract.get("values") or {})
+    raw = dict(raw_options or {})
+    overrides: dict[str, Any] = {}
+    errors: list[dict[str, Any]] = []
+
+    def _error(field: str, code: str, message: str, details: dict[str, Any] | None = None) -> None:
+        error: dict[str, Any] = {"field": field, "code": code, "message": message}
+        if details:
+            error["details"] = details
+        errors.append(error)
+
+    def _raw_value(*names: str) -> tuple[bool, Any]:
+        for name in names:
+            if name in raw:
+                return True, raw[name]
+        return False, None
+
+    def _parse_bool(field: str, value: Any) -> bool | None:
+        parsed = _runner_start_bool(value)
+        if parsed is None:
+            _error(field, "invalid_choice", f"{field} must be true or false.", {"choices": list(RUNNER_START_BOOL_CHOICES)})
+        return parsed
+
+    autopilot_present, autopilot_raw = _raw_value("autopilot", "autoPilot")
+    if autopilot_present:
+        autopilot = _parse_bool("autopilot", autopilot_raw)
+        if autopilot is not None:
+            overrides["autopilot"] = autopilot
+
+    profile_present, profile_raw = _raw_value("profile")
+    if profile_present:
+        profile = str(profile_raw or "").strip().lower()
+        if profile not in RUNNER_START_PROFILE_CHOICES:
+            _error("profile", "invalid_choice", "Profile must be personal or enterprise.", {"choices": list(RUNNER_START_PROFILE_CHOICES)})
+        else:
+            overrides["profile"] = profile
+
+    backend_present, backend_raw = _raw_value("execution_backend", "executionBackend", "backend")
+    if backend_present:
+        backend = str(backend_raw or "").strip().lower()
+        if backend not in RUNNER_START_BACKEND_CHOICES:
+            _error("execution_backend", "invalid_choice", "Backend must be codex or claudecode.", {"choices": list(RUNNER_START_BACKEND_CHOICES)})
+        else:
+            overrides["execution_backend"] = backend
+
+    config_path_present, config_path_raw = _raw_value("config_path", "configPath", "config")
+    if config_path_present:
+        config_path_text = _runner_start_path_text(config_path_raw)
+        if not config_path_text:
+            _error("config_path", "required", "Config path cannot be empty.")
+        else:
+            try:
+                resolved_config_path = resolve_config_path(repo_root, config_path_text)
+                config_path_text = resolved_config_path.expanduser().resolve().as_posix()
+            except Exception:
+                config_path_text = _runner_start_path_text(config_path_text)
+            overrides["config_path"] = config_path_text
+            overrides["config"] = config_path_text
+
+    loop_max_cycles_present, loop_max_cycles_raw = _raw_value("loop_max_cycles", "loopMaxCycles", "max_cycles", "maxCycles")
+    if loop_max_cycles_present:
+        loop_max_cycles = _runner_start_int(loop_max_cycles_raw)
+        if loop_max_cycles is None or loop_max_cycles < 0:
+            _error("loop_max_cycles", "invalid_value", "Max cycles must be an integer greater than or equal to 0.")
+        else:
+            overrides["loop_max_cycles"] = loop_max_cycles
+
+    run_mode_present, run_mode_raw = _raw_value("run_mode", "runMode", "mode")
+    continuous_present, continuous_raw = _raw_value("continuous")
+    loop_present, loop_raw = _raw_value("loop")
+    one_shot_present, one_shot_raw = _raw_value("one_shot", "one-shot", "oneShot")
+
+    explicit_mode_fields = run_mode_present or continuous_present or loop_present or one_shot_present
+    selected_mode = current_values.get("run_mode") or _runner_start_mode_from_contract(current_values)
+
+    if run_mode_present:
+        run_mode = str(run_mode_raw or "").strip().lower().replace("_", "-")
+        if run_mode not in RUNNER_START_MODE_CHOICES:
+            _error("run_mode", "invalid_choice", "Run mode must be one-shot, continuous, or loop.", {"choices": list(RUNNER_START_MODE_CHOICES)})
+        else:
+            selected_mode = run_mode
+            if continuous_present:
+                continuous = _parse_bool("continuous", continuous_raw)
+                if continuous is not None and continuous != (run_mode in {"continuous", "loop"}):
+                    _error("continuous", "invalid_combination", "Continuous does not match the selected run mode.")
+            if loop_present:
+                loop = _parse_bool("loop", loop_raw)
+                if loop is not None and loop != (run_mode == "loop"):
+                    _error("loop", "invalid_combination", "Loop does not match the selected run mode.")
+            if one_shot_present:
+                one_shot = _parse_bool("one_shot", one_shot_raw)
+                if one_shot is not None and one_shot != (run_mode == "one-shot"):
+                    _error("one_shot", "invalid_combination", "One-shot does not match the selected run mode.")
+            if run_mode == "one-shot":
+                overrides["continuous"] = False
+                overrides["loop"] = False
+            elif run_mode == "continuous":
+                overrides["continuous"] = True
+                overrides["loop"] = False
+            else:
+                overrides["continuous"] = True
+                overrides["loop"] = True
+    elif explicit_mode_fields:
+        continuous_value = current_values.get("continuous")
+        loop_value = current_values.get("loop")
+        selected_mode = _runner_start_mode_from_flags(bool(continuous_value), bool(loop_value))
+
+        if continuous_present:
+            continuous = _parse_bool("continuous", continuous_raw)
+            if continuous is not None:
+                continuous_value = continuous
+        if loop_present:
+            loop = _parse_bool("loop", loop_raw)
+            if loop is not None:
+                loop_value = loop
+        if one_shot_present:
+            one_shot = _parse_bool("one_shot", one_shot_raw)
+        else:
+            one_shot = None
+
+        if loop_present and bool(loop_value):
+            if continuous_present and continuous is False:
+                _error("loop", "invalid_combination", "Loop requires continuous to be true.")
+            continuous_value = True
+            selected_mode = "loop"
+        elif continuous_present and bool(continuous_value):
+            selected_mode = "continuous"
+            if loop_present and loop_value:
+                selected_mode = "loop"
+        elif one_shot_present and bool(one_shot):
+            selected_mode = "one-shot"
+            continuous_value = False
+            loop_value = False
+        elif one_shot_present or continuous_present or loop_present:
+            selected_mode = "one-shot"
+            continuous_value = False
+            loop_value = False
+
+        if one_shot_present and bool(one_shot):
+            if continuous_present and bool(continuous_raw):
+                _error("one_shot", "invalid_combination", "One-shot cannot be combined with continuous.")
+            if loop_present and bool(loop_raw):
+                _error("one_shot", "invalid_combination", "One-shot cannot be combined with loop.")
+            continuous_value = False
+            loop_value = False
+
+        overrides["continuous"] = bool(continuous_value)
+        overrides["loop"] = bool(loop_value)
+    # No mode fields present: keep the base runner mode.
+
+    if errors:
+        return {}, {
+            "code": "runner_start_options_invalid",
+            "message": "Runner start options are invalid.",
+            "details": {"errors": errors},
+        }
+
+    if "config_path" not in overrides:
+        overrides["config_path"] = current_values.get("config_path") or _runner_start_path_text(
+            getattr(base_args or argparse.Namespace(), "config_path", getattr(base_args or argparse.Namespace(), "config", "")) or default_config_path(repo_root)
+        )
+    if "config" not in overrides and "config_path" in overrides:
+        overrides["config"] = overrides["config_path"]
+    if "autopilot" not in overrides and autopilot_present is False:
+        overrides["autopilot"] = bool(current_values.get("autopilot", False))
+    if "loop_max_cycles" not in overrides and loop_max_cycles_present is False:
+        maybe_loop_max_cycles = _runner_start_int(current_values.get("loop_max_cycles"))
+        if maybe_loop_max_cycles is not None:
+            overrides["loop_max_cycles"] = max(0, maybe_loop_max_cycles)
+    return overrides, None
 
 
 class RunnerController:
@@ -64,6 +460,9 @@ class RunnerController:
                 cb(rc)
             except Exception:
                 pass
+
+    def start_options_contract(self) -> dict[str, Any]:
+        return build_runner_start_options_contract(self.repo, self.base_args)
 
     def _stop_file_name(self) -> str:
         raw = str(getattr(self.base_args, "stop_file", "STOP") or "STOP").strip()
@@ -213,7 +612,21 @@ class RunnerController:
             raise
 
     def start(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
-        context = {"repo": self.repo.as_posix(), "config_path": self._config_path_name()}
+        normalized_overrides, validation_error = normalize_runner_start_options(
+            self.repo,
+            overrides,
+            base_args=self.base_args,
+            contract=self.start_options_contract(),
+        )
+        context = {
+            "repo": self.repo.as_posix(),
+            "config_path": str(
+                normalized_overrides.get("config_path")
+                or self._config_path_name()
+            ),
+        }
+        if validation_error:
+            return {"ok": False, "message": str(validation_error.get("message") or "Runner start options are invalid."), "error": validation_error, **context}
         if not self._start_lock.acquire(blocking=False):
             return {"ok": False, "message": "\ub7ec\ub108 \uc2dc\uc791\uc774 \uc774\ubbf8 \uc9c4\ud589 \uc911\uc785\ub2c8\ub2e4.", **context}
 
@@ -221,7 +634,7 @@ class RunnerController:
             if self._runner_is_alive():
                 return {"ok": False, "message": "\ub7ec\ub108\uac00 \uc774\ubbf8 \uc2e4\ud589 \uc911\uc785\ub2c8\ub2e4.", **context}
 
-            eff = self._effective_dict(overrides)
+            eff = self._effective_dict(normalized_overrides)
             run_dir = self._ensure_run_dir(eff)
             run_dir.mkdir(parents=True, exist_ok=True)
             self.run_dir = run_dir
@@ -244,6 +657,11 @@ class RunnerController:
                 self._start_subprocess(args, run_dir)
             else:
                 self._start_thread(args)
+
+            updated_base = dict(eff)
+            updated_base.pop("run_dir", None)
+            updated_base.pop("resume_latest", None)
+            self.base_args = argparse.Namespace(**updated_base)
 
             return {
                 "ok": True,
@@ -642,6 +1060,7 @@ class RunnerController:
         running = self._runner_is_alive()
         run_dir = self.run_dir or find_latest_run_dir(self.repo)
         config_path = self._config_path_name()
+        start_options = self.start_options_contract()
         if run_dir is not None:
             self.run_dir = run_dir
 
@@ -666,6 +1085,8 @@ class RunnerController:
             "reason": "",
             "last_event": "",
             "stop_progress": {},
+            "start_options": start_options,
+            "startOptions": start_options,
         }
         if run_dir is None:
             return status
@@ -680,4 +1101,6 @@ class RunnerController:
         status["reason"] = self._stop_reason(run_dir)
         status["last_event"] = self._latest_event(run_dir)
         status["stop_progress"] = read_stop_progress(run_dir)
+        status["start_options"] = start_options
+        status["startOptions"] = start_options
         return status

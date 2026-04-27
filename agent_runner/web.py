@@ -49,7 +49,11 @@ from .prompts import (
 )
 from .process_guard import init_process_guard, terminate_all_children
 from .run_dir import find_latest_run_dir
-from .remote.controller import RunnerController
+from .remote.controller import (
+    RunnerController,
+    build_runner_start_options_contract,
+    normalize_runner_start_options,
+)
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, load_state, parse_backlog_md
 from .utils import atomic_write_json, atomic_write_text, now_iso, run_cmd
 
@@ -1486,9 +1490,17 @@ def _runner_control_status_payload(
     repo: Path,
     config_path: str = "",
     current_run_dir: str = "",
+    cfg: dict[str, Any] | None = None,
+    cfg_path: Path | str | None = None,
 ) -> dict[str, Any]:
     base_args = getattr(controller, "base_args", None)
     fallback_config_path = _path_text(config_path or getattr(base_args, "config_path", getattr(base_args, "config", "")) or "")
+    start_options_contract = _runner_control_start_options_contract(
+        controller,
+        repo=repo,
+        cfg=cfg,
+        cfg_path=cfg_path,
+    )
     if controller is None:
         return {
             "running": False,
@@ -1507,6 +1519,8 @@ def _runner_control_status_payload(
             "reason": "",
             "last_event": "",
             "stop_progress": {},
+            "start_options": start_options_contract,
+            "startOptions": start_options_contract,
         }
 
     try:
@@ -1529,6 +1543,8 @@ def _runner_control_status_payload(
             "reason": f"status_error: {ex}",
             "last_event": "",
             "stop_progress": {},
+            "start_options": start_options_contract,
+            "startOptions": start_options_contract,
         }
 
     stop_progress = status.get("stop_progress")
@@ -1537,6 +1553,9 @@ def _runner_control_status_payload(
     state_counts = status.get("state_counts")
     if not isinstance(state_counts, dict):
         state_counts = {}
+    start_options = status.get("start_options")
+    if not isinstance(start_options, dict) or not start_options:
+        start_options = start_options_contract
 
     return {
         "running": bool(status.get("running")),
@@ -1559,6 +1578,8 @@ def _runner_control_status_payload(
         "reason": str(status.get("reason") or "").strip(),
         "last_event": str(status.get("last_event") or "").strip(),
         "stop_progress": stop_progress,
+        "start_options": start_options,
+        "startOptions": start_options,
     }
 
 
@@ -1667,12 +1688,16 @@ def _runner_control_payload(
     goals_complete: bool = False,
     backlog_complete: bool = False,
     busy: bool = False,
+    cfg: dict[str, Any] | None = None,
+    cfg_path: Path | str | None = None,
 ) -> dict[str, Any]:
     status_payload = _runner_control_status_payload(
         controller,
         repo=repo,
         config_path=config_path,
         current_run_dir=current_run_dir,
+        cfg=cfg,
+        cfg_path=cfg_path,
     )
     controller_available = controller is not None
     actions = _runner_control_actions(enabled, status_payload, controller_available=controller_available, busy=busy)
@@ -1700,6 +1725,16 @@ def _runner_control_payload(
         message = last_message
     elif not enabled and disabled_reason:
         message = disabled_reason
+    start_options = status_payload.get("start_options")
+    if not isinstance(start_options, dict) or not start_options:
+        start_options = status_payload.get("startOptions")
+    if not isinstance(start_options, dict) or not start_options:
+        start_options = _runner_control_start_options_contract(
+            controller,
+            repo=repo,
+            cfg=cfg,
+            cfg_path=cfg_path,
+        )
     return {
         "enabled": bool(enabled),
         "source": source,
@@ -1712,6 +1747,8 @@ def _runner_control_payload(
         "project_status": str(project_status or ("complete" if project_complete else "incomplete")).strip() or ("complete" if project_complete else "incomplete"),
         "goals_complete": bool(goals_complete),
         "backlog_complete": bool(backlog_complete),
+        "start_options": start_options,
+        "startOptions": start_options,
         "actions": actions,
         "confirmation": dict(RUNNER_CONTROL_CONFIRMATIONS),
         "last_action": last_action,
@@ -1733,6 +1770,40 @@ def _runner_control_confirmation_value(payload: dict[str, Any] | None) -> str:
     return ""
 
 
+def _runner_control_request_options(payload: dict[str, Any] | None) -> dict[str, Any]:
+    data = payload if isinstance(payload, dict) else {}
+    options: dict[str, Any] = {}
+    for key in ("start_options", "startOptions", "runner_options", "runnerOptions", "options"):
+        nested = data.get(key)
+        if isinstance(nested, dict):
+            options.update(nested)
+    for key in (
+        "autopilot",
+        "continuous",
+        "loop",
+        "one_shot",
+        "one-shot",
+        "oneShot",
+        "run_mode",
+        "runMode",
+        "mode",
+        "loop_max_cycles",
+        "loopMaxCycles",
+        "max_cycles",
+        "maxCycles",
+        "profile",
+        "execution_backend",
+        "executionBackend",
+        "backend",
+        "config_path",
+        "configPath",
+        "config",
+    ):
+        if key in data:
+            options[key] = data[key]
+    return options
+
+
 def _strip_run_dir_intent(cfg: dict[str, Any] | None) -> dict[str, Any]:
     overrides = deepcopy(cfg) if isinstance(cfg, dict) else {}
     overrides.pop("run_dir", None)
@@ -1740,12 +1811,30 @@ def _strip_run_dir_intent(cfg: dict[str, Any] | None) -> dict[str, Any]:
     return overrides
 
 
-def _runner_control_start_overrides(repo_root: Path, cfg: dict[str, Any], cfg_path: Path) -> dict[str, Any]:
-    overrides = _strip_run_dir_intent(cfg)
-    overrides["repo"] = _path_text(repo_root)
-    overrides["config"] = _path_text(cfg_path)
-    overrides["config_path"] = _path_text(cfg_path)
-    return overrides
+def _runner_control_start_options_contract(
+    controller: RunnerController | None,
+    *,
+    repo: Path,
+    cfg: dict[str, Any] | None = None,
+    cfg_path: Path | str | None = None,
+) -> dict[str, Any]:
+    if controller is not None:
+        contract_fn = getattr(controller, "start_options_contract", None)
+        if callable(contract_fn):
+            try:
+                contract = contract_fn()
+            except Exception:
+                contract = None
+            if isinstance(contract, dict) and contract:
+                return contract
+    base_args = getattr(controller, "base_args", None) if controller is not None else None
+    if base_args is None:
+        resolved_cfg_path = Path(str(cfg_path).strip()) if cfg_path is not None and str(cfg_path).strip() else default_config_path(repo)
+        base_args = _build_runner_base_args(repo, cfg or {}, resolved_cfg_path)
+    try:
+        return build_runner_start_options_contract(repo, base_args)
+    except Exception:
+        return build_runner_start_options_contract(repo, argparse.Namespace())
 
 
 def _build_runner_base_args(repo: Path, cfg: dict[str, Any], cfg_path: Path) -> argparse.Namespace:
@@ -4779,6 +4868,8 @@ def build_snapshot(
         goals_complete=bool(progress.get("goals_complete", False)),
         backlog_complete=bool(progress.get("backlog_complete", False)),
         busy=bool(runner_control_busy),
+        cfg=cfg,
+        cfg_path=cfg_path,
     )
     active_run_empty = active_run["status"] == "idle" and not active_run.get("task") and not active_run.get("startedAt")
     runner_control_status = runner_control.get("status") if isinstance(runner_control.get("status"), dict) else {}
@@ -5232,11 +5323,41 @@ def create_app(
                     busy_override=False,
                 )
 
+            start_overrides: dict[str, Any] = {}
+            if normalized_action in {"start", "reload", "restart"}:
+                request_options = _runner_control_request_options(body)
+                start_options_contract = _runner_control_start_options_contract(
+                    controller,
+                    repo=repo_root,
+                    cfg=cfg,
+                    cfg_path=cfg_path,
+                )
+                start_overrides, validation_error = normalize_runner_start_options(
+                    repo_root,
+                    request_options,
+                    base_args=_build_runner_base_args(repo_root, cfg, cfg_path),
+                    contract=start_options_contract,
+                )
+                if validation_error:
+                    return _runner_control_response(
+                        action=normalized_action,
+                        status_code=400,
+                        ok=False,
+                        status="error",
+                        message=str(validation_error.get("message") or "Runner start options are invalid."),
+                        error_code=str(validation_error.get("code") or "runner_start_options_invalid"),
+                        details=validation_error.get("details") or {},
+                        busy_override=False,
+                    )
+                start_overrides["repo"] = repo_root.as_posix()
+
             current_status = _runner_control_status_payload(
                 controller,
                 repo=repo_root,
                 config_path=cfg_path.as_posix(),
                 current_run_dir=str(getattr(controller, "run_dir", "") or ""),
+                cfg=cfg,
+                cfg_path=cfg_path,
             )
             status_reason = str(current_status.get("reason") or "").strip()
             if status_reason.startswith("status_error:"):
@@ -5254,8 +5375,6 @@ def create_app(
                     details={"reason": status_reason},
                     busy_override=False,
                 )
-
-            start_overrides = _runner_control_start_overrides(repo_root, cfg, cfg_path)
 
             if normalized_action == "start":
                 result = controller.start(start_overrides)
