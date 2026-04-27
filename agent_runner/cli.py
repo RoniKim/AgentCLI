@@ -918,7 +918,7 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
             eff["profile"] = "personal"
             return
 
-        if "roles" not in explicit_args:
+        if "roles" not in explicit_args and not eff.get("roles"):
             eff["roles"] = "PM,Security,Dev,QA"
         if "qa_always" not in explicit_args:
             eff["qa_always"] = True

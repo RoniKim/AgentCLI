@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import re
 from fnmatch import fnmatch
-from typing import List, Type
+from typing import Any, List, Type
 
 from .stages.base import Stage
 from .stages.pm_stage import PMStage
@@ -26,6 +26,62 @@ _BUILTIN: dict[str, Type[Stage]] = {
     "Security": SecurityStage,
 }
 
+_PLUGIN_SPEC_RE = re.compile(
+    r"^(?P<module>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*):(?P<class>[A-Za-z_][A-Za-z0-9_]*)$"
+)
+
+
+def builtin_role_specs() -> List[str]:
+    return list(_BUILTIN.keys())
+
+
+def normalize_role_spec(spec: Any) -> str:
+    text = str(spec or "").strip()
+    if not text:
+        return ""
+    return _CANON.get(text.lower(), text)
+
+
+def is_plugin_role_spec(spec: Any) -> bool:
+    text = str(spec or "").strip()
+    if not text:
+        return False
+    return bool(_PLUGIN_SPEC_RE.match(text))
+
+
+def classify_role_spec(spec: Any) -> str:
+    text = normalize_role_spec(spec)
+    if not text:
+        return "empty"
+    if text in _BUILTIN:
+        return "builtin"
+    if is_plugin_role_spec(text):
+        return "plugin"
+    return "invalid"
+
+
+def normalize_role_specs(raw: Any, *, default: List[str] | None = None) -> List[str]:
+    if raw is None:
+        return list(default) if default is not None else []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return list(default) if default is not None else []
+        parts = [part.strip() for part in re.split(r"[\s,;]+", text) if part and part.strip()]
+    elif isinstance(raw, (list, tuple)):
+        parts = list(raw)
+    else:
+        parts = [raw]
+
+    out: List[str] = []
+    for part in parts:
+        normalized = normalize_role_spec(part)
+        if normalized:
+            out.append(normalized)
+    if not out and default is not None and not isinstance(raw, (list, tuple)):
+        return list(default)
+    return out
+
 
 def parse_roles(raw: str | None) -> List[str]:
     """Parse roles string into ordered role specs.
@@ -34,29 +90,10 @@ def parse_roles(raw: str | None) -> List[str]:
       - Comma/space/semicolon separated roles: "PM,Dev,QA"
       - External plugin stage specs: "pkg.mod:ClassName"
 
-    Returns role specs with stable de-duplication, preserving order.
+    Returns normalized role specs in input order. Builtins are canonicalized
+    and plugin/unknown specs are preserved verbatim.
     """
-    if not raw:
-        return ["PM", "Dev", "QA"]
-
-    parts = [p.strip() for p in re.split(r"[\s,;]+", raw) if p and p.strip()]
-    out: List[str] = []
-    for p in parts:
-        if ":" in p:
-            out.append(p)
-            continue
-        out.append(_CANON.get(p.lower(), p))
-
-    seen = set()
-    deduped: List[str] = []
-    for r in out:
-        k = r.lower()
-        if k in seen:
-            continue
-        seen.add(k)
-        deduped.append(r)
-
-    return deduped
+    return normalize_role_specs(raw, default=builtin_role_specs())
 
 
 def _is_allowed(spec: str, allowlist: list[str]) -> bool:
@@ -94,7 +131,13 @@ def make_stages(
     roles = parse_roles(raw_roles)
     stages: List[Stage] = []
     for r in roles:
-        if ":" in r:
+        role_kind = classify_role_spec(r)
+        if role_kind == "builtin":
+            cls = _BUILTIN.get(r)
+            if cls is not None:
+                stages.append(cls())
+            continue
+        if role_kind == "plugin":
             if not plugins_enabled:
                 raise ValueError(f"Plugin stages are disabled: {r}")
             if not _is_allowed(r, plugins_allowlist):
@@ -105,7 +148,5 @@ def make_stages(
                 if plugins_strict:
                     raise
             continue
-        cls = _BUILTIN.get(r)
-        if cls is not None:
-            stages.append(cls())
+        raise ValueError(f"Invalid role spec: {r}")
     return stages

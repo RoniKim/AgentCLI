@@ -1635,6 +1635,37 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("subprocess", controller.runner_mode)
         self.assertEqual("subprocess", controller.base_args.telegram["runner_mode"])
 
+    def test_config_save_preserves_plugin_roles_when_unrelated_fields_change(self) -> None:
+        _write_config(
+            self.config_path,
+            self.repo,
+            iterations=2,
+            prompts_dir="prompts/agentcli",
+            roles=["PM", "pkg.mod:Class", "QA"],
+        )
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        response = client.post(
+            "/api/config/save",
+            json={
+                "changes": [
+                    {"path": "iterations", "value": 5},
+                    {"path": "prompts_dir", "value": "prompts/agentcli-updated"},
+                ]
+            },
+        )
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+
+        saved = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(["PM", "pkg.mod:Class", "QA"], saved["roles"])
+        self.assertEqual(5, saved["iterations"])
+        self.assertEqual("prompts/agentcli-updated", saved["prompts_dir"])
+
+        status_payload = client.get("/api/status").json()
+        self.assertEqual(["PM", "pkg.mod:Class", "QA"], status_payload["config"]["data"]["roles"])
+
     def test_config_save_rejects_unsafe_or_redacted_payloads(self) -> None:
         _write_config(self.config_path, self.repo)
         client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)

@@ -4962,6 +4962,49 @@ Another unsupported line.
         self.assertIn("telegram.bot_token", normalized["configContract"]["redaction"]["paths"])
         self.assertIn("telegram.bot_token", normalized["configContract"]["restart_required_paths"])
 
+    def test_adapter_preserves_plugin_role_specs_as_editable_controls(self) -> None:
+        options = ["PM", "Dev", "QA", "Security"]
+        normalized_from_string, normalized_from_array, plugin_kind, malformed_kind, rendered_from_string, rendered_from_array = _run_adapter_harness(
+            [
+                {"kind": "call", "name": "normalizeRoleSpecs", "args": ["PM, pkg.mod:Class, QA", options]},
+                {"kind": "call", "name": "normalizeRoleSpecs", "args": [["PM", "pkg.mod:Class", "QA"], options]},
+                {"kind": "call", "name": "classifyRoleSpec", "args": ["pkg.mod:Class", options]},
+                {"kind": "call", "name": "classifyRoleSpec", "args": ["bad role", options]},
+                {
+                    "kind": "call",
+                    "name": "renderConfigRolesControl",
+                    "args": [
+                        {
+                            "path": "roles",
+                            "options": options,
+                            "value": "PM, pkg.mod:Class, QA",
+                        }
+                    ],
+                },
+                {
+                    "kind": "call",
+                    "name": "renderConfigRolesControl",
+                    "args": [
+                        {
+                            "path": "roles",
+                            "options": options,
+                            "value": ["PM", "pkg.mod:Class", "QA"],
+                        }
+                    ],
+                },
+            ]
+        )
+
+        self.assertEqual(["PM", "pkg.mod:Class", "QA"], normalized_from_string)
+        self.assertEqual(normalized_from_string, normalized_from_array)
+        self.assertEqual("plugin", plugin_kind)
+        self.assertEqual("invalid", malformed_kind)
+        self.assertEqual(rendered_from_string, rendered_from_array)
+        self.assertIn('data-config-field="roles"', rendered_from_string)
+        self.assertIn('value="PM, pkg.mod:Class, QA"', rendered_from_string)
+        self.assertIn('chip--info', rendered_from_string)
+        self.assertIn('pkg.mod:Class', rendered_from_string)
+
     def test_runner_control_start_option_validation_and_preview_are_exposed_to_js(self) -> None:
         from agent_runner.remote.controller import build_runner_start_options_contract
 

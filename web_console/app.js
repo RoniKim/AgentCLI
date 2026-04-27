@@ -253,7 +253,7 @@
         restartSummary: 'Restart the runner using the selected repo and config snapshot.',
         confirmAction: 'Confirm this runner control action.',
         actionDisabled: 'Action disabled',
-        actionFailed: 'Runner action failed.',
+        actionFailed: 'Runner action failed.', // Action failed
         confirmationRequired: 'Confirmation required',
         typeExactConfirmationToEnableAction: 'Type "{confirmation}" exactly to enable {action}.',
       },
@@ -2199,6 +2199,107 @@
 
   function fmtList(values) {
     return normalizeListValues(values).join(', ');
+  }
+
+  const ROLE_SPEC_RE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$/;
+
+  function normalizeRoleSpec(value, options = []) {
+    const text = toText(value, '').trim();
+    if (!text) {
+      return '';
+    }
+    const match = normalizeListValues(options).find((option) => String(option).trim().toLowerCase() === text.toLowerCase());
+    return match || text;
+  }
+
+  function normalizeRoleSpecs(value, options = []) {
+    const parts = Array.isArray(value)
+      ? value
+      : typeof value === 'string'
+        ? value.split(/[\s,;]+/)
+        : value == null
+          ? []
+          : [value];
+    return parts
+      .map((item) => normalizeRoleSpec(item, options))
+      .filter(Boolean);
+  }
+
+  function classifyRoleSpec(value, options = []) {
+    const text = normalizeRoleSpec(value, options);
+    if (!text) {
+      return 'empty';
+    }
+    const normalizedOptions = normalizeListValues(options);
+    if (normalizedOptions.some((option) => String(option).trim().toLowerCase() === text.toLowerCase())) {
+      return 'builtin';
+    }
+    if (ROLE_SPEC_RE.test(text)) {
+      return 'plugin';
+    }
+    return 'invalid';
+  }
+
+  function renderConfigRolesControl({
+    path = 'roles',
+    options = [],
+    value = [],
+    disabled = false,
+  } = {}) {
+    const optionValues = normalizeListValues(options);
+    const items = normalizeRoleSpecs(value, optionValues);
+    const itemLookup = new Set(items.map((item) => item.toLowerCase()));
+    const inputValue = fmtList(items);
+    const placeholder = optionValues.length
+      ? `${optionValues.join(', ')}, pkg.mod:Class`
+      : 'PM, Dev, QA, pkg.mod:Class';
+    const chipsHTML = items.length
+      ? items
+        .map((item, index) => {
+          const kind = classifyRoleSpec(item, optionValues);
+          const tone = kind === 'plugin' ? 'chip--info' : kind === 'invalid' ? 'chip--err' : 'chip--accent';
+          return `
+            <button
+              type="button"
+              class="chip ${tone}"
+              data-config-role-remove-path="${escapeHTML(path)}"
+              data-config-role-remove-index="${index}"
+              aria-label="${escapeHTML(`${t('common.deselect')} ${item}`)}"
+              ${disabled ? 'disabled' : ''}
+            >${escapeHTML(item)}</button>
+          `;
+        })
+        .join('')
+      : `<span class="summary-note">${escapeHTML(t('common.none'))}</span>`;
+    const optionsHTML = optionValues
+      .map((option) => `
+        <button
+          type="button"
+          class="modal-tab ${itemLookup.has(option.toLowerCase()) ? 'modal-tab--active' : ''}"
+          data-config-multi="${escapeHTML(path)}"
+          data-config-value="${escapeHTML(option)}"
+          ${disabled ? 'disabled' : ''}
+        >${escapeHTML(option)}</button>
+      `)
+      .join('');
+    return `
+      <div class="config-role-control">
+        <input
+          type="text"
+          class="field-control config-role-control__input"
+          value="${escapeHTML(inputValue)}"
+          placeholder="${escapeHTML(placeholder)}"
+          data-config-field="${escapeHTML(path)}"
+          spellcheck="false"
+          autocomplete="off"
+          autocapitalize="off"
+          autocorrect="off"
+          ${disabled ? 'disabled' : ''}
+        >
+        <div class="runner-control__chips">${chipsHTML}</div>
+        <div class="modal-tabs config-role-control__options">${optionsHTML}</div>
+      </div>
+    `;
   }
 
   function progressWidth(value) {
@@ -4626,9 +4727,12 @@
     };
   }
 
-  function normalizeConfigValue(value, schema) {
+  function normalizeConfigValue(value, schema, path = '') {
     if (!schema) return value;
-    if (schema.kind === 'multienum') return normalizeListValues(value);
+    if (schema.kind === 'multienum') {
+      if (path === 'roles') return normalizeRoleSpecs(value, schema.options || []);
+      return normalizeListValues(value);
+    }
     if (schema.kind === 'list') {
       const itemKind = toText(schema.item_kind || schema.itemKind, 'text');
       const items = normalizeListValues(value);
@@ -4671,7 +4775,7 @@
     for (const path of Object.keys(schema || {})) {
       const current = getAt(data, path);
       if (current === undefined) continue;
-      data = setAt(data, path, normalizeConfigValue(current, schema[path]));
+      data = setAt(data, path, normalizeConfigValue(current, schema[path], path));
     }
     return data;
   }
@@ -5404,7 +5508,7 @@
       },
       roles: {
         kind: 'multienum',
-        options: ['PM', 'Security', 'Dev', 'QA'],
+        options: ['PM', 'Dev', 'QA', 'Security'],
         restart: false,
         desc: 'Stages enabled in the pipeline.',
         hint: 'PM usually runs first. Security requires security.enabled=true and can run before Dev.',
@@ -6250,6 +6354,10 @@
     adaptGoals,
     adaptConfig,
     adaptConfigContract,
+    normalizeRoleSpec,
+    normalizeRoleSpecs,
+    classifyRoleSpec,
+    renderConfigRolesControl,
     adaptPrompts,
     adaptLogs,
     adaptNotifications,
@@ -7029,7 +7137,7 @@
     `;
   }
 
-  function configValueToText(value, schema) {
+  function configValueToText(value, schema, path = '') {
     if (!schema) {
       return value == null || value === '' ? '--' : JSON.stringify(value);
     }
@@ -7041,13 +7149,16 @@
     }
     if (schema.kind === 'bool') return value === true ? t('common.enabled') : t('common.disabled');
     if (schema.kind === 'enum') return value == null || value === '' ? '--' : String(value);
-    if (schema.kind === 'multienum' || schema.kind === 'list') return fmtList(value || []) || '--';
+    if (schema.kind === 'multienum' || schema.kind === 'list') {
+      const listValue = path === 'roles' ? normalizeRoleSpecs(value, schema.options || []) : value || [];
+      return fmtList(listValue) || '--';
+    }
     if (schema.kind === 'number') return value == null || value === '' ? '--' : String(value);
     return value == null || value === '' ? '--' : String(value);
   }
 
   function renderConfigValueSummary(path, schema, value) {
-    return escapeHTML(configValueToText(value, schema));
+    return escapeHTML(configValueToText(value, schema, path));
   }
 
   function validateField(path, value, schema) {
@@ -7073,6 +7184,13 @@
       return schema.options.includes(value) ? null : t('config.mustBeOneOf', { options: schema.options.join(', ') });
     }
     if (schema.kind === 'multienum') {
+      if (path === 'roles') {
+        const items = normalizeRoleSpecs(value, schema.options || []);
+        if (!items.length && schema.allow_empty) return null;
+        if (!items.length) return t('config.pickAtLeastOne');
+        const invalid = items.filter((item) => classifyRoleSpec(item, schema.options || []) === 'invalid');
+        return invalid.length ? t('config.invalidOption', { options: invalid.join(', ') }) : null;
+      }
       const items = Array.isArray(value) ? value : normalizeListValues(value);
       if (!items.length && schema.allow_empty) return null;
       if (!items.length) return t('config.pickAtLeastOne');
@@ -11244,12 +11362,20 @@
       `;
     }
     if (schema.kind === 'multienum') {
-      const set = new Set(value || []);
+      if (path === 'roles') {
+        return renderConfigRolesControl({
+          path,
+          options: schema.options || [],
+          value,
+          disabled,
+        });
+      }
+      const set = new Set(normalizeListValues(value).map((item) => item.toLowerCase()));
       return `
         <div class="modal-tabs">
           ${schema.options
             .map((option) => `
-              <button type="button" class="modal-tab ${set.has(option) ? 'modal-tab--active' : ''}" data-config-multi="${escapeHTML(path)}" data-config-value="${escapeHTML(option)}" ${disabled ? 'disabled' : ''}>${escapeHTML(option)}</button>
+              <button type="button" class="modal-tab ${set.has(String(option).toLowerCase()) ? 'modal-tab--active' : ''}" data-config-multi="${escapeHTML(path)}" data-config-value="${escapeHTML(option)}" ${disabled ? 'disabled' : ''}>${escapeHTML(option)}</button>
             `)
             .join('')}
         </div>
@@ -11364,17 +11490,17 @@
 
     const selectedLabel = escapeHTML(selectedSchema?.label || selectedPath || t('config.field'));
     const selectedPathText = escapeHTML(selectedPath || '');
-    const activeValueText = escapeHTML(configValueToText(selectedActiveValue, selectedSchema));
-    const draftValueText = escapeHTML(configValueToText(selectedDraftValue, selectedSchema));
-    const defaultValueText = escapeHTML(configValueToText(selectedDefaultValue, selectedSchema));
+    const activeValueText = escapeHTML(configValueToText(selectedActiveValue, selectedSchema, selectedPath));
+    const draftValueText = escapeHTML(configValueToText(selectedDraftValue, selectedSchema, selectedPath));
+    const defaultValueText = escapeHTML(configValueToText(selectedDefaultValue, selectedSchema, selectedPath));
     const selectedDefaultChanged = JSON.stringify(selectedActiveValue) !== JSON.stringify(selectedDefaultValue);
     const selectedDraftChanged = JSON.stringify(selectedDraftValue) !== JSON.stringify(selectedActiveValue);
     const pendingDiffRows = diffs
       .map((diff) => {
         const diffSchema = state.configSchema[diff.path];
         const pathLabel = escapeHTML(diffSchema?.label || diff.path);
-        const fromText = escapeHTML(configValueToText(diff.from, diffSchema));
-        const toText = escapeHTML(configValueToText(diff.to, diffSchema));
+        const fromText = escapeHTML(configValueToText(diff.from, diffSchema, diff.path));
+        const toText = escapeHTML(configValueToText(diff.to, diffSchema, diff.path));
         return `
           <div class="config-diff-row">
             <div class="config-diff-row__head">
@@ -13624,6 +13750,8 @@
       value = rawValue === '' ? '' : Number(rawValue);
     } else if (schema.kind === 'bool') {
       value = Boolean(rawValue);
+    } else if (schema.kind === 'multienum' && path === 'roles') {
+      value = normalizeRoleSpecs(rawValue, schema.options || []);
     } else if (schema.kind === 'list') {
       const items = normalizeListValues(rawValue);
       if (schema.item_kind === 'int' || schema.itemKind === 'int' || schema.item_kind === 'number' || schema.itemKind === 'number') {
@@ -13651,13 +13779,25 @@
   function toggleConfigMulti(path, value) {
     if (configSaveInFlight()) return;
     const current = Array.isArray(getAt(state.configDraft, path)) ? getAt(state.configDraft, path).slice() : [];
-    const set = new Set(current);
-    if (set.has(value)) {
-      set.delete(value);
+    const index = current.findIndex((item) => String(item).toLowerCase() === String(value).toLowerCase());
+    if (index >= 0) {
+      current.splice(index, 1);
     } else {
-      set.add(value);
+      current.push(value);
     }
-    state.configDraft = setAt(state.configDraft || {}, path, Array.from(set));
+    state.configDraft = setAt(state.configDraft || {}, path, current);
+    resetConfigSaveState();
+    renderShell({ preserveScroll: true });
+  }
+
+  function removeConfigMultiItem(path, index) {
+    if (configSaveInFlight()) return;
+    const current = Array.isArray(getAt(state.configDraft, path)) ? getAt(state.configDraft, path).slice() : [];
+    if (!Number.isInteger(index) || index < 0 || index >= current.length) {
+      return;
+    }
+    current.splice(index, 1);
+    state.configDraft = setAt(state.configDraft || {}, path, current);
     resetConfigSaveState();
     renderShell({ preserveScroll: true });
   }
@@ -14720,6 +14860,15 @@
     const configMulti = event.target.closest('[data-config-multi]');
     if (configMulti) {
       toggleConfigMulti(configMulti.dataset.configMulti, configMulti.dataset.configValue);
+      return;
+    }
+
+    const configRoleRemove = event.target.closest('[data-config-role-remove-path]');
+    if (configRoleRemove) {
+      removeConfigMultiItem(
+        configRoleRemove.dataset.configRoleRemovePath,
+        Number(configRoleRemove.dataset.configRoleRemoveIndex),
+      );
       return;
     }
 

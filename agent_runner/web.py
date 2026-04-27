@@ -20,8 +20,11 @@ from .config import (
     default_prompts_dir,
     legacy_default_config_path,
     load_config,
+    builtin_roles,
     resolve_config_path,
     resolve_prompts_dir,
+    normalize_roles_value,
+    validate_roles_value,
 )
 from .cli import DEFAULTS as CLI_DEFAULTS
 from .goals import goals_path, parse_goals_completion, read_goals, resolve_goals_completion_level
@@ -1435,7 +1438,7 @@ CONFIG_CONTRACT_FIELDS: list[dict[str, Any]] = [
     {"path": "repo", "group": "project", "kind": "text", "label": "Repository", "restart": True, "allow_empty": False, "desc": "Repository root the runner targets.", "hint": "Set automatically from the repo the server serves."},
     {"path": "profile", "group": "project", "kind": "enum", "label": "Profile", "restart": True, "options": ["personal", "enterprise"], "allow_empty": False, "desc": "Default safety profile used to derive runner limits.", "hint": "Enterprise raises several guardrails."},
     {"path": "execution_backend", "group": "project", "kind": "enum", "label": "Execution backend", "restart": True, "options": ["codex", "claudecode"], "allow_empty": False, "desc": "Backend used for Dev and QA stages.", "hint": "codex = OpenAI Codex CLI, claudecode = Claude Code."},
-    {"path": "roles", "group": "project", "kind": "multienum", "label": "Pipeline roles", "options": ["PM", "Security", "Dev", "QA"], "allow_empty": False, "desc": "Stages enabled in the pipeline.", "hint": "PM usually runs first. Security requires security.enabled=true and can run before Dev."},
+    {"path": "roles", "group": "project", "kind": "multienum", "label": "Pipeline roles", "options": builtin_roles(), "allow_empty": False, "desc": "Stages enabled in the pipeline.", "hint": "Built-in roles come from the stage registry. Plugin specs like pkg.mod:Class are preserved. PM usually runs first."},
     {"path": "autopilot", "group": "runner", "kind": "bool", "label": "Autopilot", "allow_empty": True, "desc": "Skip interactive confirmation prompts.", "hint": "When off, the runner pauses between stages."},
     {"path": "continuous", "group": "runner", "kind": "bool", "label": "Continuous", "allow_empty": True, "desc": "Keep chaining cycles without manual stopping.", "hint": "Best paired with autopilot for unattended runs."},
     {"path": "iterations", "group": "runner", "kind": "number", "label": "Iterations", "min": 1, "allow_empty": False, "desc": "Maximum run iterations.", "hint": "One iteration equals one PM -> Dev -> QA cycle."},
@@ -1557,6 +1560,7 @@ def _normalize_config_list(value: Any, *, item_kind: str = "text") -> list[Any]:
 
 def _normalize_config_contract_value(value: Any, spec: dict[str, Any]) -> Any:
     kind = str(spec.get("kind") or "text")
+    path = str(spec.get("path") or "")
     if kind == "bool":
         if isinstance(value, bool):
             return value
@@ -1579,6 +1583,8 @@ def _normalize_config_contract_value(value: Any, spec: dict[str, Any]) -> Any:
                 return value
         return number
     if kind in {"multienum", "list"}:
+        if kind == "multienum" and path == "roles":
+            return normalize_roles_value(value)
         items = _normalize_config_list(value, item_kind=str(spec.get("item_kind") or "text"))
         options = spec.get("options")
         if kind == "multienum" and isinstance(options, list) and options:
@@ -1761,6 +1767,20 @@ def _config_save_validate_change(path: str, raw_value: Any, schema: dict[str, An
         return raw_value, "", {}
 
     if kind == "multienum":
+        if path == "roles":
+            items, invalid = validate_roles_value(raw_value)
+            if not items:
+                if allow_empty:
+                    return [], "", {}
+                return raw_value, "config_value_required", {"path": path, "kind": kind}
+            if invalid:
+                return items, "config_value_invalid_choice", {
+                    "path": path,
+                    "kind": kind,
+                    "invalid": invalid,
+                    "options": builtin_roles(),
+                }
+            return items, "", {}
         options = [str(option) for option in schema.get("options") or []]
         items = raw_value if isinstance(raw_value, list) else _normalize_config_list(raw_value, item_kind="text")
         items = [str(item) for item in items if str(item).strip()]

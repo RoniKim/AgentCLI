@@ -2962,6 +2962,11 @@ a {
   gap: 8px;
 }
 
+.config-role-control {
+  display: grid;
+  gap: 8px;
+}
+
 .runner-control__preview {
   display: grid;
   gap: 8px;

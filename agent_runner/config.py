@@ -8,6 +8,11 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .pipeline.stage_registry import (
+    builtin_role_specs as _builtin_role_specs,
+    classify_role_spec as _classify_role_spec,
+    normalize_role_specs as _normalize_role_specs,
+)
 from .utils import atomic_write_json, eprint
 
 # Runtime artifacts directory name (under target repo root).
@@ -339,6 +344,20 @@ def save_config(path: Path, cfg: Dict[str, Any]) -> None:
     except Exception as ex:
         eprint(f"[WARN] Failed to write config atomically: {ex}")
         path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+
+
+def normalize_roles_value(value: Any, *, default: List[str] | None = None) -> List[str]:
+    return _normalize_role_specs(value, default=default)
+
+
+def validate_roles_value(value: Any, *, default: List[str] | None = None) -> tuple[List[str], List[str]]:
+    items = _normalize_role_specs(value, default=default)
+    invalid = [item for item in items if _classify_role_spec(item) == "invalid"]
+    return items, invalid
+
+
+def builtin_roles() -> List[str]:
+    return _builtin_role_specs()
 
 
 # ---- path resolution ----
