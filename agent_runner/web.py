@@ -1968,6 +1968,15 @@ def _parse_goal_items_and_warnings(goals_text: str | None) -> tuple[dict[str, li
                 current_bucket = "p1"
                 ignore_outside_list_items = False
                 continue
+            if level == 2 and re.match(r"p[\s_-]*[01]\b", title):
+                warnings.append(
+                    {
+                        "line_number": line_number,
+                        "line": line,
+                        "reason": "malformed_priority_section_heading",
+                        "message": "Priority section headings must use ## P0 or ## P1.",
+                    }
+                )
             if level == 2:
                 current_bucket = None
                 ignore_outside_list_items = title.startswith("completion criteria")
@@ -2065,9 +2074,12 @@ def _build_goals_payload(repo: Path, *, completion_level: str = "all") -> dict[s
     p1_done = len([item for item in items["p1"] if item.get("done")])
     total = p0_total + p1_total
     done = p0_done + p1_done
+    missing_sections = list(completion.get("missing_sections") or [])
     summary = {
         "has_goals": bool(completion.get("has_goals")),
         "project_complete": bool(completion.get("project_complete")),
+        "valid": bool(completion.get("valid", False)),
+        "missing_sections": missing_sections,
         "p0_total": p0_total,
         "p0_done": p0_done,
         "p1_total": p1_total,

@@ -73,6 +73,13 @@ def format_goals_block(goals_path_: Optional[Path], goals_text: Optional[str],
     return f"# GOALS SOURCE: {goals_path_.as_posix()}\n" + "\n".join(lines)
 
 
+def _goals_completion_required_sections(completion_level: str) -> list[str]:
+    level = completion_level.lower().strip() if completion_level else "all"
+    if level == "p0":
+        return ["p0"]
+    return ["p0", "p1"]
+
+
 def parse_goals_completion(goals_text: Optional[str], *,
                            completion_level: str = "all") -> Dict[str, Any]:
     """Parse GOALS.md checkboxes and evaluate completion status.
@@ -85,15 +92,35 @@ def parse_goals_completion(goals_text: Optional[str], *,
             "all" — Every checkbox checked (default).
 
     Returns dict with:
-      has_goals, p0_total, p0_done, p1_total, p1_done,
+      has_goals, valid, missing_sections, warnings,
+      p0_total, p0_done, p1_total, p1_done,
       all_total, all_done, p0_complete, p1_complete, project_complete,
       unmet_p0, unmet_p1
     """
+    level = completion_level.lower().strip() if completion_level else "all"
+    required_sections = _goals_completion_required_sections(level)
+
     if not goals_text or not goals_text.strip():
-        return {"has_goals": False, "project_complete": False}
+        return {
+            "has_goals": False,
+            "valid": False,
+            "missing_sections": list(required_sections),
+            "warnings": [],
+            "p0_total": 0, "p0_done": 0,
+            "p1_total": 0, "p1_done": 0,
+            "all_total": 0, "all_done": 0,
+            "p0_complete": False,
+            "p1_complete": False,
+            "project_complete": False,
+            "unmet_p0": [],
+            "unmet_p1": [],
+        }
 
     result: Dict[str, Any] = {
         "has_goals": True,
+        "valid": False,
+        "missing_sections": [],
+        "warnings": [],
         "p0_total": 0, "p0_done": 0,
         "p1_total": 0, "p1_done": 0,
         "all_total": 0, "all_done": 0,
@@ -102,32 +129,46 @@ def parse_goals_completion(goals_text: Optional[str], *,
     }
 
     current_priority: Optional[str] = None
+    section_has_items: dict[str, bool] = {"p0": False, "p1": False}
 
-    for line in goals_text.splitlines():
+    for line_number, line in enumerate(goals_text.splitlines(), start=1):
         stripped = line.strip()
-        lower = stripped.lower()
+
+        if not stripped:
+            continue
+
+        if stripped.startswith("<!--") and stripped.endswith("-->"):
+            continue
 
         # Detect priority section headers
-        if re.match(r'^##\s+p0\b', lower):
-            current_priority = "p0"
-            continue
-        elif re.match(r'^##\s+p1\b', lower):
-            current_priority = "p1"
-            continue
-        elif re.match(r'^##\s+(p2|p3|completion|criteria|note)', lower):
-            current_priority = None
-            continue
-        elif lower.startswith('## '):
+        heading = re.match(r"^(#+)\s+(.+)$", stripped)
+        if heading:
+            level_no = len(heading.group(1))
+            title = heading.group(2).strip().lower()
+            if level_no == 2 and re.match(r"^p0\b", title):
+                current_priority = "p0"
+                continue
+            if level_no == 2 and re.match(r"^p1\b", title):
+                current_priority = "p1"
+                continue
+            if level_no == 2 and re.match(r"^p[\s_-]*[01]\b", title):
+                result["warnings"].append(
+                    {
+                        "line_number": line_number,
+                        "line": stripped,
+                        "reason": "malformed_priority_section_heading",
+                        "message": "Priority section headings must use ## P0 or ## P1.",
+                    }
+                )
+            if level_no > 2:
+                continue
             current_priority = None
             continue
 
-        # Parse checkboxes
         checkbox_done = re.match(r'^\s*-\s*\[x\]', line, re.IGNORECASE)
         checkbox_open = re.match(r'^\s*-\s*\[\s\]', line)
-
         if checkbox_done or checkbox_open:
             is_done = bool(checkbox_done)
-            # Extract item text
             item_text = re.sub(r'^\s*-\s*\[[x ]\]\s*', '', line, flags=re.IGNORECASE).strip()
 
             result["all_total"] += 1
@@ -135,32 +176,51 @@ def parse_goals_completion(goals_text: Optional[str], *,
                 result["all_done"] += 1
 
             if current_priority == "p0":
+                section_has_items["p0"] = True
                 result["p0_total"] += 1
                 if is_done:
                     result["p0_done"] += 1
                 else:
                     result["unmet_p0"].append(item_text)
             elif current_priority == "p1":
+                section_has_items["p1"] = True
                 result["p1_total"] += 1
                 if is_done:
                     result["p1_done"] += 1
                 else:
                     result["unmet_p1"].append(item_text)
+            else:
+                result["warnings"].append(
+                    {
+                        "line_number": line_number,
+                        "line": line,
+                        "reason": "checkbox_outside_priority_section",
+                        "message": "Checkbox item outside P0/P1 was ignored for P0/P1 completion.",
+                    }
+                )
+            continue
+
+    missing_sections = [section for section in required_sections if not section_has_items[section]]
+    has_malformed_required_heading = any(
+        warning.get("reason") == "malformed_priority_section_heading"
+        for warning in result["warnings"]
+    )
+    result["missing_sections"] = missing_sections
+    result["valid"] = not missing_sections and not has_malformed_required_heading
 
     # Per-level completion flags
-    result["p0_complete"] = (result["p0_total"] == 0) or (result["p0_done"] >= result["p0_total"])
-    result["p1_complete"] = (result["p1_total"] == 0) or (result["p1_done"] >= result["p1_total"])
+    result["p0_complete"] = section_has_items["p0"] and (result["p0_done"] >= result["p0_total"])
+    result["p1_complete"] = section_has_items["p0"] and section_has_items["p1"] and (result["p0_done"] >= result["p0_total"]) and (result["p1_done"] >= result["p1_total"])
 
-    # Project completion depends on configured level
-    level = completion_level.lower().strip() if completion_level else "all"
-    if result["all_total"] == 0:
+    # Project completion depends on configured level and required section validity.
+    if not result["valid"]:
         result["project_complete"] = False
     elif level == "p0":
         result["project_complete"] = result["p0_complete"]
     elif level == "p1":
-        result["project_complete"] = result["p0_complete"] and result["p1_complete"]
+        result["project_complete"] = result["p1_complete"]
     else:  # "all" (default)
-        result["project_complete"] = result["all_done"] >= result["all_total"]
+        result["project_complete"] = result["all_total"] > 0 and result["all_done"] >= result["all_total"]
 
     return result
 

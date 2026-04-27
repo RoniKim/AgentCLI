@@ -3232,6 +3232,12 @@
     };
   }
 
+  function normalizeGoalSectionNames(sections) {
+    return toArray(sections)
+      .map((section) => toText(section, '').trim().toLowerCase())
+      .filter(Boolean);
+  }
+
   function goalSnapshotMessage(snapshot, total, dirty = false) {
     if (dirty) {
       return `${t('goals.browserLocalDraft')} ${t('goals.draftStaysLocal')}`;
@@ -3243,6 +3249,11 @@
     const rawText = toText(raw.raw_text || raw.rawText, '').trim();
     if (!rawText) {
       return t('goals.empty');
+    }
+    const completion = toObject(raw.completion);
+    const missingSections = normalizeGoalSectionNames(completion.missing_sections || completion.missingSections);
+    if (completion.valid === false || missingSections.length) {
+      return t('snapshot.partial');
     }
     if (!total) {
       return t('goals.noGoals');
@@ -4063,11 +4074,16 @@
     const raw = toObject(goals);
     const warnings = toArray(raw.warnings).map(normalizeGoalWarning);
     const items = normalizeGoalBuckets(raw);
+    const completion = toObject(raw.completion);
+    const missingSections = normalizeGoalSectionNames(completion.missing_sections || completion.missingSections);
+    const valid = completion.valid !== false && !missingSections.length;
     const total = items.p0.length + items.p1.length;
     const done = items.p0.filter((goal) => goal.done).length + items.p1.filter((goal) => goal.done).length;
     const summary = {
       has_goals: Boolean(raw.completion?.has_goals ?? total),
       project_complete: Boolean(raw.completion?.project_complete),
+      valid,
+      missing_sections: missingSections,
       p0_total: toNumber(raw.summary?.p0_total || items.p0.length, items.p0.length),
       p0_done: toNumber(raw.summary?.p0_done || items.p0.filter((goal) => goal.done).length, 0),
       p1_total: toNumber(raw.summary?.p1_total || items.p1.length, items.p1.length),
@@ -4089,7 +4105,11 @@
       completion_level: toText(raw.completion_level || raw.completionLevel, ''),
       items,
       warnings,
-      state: buildSectionState('goals', total ? 'ready' : 'empty', goalSnapshotMessage(raw, total)),
+      state: buildSectionState(
+        'goals',
+        !toText(raw.raw_text || raw.rawText, '').trim() ? 'empty' : (!valid ? 'partial' : (total ? 'ready' : 'empty')),
+        goalSnapshotMessage(raw, total),
+      ),
       summary,
     };
   }

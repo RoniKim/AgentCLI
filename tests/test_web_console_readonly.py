@@ -4354,6 +4354,373 @@ Another unsupported line.
         self.assertFalse(_goal_save_has_required_sections("# Project Goals\n\n## P0\n- [ ] Missing P1\n"))
         self.assertFalse(_goal_save_has_required_sections("# Project Goals\n\n## P1\n- [ ] Missing P0\n"))
 
+    def test_parse_goals_completion_requires_priority_sections_and_reports_warnings(self) -> None:
+        from agent_runner.goals import parse_goals_completion
+
+        def check(
+            *,
+            label: str,
+            level: str,
+            text: str,
+            valid: bool,
+            project_complete: bool,
+            missing_sections: list[str],
+            p0_complete: bool,
+            p1_complete: bool,
+            p0_total: int,
+            p1_total: int,
+            all_total: int,
+            warning_reason: str | None = None,
+            warning_count: int = 0,
+        ) -> None:
+            status = parse_goals_completion(text, completion_level=level)
+            self.assertTrue(status["has_goals"], label)
+            self.assertEqual(valid, status["valid"], label)
+            self.assertEqual(project_complete, status["project_complete"], label)
+            self.assertEqual(missing_sections, status["missing_sections"], label)
+            self.assertEqual(p0_complete, status["p0_complete"], label)
+            self.assertEqual(p1_complete, status["p1_complete"], label)
+            self.assertEqual(p0_total, status["p0_total"], label)
+            self.assertEqual(p1_total, status["p1_total"], label)
+            self.assertEqual(all_total, status["all_total"], label)
+            self.assertEqual(warning_count, len(status["warnings"]), label)
+            if warning_reason is not None:
+                self.assertIn(warning_reason, [warning["reason"] for warning in status["warnings"]], label)
+
+        missing_p0 = """# Project Goals
+
+## P1
+- [x] Follow through
+"""
+        check(
+            label="missing-p0 / p0",
+            level="p0",
+            text=missing_p0,
+            valid=False,
+            project_complete=False,
+            missing_sections=["p0"],
+            p0_complete=False,
+            p1_complete=False,
+            p0_total=0,
+            p1_total=1,
+            all_total=1,
+        )
+        check(
+            label="missing-p0 / p1",
+            level="p1",
+            text=missing_p0,
+            valid=False,
+            project_complete=False,
+            missing_sections=["p0"],
+            p0_complete=False,
+            p1_complete=False,
+            p0_total=0,
+            p1_total=1,
+            all_total=1,
+        )
+        check(
+            label="missing-p0 / all",
+            level="all",
+            text=missing_p0,
+            valid=False,
+            project_complete=False,
+            missing_sections=["p0"],
+            p0_complete=False,
+            p1_complete=False,
+            p0_total=0,
+            p1_total=1,
+            all_total=1,
+        )
+
+        missing_p1 = """# Project Goals
+
+## P0
+- [x] Keep launch moving
+"""
+        check(
+            label="missing-p1 / p0",
+            level="p0",
+            text=missing_p1,
+            valid=True,
+            project_complete=True,
+            missing_sections=[],
+            p0_complete=True,
+            p1_complete=False,
+            p0_total=1,
+            p1_total=0,
+            all_total=1,
+        )
+        check(
+            label="missing-p1 / p1",
+            level="p1",
+            text=missing_p1,
+            valid=False,
+            project_complete=False,
+            missing_sections=["p1"],
+            p0_complete=True,
+            p1_complete=False,
+            p0_total=1,
+            p1_total=0,
+            all_total=1,
+        )
+        check(
+            label="missing-p1 / all",
+            level="all",
+            text=missing_p1,
+            valid=False,
+            project_complete=False,
+            missing_sections=["p1"],
+            p0_complete=True,
+            p1_complete=False,
+            p0_total=1,
+            p1_total=0,
+            all_total=1,
+        )
+
+        malformed_heading = """# Project Goals
+
+## P 0
+- [x] Keep launch moving
+
+## P1
+- [x] Follow through
+"""
+        check(
+            label="malformed-heading / all",
+            level="all",
+            text=malformed_heading,
+            valid=False,
+            project_complete=False,
+            missing_sections=["p0"],
+            p0_complete=False,
+            p1_complete=False,
+            p0_total=0,
+            p1_total=1,
+            all_total=2,
+            warning_reason="malformed_priority_section_heading",
+            warning_count=2,
+        )
+
+        malformed_but_complete = """# Project Goals
+
+## P 0
+- [x] Keep launch moving
+
+## P0
+- [x] Keep launch moving
+
+## P1
+- [x] Follow through
+"""
+        check(
+            label="malformed-complete / p0",
+            level="p0",
+            text=malformed_but_complete,
+            valid=False,
+            project_complete=False,
+            missing_sections=[],
+            p0_complete=True,
+            p1_complete=True,
+            p0_total=1,
+            p1_total=1,
+            all_total=3,
+            warning_reason="malformed_priority_section_heading",
+            warning_count=2,
+        )
+        check(
+            label="malformed-complete / p1",
+            level="p1",
+            text=malformed_but_complete,
+            valid=False,
+            project_complete=False,
+            missing_sections=[],
+            p0_complete=True,
+            p1_complete=True,
+            p0_total=1,
+            p1_total=1,
+            all_total=3,
+            warning_reason="malformed_priority_section_heading",
+            warning_count=2,
+        )
+        check(
+            label="malformed-complete / all",
+            level="all",
+            text=malformed_but_complete,
+            valid=False,
+            project_complete=False,
+            missing_sections=[],
+            p0_complete=True,
+            p1_complete=True,
+            p0_total=1,
+            p1_total=1,
+            all_total=3,
+            warning_reason="malformed_priority_section_heading",
+            warning_count=2,
+        )
+
+        outside_items = """# Project Goals
+
+- [x] Outside item
+
+## P0
+- [x] Keep launch moving
+
+## P1
+- [x] Follow through
+"""
+        check(
+            label="outside-items / p0",
+            level="p0",
+            text=outside_items,
+            valid=True,
+            project_complete=True,
+            missing_sections=[],
+            p0_complete=True,
+            p1_complete=True,
+            p0_total=1,
+            p1_total=1,
+            all_total=3,
+            warning_reason="checkbox_outside_priority_section",
+            warning_count=1,
+        )
+        check(
+            label="outside-items / p1",
+            level="p1",
+            text=outside_items,
+            valid=True,
+            project_complete=True,
+            missing_sections=[],
+            p0_complete=True,
+            p1_complete=True,
+            p0_total=1,
+            p1_total=1,
+            all_total=3,
+            warning_reason="checkbox_outside_priority_section",
+            warning_count=1,
+        )
+        check(
+            label="outside-items / all",
+            level="all",
+            text=outside_items,
+            valid=True,
+            project_complete=True,
+            missing_sections=[],
+            p0_complete=True,
+            p1_complete=True,
+            p0_total=1,
+            p1_total=1,
+            all_total=3,
+            warning_reason="checkbox_outside_priority_section",
+            warning_count=1,
+        )
+
+        valid_text = """# Project Goals
+
+## P0
+- [x] Keep launch moving
+
+## P1
+- [x] Follow through
+"""
+        check(
+            label="valid / p0",
+            level="p0",
+            text=valid_text,
+            valid=True,
+            project_complete=True,
+            missing_sections=[],
+            p0_complete=True,
+            p1_complete=True,
+            p0_total=1,
+            p1_total=1,
+            all_total=2,
+        )
+        check(
+            label="valid / p1",
+            level="p1",
+            text=valid_text,
+            valid=True,
+            project_complete=True,
+            missing_sections=[],
+            p0_complete=True,
+            p1_complete=True,
+            p0_total=1,
+            p1_total=1,
+            all_total=2,
+        )
+        check(
+            label="valid / all",
+            level="all",
+            text=valid_text,
+            valid=True,
+            project_complete=True,
+            missing_sections=[],
+            p0_complete=True,
+            p1_complete=True,
+            p0_total=1,
+            p1_total=1,
+            all_total=2,
+        )
+
+    def test_goals_payload_surfaces_missing_sections_and_invalid_state(self) -> None:
+        from agent_runner.web import _build_goals_payload
+
+        repo = self._tmp / "goals-payload-repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        _write(
+            repo / ".doc" / "GOALS.md",
+            """# Project Goals
+
+## P 0
+- [x] Keep launch moving
+
+## P1
+- [x] Follow through
+""",
+        )
+
+        payload = _build_goals_payload(repo, completion_level="all")
+        self.assertFalse(payload["completion"]["valid"])
+        self.assertEqual(["p0"], payload["completion"]["missing_sections"])
+        self.assertEqual(2, len(payload["completion"]["warnings"]))
+        self.assertFalse(payload["summary"]["valid"])
+        self.assertEqual(["p0"], payload["summary"]["missing_sections"])
+        self.assertGreaterEqual(len(payload["warnings"]), 1)
+
+        normalized = _run_adapter_harness([{"kind": "snapshot", "data": {**_make_no_run_snapshot(), "goals": payload}}])[0]
+        self.assertEqual("partial", normalized["sectionState"]["goals"]["status"])
+        self.assertEqual(["p0"], normalized["goalsCompletion"]["missing_sections"])
+        self.assertFalse(normalized["goalsCompletion"]["valid"])
+
+        _write(
+            repo / ".doc" / "GOALS.md",
+            """# Project Goals
+
+## P 0
+- [x] Keep launch moving
+
+## P0
+- [x] Keep launch moving
+
+## P1
+- [x] Follow through
+""",
+        )
+
+        malformed_complete = _build_goals_payload(repo, completion_level="all")
+        self.assertFalse(malformed_complete["completion"]["valid"])
+        self.assertEqual([], malformed_complete["completion"]["missing_sections"])
+        self.assertEqual(2, len(malformed_complete["completion"]["warnings"]))
+        self.assertFalse(malformed_complete["summary"]["valid"])
+        self.assertEqual([], malformed_complete["summary"]["missing_sections"])
+
+        normalized_complete = _run_adapter_harness(
+            [{"kind": "snapshot", "data": {**_make_no_run_snapshot(), "goals": malformed_complete}}]
+        )[0]
+        self.assertEqual("partial", normalized_complete["sectionState"]["goals"]["status"])
+        self.assertEqual([], normalized_complete["goalsCompletion"]["missing_sections"])
+        self.assertFalse(normalized_complete["goalsCompletion"]["valid"])
+
     def test_adapter_normalizes_config_contract_shape_and_redaction(self) -> None:
         snapshot = _make_no_run_snapshot()
         snapshot["config_contract"] = {

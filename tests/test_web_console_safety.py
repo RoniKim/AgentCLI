@@ -1208,6 +1208,8 @@ class WebConsoleSafetyTests(unittest.TestCase):
         cases = (
             ("missing-p1", "# Project Goals\n\n## P0\n- [ ] Keep read-only progress views\n"),
             ("missing-p0", "# Project Goals\n\n## P1\n- [ ] Surface the safety banner\n"),
+            ("typo-p0", "# Project Goals\n\n## P 0\n- [ ] Keep read-only progress views\n\n## P1\n- [ ] Surface the safety banner\n"),
+            ("typo-p1", "# Project Goals\n\n## P0\n- [ ] Keep read-only progress views\n\n## P 1\n- [ ] Surface the safety banner\n"),
         )
 
         for label, raw_text in cases:
