@@ -4926,6 +4926,34 @@ Another unsupported line.
         self.assertIn("telegram.bot_token", normalized["configContract"]["redaction"]["paths"])
         self.assertIn("telegram.bot_token", normalized["configContract"]["restart_required_paths"])
 
+    def test_fast_web_worktree_regression_scope_detection_requires_repo_markers(self) -> None:
+        from agent_runner.gates import repo_has_web_worktree_markers, should_run_fast_web_worktree_regression
+
+        self.assertFalse(repo_has_web_worktree_markers(self.repo))
+        self.assertFalse(should_run_fast_web_worktree_regression(self.repo, ["web_console/app.js"]))
+
+        (self.repo / "agent_runner").mkdir(parents=True, exist_ok=True)
+        (self.repo / "web_console").mkdir(parents=True, exist_ok=True)
+        _write(
+            self.repo / ".doc" / "GOALS.md",
+            """# Project Goals
+
+## P0
+- [ ] Keep self-development runs on the fast regression suite.
+""",
+        )
+
+        self.assertTrue(repo_has_web_worktree_markers(self.repo))
+        self.assertTrue(should_run_fast_web_worktree_regression(self.repo, ["web_console/app.js"]))
+        self.assertTrue(should_run_fast_web_worktree_regression(self.repo, ["tests/test_web_console_readonly.py"]))
+        self.assertTrue(
+            should_run_fast_web_worktree_regression(
+                self.repo,
+                [(self.repo / "tests" / "test_worktree_manual_merge.py").as_posix()],
+            )
+        )
+        self.assertFalse(should_run_fast_web_worktree_regression(self.repo, ["docs/notes.md"]))
+
 
 if __name__ == "__main__":
     unittest.main()

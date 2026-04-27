@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
+import sys
 from pathlib import Path
+from typing import Sequence
 
-from .utils import run_cmd, run_cmd_async
+from .utils import now_iso, run_cmd, run_cmd_async
+
+
+FAST_WEB_WORKTREE_REGRESSION_TEST_FILES: tuple[str, ...] = (
+    "tests/test_web_console_readonly.py",
+    "tests/test_web_console_safety.py",
+    "tests/test_web_console_static.py",
+    "tests/test_web_console_worktree.py",
+    "tests/test_worktree_isolation.py",
+    "tests/test_worktree_manual_merge.py",
+)
+
+FAST_WEB_WORKTREE_REGRESSION_SCOPE_FILES: tuple[str, ...] = (
+    ".doc/goals.md",
+)
 
 
 def _norm_cmd(v: object) -> list[str]:
@@ -30,6 +47,162 @@ def _norm_cmd(v: object) -> list[str]:
         except ValueError:
             return s.split()  # fallback
     return []
+
+
+def repo_has_web_worktree_markers(repo: Path) -> bool:
+    """Return True when the repository looks like the AgentCLI web/worktree repo."""
+    try:
+        return (
+            (repo / "agent_runner").is_dir()
+            and (repo / "web_console").is_dir()
+            and (repo / ".doc" / "GOALS.md").is_file()
+        )
+    except Exception:
+        return False
+
+
+def _normalized_task_path(repo: Path, value: object) -> tuple[str, tuple[str, ...]]:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return "", ()
+    try:
+        path = Path(text)
+        if path.is_absolute():
+            repo_root = repo.expanduser().resolve()
+            try:
+                text = path.resolve().relative_to(repo_root).as_posix()
+            except Exception:
+                text = path.as_posix().replace("\\", "/")
+        else:
+            text = Path(text).as_posix()
+    except Exception:
+        text = text.replace("\\", "/")
+    normalized = text.lower()
+    parts = tuple(part.lower() for part in Path(text).parts if part not in ("", "."))
+    return normalized, parts
+
+
+def should_run_fast_web_worktree_regression(
+    repo: Path,
+    task_files: Sequence[str] | None,
+    *extra_task_files: Sequence[str] | None,
+) -> bool:
+    """Return True when a task should pay the fast web/worktree regression cost."""
+    if not repo_has_web_worktree_markers(repo):
+        return False
+    candidate_files: list[str] = []
+    for file_group in (task_files, *extra_task_files):
+        if not file_group:
+            continue
+        for raw in file_group:
+            text = str(raw or "").strip()
+            if text:
+                candidate_files.append(text)
+    if not candidate_files:
+        return False
+    for raw in candidate_files:
+        normalized, parts = _normalized_task_path(repo, raw)
+        if not normalized:
+            continue
+        if normalized in FAST_WEB_WORKTREE_REGRESSION_SCOPE_FILES:
+            return True
+        if "web_console" in parts or "agent_runner" in parts:
+            return True
+        if len(parts) >= 2 and parts[0] == "tests" and (
+            parts[1].startswith("test_web_console_") or parts[1].startswith("test_worktree_")
+        ):
+            return True
+    return False
+
+
+def _fast_web_worktree_regression_commands() -> list[dict[str, object]]:
+    python = sys.executable or "python"
+    commands: list[dict[str, object]] = []
+    for test_file in FAST_WEB_WORKTREE_REGRESSION_TEST_FILES:
+        commands.append(
+            {
+                "name": Path(test_file).stem,
+                "test_file": test_file,
+                "cmd": [
+                    python,
+                    "-B",
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    "tests",
+                    "-p",
+                    Path(test_file).name,
+                ],
+            }
+        )
+    return commands
+
+
+async def run_fast_web_worktree_regression_async(
+    repo: Path,
+    log_path: Path,
+    *,
+    stop_path: Path | None = None,
+    max_output_bytes: int = 10_000_000,
+) -> dict[str, object]:
+    """Run the fast web/worktree regression command set and persist a summary."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_dir = log_path.parent / log_path.stem
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    started_at = now_iso()
+    command_specs = _fast_web_worktree_regression_commands()
+    records: list[dict[str, object]] = []
+    result: dict[str, object] = {
+        "schema_version": 1,
+        "gate": "fast_web_worktree_regression",
+        "repo": str(repo),
+        "started_at": started_at,
+        "ended_at": "",
+        "ok": False,
+        "commands": records,
+        "log_path": str(log_path),
+        "log_dir": str(log_dir),
+        "failed_command": None,
+    }
+
+    try:
+        for index, spec in enumerate(command_specs, start=1):
+            cmd = [str(part) for part in spec["cmd"]]  # type: ignore[index]
+            test_file = str(spec["test_file"])  # type: ignore[index]
+            name = str(spec["name"])  # type: ignore[index]
+            cmd_log_path = log_dir / f"{index:02d}_{name}.txt"
+            rc, summary = await run_cmd_async(
+                cmd,
+                cwd=repo,
+                log_path=cmd_log_path,
+                timeout_sec=1800,
+                stop_path=stop_path,
+                max_output_bytes=max_output_bytes,
+            )
+            record = {
+                "index": index,
+                "name": name,
+                "test_file": test_file,
+                "cmd": cmd,
+                "rc": rc,
+                "summary": summary,
+                "log_path": str(cmd_log_path),
+            }
+            records.append(record)
+            if rc != 0:
+                result["failed_command"] = record
+                break
+        result["ok"] = bool(records) and all(int(item.get("rc", 1)) == 0 for item in records)
+        result["ended_at"] = now_iso()
+    finally:
+        try:
+            log_path.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    return result
 
 
 def run_build_gate(repo: Path, build_cmd: object, build_timeout_sec: int, legacy_build_target: str, log_path: Path) -> bool:

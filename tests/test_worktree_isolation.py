@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -350,6 +351,119 @@ class WorktreeIsolationTests(unittest.TestCase):
         saved = json.loads(shell.config_path.read_text(encoding="utf-8"))
         self.assertNotIn("run_dir", saved)
         self.assertNotIn("resume_latest", saved)
+
+    def test_fast_web_worktree_regression_runs_exact_suite_and_persists_summary(self) -> None:
+        from agent_runner.gates import (
+            repo_has_web_worktree_markers,
+            run_fast_web_worktree_regression_async,
+            should_run_fast_web_worktree_regression,
+        )
+
+        (self.repo / "agent_runner").mkdir(parents=True, exist_ok=True)
+        (self.repo / "web_console").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".doc").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".doc" / "GOALS.md").write_text(
+            "# Project Goals\n\n## P0\n- [ ] Keep the regression gate fast.\n",
+            encoding="utf-8",
+        )
+
+        self.assertTrue(repo_has_web_worktree_markers(self.repo))
+        self.assertTrue(should_run_fast_web_worktree_regression(self.repo, ["agent_runner/web.py"]))
+        self.assertTrue(
+            should_run_fast_web_worktree_regression(
+                self.repo,
+                ["docs/notes.md"],
+                ["web_console/app.js"],
+            )
+        )
+
+        calls: list[dict[str, object]] = []
+
+        async def fake_run_cmd_async(cmd, cwd, log_path, *, timeout_sec=600, stop_path=None, max_output_bytes=10_000_000):
+            calls.append({
+                "cmd": list(cmd),
+                "cwd": cwd,
+                "log_path": log_path,
+                "timeout_sec": timeout_sec,
+                "stop_path": stop_path,
+                "max_output_bytes": max_output_bytes,
+            })
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("ok\n", encoding="utf-8")
+            return 0, "ok"
+
+        summary_path = self.run_dir / "fast_web_worktree_regression.json"
+        with patch("agent_runner.gates.run_cmd_async", new=fake_run_cmd_async):
+            result = asyncio.run(run_fast_web_worktree_regression_async(self.repo, summary_path))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(6, len(result["commands"]))
+        self.assertEqual(6, len(calls))
+        self.assertTrue(summary_path.exists())
+
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        expected_files = [
+            "tests/test_web_console_readonly.py",
+            "tests/test_web_console_safety.py",
+            "tests/test_web_console_static.py",
+            "tests/test_web_console_worktree.py",
+            "tests/test_worktree_isolation.py",
+            "tests/test_worktree_manual_merge.py",
+        ]
+        self.assertTrue(summary["ok"])
+        self.assertEqual(expected_files, [item["test_file"] for item in summary["commands"]])
+        self.assertEqual(expected_files, [item["test_file"] for item in result["commands"]])
+
+        for call, expected_file in zip(calls, expected_files, strict=True):
+            self.assertEqual(Path(expected_file).name, call["cmd"][-1])
+            self.assertEqual(self.repo, call["cwd"])
+            self.assertTrue(str(call["log_path"]).endswith(".txt"))
+
+        log_dir = self.run_dir / "fast_web_worktree_regression"
+        self.assertTrue((log_dir / "01_test_web_console_readonly.txt").exists())
+        self.assertTrue((log_dir / "06_test_worktree_manual_merge.txt").exists())
+
+    def test_fast_web_worktree_regression_stops_on_first_failure_and_records_summary(self) -> None:
+        from agent_runner.gates import run_fast_web_worktree_regression_async
+
+        (self.repo / "agent_runner").mkdir(parents=True, exist_ok=True)
+        (self.repo / "web_console").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".doc").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".doc" / "GOALS.md").write_text(
+            "# Project Goals\n\n## P0\n- [ ] Keep the regression gate fast.\n",
+            encoding="utf-8",
+        )
+
+        calls: list[dict[str, object]] = []
+
+        async def fake_run_cmd_async(cmd, cwd, log_path, *, timeout_sec=600, stop_path=None, max_output_bytes=10_000_000):
+            test_file = str(cmd[-1])
+            rc = 1 if test_file == "test_web_console_safety.py" else 0
+            calls.append({
+                "cmd": list(cmd),
+                "cwd": cwd,
+                "log_path": log_path,
+                "rc": rc,
+            })
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(f"rc={rc}\n", encoding="utf-8")
+            return rc, "boom" if rc else "ok"
+
+        summary_path = self.run_dir / "fast_web_worktree_regression.json"
+        with patch("agent_runner.gates.run_cmd_async", new=fake_run_cmd_async):
+            result = asyncio.run(run_fast_web_worktree_regression_async(self.repo, summary_path))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(2, len(calls))
+        self.assertIsNotNone(result["failed_command"])
+        self.assertEqual("test_web_console_safety", result["failed_command"]["name"])
+        self.assertTrue(summary_path.exists())
+
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        self.assertFalse(summary["ok"])
+        self.assertEqual("test_web_console_safety", summary["failed_command"]["name"])
+        self.assertEqual(2, len(summary["commands"]))
+        self.assertTrue((self.run_dir / "fast_web_worktree_regression" / "02_test_web_console_safety.txt").exists())
 
 
 if __name__ == "__main__":

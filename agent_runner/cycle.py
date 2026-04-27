@@ -12,7 +12,13 @@ from typing import Optional, Any
 
 from .analysis_cache import merge_dev_hints_to_global_changelog
 from .docs import resolve_docs_dir, generate_docs_digest
-from .gates import run_build_gate_async, run_test_gate_async, extract_build_warnings
+from .gates import (
+    extract_build_warnings,
+    run_build_gate_async,
+    run_fast_web_worktree_regression_async,
+    run_test_gate_async,
+    should_run_fast_web_worktree_regression,
+)
 from .gitops import (
     git_head,
     git_changed_files,
@@ -1561,6 +1567,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 task_completed = False
                 task_blocked = False
+                task_failure_reason = ""
                 _prev_build_error: str = ""  # Carried across attempts for build-error-aware retry
 
                 def _isolate_or_stop(reason: str) -> tuple[bool, str]:
@@ -2132,11 +2139,109 @@ async def main_async(args: argparse.Namespace) -> int:
                                 skipped_set.add(next_task.id)
                                 break
                             return 1, "policy_violation", 0, (len(done_set) > before_done)
+                    fast_regression_files = list(next_task.files or [])
+                    try:
+                        fast_regression_files.extend(git_changed_files(repo, task_head_before, git_head(repo)))
+                    except Exception:
+                        pass
+                    try:
+                        fast_regression_files.extend(git_worktree_changed_files(repo))
+                    except Exception:
+                        pass
+                    if should_run_fast_web_worktree_regression(repo, fast_regression_files):
+                        fast_regression_log = attempt_dir / "fast_web_worktree_regression.json"
+                        metrics.event(
+                            "fast_regression_start",
+                            cycle=cycle_idx,
+                            step=step,
+                            task_id=next_task.id,
+                            attempt=attempt,
+                            log_path=str(fast_regression_log),
+                        )
+                        fast_regression = await run_fast_web_worktree_regression_async(
+                            repo=repo,
+                            log_path=fast_regression_log,
+                            stop_path=stop_path,
+                        )
+                        fast_command_count = len(fast_regression.get("commands", []) or [])
+                        fast_ok = bool(fast_regression.get("ok", False))
+                        metrics.event(
+                            "fast_regression_end",
+                            cycle=cycle_idx,
+                            step=step,
+                            task_id=next_task.id,
+                            attempt=attempt,
+                            rc=0 if fast_ok else 1,
+                            command_count=fast_command_count,
+                            log_path=str(fast_regression_log),
+                        )
+                        logger.gate_event("fast_regression", next_task.id, passed=fast_ok, commands=fast_command_count)
+                        if stop_path.exists():
+                            _record_task_stop("fast_regression_gate", attempt)
+                            return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
+                        if not fast_ok:
+                            failed_command = fast_regression.get("failed_command") or {}
+                            failed_name = str(failed_command.get("name") or failed_command.get("test_file") or "fast_regression")
+                            failed_summary = str(fast_regression_log)
+                            try:
+                                if isinstance(failed_command, dict):
+                                    failed_summary = json.dumps(failed_command, ensure_ascii=False, default=str)
+                            except Exception:
+                                pass
+                            state.setdefault("failed", []).append({
+                                "task": next_task.id,
+                                "reason": "fast_regression_failed",
+                                "detail": failed_summary[:500],
+                            })
+                            save_state(state_path, state)
+                            _record_history(
+                                next_task.id,
+                                next_task.title,
+                                "failed",
+                                reason="fast_regression_failed",
+                                detail=failed_summary[:500],
+                                files=next_task.files,
+                                cycle=cycle_idx,
+                                attempt=attempt + 1,
+                                max_attempts=max_attempts,
+                            )
+                            task_results.append({
+                                "id": next_task.id,
+                                "title": next_task.title,
+                                "status": "failed",
+                                "reason": "fast_regression_failed",
+                                "detail": failed_name,
+                                "duration": time.time() - task_outer_t0,
+                            })
+                            metrics.event(
+                                "task_end",
+                                cycle=cycle_idx,
+                                step=step,
+                                task_id=next_task.id,
+                                rc=1,
+                                reason="fast_regression_failed",
+                                command_count=fast_command_count,
+                            )
+                            logger.task_end(task_id=next_task.id, success=False, reason="fast_regression_failed", attempt=attempt)
+                            task_failure_reason = "fast_regression_failed"
+                            if tb or cp:
+                                ok_restore, fail_reason = _isolate_or_stop("fast_regression_failed")
+                                if not ok_restore:
+                                    if not continuous:
+                                        return 1, fail_reason, 0, (len(done_set) > before_done)
+                                    eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
+                            if continuous:
+                                skipped_set.add(next_task.id)
+                                break
+                            return 1, "fast_regression_failed", 0, (len(done_set) > before_done)
                     # Success: exit attempt loop
                     metrics.event("dev_attempt_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0)
                     logger.task_end(task_id=next_task.id, success=True, reason="completed", attempt=attempt)
                     task_completed = True
                     break
+
+                if task_failure_reason:
+                    continue
 
                 if stop_path.exists():
                     _record_task_stop("dev_after_attempt", locals().get("attempt") if "attempt" in locals() else None)
