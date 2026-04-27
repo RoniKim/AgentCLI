@@ -1,13 +1,13 @@
 :root {
-  --bg: #0a0c0a;
-  --surface: #10130f;
-  --surface-2: #161a14;
-  --surface-3: #0d100d;
-  --border: #1f2620;
-  --border-hi: #2a3328;
-  --text: #c8d2be;
-  --text-dim: #7a8275;
-  --text-sub: #505a4c;
+  --bg: #090b10;
+  --surface: #10131a;
+  --surface-2: #171b24;
+  --surface-3: #0d1016;
+  --border: #232937;
+  --border-hi: #303849;
+  --text: #d0d5df;
+  --text-dim: #858d9b;
+  --text-sub: #5b6472;
   --accent: #7ee38a;
   --accent-soft: rgba(126, 227, 138, 0.12);
   --warn: #f3c26b;
@@ -80,12 +80,12 @@ a {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1f2620;
+  background: var(--border);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #2a3328;
+  background: var(--border-hi);
 }
 
 .noscript {
@@ -114,7 +114,7 @@ a {
   gap: 12px;
   padding: 0 14px 0 16px;
   border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, #11140f 0%, #0d100d 100%);
+  background: linear-gradient(180deg, #121620 0%, #0d1016 100%);
   font-family: var(--mono);
   min-width: 0;
 }
@@ -218,7 +218,7 @@ a {
 .locale-switch__button--active {
   background: var(--accent);
   border-color: var(--accent);
-  color: #0a0c0a;
+  color: #06080a;
 }
 
 .sidebar {
@@ -536,14 +536,14 @@ a {
 .button--primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #0a0c0a;
+  color: #06080a;
   font-weight: 600;
 }
 
 .button--primary:hover,
 .button--primary:focus-visible {
   background: #92e89d;
-  color: #0a0c0a;
+  color: #06080a;
 }
 
 .button--danger {
@@ -1158,7 +1158,7 @@ a {
 }
 
 .log-row:nth-child(2n) {
-  background: #0f120f;
+  background: #0f1218;
 }
 
 .log-row__time {
@@ -3207,22 +3207,22 @@ a {
   font-family: var(--mono);
   font-size: 10px;
   line-height: 1;
-  color: #0a0c0a;
+  color: #06080a;
   background: var(--accent);
 }
 
 .badge--warn {
-  color: #0a0c0a;
+  color: #06080a;
   background: var(--warn);
 }
 
 .badge--err {
-  color: #0a0c0a;
+  color: #06080a;
   background: var(--err);
 }
 
 .badge--info {
-  color: #0a0c0a;
+  color: #06080a;
   background: var(--info);
 }
 

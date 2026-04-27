@@ -136,12 +136,76 @@
 - [x] LAN web serving refuses runner controls without real authentication or an explicit trusted-network gate; confirmation phrases remain UX confirmations, not authentication.
 - [ ] Redaction covers logs, GOALS raw text, task output excerpts, config, prompts, and serialized runner arguments consistently before LAN exposure.
 
+### P0-M. Browser-First Runner Operation
+
+- [ ] Start controls expose the same practical run modes operators use in the shell: autopilot, continuous, loop, one-shot, max cycles, profile, backend, and config path.
+- [ ] Start controls validate incompatible run options before launch and show the exact command-equivalent runner arguments that will be used.
+- [ ] Stop controls show phase-by-phase progress from request, stop file write, child termination, runner wait, final artifact collection, timeout, and finalized states.
+- [ ] Stop timeout state stays visibly actionable in the browser, including whether the runner is still alive, which child PIDs remain tracked, and which files may still be locked.
+- [ ] Browser restart/reload flows preserve intended run options instead of falling back to hidden defaults.
+- [ ] The browser can distinguish "runner process alive", "task backend alive", "tracked children alive", and "artifact writer still flushing" as separate states.
+- [ ] Runner control events are written to durable artifacts so shell, web, and remote-controller views agree after refresh or reconnect.
+
+### P0-N. Real-Time Monitoring Completeness
+
+- [ ] Active run state updates use one consistent polling or streaming model with backoff, reconnect, stale-data detection, and visible last-updated timestamps.
+- [ ] Dashboard, Pipeline, Logs, Notifications, and Runner Controls consume the same normalized live-run contract instead of each reconstructing status independently.
+- [ ] A long-running PM/Dev/QA task shows elapsed time, last log line, latest backend event, and "no output for N minutes" warning without requiring terminal access.
+- [ ] Live logs preserve scroll position, selection, pause state, and filters across route changes and refreshes.
+- [ ] Log tailing can switch between `run.log`, `error.log`, `events.jsonl`, `cycle_summary.log`, and backend transcript sources when available.
+- [ ] UI explicitly marks stale snapshots when the run directory, controller state, and process table disagree.
+- [ ] Playwright coverage verifies a simulated long-running task, stop-in-progress sequence, reconnect, stale snapshot, and completed-run transition.
+
+### P0-O. Enterprise-Grade Config And Role Management
+
+- [ ] Role editing preserves unknown/plugin stage specs such as `pkg.mod:Class` instead of silently dropping values outside the built-in enum.
+- [ ] Built-in role choices, defaults, and ordering have a single source of truth shared by CLI, web schema, stage registry, tests, and docs.
+- [ ] The web config editor exposes PM, Security, Dev, QA, reporter, and fallback model settings with labels that match their runtime behavior.
+- [ ] Model selection supports the approved Codex model ladder: PM `gpt-5.5`; Dev fallback `gpt-5.4-mini -> gpt-5.4 -> gpt-5.5`; QA `gpt-5.5`; reporter `gpt-5.4-mini`.
+- [ ] Security role UX shows both requirements: the role must be selected and `security.enabled` must be true, with a warning when one side is missing.
+- [ ] Config saves normalize list/string fields before runner launch so web-saved `roles`, models, allowlists, and paths cannot produce zero-stage runs.
+- [ ] Config save validation reports every rejected field in one response, not only the first failure.
+- [ ] Config backup/restore UI can list recent backups and restore a selected backup with confirmation.
+
+### P0-P. Worktree Review, Merge, And Cleanup Operations
+
+- [ ] Worktree Review includes an inspectable per-file diff view with binary, deleted, renamed, and large-file states handled explicitly.
+- [ ] Merge preflight details are shown in the UI: source dirty state, source `HEAD`, expected base ref, patch hash, `git apply --check`, and pending marker path.
+- [ ] Merge conflicts or patch apply failures show exact failed files/hunks and leave the pending state recoverable.
+- [ ] Discard and cleanup actions distinguish source-safe discard, generated worktree removal, stale marker pruning, and cleanup-failed reconciliation.
+- [ ] Worktree diagnostics can filter active, pending, stale, orphaned, cleanup-failed, and missing-patch entries without mutating files by default.
+- [ ] Cleanup-failed artifacts are cleared automatically only after the worktree path and marker state are actually reconciled.
+- [ ] Windows locked-path cleanup reports the locking path, affected artifact, retry schedule, and reboot-required guidance when user-mode cleanup cannot progress.
+- [ ] API and Playwright tests cover failed merge preflight, patch apply failure, stale marker repair, orphaned worktree reporting, and cleanup-failed reconciliation.
+
+### P0-Q. Safe Self-Development Automation
+
+- [ ] PM task generation consumes `.doc/GOALS.md` directly and refuses to create irrelevant backlog tasks when GOALS has unmet P0 items.
+- [ ] Generated task branches include the GOALS item id or exact text they satisfy, and completion can be traced from commit to GOALS checkbox.
+- [ ] AgentCLI self-runs cannot stop early with `reason=ok` while any required GOALS completion level remains unmet.
+- [ ] Task completion requires compile checks plus the fast regression suite relevant to touched files, with failures persisted in run artifacts.
+- [ ] QA stage records the validation commands, return codes, artifacts, and skipped-test rationale in a browser-readable report.
+- [ ] Reporter stage writes a concise final run report that the Web UI can render without reading raw terminal scrollback.
+- [ ] Failed tasks are carried into the next PM prompt through a structured failed-tasks block and are visible in Web History.
+- [ ] The browser can show "what changed this cycle" from git commits, changed files, tests, GOALS updates, and pending worktree state.
+
+### P0-R. Web UI Production Polish And Accessibility
+
+- [ ] All primary routes have dense but readable desktop layouts with no nested-card clutter, no text overlap, and stable control dimensions.
+- [ ] Mobile routes match the intended operational workflow, not only a visual preview, with usable navigation, filters, editors, and confirmations.
+- [ ] Background and surface colors use a neutral charcoal base; green is reserved for success/accent/status signals rather than global page tint.
+- [ ] Destructive, mutating, and long-running actions use consistent confirmation, busy, disabled, success, failure, timeout, and retry states.
+- [ ] Empty, partial, loading, stale, permission-denied, and backend-unavailable states are visually distinct across every screen.
+- [ ] Keyboard navigation covers route switching, command palette, modals, editors, diff views, logs, and confirmation dialogs.
+- [ ] Accessibility checks cover focus visibility, labels, contrast, reduced motion, and screen-reader names for icon-only controls.
+- [ ] Playwright screenshots validate Dashboard, Pipeline, Logs, Goals, Config, Prompts, History, Notifications, Worktree Review, Runner Controls, and mobile in both locales.
+
 ## P1 (Should-Have)
 
-- [ ] Mobile layout matches the `A_Mobile` design path without text overlap or broken controls.
-- [ ] Run History supports comparing two runs side-by-side.
-- [ ] Notifications support read/unread state and filtering.
-- [ ] Keyboard navigation is complete: command palette, `g` navigation chords, Escape handling, focus states, and accessible labels.
+- [ ] Run History supports comparing two runs side-by-side with commits, task outcomes, token/quota usage, validation results, and worktree outcomes.
+- [ ] Notifications support read/unread state, filtering, severity grouping, and links back to the relevant run/task/log lines.
+- [ ] Web report export can create Markdown and JSON summaries for a selected run.
+- [ ] The browser can open local artifact paths through a documented safe helper instead of exposing raw filesystem mutation.
 - [ ] The CLI can optionally launch or serve the web console from a documented command.
 - [ ] Web console exposes diagnostics for missing FastAPI/uvicorn dependencies and broken virtual environments.
 - [x] UI state clearly distinguishes fallback/demo data from real API data.
