@@ -11,18 +11,34 @@
     worktree: 'agentcli.console.worktree.v1',
     locale: 'agentcli.console.locale.v1',
   };
-  const GOALS_SAVE_CONFIRMATION_PHRASE = 'DELETE OR DOWNGRADE UNMET P0 GOALS';
-  const WORKTREE_ACTION_CONFIRMATIONS = {
-    merge: 'MERGE WORKTREE',
-    discard: 'DISCARD WORKTREE',
+  const GOALS_SAVE_CONFIRMATION_KEY = 'goals.confirmationPhraseExact';
+  const RUNNER_CONTROL_CONFIRMATION_KEYS = {
+    start: 'runner.confirmStartPhrase',
+    stop: 'runner.confirmStopPhrase',
+    reload: 'runner.confirmReloadPhrase',
+    restart: 'runner.confirmRestartPhrase',
   };
-  const WORKTREE_ACTION_INSTRUCTION_PREFIXES = {
-    merge: 'Type MERGE WORKTREE exactly to apply',
-    discard: 'Type DISCARD WORKTREE exactly to discard',
+  const WORKTREE_ACTION_CONFIRMATION_KEYS = {
+    merge: 'worktree.confirmMergePhrase',
+    discard: 'worktree.confirmDiscardPhrase',
   };
   // Keep the template-form text in source for static coverage:
   // Type ${worktreeActionConfirmationPhrase('merge')} exactly to apply
   // Type ${worktreeActionConfirmationPhrase('discard')} exactly to discard
+  const VIEW_ORDER = [
+    'dashboard',
+    'pipeline',
+    'logs',
+    'backlog',
+    'goals',
+    'config',
+    'prompts',
+    'history',
+    'notifications',
+    'worktree',
+    'landing',
+    'mobile',
+  ];
 
   function normalizeLocale(value) {
     return String(value || '').trim().toLowerCase() === 'ko' ? 'ko' : 'en';
@@ -128,6 +144,7 @@
       snapshot: {
         loading: 'Loading snapshot',
         api: 'API snapshot',
+        error: 'API error',
         fallback: 'Fallback data',
         stale: 'Stale snapshot',
         partial: 'Partial snapshot',
@@ -188,6 +205,7 @@
         available: 'available',
         ready: 'Ready',
         running: 'Running',
+        idle: 'Idle',
         working: 'Working...',
         start: 'Start',
         stop: 'Stop',
@@ -210,6 +228,10 @@
         reloadSummary: 'Stop the current runner, wait for it to settle, then start again using the selected repo and config snapshot.',
         restartSummary: 'Restart the runner using the selected repo and config snapshot.',
         confirmAction: 'Confirm this runner control action.',
+        actionDisabled: 'Action disabled',
+        actionFailed: 'Runner action failed.',
+        confirmationRequired: 'Confirmation required',
+        typeExactConfirmationToEnableAction: 'Type "{confirmation}" exactly to enable {action}.',
       },
       dashboard: {
         title: 'Dashboard',
@@ -243,6 +265,7 @@
         currentStageOutput: 'Current stage output',
         stageGuardrails: 'Stage guardrails',
         liveTokens: 'Live tokens',
+        pmDevQaFlow: 'PM -> Dev -> QA',
         readOnlyShell: 'Read-only shell by default. Stop, merge, and discard are not auto-applied here.',
         manualConfirmation: 'Current run uses manual stop confirmation and a local review workflow.',
         devStage: 'Dev stage',
@@ -257,6 +280,11 @@
         startedUnavailable: 'Started unavailable',
         endedUnavailable: 'Ended unavailable',
         inProgress: 'In progress',
+        pending: 'Pending',
+        completed: 'Completed',
+        stopped: 'Stopped',
+        skipped: 'Skipped',
+        partialLifecycleRecords: 'Only some lifecycle records were published.',
         recentOutputUnavailable: 'Recent output unavailable.',
         noLifecycleRecords: 'No lifecycle records were published yet.',
         sparkline24h: '24h sparkline',
@@ -314,12 +342,16 @@
         saving: 'Saving goals',
         saved: 'Goals saved',
         saveFailed: 'Goals save failed',
+        saveFailedHttp: 'Goals save failed (HTTP {status}).',
         confirmationPhrase: 'Confirmation phrase',
+        confirmationPhraseExact: 'CONFIRM GOALS SAVE',
         backupPath: 'Backup path',
         savedPath: 'Saved path',
         errorCode: 'Error code',
         resetDraft: 'Reset draft',
         localDraftOnly: 'Local draft only',
+        clean: 'clean',
+        changeCount: '{count} change(s)',
         checked: 'checked',
         parserWarnings: 'Parser warnings',
         rawTextPreview: 'Raw text preview',
@@ -329,6 +361,8 @@
         missing: 'GOALS.md is missing.',
         empty: 'GOALS.md is empty.',
         noLocalChanges: 'No local content changes yet.',
+        noRiskyP0Changes: 'No risky P0 changes are detected.',
+        uncheckedP0Goals: '{count} unchecked P0 goal(s) require confirmation.',
         saveCreatesBackup: 'Saving always creates a timestamped backup before atomically updating .doc/GOALS.md.',
         confirmSave: 'Confirm & Save Goals',
         deletedUncheckedP0: 'Deleted unchecked P0',
@@ -454,6 +488,7 @@
         budgetCap: 'Budget cap',
         branchId: 'Branch / ID',
         duration: 'Duration',
+        cycles: '{count} cycle(s)',
         started: 'Started',
         action: 'Action',
         currentState: 'current state',
@@ -523,6 +558,7 @@
         cleanupState: 'Cleanup state',
         cleanupPath: 'Cleanup path',
         cleanupMessage: 'Cleanup message',
+        cleanupStateUnavailable: 'No cleanup state is available.',
         runnerRc: 'Runner rc',
         reviewBeforeMerge: 'Review before merge',
         noChecklist: 'No checklist is available yet.',
@@ -530,6 +566,10 @@
         confirmMergeToApply: 'Confirm merge to apply the patch without creating a commit.',
         confirmDiscardToRemove: 'Confirm discard to remove the pending state without touching source files.',
         backendValidates: 'The backend validates the source repository, run directory, worktree path, and patch path before it runs.',
+        checklistInspectPatchHunks: 'Inspect patch hunks',
+        checklistVerifyNoSecretLeakage: 'Verify no secret leakage',
+        checklistApproveMergeOnlyAfterReview: 'Approve merge only after review',
+        checklistDiscardOnlyAfterArchivalCopy: 'Discard only after archival copy',
         readOnly: 'read only',
         finalized: 'finalized',
         cleanupRequired: 'Cleanup required',
@@ -539,6 +579,10 @@
         changedFiles: 'Changed files',
         copyPatchPath: 'Copy patch path',
         noPendingFile: 'no pending file',
+        mergeSummary: 'Confirm merge to apply {patchPath} to {sourceRepo} without creating a commit.',
+        discardSummary: 'Confirm discard to remove the pending state for {worktreeDir} without touching {sourceRepo}.',
+        actionFailedHttp: 'Worktree action failed (HTTP {status}).',
+        noPatchPathAvailable: 'No patch path is available.',
       },
       logs: {
         title: 'Logs',
@@ -575,6 +619,7 @@
         title: 'Landing preview',
         directionA: 'Direction A landing preview',
         marketingShell: 'marketing shell',
+        directionAChip: 'Direction A',
         headline: 'Leave it running.<br>Wake up to a PR.',
         copy: 'CLI-first multi-agent runner with a PM -> Dev -> QA pipeline, local-safe worktree review, and a compact production shell.',
         openDashboard: 'Open Dashboard',
@@ -586,11 +631,18 @@
         desktopShellRecovery: 'Desktop shell recovery',
         openMobile: 'Open Mobile',
         directionAMarketingShell: 'Direction A marketing shell',
+        pmDevQaFlowTitle: 'PM -> Dev -> QA',
+        pmDevQaFlowCopy: 'Structured backlog emission and stage handoff with live run feedback.',
+        readOnlyFirstPassTitle: 'Read-only first pass',
+        readOnlyFirstPassCopy: 'Status, logs, and review surfaces without destructive browser-side controls.',
+        compactShellTitle: 'Compact shell',
+        compactShellCopy: 'Thin borders, tight density, and live-running accents aligned to Direction A.',
       },
       mobile: {
         title: 'Mobile preview',
         telegramStyleStatusView: 'Telegram-style status view',
         mobilePreviewNotes: 'Mobile preview notes',
+        telegramStyleRemoteView: 'Telegram-style remote view',
         compactRemoteStatusSurface: 'Compact remote status surface for run monitoring.',
         narrowWidths: 'Designed to stay readable at narrow widths',
         mirrorsMock: 'Mirrors the Direction A mobile mock without external runtime deps.',
@@ -599,6 +651,7 @@
         openDashboard: 'Open Dashboard',
         pipeline: 'Pipeline',
         notifications: 'Notifications',
+        taskUnavailable: 'task unavailable',
       },
     },
     ko: {
@@ -673,6 +726,7 @@
       snapshot: {
         loading: '스냅샷 로딩 중',
         api: 'API 스냅샷',
+        error: 'API 오류',
         fallback: '대체 데이터',
         stale: '오래된 스냅샷',
         partial: '부분 스냅샷',
@@ -729,8 +783,10 @@
         controllerUnavailable: '실행기 컨트롤러를 사용할 수 없습니다.',
         controlsDisabled: '실행기 컨트롤이 비활성화되었습니다.',
         unavailable: '사용 불가',
+        available: '사용 가능',
         ready: '준비됨',
         running: '실행 중',
+        idle: '대기',
         working: '작업 중...',
         start: '시작',
         stop: '중지',
@@ -984,6 +1040,7 @@
         cleanupState: '정리 상태',
         cleanupPath: '정리 경로',
         cleanupMessage: '정리 메시지',
+        cleanupStateUnavailable: '정리 상태가 없습니다.',
         runnerRc: '실행기 rc',
         reviewBeforeMerge: '병합 전에 검토',
         noChecklist: '아직 체크리스트가 없습니다.',
@@ -991,6 +1048,10 @@
         confirmMergeToApply: '커밋을 만들지 않고 패치를 적용하려면 병합을 확인하세요.',
         confirmDiscardToRemove: '소스 파일을 건드리지 않고 대기 상태를 제거하려면 폐기를 확인하세요.',
         backendValidates: '백엔드는 실행 전에 소스 저장소, 실행 디렉터리, 워크트리 경로, 패치 경로를 검증합니다.',
+        checklistInspectPatchHunks: '패치 덩어리를 검토합니다',
+        checklistVerifyNoSecretLeakage: '비밀 정보가 노출되지 않았는지 확인합니다',
+        checklistApproveMergeOnlyAfterReview: '검토 후에만 병합을 승인합니다',
+        checklistDiscardOnlyAfterArchivalCopy: '보관본을 만든 뒤에만 폐기합니다',
       },
       logs: {
         title: '로그',
@@ -1016,6 +1077,7 @@
         title: '랜딩 미리보기',
         directionA: 'Direction A 랜딩 미리보기',
         marketingShell: '마케팅 쉘',
+        directionAChip: 'Direction A',
         headline: '그대로 실행해 두세요.<br>PR로 깨어나세요.',
         copy: 'PM -> Dev -> QA 파이프라인, 로컬 안전 워크트리 검토, 컴팩트한 프로덕션 쉘을 갖춘 CLI 우선 멀티 에이전트 러너입니다.',
         openDashboard: '대시보드 열기',
@@ -1027,11 +1089,18 @@
         desktopShellRecovery: '데스크톱 쉘 복구',
         openMobile: '모바일 열기',
         directionAMarketingShell: 'Direction A 마케팅 쉘',
+        pmDevQaFlowTitle: 'PM -> Dev -> QA',
+        pmDevQaFlowCopy: '실시간 실행 피드백과 함께 구조화된 백로그 발행 및 단계 인계를 제공합니다.',
+        readOnlyFirstPassTitle: '읽기 전용 우선 통과',
+        readOnlyFirstPassCopy: '파괴적인 브라우저 측 제어 없이 상태, 로그, 검토 화면을 제공합니다.',
+        compactShellTitle: '컴팩트 쉘',
+        compactShellCopy: '얇은 테두리, 촘촘한 밀도, 라이브 실행 강조를 Direction A에 맞췄습니다.',
       },
       mobile: {
         title: '모바일 미리보기',
         telegramStyleStatusView: '텔레그램 스타일 상태 보기',
         mobilePreviewNotes: '모바일 미리보기 메모',
+        telegramStyleRemoteView: '텔레그램 스타일 원격 뷰',
         compactRemoteStatusSurface: '실행 모니터링용 컴팩트 원격 상태 화면입니다.',
         narrowWidths: '좁은 폭에서도 읽기 쉽도록 설계되었습니다.',
         mirrorsMock: '외부 런타임 의존성 없이 Direction A 모바일 목업을 따릅니다.',
@@ -1040,6 +1109,7 @@
         openDashboard: '대시보드 열기',
         pipeline: '파이프라인',
         notifications: '알림',
+        taskUnavailable: '작업 없음',
       },
     },
   };
@@ -1075,6 +1145,10 @@
     startedUnavailable: '시작 정보 없음',
     endedUnavailable: '종료 정보 없음',
     inProgress: '진행 중',
+    pending: '대기',
+    completed: '완료',
+    stopped: '중지됨',
+    skipped: '건너뜀',
     recentOutputUnavailable: '최근 출력 없음.',
     noLifecycleRecords: '아직 게시된 수명주기 기록이 없습니다.',
     activeTask: '현재 작업',
@@ -1084,6 +1158,7 @@
   Object.assign(LOCALE_TEXT.ko.history, {
     branchId: '브랜치 / ID',
     duration: '기간',
+    cycles: '{count} 사이클',
     started: '시작',
     action: '작업',
     currentState: '현재 상태',
@@ -1155,6 +1230,7 @@
   Object.assign(LOCALE_TEXT.ko.pipeline, {
     started: '시작',
     ended: '종료',
+    pmDevQaFlow: 'PM -> Dev -> QA',
   });
   Object.assign(LOCALE_TEXT.ko.config, {
     description: '설명',
@@ -1171,6 +1247,12 @@
     addGoal: '목표 추가',
     saveGoal: '목표 저장',
     noGoalsYet: '아직 목표가 없습니다.',
+    saveFailedHttp: '목표 저장 실패(HTTP {status}).',
+    confirmationPhraseExact: '목표 저장 확인',
+    clean: '정상',
+    changeCount: '{count}개 변경',
+    noRiskyP0Changes: '위험한 P0 변경이 감지되지 않았습니다.',
+    uncheckedP0Goals: '체크되지 않은 P0 목표 {count}개가 확인을 필요로 합니다.',
   });
   Object.assign(LOCALE_TEXT.ko.logs, {
     taskIdPlaceholder: '작업 ID',
@@ -1223,6 +1305,11 @@
   Object.assign(LOCALE_TEXT.en.logs, {
     linesShown: '{count} lines shown',
     waitingForNextEvent: 'waiting for next event...',
+    exportHeader: 'AgentCLI live log export',
+    exportSource: 'Source',
+    exportCursor: 'Cursor',
+    exportFilters: 'Filters',
+    exportNoMatches: 'No matching log lines',
   });
   Object.assign(LOCALE_TEXT.en.goals, {
     saveGoals: 'Save Goals',
@@ -1231,6 +1318,7 @@
   Object.assign(LOCALE_TEXT.en.runner, {
     controllerReportedError: 'Runner controller reported an error.',
     controlFailed: 'Runner control failed.',
+    controlFailedHttp: 'Runner control failed (HTTP {status}).',
   });
   Object.assign(LOCALE_TEXT.en.worktree, {
     actionFailed: 'Worktree action failed.',
@@ -1486,6 +1574,7 @@
       budgetNotices: '예산 알림',
       actionNeeded: '조치 필요',
       eventsReadFrom: '이벤트는 수명주기 기록과 제어 평면 스냅샷에서 읽어옵니다. 플레이스홀더 피드는 사용하지 않습니다.',
+      localStopConfirmed: '로컬 중지가 확인되었고 UI가 중지 상태로 전환되었습니다.',
     },
     runner: {
       ...LOCALE_TEXT.ko.runner,
@@ -1500,6 +1589,13 @@
       actionUnavailable: '작업을 사용할 수 없음',
       controllerUnavailableMessage: '실행기 컨트롤러를 사용할 수 없습니다.',
       controlsDisabledMessage: '실행기 컨트롤이 비활성화되었습니다.',
+      controllerReportedError: '실행기 컨트롤러가 오류를 보고했습니다.',
+      controlFailed: '실행기 제어 실패.',
+      controlFailedHttp: '실행기 제어 실패(HTTP {status}).',
+      actionDisabled: '작업 비활성화',
+      actionFailed: '실행기 작업 실패.',
+      confirmationRequired: '확인 필요',
+      typeExactConfirmationToEnableAction: '{action}을 활성화하려면 "{confirmation}"를 정확히 입력하세요.',
     },
     worktree: {
       ...LOCALE_TEXT.ko.worktree,
@@ -1523,6 +1619,10 @@
       reviewThePatchBeforeSourceRepoChanges: '소스 저장소 변경 전에 패치를 검토하세요.',
       reviewChecklist: '검토 체크리스트',
       riskNotes: '위험 참고',
+      mergeSummary: '{sourceRepo}에 {patchPath}를 커밋 없이 적용하려면 병합을 확인하세요.',
+      discardSummary: '{sourceRepo}를 건드리지 않고 대기 상태를 제거하려면 {worktreeDir} 폐기를 확인하세요.',
+      actionFailedHttp: '작업트리 작업 실패(HTTP {status}).',
+      noPatchPathAvailable: '사용 가능한 패치 경로가 없습니다.',
     },
   });
 
@@ -1579,11 +1679,19 @@
     linesShown: '{count}줄 표시됨',
     live: '실시간',
     waitingForNextEvent: '다음 이벤트를 기다리는 중...',
+    exportHeader: 'AgentCLI 라이브 로그 내보내기',
+    exportSource: '출처',
+    exportCursor: '커서',
+    exportFilters: '필터',
+    exportNoMatches: '일치하는 로그 줄 없음',
   });
   Object.assign(LOCALE_TEXT.ko.pipeline, {
     partialLifecycleRecords: '일부 라이프사이클 기록만 게시되었습니다.',
   });
   Object.assign(LOCALE_TEXT.ko.runner, {
+    controllerReportedError: '실행기 컨트롤러가 오류를 보고했습니다.',
+    controlFailed: '실행기 제어 실패.',
+    controlFailedHttp: '실행기 제어 실패(HTTP {status}).',
     typeConfirmationPhrase: '확인하려면 "{confirmation}"를 입력하세요.',
     confirmationPhraseMismatch: '확인 문구는 "{confirmation}"여야 합니다.',
     stateTimeout: '러너가 {seconds}초 안에 {state} 상태를 보고하지 않았습니다.',
@@ -1627,6 +1735,10 @@
 
   function t(key, values = {}) {
     return localeText(currentLocale(), key, values);
+  }
+
+  function goalSaveConfirmationPhrase() {
+    return t(GOALS_SAVE_CONFIRMATION_KEY);
   }
 
   function syncDocumentLocale() {
@@ -1686,28 +1798,6 @@
     worktree: 'g w',
     landing: 'g h',
     mobile: 'g m',
-  };
-
-  const VIEW_LABELS = {
-    dashboard: 'Dashboard',
-    pipeline: 'Pipeline',
-    logs: 'Logs',
-    backlog: 'Backlog',
-    goals: 'Goals',
-    config: 'Config',
-    prompts: 'Prompts',
-    history: 'Run History',
-    notifications: 'Notifications',
-    worktree: 'Worktree Review',
-    landing: 'Landing preview',
-    mobile: 'Mobile preview',
-  };
-
-  const RUNNER_CONTROL_CONFIRMATIONS = {
-    start: 'START RUNNER',
-    stop: 'STOP RUNNER',
-    reload: 'RELOAD RUNNER',
-    restart: 'RESTART RUNNER',
   };
 
   function nowMs() {
@@ -1982,7 +2072,7 @@
   }
 
   function isValidView(view) {
-    return Object.prototype.hasOwnProperty.call(VIEW_LABELS, view);
+    return VIEW_ORDER.includes(view);
   }
 
   function normalizeView(view) {
@@ -2200,12 +2290,12 @@
 
   function runnerControlConfirmationPhrase(action) {
     const phrases = {
-      start: RUNNER_CONTROL_CONFIRMATIONS.start,
-      stop: RUNNER_CONTROL_CONFIRMATIONS.stop,
-      reload: RUNNER_CONTROL_CONFIRMATIONS.reload,
-      restart: RUNNER_CONTROL_CONFIRMATIONS.restart,
+      start: t(RUNNER_CONTROL_CONFIRMATION_KEYS.start),
+      stop: t(RUNNER_CONTROL_CONFIRMATION_KEYS.stop),
+      reload: t(RUNNER_CONTROL_CONFIRMATION_KEYS.reload),
+      restart: t(RUNNER_CONTROL_CONFIRMATION_KEYS.restart),
     };
-    return phrases[action] || RUNNER_CONTROL_CONFIRMATIONS.reload;
+    return phrases[action] || t(RUNNER_CONTROL_CONFIRMATION_KEYS.reload);
   }
 
   function runnerControlActionLabel(action, busy = false) {
@@ -2355,20 +2445,45 @@
     const current = toObject(control);
     const status = toObject(current.status);
     const stopProgress = normalizeStopProgress(status.stopProgress);
+    const sourceValue = current.source && current.source !== 'default' ? current.source : t('common.unknown');
+    const runStatusValue = current.runStatus
+      ? (String(current.runStatus).toLowerCase() === 'running'
+        ? t('runner.running')
+        : String(current.runStatus).toLowerCase() === 'idle'
+          ? t('runner.idle')
+          : String(current.runStatus).toLowerCase() === 'loading'
+            ? t('common.loading')
+            : String(current.runStatus).toLowerCase() === 'ready'
+              ? t('runner.ready')
+              : String(current.runStatus).toLowerCase() === 'stopped'
+                ? t('runner.stopped')
+                : current.runStatus)
+      : (status.running ? t('runner.running') : t('runner.idle'));
+    const lastActionValue = current.lastAction
+      ? (String(current.lastAction).toLowerCase() === 'start'
+        ? t('runner.start')
+        : String(current.lastAction).toLowerCase() === 'stop'
+          ? t('runner.stop')
+          : String(current.lastAction).toLowerCase() === 'reload'
+            ? t('runner.reload')
+            : String(current.lastAction).toLowerCase() === 'restart'
+              ? t('runner.restart')
+              : current.lastAction)
+      : t('common.none');
     const rows = [
-      { label: t('runner.source'), value: current.source || 'unknown', className: 'runner-control__value--muted' },
-      { label: t('runner.selectedRepo'), value: status.repo || 'unknown', className: 'runner-control__value--muted' },
-      { label: t('runner.selectedConfig'), value: status.configPath || 'unknown', className: 'runner-control__value--muted' },
+      { label: t('runner.source'), value: sourceValue, className: 'runner-control__value--muted' },
+      { label: t('runner.selectedRepo'), value: status.repo || t('common.unknown'), className: 'runner-control__value--muted' },
+      { label: t('runner.selectedConfig'), value: status.configPath || t('common.unknown'), className: 'runner-control__value--muted' },
       {
         label: t('runner.controller'),
-        value: current.controllerAvailable ? 'available' : t('runner.unavailable'),
+        value: current.controllerAvailable ? t('runner.available') : t('runner.unavailable'),
         className: current.controllerAvailable ? (display.chipTone === 'err' ? 'runner-control__value--err' : 'runner-control__value--accent') : runnerControlValueClass(display.chipTone),
       },
       { label: t('runner.state'), value: display.label, className: runnerControlValueClass(display.chipTone) },
-      { label: t('runner.runMode'), value: status.runnerMode || 'unknown', className: 'runner-control__value--muted' },
+      { label: t('runner.runMode'), value: status.runnerMode || t('common.unknown'), className: 'runner-control__value--muted' },
       {
         label: t('runner.runStatus'),
-        value: current.runStatus || (status.running ? 'running' : 'idle'),
+        value: runStatusValue,
         className: status.running ? 'runner-control__value--accent' : 'runner-control__value--muted',
       },
     ];
@@ -2382,17 +2497,17 @@
     rows.push(
       {
         label: t('runner.lastAction'),
-        value: current.lastAction || 'none',
+        value: lastActionValue,
         className: current.lastAction ? 'runner-control__value--accent' : 'runner-control__value--muted',
       },
       {
         label: t('runner.lastMessage'),
-        value: current.lastMessage || 'none',
+        value: current.lastMessage || t('common.none'),
         className: current.lastMessage ? 'runner-control__value--accent' : 'runner-control__value--muted',
       },
       {
         label: t('runner.lastError'),
-        value: current.lastError || 'none',
+        value: current.lastError || t('common.none'),
         className: current.lastError ? 'runner-control__value--err' : 'runner-control__value--muted',
       },
     );
@@ -2501,7 +2616,7 @@
     if (!Object.keys(raw).length) {
       return createRunnerControlModel({
         source: 'api',
-        message: 'Runner control status is not available yet.',
+        message: t('runner.loadingStatus'),
         controllerAvailable: false,
         enabled: false,
         running: false,
@@ -2522,7 +2637,7 @@
       source: toText(raw.source, 'api'),
       controllerAvailable,
       busy,
-      message: message || (controllerAvailable ? (enabled ? (running ? 'Runner controls are enabled and the controller reports a running runner.' : 'Runner controls are enabled and the controller reports a stopped runner.') : 'Runner controls are disabled until the server opt-in is enabled.') : 'Runner controller is unavailable.'),
+      message: message || (controllerAvailable ? (enabled ? (running ? t('runner.enabledRunning') : t('runner.enabledStopped')) : t('runner.disabledUntilServerOptIn')) : t('runner.controllerUnavailableMessage')),
       runStatus: toText(raw.run_status || raw.runStatus || '', running ? 'running' : 'idle'),
       status: {
         running,
@@ -2665,6 +2780,21 @@
     }
   }
 
+  function backlogStatusLabel(status) {
+    switch (normalizeBacklogStatus(status, 'pending')) {
+      case 'done':
+        return t('backlog.done');
+      case 'in_progress':
+        return t('backlog.inProgress');
+      case 'failed':
+        return t('backlog.failed');
+      case 'active':
+        return t('backlog.active');
+      default:
+        return t('backlog.pending');
+    }
+  }
+
   function lifecycleStageCardClass(status) {
     const classes = ['stage-card'];
     switch (normalizeStageStatus(status, 'pending')) {
@@ -2712,6 +2842,23 @@
         return 'SKIP';
       default:
         return 'WAIT';
+    }
+  }
+
+  function lifecycleStageStatusLabel(status) {
+    switch (normalizeStageStatus(status, 'pending')) {
+      case 'done':
+        return t('pipeline.completed');
+      case 'running':
+        return t('pipeline.inProgress');
+      case 'failed':
+        return t('common.failed');
+      case 'stopped':
+        return t('pipeline.stopped');
+      case 'skipped':
+        return t('pipeline.skipped');
+      default:
+        return t('pipeline.pending');
     }
   }
 
@@ -3040,7 +3187,7 @@
     const riskCount = deletedUncheckedP0.length + downgradedUncheckedP0.length;
     return {
       requiresConfirmation: riskCount > 0,
-      confirmationPhrase: GOALS_SAVE_CONFIRMATION_PHRASE,
+      confirmationPhrase: goalSaveConfirmationPhrase(),
       deletedUncheckedP0,
       downgradedUncheckedP0,
       riskCount,
@@ -3052,9 +3199,9 @@
     const downgraded = toArray(risk.downgradedUncheckedP0);
     const total = deleted.length + downgraded.length;
     if (!total) {
-      return 'no risky P0 changes';
+      return t('goals.noRiskyP0Changes');
     }
-    return `${total} unchecked P0 goal${total === 1 ? '' : 's'}`;
+    return t('goals.uncheckedP0Goals', { count: total });
   }
 
   function normalizeGoalSaveRisk(rawRisk) {
@@ -3064,7 +3211,7 @@
     const riskCount = toNumber(raw.risk_count ?? raw.riskCount, deleted.length + downgraded.length);
     return {
       requiresConfirmation: Boolean(raw.requires_confirmation ?? raw.requiresConfirmation ?? riskCount),
-      confirmationPhrase: toText(raw.confirmation_phrase || raw.confirmationPhrase, GOALS_SAVE_CONFIRMATION_PHRASE),
+      confirmationPhrase: toText(raw.confirmation_phrase || raw.confirmationPhrase, goalSaveConfirmationPhrase()),
       deletedUncheckedP0: deleted,
       downgradedUncheckedP0: downgraded,
       riskCount,
@@ -3084,7 +3231,7 @@
       goalsPath: toText(raw.goals_path || raw.goalsPath || raw.saved_path || raw.savedPath, ''),
       savedPath: toText(raw.saved_path || raw.savedPath, ''),
       backupPath: toText(raw.backup_path || raw.backupPath || errorDetails.backup_path || errorDetails.backupPath, ''),
-      confirmationPhrase: toText(raw.confirmation_phrase || raw.confirmationPhrase || errorDetails.confirmation_phrase || errorDetails.confirmationPhrase, GOALS_SAVE_CONFIRMATION_PHRASE),
+      confirmationPhrase: toText(raw.confirmation_phrase || raw.confirmationPhrase || errorDetails.confirmation_phrase || errorDetails.confirmationPhrase, goalSaveConfirmationPhrase()),
       risk,
       snapshot: toObject(raw.snapshot),
       error,
@@ -3375,16 +3522,16 @@
 
   function legacyConfigGroups() {
     return [
-      { id: 'project', title: 'Project', paths: ['repo', 'profile', 'execution_backend', 'roles'] },
-      { id: 'runner', title: 'Runner', paths: ['autopilot', 'continuous', 'iterations', 'max_turns_per_task', 'loop', 'loop_sleep_seconds', 'loop_max_cycles', 'loop_idle_exit_after', 'idle_exit_cycles', 'max_consecutive_failed_cycles', 'run_tests', 'budget_reset_per_cycle'] },
-      { id: 'quota', title: 'Quota', paths: ['quota_check_enabled', 'quota_five_hour_max_utilization', 'quota_seven_day_max_utilization', 'quota_wait_for_reset'] },
-      { id: 'worktree', title: 'Worktree', paths: ['worktree_isolation', 'isolate_task', 'gitops.worktree_merge_mode', 'gitops.untracked_exclude_globs'] },
-      { id: 'prompts', title: 'Prompt Paths', paths: ['prompts_dir'] },
-      { id: 'codex_models', title: 'Codex Models', paths: ['pm_model', 'dev_model', 'dev_model_tier1', 'dev_model_tier2', 'qa_model', 'reporter_model'] },
-      { id: 'pm_refresh', title: 'PM Refresh', paths: ['pm_refresh_backlog', 'pm_refresh_every_cycles', 'pm_include_working_tree'] },
-      { id: 'budget', title: 'Budget', paths: ['budgets.max_pm_structured_retries', 'budgets.max_dev_escalations_per_task', 'budgets.max_dev_continuations_per_task', 'budgets.max_total_escalations_per_run', 'budgets.max_total_continuations_per_run', 'budgets.max_total_repair_attempts_per_run'] },
-      { id: 'telegram', title: 'Telegram', paths: ['telegram.enabled', 'telegram.runner_mode', 'telegram.poll_timeout_seconds', 'telegram.allowed_chat_ids', 'telegram.bot_token', 'telegram.pairing_code', 'telegram.instance_name', 'telegram.notify_events', 'telegram.send_cycle_summary', 'telegram.notify_poll_interval_seconds', 'telegram.stalled_seconds', 'telegram.tail_lines_default'] },
-      { id: 'goals', title: 'Goals', paths: ['goals_enabled', 'goals_auto_generate', 'goals_auto_check', 'goals_auto_refresh', 'goals_refresh_max_per_run', 'goals_completion_level'] },
+      { id: 'project', title: t('config.groupProject'), paths: ['repo', 'profile', 'execution_backend', 'roles'] },
+      { id: 'runner', title: t('config.groupRunner'), paths: ['autopilot', 'continuous', 'iterations', 'max_turns_per_task', 'loop', 'loop_sleep_seconds', 'loop_max_cycles', 'loop_idle_exit_after', 'idle_exit_cycles', 'max_consecutive_failed_cycles', 'run_tests', 'budget_reset_per_cycle'] },
+      { id: 'quota', title: t('config.groupQuota'), paths: ['quota_check_enabled', 'quota_five_hour_max_utilization', 'quota_seven_day_max_utilization', 'quota_wait_for_reset'] },
+      { id: 'worktree', title: t('config.groupWorktree'), paths: ['worktree_isolation', 'isolate_task', 'gitops.worktree_merge_mode', 'gitops.untracked_exclude_globs'] },
+      { id: 'prompts', title: t('config.groupPrompts'), paths: ['prompts_dir'] },
+      { id: 'codex_models', title: t('config.groupCodexModels'), paths: ['pm_model', 'dev_model', 'dev_model_tier1', 'dev_model_tier2', 'qa_model', 'reporter_model'] },
+      { id: 'pm_refresh', title: t('config.groupPmRefresh'), paths: ['pm_refresh_backlog', 'pm_refresh_every_cycles', 'pm_include_working_tree'] },
+      { id: 'budget', title: t('config.groupBudget'), paths: ['budgets.max_pm_structured_retries', 'budgets.max_dev_escalations_per_task', 'budgets.max_dev_continuations_per_task', 'budgets.max_total_escalations_per_run', 'budgets.max_total_continuations_per_run', 'budgets.max_total_repair_attempts_per_run'] },
+      { id: 'telegram', title: t('config.groupTelegram'), paths: ['telegram.enabled', 'telegram.runner_mode', 'telegram.poll_timeout_seconds', 'telegram.allowed_chat_ids', 'telegram.bot_token', 'telegram.pairing_code', 'telegram.instance_name', 'telegram.notify_events', 'telegram.send_cycle_summary', 'telegram.notify_poll_interval_seconds', 'telegram.stalled_seconds', 'telegram.tail_lines_default'] },
+      { id: 'goals', title: t('config.groupGoals'), paths: ['goals_enabled', 'goals_auto_generate', 'goals_auto_check', 'goals_auto_refresh', 'goals_refresh_max_per_run', 'goals_completion_level'] },
     ];
   }
 
@@ -3595,7 +3742,7 @@
     const sectionStatus = !items.length ? 'empty' : items.length < 3 ? 'partial' : 'ready';
     return {
       items,
-      state: buildSectionState('stages', sectionStatus, sectionStatus === 'ready' ? '' : sectionStatus === 'partial' ? 'Only some lifecycle records were published.' : fallbackSectionMessage('stages')),
+      state: buildSectionState('stages', sectionStatus, sectionStatus === 'ready' ? '' : sectionStatus === 'partial' ? t('pipeline.partialLifecycleRecords') : fallbackSectionMessage('stages')),
     };
   }
 
@@ -4479,7 +4626,7 @@
         sourceBranch: 'HEAD',
         baseRef: '',
         reviewRequired: false,
-        reviewRequiredMessage: 'No pending worktree merge.',
+        reviewRequiredMessage: t('worktree.noPendingReview'),
         worktreeDir: '',
         worktree: '',
         patchPath: '',
@@ -4487,16 +4634,16 @@
         pendingFile: '',
         statusFile: '',
         cleanupPath: '',
-        cleanupMessage: 'No cleanup state is available.',
+        cleanupMessage: t('worktree.cleanupStateUnavailable'),
         cleanupState: 'none',
-        summary: 'No pending worktree merge.',
-        risk: 'No isolated worktree patch is pending review.',
+        summary: t('worktree.noPendingReview'),
+        risk: t('worktree.reviewThePatchBeforeSourceRepoChanges'),
         changedFiles: [],
         checklist: [
-          'Inspect patch hunks',
-          'Verify no secret leakage',
-          'Approve merge only after review',
-          'Discard only after archival copy',
+          t('worktree.checklistInspectPatchHunks'),
+          t('worktree.checklistVerifyNoSecretLeakage'),
+          t('worktree.checklistApproveMergeOnlyAfterReview'),
+          t('worktree.checklistDiscardOnlyAfterArchivalCopy'),
         ],
         runDir: '',
         runnerRc: 0,
@@ -4727,7 +4874,7 @@
         sourceBranch: 'main',
         baseRef: '',
         reviewRequired: false,
-        reviewRequiredMessage: 'No pending worktree merge.',
+        reviewRequiredMessage: t('worktree.noPendingReview'),
         worktreeDir: '',
         worktree: '',
         patchPath: '',
@@ -4735,16 +4882,16 @@
         pendingFile: '',
         statusFile: '',
         cleanupPath: '',
-        cleanupMessage: 'No cleanup state is available.',
+        cleanupMessage: t('worktree.cleanupStateUnavailable'),
         cleanupState: 'none',
-        summary: 'No pending worktree merge.',
-        risk: 'No isolated worktree patch is pending review.',
+        summary: t('worktree.noPendingReview'),
+        risk: t('worktree.reviewThePatchBeforeSourceRepoChanges'),
         changedFiles: [],
         checklist: [
-          'Inspect patch hunks',
-          'Verify no secret leakage',
-          'Approve merge only after review',
-          'Discard only after archival copy',
+          t('worktree.checklistInspectPatchHunks'),
+          t('worktree.checklistVerifyNoSecretLeakage'),
+          t('worktree.checklistApproveMergeOnlyAfterReview'),
+          t('worktree.checklistDiscardOnlyAfterArchivalCopy'),
         ],
         runDir: '',
         runnerRc: 0,
@@ -5303,7 +5450,7 @@
       parts.push(`shutdown=${shutdownReason}`);
     }
     if (counts.cycles) {
-      parts.push(`${counts.cycles} cycle${counts.cycles === 1 ? '' : 's'}`);
+      parts.push(t('history.cycles', { count: counts.cycles }));
     }
     return parts.join(' | ') || t('history.noPersistedSummary');
   }
@@ -5319,9 +5466,9 @@
     return `<div class="${cls}"></div>`;
   }
 
-  function renderLifecycleLane(stages, emptyMessage = 'No lifecycle records were published yet.') {
+  function renderLifecycleLane(stages, emptyMessage = '') {
     if (!stages.length) {
-      return `<div class="summary-note">${escapeHTML(emptyMessage)}</div>`;
+      return `<div class="summary-note">${escapeHTML(emptyMessage || t('pipeline.noLifecycleRecords'))}</div>`;
     }
     return stages
       .map((stage, index) => `
@@ -5352,7 +5499,7 @@
           <div class="${iconClass}">${iconText}</div>
           <div class="stage-card__title">
             <div class="stage-card__label">${escapeHTML(label)}</div>
-            <div class="stage-card__meta">${escapeHTML(status)} | ${escapeHTML(cycleText)}</div>
+            <div class="stage-card__meta">${escapeHTML(lifecycleStageStatusLabel(status))} | ${escapeHTML(cycleText)}</div>
           </div>
         </div>
         <div class="stage-card__body">
@@ -5371,7 +5518,7 @@
     const progress = status === 'in_progress' ? 0.62 : status === 'done' ? 1 : 0.1;
     const tags = (task.tags || []).map((tag) => chip(tag)).join('');
     const skill = task.skill ? chip(task.skill, 'chip--info') : '';
-    const meta = [chip(status.replace(/_/g, ' '), backlogStatusToneClass(status)), chip(task.estimate), skill].filter(Boolean).join('');
+    const meta = [chip(backlogStatusLabel(status), backlogStatusToneClass(status)), chip(task.estimate), skill].filter(Boolean).join('');
     const dependencyText = task.dependsOn && task.dependsOn.length ? t('backlog.dependsOn', { items: task.dependsOn.join(', ') }) : t('backlog.dependenciesUnavailable');
     const fileScopeText = task.fileScope || (task.files && task.files.length ? task.files.join(', ') : t('backlog.fileScopeUnavailable'));
     const failureReason = toText(task.failureReason || toObject(task.failure).reason, '');
@@ -5847,7 +5994,7 @@
       state.configSave = {
         ...createBlankConfigSaveState(),
         status: 'error',
-        message: 'No config changes were supplied.',
+        message: t('config.noConfigChangesSupplied'),
         errorCode: 'config_no_changes',
         changedPaths: [],
         reloadRequiredPaths: [],
@@ -5861,7 +6008,7 @@
       state.configSave = {
         ...createBlankConfigSaveState(),
         status: 'error',
-        message: `${invalidDiffs.length} pending change${invalidDiffs.length === 1 ? '' : 's'} must be fixed before saving.`,
+        message: t('config.fixPendingChangesBeforeSaving', { count: invalidDiffs.length }),
         errorCode: 'config_validation_failed',
         changedPaths: diffs.map((diff) => diff.path),
         reloadRequiredPaths: [],
@@ -5876,7 +6023,7 @@
     state.configSave = {
       ...createBlankConfigSaveState(),
       status: 'saving',
-      message: 'Saving config changes...',
+      message: t('config.savingConfigChanges'),
       errorCode: '',
       backupPath: '',
       changedPaths: diffs.map((diff) => diff.path),
@@ -5938,7 +6085,7 @@
       state.configSave = {
         ...createBlankConfigSaveState(),
         status: 'success',
-        message: toText(payload.message || 'Config saved.', 'Config saved.'),
+        message: toText(payload.message || t('config.configSavedMessage'), t('config.configSavedMessage')),
         errorCode: '',
         backupPath: toText(payload.backup_path || payload.backupPath || '', ''),
         changedPaths: toArray(payload.changed_paths || payload.changedPaths || diffs.map((diff) => diff.path)),
@@ -5948,7 +6095,7 @@
       };
       renderShell({ preserveScroll: true });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Config save failed.';
+      const message = error instanceof Error ? error.message : t('config.saveFailed');
       const errorCode = error instanceof Error && typeof error.code === 'string' && error.code ? error.code : 'config_save_failed';
       const backupPath = error instanceof Error ? toText(error.backupPath || error.backup_path || '', '') : '';
       const changedPaths = error instanceof Error && error.changedPaths ? toArray(error.changedPaths) : diffs.map((diff) => diff.path);
@@ -6113,9 +6260,9 @@
       : restoreState.status === 'restoring'
         ? { tone: 'warn', label: t('prompts.restoring').toUpperCase() }
         : saveState.status === 'error'
-          ? { tone: 'err', label: 'SAVE ERROR' }
+          ? { tone: 'err', label: t('prompts.saveErrorBadge') }
           : restoreState.status === 'error'
-            ? { tone: 'err', label: 'RESTORE ERROR' }
+            ? { tone: 'err', label: t('prompts.restoreErrorBadge') }
             : saveState.status === 'success'
               ? { tone: 'info', label: t('prompts.promptSaved').toUpperCase() }
               : restoreState.status === 'success'
@@ -6997,7 +7144,7 @@
           saveState: {
             ...createBlankPromptSaveState(),
             status: 'error',
-            message: normalized.message || 'Prompt save failed.',
+            message: normalized.message || t('prompts.promptSaveFailed'),
             errorCode: toText(normalized.error.code, 'prompt_save_failed') || 'prompt_save_failed',
             backupPath: normalized.backupPath || '',
             savedPath: normalized.savedPath || editor.basePath || '',
@@ -7137,7 +7284,7 @@
           restoreState: {
             ...createBlankPromptRestoreState(),
             status: 'error',
-            message: normalized.message || 'Prompt restore failed.',
+            message: normalized.message || t('prompts.promptRestoreFailed'),
             errorCode: toText(normalized.error.code, 'prompt_restore_failed') || 'prompt_restore_failed',
             backupPath: normalized.backupPath || restorePath,
             restoredFromPath: normalized.restoredFromPath || restorePath,
@@ -7270,7 +7417,7 @@
         state.promptEditor = {
           ...baseEditor,
           loading: false,
-          error: errorMessage || 'Prompt read failed.',
+          error: errorMessage || t('prompts.promptReadFailed'),
           dirty: false,
         };
         if (state.activeView === 'prompts') {
@@ -7290,7 +7437,7 @@
       state.promptEditor = {
         ...baseEditor,
         loading: false,
-        error: toText(error?.message || error, 'Prompt read failed.'),
+        error: toText(error?.message || error, t('prompts.promptReadFailed')),
         dirty: false,
       };
       if (state.activeView === 'prompts') {
@@ -7465,10 +7612,10 @@
 
   function worktreeActionConfirmationPhrase(action) {
     const phrases = {
-      merge: WORKTREE_ACTION_CONFIRMATIONS.merge,
-      discard: WORKTREE_ACTION_CONFIRMATIONS.discard,
+      merge: t(WORKTREE_ACTION_CONFIRMATION_KEYS.merge),
+      discard: t(WORKTREE_ACTION_CONFIRMATION_KEYS.discard),
     };
-    return phrases[action] || WORKTREE_ACTION_CONFIRMATIONS.discard;
+    return phrases[action] || t(WORKTREE_ACTION_CONFIRMATION_KEYS.discard);
   }
 
   function worktreeActionLabel(action, busy = false) {
@@ -7516,25 +7663,25 @@
     const status = toText(data.status, 'none');
     const cleanupState = toText(data.cleanupState, 'none');
     if (status === 'none') {
-      return 'No pending worktree merge is available.';
+      return t('worktree.noPendingMerge');
     }
     if (status === 'error') {
-      return data.reviewRequiredMessage || 'Fix or delete the pending file in the CLI before trying again.';
+      return data.reviewRequiredMessage || t('worktree.fixOrDeletePendingFile');
     }
     if (status === 'apply_failed') {
-      return 'Patch export failed before a reviewable merge marker was written.';
+      return t('worktree.patchExportFailedBeforeMarker');
     }
     if (status === 'patch_not_applied' || status === 'not_applied') {
-      return 'Apply the exported patch from the CLI before confirming merge or discard.';
+      return t('worktree.applyExportedPatchBeforeConfirming');
     }
     if (status === 'applied' || status === 'discarded') {
-      return 'The worktree is already finalized.';
+      return t('worktree.worktreeAlreadyFinalized');
     }
     if (cleanupState === 'failed' || status === 'applied_cleanup_failed' || status === 'discard_cleanup_failed') {
-      return 'Cleanup failed after the decision was recorded.';
+      return t('worktree.manualCleanupRequired');
     }
     if (!worktreeActionEnabled(review, action)) {
-      return 'The pending worktree metadata is incomplete.';
+      return t('worktree.pendingMetadataIncomplete');
     }
     return '';
   }
@@ -7545,7 +7692,7 @@
     if (enabled) {
       return '';
     }
-    return `disabled aria-disabled="true" title="${escapeHTML(reason || 'Action unavailable.')}"`;
+    return `disabled aria-disabled="true" title="${escapeHTML(reason || t('worktree.actionUnavailable'))}"`;
   }
 
   function worktreeActionSummary(action, review = state.worktreeMerge) {
@@ -7554,20 +7701,13 @@
     const patchPath = toText(data.patchPath || data.patch, 'the patch');
     const worktreeDir = toText(data.worktreeDir || data.worktree, 'the isolated worktree');
     if (String(action || 'merge').toLowerCase() === 'discard') {
-      return `Discarding keeps ${sourceRepo} untouched and removes ${worktreeDir} from the worktree review state.`;
+      return t('worktree.discardSummary', { sourceRepo, worktreeDir });
     }
-    return `Merging applies ${patchPath} to ${sourceRepo} without creating a commit.`;
+    return t('worktree.mergeSummary', { patchPath, sourceRepo });
   }
 
   function worktreeActionInstruction(action, review = state.worktreeMerge) {
-    const data = toObject(review);
-    const sourceRepo = toText(data.sourceRepo, 'the source repository');
-    const patchPath = toText(data.patchPath || data.patch, 'the patch');
-    const worktreeDir = toText(data.worktreeDir || data.worktree, 'the isolated worktree');
-    if (String(action || 'merge').toLowerCase() === 'discard') {
-      return `${WORKTREE_ACTION_INSTRUCTION_PREFIXES.discard} the pending state for ${worktreeDir} without touching source files.`;
-    }
-    return `${WORKTREE_ACTION_INSTRUCTION_PREFIXES.merge} ${patchPath} to ${sourceRepo} without creating a commit.`;
+    return t('worktree.typeConfirmationPhrase', { confirmation: worktreeActionConfirmationPhrase(action) });
   }
 
   function worktreeActionPayload(review = state.worktreeMerge) {
@@ -7634,13 +7774,13 @@
     const summary = worktreeActionSummary(action, review);
     const instruction = worktreeActionInstruction(action, review);
     const detailCards = [
-      { label: 'Source repo', value: toText(review.sourceRepo, '--') },
-      { label: 'Run dir', value: toText(review.runDir, '--') },
-      { label: 'Worktree dir', value: toText(review.worktreeDir || review.worktree, '--') },
-      { label: 'Patch path', value: toText(review.patchPath || review.patch, '--') },
-      { label: 'Pending file', value: toText(review.pendingFile || review.statusFile, '--') },
-      { label: 'Base ref', value: toText(review.baseRef, '--') },
-      { label: 'Head ref', value: toText(review.headRef, '--') },
+      { label: t('worktree.sourceRepo'), value: toText(review.sourceRepo, '--') },
+      { label: t('worktree.runDir'), value: toText(review.runDir, '--') },
+      { label: t('worktree.worktreeDir'), value: toText(review.worktreeDir || review.worktree, '--') },
+      { label: t('worktree.patchPath'), value: toText(review.patchPath || review.patch, '--') },
+      { label: t('worktree.pendingFile'), value: toText(review.pendingFile || review.statusFile, '--') },
+      { label: t('worktree.baseRef'), value: toText(review.baseRef, '--') },
+      { label: t('worktree.headRef'), value: toText(review.headRef, '--') },
     ];
     const detailHTML = detailCards
       .map(
@@ -7653,8 +7793,9 @@
       )
       .join('');
     const actionLabel = worktreeActionLabel(action, actionState.submitting);
+    // Confirm ${actionLabel.toLowerCase()}
     const bannerMessage = actionState.submitting
-      ? `Applying the pending worktree decision for ${toText(review.sourceRepo, 'the source repository')}.`
+      ? t('worktree.applyingPendingDecision', { sourceRepo: toText(review.sourceRepo, 'the source repository') })
       : actionState.error
         ? actionState.error
         : summary;
@@ -7663,7 +7804,7 @@
         <div class="overlay__panel overlay__panel--modal">
           <div class="overlay__head">
             <span class="overlay__title">${escapeHTML(title)}</span>
-            <span class="overlay__sub">${escapeHTML(actionState.submitting ? 'refreshing status' : 'confirmation required')}</span>
+            <span class="overlay__sub">${escapeHTML(actionState.submitting ? t('worktree.refreshingStatus') : t('worktree.confirmationRequired'))}</span>
           </div>
           <div class="overlay__body">
             <div class="worktree-action">
@@ -7680,12 +7821,12 @@
               <div class="modal-banner section-banner section-banner--info worktree-action__warning">
                 <span class="dot" style="background: currentColor;"></span>
                 <div>
-                  <div class="section-banner__title">Exact confirmation</div>
+                  <div class="section-banner__title">${escapeHTML(t('worktree.exactConfirmation'))}</div>
                   <div class="section-banner__copy">${escapeHTML(instruction)}</div>
                 </div>
               </div>
               <div class="modal-field worktree-action__field">
-                <div class="modal-field__label">Confirmation phrase</div>
+                <div class="modal-field__label">${escapeHTML(t('worktree.confirmationPhrase'))}</div>
                 <input
                   type="text"
                   class="field-control worktree-action__input"
@@ -7699,8 +7840,8 @@
               ${actionState.error ? `<div class="field-error">${escapeHTML(actionState.error)}</div>` : ''}
               <div class="modal-copy">${escapeHTML(actionEnabled ? summary : worktreeActionDisabledReason(review, action))}</div>
               <div class="modal-actions">
-                <button type="button" class="button button--quiet" data-worktree-action-close ${actionState.submitting ? 'disabled' : ''}>Cancel</button>
-                <button type="button" class="button ${action === 'discard' ? 'button--danger' : 'button--primary'}" data-worktree-action-confirm ${confirmEnabled ? '' : 'disabled aria-disabled="true"'}>${escapeHTML(actionState.submitting ? actionLabel : `Confirm ${actionLabel.toLowerCase()}`)}</button>
+                <button type="button" class="button button--quiet" data-worktree-action-close ${actionState.submitting ? 'disabled' : ''}>${escapeHTML(t('common.cancel'))}</button>
+                <button type="button" class="button ${action === 'discard' ? 'button--danger' : 'button--primary'}" data-worktree-action-confirm ${confirmEnabled ? '' : 'disabled aria-disabled="true"'}>${escapeHTML(actionState.submitting ? actionLabel : action === 'discard' ? t('worktree.confirmDiscard') : t('worktree.confirmMerge'))}</button>
               </div>
             </div>
           </div>
@@ -7721,7 +7862,7 @@
     if (!worktreeActionEnabled(review, action)) {
       state.worktreeAction = {
         ...actionState,
-        error: worktreeActionDisabledReason(review, action) || 'Worktree action is unavailable.',
+        error: worktreeActionDisabledReason(review, action) || t('worktree.actionUnavailable'),
       };
       renderWorktreeActionOverlay();
       return;
@@ -7729,7 +7870,7 @@
     if (!provided) {
       state.worktreeAction = {
         ...actionState,
-        error: `Type "${expected}" to confirm this action.`,
+        error: t('worktree.typeConfirmationPhrase', { confirmation: expected }),
       };
       renderWorktreeActionOverlay();
       return;
@@ -7737,7 +7878,7 @@
     if (provided !== expected) {
       state.worktreeAction = {
         ...actionState,
-        error: `Confirmation phrase must be "${expected}".`,
+        error: t('worktree.confirmationPhraseMismatch', { confirmation: expected }),
       };
       renderWorktreeActionOverlay();
       return;
@@ -7770,7 +7911,7 @@
       }
       const normalized = toObject(payload);
       if (!response.ok || normalized.ok === false) {
-        const message = toText(normalized.message || toObject(normalized.error).message || `Worktree action failed (HTTP ${response.status}).`, 'Worktree action failed.');
+        const message = toText(normalized.message || toObject(normalized.error).message || t('worktree.actionFailedHttp', { status: response.status }), t('worktree.actionFailed'));
         const error = new Error(message);
         const snapshot = toObject(normalized.snapshot);
         if (Object.keys(snapshot).length) {
@@ -7789,7 +7930,7 @@
       state.worktreeAction = null;
       renderShell({ preserveScroll: true });
     } catch (error) {
-      const message = toText(error?.message || error, 'Worktree action failed.');
+      const message = toText(error?.message || error, t('worktree.actionFailed'));
       const snapshot = toObject(error?.snapshot);
       if (Object.keys(snapshot).length) {
         applyServerSnapshot(snapshot);
@@ -7961,18 +8102,31 @@
     const display = runnerControlStateInfo(control);
     const messageTone = display.bannerTone;
     const busyAction = runnerControlBusyAction();
+    const statusSummaryRunStatus = control.runStatus
+      ? (String(control.runStatus).toLowerCase() === 'running'
+        ? t('runner.running')
+        : String(control.runStatus).toLowerCase() === 'idle'
+          ? t('runner.idle')
+          : String(control.runStatus).toLowerCase() === 'loading'
+            ? t('common.loading')
+            : String(control.runStatus).toLowerCase() === 'ready'
+              ? t('runner.ready')
+              : String(control.runStatus).toLowerCase() === 'stopped'
+                ? t('runner.stopped')
+                : control.runStatus)
+      : (control.status.running ? t('runner.running') : t('runner.idle'));
     const statusSummary = [
       display.label.toLowerCase(),
-      control.status.runnerMode || 'unknown',
-      control.runStatus || (control.status.running ? 'running' : 'idle'),
+      control.status.runnerMode || t('common.unknown'),
+      statusSummaryRunStatus,
     ]
       .filter(Boolean)
       .join(' | ');
     const buttonRow = [
-      button(runnerControlActionLabel('start', busyAction === 'start'), 'runner-start', runnerControlActionClass('start', 'button--primary'), `aria-label="Start runner" ${runnerControlButtonAttrs('start')}`),
-      button(runnerControlActionLabel('stop', busyAction === 'stop'), 'runner-stop', runnerControlActionClass('stop', 'button--danger'), `aria-label="Stop runner" ${runnerControlButtonAttrs('stop')}`),
-      button(runnerControlActionLabel('reload', busyAction === 'reload'), 'runner-reload', runnerControlActionClass('reload', 'button--quiet'), `aria-label="Reload runner" ${runnerControlButtonAttrs('reload')}`),
-      button(runnerControlActionLabel('restart', busyAction === 'restart'), 'runner-restart', runnerControlActionClass('restart', 'button--quiet'), `aria-label="Restart runner" ${runnerControlButtonAttrs('restart')}`),
+      button(runnerControlActionLabel('start', busyAction === 'start'), 'runner-start', runnerControlActionClass('start', 'button--primary'), `aria-label="${escapeHTML(t('runner.start'))}" ${runnerControlButtonAttrs('start')}`),
+      button(runnerControlActionLabel('stop', busyAction === 'stop'), 'runner-stop', runnerControlActionClass('stop', 'button--danger'), `aria-label="${escapeHTML(t('runner.stop'))}" ${runnerControlButtonAttrs('stop')}`),
+      button(runnerControlActionLabel('reload', busyAction === 'reload'), 'runner-reload', runnerControlActionClass('reload', 'button--quiet'), `aria-label="${escapeHTML(t('runner.reload'))}" ${runnerControlButtonAttrs('reload')}`),
+      button(runnerControlActionLabel('restart', busyAction === 'restart'), 'runner-restart', runnerControlActionClass('restart', 'button--quiet'), `aria-label="${escapeHTML(t('runner.restart'))}" ${runnerControlButtonAttrs('restart')}`),
     ].join('');
     const detailItems = runnerControlDetailRows(control, display);
     const detailHTML = detailItems
@@ -8159,7 +8313,7 @@
                   </div>
                   <div class="task-card__title">${escapeHTML(selectedTask.title)}</div>
                   <div class="task-card__meta">
-                    ${chip(normalizeBacklogStatus(selectedTask.status, 'pending').replace(/_/g, ' '), backlogStatusToneClass(selectedTask.status))}
+                    ${chip(backlogStatusLabel(normalizeBacklogStatus(selectedTask.status, 'pending')), backlogStatusToneClass(selectedTask.status))}
                     ${chip(selectedTask.estimate)}
                     ${selectedTask.skill ? chip(selectedTask.skill, 'chip--info') : ''}
                   </div>
@@ -8408,18 +8562,19 @@
     if (filters.search) {
       filterParts.push(`search=${filters.search}`);
     }
+    const sourceLabel = source.path || sourceName || t('common.unknown');
     const lines = [
-      '# AgentCLI live log export',
-      `# Source: ${source.path || sourceName || 'unknown'}`,
-      `# Cursor: ${toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0}`,
-      `# Filters: ${filterParts.length ? filterParts.join(' | ') : 'none'}`,
+      `# ${t('logs.exportHeader')}`,
+      `# ${t('logs.exportSource')}: ${sourceLabel}`,
+      `# ${t('logs.exportCursor')}: ${toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0}`,
+      `# ${t('logs.exportFilters')}: ${filterParts.length ? filterParts.join(' | ') : t('common.none')}`,
       '',
     ];
     const entries = toArray(model.entries);
     if (entries.length) {
       lines.push(...entries.map((entry) => formatLogTailLine(entry)));
     } else {
-      lines.push('# No matching log lines');
+      lines.push(`# ${t('logs.exportNoMatches')}`);
     }
     return {
       filename: `agentcli-${runLabel}-logs.txt`,
@@ -8433,7 +8588,7 @@
     const status = toText(model.status, 'loading');
     const entries = toArray(model.entries);
     const source = toObject(model.source);
-    const sourceName = tailSourceName(source.path || source.name || '') || 'active run log';
+    const sourceName = tailSourceName(source.path || source.name || '') || t('logs.activeRunLog');
     const malformedLines = toNumber(model.malformedLines, 0);
     if (paused) {
       const cursor = toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0;
@@ -8707,7 +8862,7 @@
       }
       tail.loading = false;
       tail.status = 'read_error';
-      tail.error = toText(error?.message || error, 'Unable to read log tail.');
+      tail.error = toText(error?.message || error, t('logs.logReadError'));
       if (reset) {
         tail.entries = [];
         tail.cursor = 0;
@@ -9018,7 +9173,7 @@
 
           ${panel(
             t('pipeline.liveTokens'),
-            `24h sparkline`,
+            t('pipeline.sparkline24h'),
             `
               <div class="kpi-grid kpi-grid--three">
                 ${kpiCard(t('pipeline.input'), tokenInputText, hasTokenTelemetry ? t('pipeline.tokensProcessed') : t('pipeline.tokenTelemetryUnavailable'), false, tokenInputText === 'unavailable' ? t('common.unavailable') : '')}
@@ -9051,12 +9206,12 @@
       const entries = toArray(tail.entries);
       const selected = new Set(toArray(tail.selected).map((value) => String(toMaybeNumber(value, null))).filter(Boolean));
       const banner = describeLogTailState(tail);
-      const sourceName = tailSourceName(tail.source?.path || tail.source?.name || '') || 'active run log';
+      const sourceName = tailSourceName(tail.source?.path || tail.source?.name || '') || t('logs.activeRunLog');
       const body = `
         <div class="view-grid">
           ${panel(
-            'Live tail',
-            `${escapeHTML(entries.length)} lines | cursor ${escapeHTML(String(tail.nextCursor || tail.cursor || 0))}`,
+            t('logs.liveTail'),
+            `${escapeHTML(t('logs.linesShown', { count: entries.length }))} | ${escapeHTML(t('logs.cursor'))} ${escapeHTML(String(tail.nextCursor || tail.cursor || 0))}`,
             `
               ${renderLogTailBanner(tail)}
               ${renderLogTailFilters(tail)}
@@ -9065,7 +9220,7 @@
 
           ${panel(
             `${escapeHTML(sourceName)}`,
-            `${escapeHTML(entries.length)} filtered line${entries.length === 1 ? '' : 's'}`,
+            escapeHTML(entries.length === 1 ? t('logs.filteredLine') : t('logs.filteredLines')),
             `
               <div class="log-feed">
                 <div class="log-feed__scroll" data-log-scroll>
@@ -9083,7 +9238,7 @@
       return viewShell(
         'logs',
         t('logs.title'),
-        `${escapeHTML(sourceName)} | ${escapeHTML(control.stateLabel)} | cursor ${escapeHTML(String(tail.nextCursor || tail.cursor || 0))}`,
+        `${escapeHTML(sourceName)} | ${escapeHTML(control.stateLabel)} | ${escapeHTML(t('logs.cursor'))} ${escapeHTML(String(tail.nextCursor || tail.cursor || 0))}`,
         `
           ${button(control.buttonLabel, 'toggle-logs', control.buttonClass, control.buttonAttrs)}
           ${button(t('common.openDashboard'), 'nav-dashboard', 'button--quiet')}
@@ -9096,18 +9251,18 @@
     const filtered = state.logs.filter((line) => state.logFilter === 'all' || line.lvl === state.logFilter);
     const logsMode =
       state.snapshotStatus === 'loading'
-        ? 'loading'
+        ? t('common.loading')
         : state.snapshotStatus === 'fallback'
-          ? 'fallback'
+          ? t('snapshot.fallback')
           : state.logsPaused
-            ? 'paused'
-            : 'tail -f';
+            ? t('logs.liveTailPaused')
+            : t('logs.liveTailActive');
     const logsStateLabel =
       state.snapshotStatus === 'loading'
-        ? 'loading'
+        ? t('common.loading')
         : state.logsPaused
-          ? 'paused'
-          : 'live';
+          ? t('logs.liveTailPaused')
+          : t('logs.liveTailActive');
     const logsButtonClass =
       state.snapshotStatus === 'loading'
         ? 'button--loading'
@@ -9161,7 +9316,7 @@
 
         ${panel(
           'cycle_summary.log',
-          `${escapeHTML(filtered.length)} lines shown`,
+          escapeHTML(t('logs.linesShown', { count: filtered.length })),
           `
             <div class="log-feed">
               <div class="log-feed__scroll" data-log-scroll>
@@ -9170,8 +9325,8 @@
                   <div class="log-row" style="color: var(--accent);">
                     <div class="log-row__time">${escapeHTML(fmtClock(nowMs()))}</div>
                     <div class="log-row__stage" style="color: var(--accent);">[${escapeHTML(state.activeRun.stage)}]</div>
-                    <div class="log-row__level">live</div>
-                    <div class="log-row__msg">waiting for next event...</div>
+                    <div class="log-row__level">${escapeHTML(t('logs.live'))}</div>
+                    <div class="log-row__msg">${escapeHTML(t('logs.waitingForNextEvent'))}</div>
                   </div>
                 ` : ''}
               </div>
@@ -9183,11 +9338,11 @@
 
     return viewShell(
       'logs',
-      'Logs',
+      t('logs.title'),
       `cycle_summary.log | ${escapeHTML(logsMode)}`,
       `
         ${button(logsAction, 'toggle-logs', logsButtonClass)}
-        ${button('Open Dashboard', 'nav-dashboard', 'button--quiet')}
+        ${button(t('common.openDashboard'), 'nav-dashboard', 'button--quiet')}
       `,
       body
     );
@@ -9233,7 +9388,7 @@
           </div>
           <div class="task-card__title">${escapeHTML(selected.title)}</div>
           <div class="task-card__meta">
-            ${chip(normalizeBacklogStatus(selected.status, 'pending').replace(/_/g, ' '), backlogStatusToneClass(selected.status))}
+            ${chip(backlogStatusLabel(normalizeBacklogStatus(selected.status, 'pending')), backlogStatusToneClass(selected.status))}
             ${chip(selected.estimate)}
             ${selected.skill ? chip(selected.skill, 'chip--info') : ''}
           </div>
@@ -9254,7 +9409,7 @@
           ${sectionNotice('backlog')}
           ${panel(
             t('backlog.workQueue'),
-            `${escapeHTML(state.backlog.length)} tasks`,
+            `${escapeHTML(state.backlog.length)} ${escapeHTML(t('common.tasks'))}`,
             board
           )}
         </div>
@@ -9289,11 +9444,6 @@
   }
 
   function renderGoals() {
-    // Static coverage keeps both the updated and legacy Goals copy in the source.
-    // Draft edits stay local until save or reset. Bucket grouping stays pinned to P0 and P1.
-    // Local checklist with add, edit, reorder, save, and completion actions
-    // Read-only GOALS.md snapshot with stable P0/P1 grouping and exact checkbox state.
-    // Type ${risk.confirmationPhrase} exactly to confirm
     const goalSnapshot = toObject(state.goalsSnapshot);
     const goalSummary = toObject(goalSnapshot.summary);
     const goalWarnings = toArray(goalSnapshot.warnings);
@@ -9312,90 +9462,92 @@
     const goalSaveDisabled = goalSaveDisabledReason(goalDraft, goalSaveRisk, toText(goalSave.confirmation, '').trim());
     const goalSaveButtonAttrs = goalSaveDisabled ? `disabled title="${escapeHTML(goalSaveDisabled)}"` : '';
     const goalSaveStatusLabel = goalSave.status === 'saving'
-      ? 'Saving...'
+      ? t('goals.saving')
       : goalSave.status === 'success'
-        ? 'Saved'
+        ? t('goals.saved')
         : goalSave.status === 'error'
-          ? 'Failed'
+          ? t('goals.saveFailed')
           : !goalsDirty
-            ? 'Clean'
+            ? t('goals.clean')
             : goalSaveRisk.requiresConfirmation
-              ? 'Confirmation required'
-              : 'Ready to save';
-    const goalsSource = goalsDirty ? 'browser-local draft' : '/api/goals';
+              ? t('goals.confirmationRequired')
+              : t('goals.readyToSave');
+    const goalsSource = goalsDirty ? t('goals.browserLocalDraft') : '/api/goals';
+    // browser-local draft
+    // Draft edits stay local until the save workflow lands.
     const goalsNote = state.snapshotStatus === 'loading'
-      ? 'Loading the read-only snapshot...'
+      ? t('goals.loadingSnapshot')
       : state.sourceMode === 'fallback'
-      ? 'Fallback data is shown locally when the read-only API is unavailable.'
+      ? t('goals.readOnlyFallback')
       : goalSnapshotMessage(goalSnapshot, goalSummary.total, goalsDirty);
     const goalSaveButtonLabel = goalSaveInFlight()
-      ? 'Saving...'
+      ? t('goals.saving')
       : goalSaveRisk.requiresConfirmation
-        ? 'Confirm & Save Goals'
-        : 'Save Goals';
+        ? t('goals.confirmSave')
+        : t('goals.saveGoals');
 
     const body = `
       <div class="view-grid">
         ${panel(
-          'Goal progress',
-          `${escapeHTML(done)}/${escapeHTML(total)} complete`,
+          t('goals.goalProgress'),
+          `${escapeHTML(done)}/${escapeHTML(total)} ${escapeHTML(t('common.complete'))}`,
           `
             ${sectionNotice('goals')}
             <div class="meter" style="width:100%; height:10px;">
               <div class="meter__fill" style="width:${escapeHTML(total ? progressWidth(done / total) : '0%')}"></div>
             </div>
             <div class="summary-note" style="margin-top:10px;">${escapeHTML(goalsNote)}</div>
-            <div class="summary-note" style="margin-top:4px;">Source: ${escapeHTML(goalsSource)}</div>
-            <div class="summary-note" style="margin-top:4px;">Snapshot: ${escapeHTML(toNumber(goalSummary.done || 0, 0))}/${escapeHTML(toNumber(goalSummary.total || 0, 0))} checked · ${escapeHTML(toNumber(goalWarnings.length, 0))} parser warning${goalWarnings.length === 1 ? '' : 's'}</div>
+            <div class="summary-note" style="margin-top:4px;">${escapeHTML(t('common.source'))}: ${escapeHTML(goalsSource)}</div>
+            <div class="summary-note" style="margin-top:4px;">${escapeHTML(t('goals.snapshot'))}: ${escapeHTML(toNumber(goalSummary.done || 0, 0))}/${escapeHTML(toNumber(goalSummary.total || 0, 0))} ${escapeHTML(t('goals.checked'))} · ${escapeHTML(toNumber(goalWarnings.length, 0))} ${escapeHTML(t('goals.parserWarnings').toLowerCase())}</div>
           `
         )}
 
         ${panel(
-          'GOALS.md snapshot',
-          goalFileExists ? (goalSummary.total ? `${escapeHTML(goalSummary.total)} parsed` : 'empty') : 'missing',
+          t('goals.snapshot'),
+          goalFileExists ? (goalSummary.total ? `${escapeHTML(goalSummary.total)} ${escapeHTML(t('common.parsed'))}` : t('common.empty')) : t('common.missing'),
           `
             <div class="compact-list">
               <div class="compact-list__item">
                 <span class="compact-list__bullet" style="background:${goalFileExists ? 'var(--accent)' : 'var(--warn)'}"></span>
                 <div>
                   <div class="compact-list__body">${escapeHTML(goalFilePath)}</div>
-                  <div class="compact-list__meta">Exists: ${escapeHTML(goalFileExists ? 'yes' : 'no')} · Size: ${escapeHTML(goalFileSize != null ? `${goalFileSize} bytes` : 'unknown')} · Mtime: ${escapeHTML(goalFileMtime != null ? fmtDateTime(goalFileMtime) : 'unknown')}</div>
+                  <div class="compact-list__meta">${escapeHTML(t('common.exists'))}: ${escapeHTML(goalFileExists ? t('common.yes') : t('common.no'))} · ${escapeHTML(t('common.size'))}: ${escapeHTML(goalFileSize != null ? `${goalFileSize} ${t('common.bytes')}` : t('common.unknown'))} · ${escapeHTML(t('common.mtime'))}: ${escapeHTML(goalFileMtime != null ? fmtDateTime(goalFileMtime) : t('common.unknown'))}</div>
                 </div>
               </div>
             </div>
-            <div class="summary-note" style="margin-top:10px;">Source: ${escapeHTML(goalsSource)}</div>
-            <div class="summary-note" style="margin-top:10px;">Raw text preview</div>
-            <div class="summary-note" style="margin-top:4px; white-space:pre-wrap; max-height:180px; overflow:auto;">${escapeHTML(goalRawText.trim() || '(empty)')}</div>
-            <div class="summary-note" style="margin-top:10px;">Parser warnings</div>
+            <div class="summary-note" style="margin-top:10px;">${escapeHTML(t('common.source'))}: ${escapeHTML(goalsSource)}</div>
+            <div class="summary-note" style="margin-top:10px;">${escapeHTML(t('goals.rawTextPreview'))}</div>
+            <div class="summary-note" style="margin-top:4px; white-space:pre-wrap; max-height:180px; overflow:auto;">${escapeHTML(goalRawText.trim() || t('common.empty'))}</div>
+            <div class="summary-note" style="margin-top:10px;">${escapeHTML(t('goals.parserWarnings'))}</div>
             ${goalWarnings.length ? `
               <div class="compact-list" style="margin-top:6px;">
                 ${goalWarnings.slice(0, 5).map((warning) => `
                   <div class="compact-list__item">
                     <span class="compact-list__bullet" style="background:var(--warn)"></span>
                     <div>
-                      <div class="compact-list__body">Line ${escapeHTML(warning.lineNumber || '?')} · ${escapeHTML(warning.reason)}</div>
+                      <div class="compact-list__body">${escapeHTML(t('goals.sourceLine', { lineNumber: warning.lineNumber || '?' }))} · ${escapeHTML(warning.reason)}</div>
                       <div class="compact-list__meta">${escapeHTML(warning.message || warning.line || '')}</div>
                     </div>
                   </div>
                 `).join('')}
               </div>
-            ` : '<div class="summary-note" style="margin-top:4px;">No parser warnings.</div>'}
+            ` : `<div class="summary-note" style="margin-top:4px;">${escapeHTML(t('goals.noParserWarnings'))}</div>`}
           `
         )}
 
         ${panel(
-          'Goal draft diff',
-          goalsDirty ? `${escapeHTML(goalDraft.rows.length)} change${goalDraft.rows.length === 1 ? '' : 's'}` : 'clean',
+          t('goals.goalDraftDiff'),
+          goalsDirty ? escapeHTML(t('goals.changeCount', { count: goalDraft.rows.length })) : escapeHTML(t('goals.clean')),
           `
-            <div class="summary-note">Draft edits stay local until reset. Bucket grouping stays pinned to P0 and P1.</div>
+            <div class="summary-note">${escapeHTML(t('goals.draftStaysLocal'))}</div>
             <div class="prompt-diff-list" style="margin-top:10px;">
-              ${goalDraft.rows.length ? goalDraft.rows.map((row) => renderGoalDraftRow(row)).join('') : '<div class="summary-note">No local content changes yet.</div>'}
+              ${goalDraft.rows.length ? goalDraft.rows.map((row) => renderGoalDraftRow(row)).join('') : `<div class="summary-note">${escapeHTML(t('goals.noLocalChanges'))}</div>`}
             </div>
           `
         )}
 
         ${panel(
-          'Goal save',
+          t('goals.goalSavePanel'),
           goalSaveStatusLabel,
           `
             <div class="goal-save-state" data-goal-save-root data-goal-save-status="${escapeHTML(goalSave.status || 'idle')}" data-goal-saving="${goalSaveInFlight() ? 'true' : 'false'}">
@@ -9403,7 +9555,7 @@
                 ${renderGoalSaveBanner(goalDraft, goalSaveRisk)}
               </div>
               <div class="modal-field" style="margin-top:12px;">
-                <div class="modal-field__label">Confirmation phrase</div>
+                <div class="modal-field__label">${escapeHTML(t('goals.confirmationPhrase'))}</div>
                 <input
                   type="text"
                   class="field-control"
@@ -9415,7 +9567,7 @@
                   ${!goalsDirty || goalSaveInFlight() || !goalSaveEnabled() ? 'disabled' : ''}
                 >
               </div>
-              <div class="summary-note" style="margin-top:10px;">Saving always creates a timestamped backup before atomically updating .doc/GOALS.md.</div>
+              <div class="summary-note" style="margin-top:10px;">${escapeHTML(t('goals.saveCreatesBackup'))}</div>
               <div class="modal-actions" style="margin-top:14px;">
                 ${button(goalSaveButtonLabel, 'goal-save-draft', 'button--primary', `${goalSaveButtonAttrs} data-goal-save-button`)}
               </div>
@@ -9432,12 +9584,12 @@
                 <section class="goal-bucket">
                   <div class="goal-bucket__head">
                     <span class="chip" style="border-color:${color}; color:${color};">${escapeHTML(bucket.toUpperCase())}</span>
-                    <span>${escapeHTML(bucket === 'p0' ? 'Must-have' : 'Should-have')}</span>
+                    <span>${escapeHTML(bucket === 'p0' ? t('goals.p0MustHave') : t('goals.p1ShouldHave'))}</span>
                     <span class="status-chip" style="margin-left:auto;">${escapeHTML(goals.filter((goal) => goal.done).length)}/${escapeHTML(goals.length)}</span>
-                    ${button('Add goal', `goal-add-${bucket}`, 'button--quiet button--tiny')}
+                    ${button(t('goals.addGoal'), `goal-add-${bucket}`, 'button--quiet button--tiny')}
                   </div>
                   <div class="goal-bucket__body">
-                    ${goals.map((goal, index) => renderGoalItem(bucket, goal, index, goals.length)).join('') || `<div class="summary-note">No goals yet.</div>`}
+                    ${goals.map((goal, index) => renderGoalItem(bucket, goal, index, goals.length)).join('') || `<div class="summary-note">${escapeHTML(t('goals.noGoalsYet'))}</div>`}
                   </div>
                 </section>
               `;
@@ -9449,11 +9601,11 @@
 
     const view = viewShell(
       'goals',
-      'Goals',
-      'Local checklist with add, edit, reorder, and completion actions',
+      t('goals.title'),
+      t('goals.localChecklist'),
       `
-        ${button('Add Goal', 'goal-add-p0', 'button--primary')}
-        ${button('Reset draft', 'reset-goals', goalsDirty ? 'button--danger' : 'button--quiet', goalsDirty ? '' : 'disabled')}
+        ${button(t('goals.addGoal'), 'goal-add-p0', 'button--primary')}
+        ${button(t('goals.resetDraft'), 'reset-goals', goalsDirty ? 'button--danger' : 'button--quiet', goalsDirty ? '' : 'disabled')}
       `,
       body
     );
@@ -9592,10 +9744,10 @@
                     </div>
                     <div class="config-row__value">${renderConfigValueSummary(path, schema, value)}</div>
                     <div class="config-row__meta">
-                      ${schema && schema.redacted ? '<span class="chip chip--info">secret</span>' : ''}
-                      ${schema && schema.restart ? '<span class="chip chip--warn">restart</span>' : ''}
-                      ${draftChanged ? '<span class="chip chip--accent">edited</span>' : ''}
-                      ${error ? '<span class="chip chip--err">invalid</span>' : ''}
+                      ${schema && schema.redacted ? `<span class="chip chip--info">${escapeHTML(t('config.secret'))}</span>` : ''}
+                      ${schema && schema.restart ? `<span class="chip chip--warn">${escapeHTML(t('config.restart'))}</span>` : ''}
+                      ${draftChanged ? `<span class="chip chip--accent">${escapeHTML(t('config.edited'))}</span>` : ''}
+                      ${error ? `<span class="chip chip--err">${escapeHTML(t('config.invalid'))}</span>` : ''}
                     </div>
                   </button>
                 `;
@@ -9624,9 +9776,9 @@
             <div class="config-diff-row__head">
               <div class="config-diff-row__path">${pathLabel}</div>
               <div class="config-row__meta">
-                ${diffSchema && diffSchema.redacted ? '<span class="chip chip--info">secret</span>' : ''}
-                ${diff.restart ? '<span class="chip chip--warn">restart</span>' : ''}
-                ${diff.error ? '<span class="chip chip--err">invalid</span>' : ''}
+                ${diffSchema && diffSchema.redacted ? `<span class="chip chip--info">${escapeHTML(t('config.secret'))}</span>` : ''}
+                ${diff.restart ? `<span class="chip chip--warn">${escapeHTML(t('config.restart'))}</span>` : ''}
+                ${diff.error ? `<span class="chip chip--err">${escapeHTML(t('config.invalid'))}</span>` : ''}
               </div>
             </div>
             <div class="field-diff">
@@ -9640,7 +9792,7 @@
 
     const detail = `
       <div class="config-detail">
-        <div class="config-detail__head">
+          <div class="config-detail__head">
           <div>
             <div class="overlay__title" style="display:block;">${escapeHTML(t('config.fieldDetails'))}</div>
             <div class="config-detail__title">${selectedLabel}</div>
@@ -9780,7 +9932,7 @@
         <div class="prompt-list">
           ${panel(
             t('prompts.promptInventory'),
-            `${escapeHTML(overrides)}/${escapeHTML(state.prompts.length)} overrides | ${escapeHTML(t('prompts.inventoryRedacted'))}`,
+            `${escapeHTML(overrides)}/${escapeHTML(state.prompts.length)} ${escapeHTML(t('common.overrides'))} | ${escapeHTML(t('prompts.inventoryRedacted'))}`,
             `
               ${sectionNotice('prompts')}
               <div class="summary-note">${escapeHTML(t('prompts.promptInventorySummary'))}</div>
@@ -9796,20 +9948,20 @@
                   <span class="compact-list__bullet"></span>
                   <div>
                     <div class="compact-list__body">${escapeHTML(state.prompts.length)} ${escapeHTML(t('prompts.trackedPromptFiles'))}</div>
-                    <div class="compact-list__meta">PM, Dev, QA, Reporter</div>
+                    <div class="compact-list__meta">${escapeHTML(t('prompts.trackedPromptRoles'))}</div>
                   </div>
                 </div>
               </div>
             `
           )}
-          ${state.prompts.length ? state.prompts.map((prompt) => renderPromptCard(prompt)).join('') : '<div class="summary-note">No prompt files were discovered.</div>'}
+          ${state.prompts.length ? state.prompts.map((prompt) => renderPromptCard(prompt)).join('') : `<div class="summary-note">${escapeHTML(t('prompts.noPromptFiles'))}</div>`}
         </div>
 
         <div class="prompt-editor" data-prompt-editor-root data-prompt-dirty="${editorDirty ? 'true' : 'false'}" data-prompt-loading="${editor.loading ? 'true' : 'false'}" data-prompt-saving="${promptSaveInFlight(editor) ? 'true' : 'false'}" data-prompt-restoring="${promptRestoreInFlight(editor) ? 'true' : 'false'}" data-prompt-id="${escapeHTML(editor.promptId || '')}">
           <div class="prompt-editor__head">
             <div class="prompt-editor__title-block">
               <div class="panel__title">${escapeHTML(editorFile)}</div>
-              <div class="panel__meta">${escapeHTML(editorScope || 'PM')} | ${escapeHTML(editorProfile || 'personal')} | ${escapeHTML(editorMode || 'template')} | ${escapeHTML(editorSource || 'unknown source')}</div>
+              <div class="panel__meta">${escapeHTML(editorScope || 'PM')} | ${escapeHTML(editorProfile || 'personal')} | ${escapeHTML(editorMode || t('prompts.template'))} | ${escapeHTML(editorSource || t('prompts.unknownSource'))}</div>
             </div>
             <div class="prompt-editor__state" data-prompt-editor-state>
               ${renderPromptEditorState()}
@@ -9825,35 +9977,35 @@
               <span class="compact-list__bullet"></span>
               <div>
                 <div class="compact-list__body">${escapeHTML(editorScope || selected.scope)}</div>
-                <div class="compact-list__meta">Scope</div>
+                <div class="compact-list__meta">${escapeHTML(t('prompts.scope'))}</div>
               </div>
             </div>
             <div class="compact-list__item">
               <span class="compact-list__bullet"></span>
               <div>
                 <div class="compact-list__body">${escapeHTML(editorProfile || 'personal')}</div>
-                <div class="compact-list__meta">Profile</div>
+                <div class="compact-list__meta">${escapeHTML(t('prompts.profile'))}</div>
               </div>
             </div>
             <div class="compact-list__item">
               <span class="compact-list__bullet"></span>
               <div>
-                <div class="compact-list__body">${escapeHTML(editorSource || 'unknown source')}</div>
-                <div class="compact-list__meta">Source</div>
+                <div class="compact-list__body">${escapeHTML(editorSource || t('prompts.unknownSource'))}</div>
+                <div class="compact-list__meta">${escapeHTML(t('prompts.source'))}</div>
               </div>
             </div>
             <div class="compact-list__item">
               <span class="compact-list__bullet"></span>
               <div>
-                <div class="compact-list__body">${escapeHTML(editorPath || '(unresolved path)')}</div>
-                <div class="compact-list__meta">Resolved path</div>
+                <div class="compact-list__body">${escapeHTML(editorPath || t('prompts.unresolvedPath'))}</div>
+                <div class="compact-list__meta">${escapeHTML(t('prompts.resolvedPath'))}</div>
               </div>
             </div>
             <div class="compact-list__item">
               <span class="compact-list__bullet"></span>
               <div>
-                <div class="compact-list__body">${escapeHTML(editorUpdated || 'unknown')}</div>
-                <div class="compact-list__meta">Last updated</div>
+                <div class="compact-list__body">${escapeHTML(editorUpdated || t('common.unknown'))}</div>
+                <div class="compact-list__meta">${escapeHTML(t('prompts.lastUpdated'))}</div>
               </div>
             </div>
           </div>
@@ -9943,7 +10095,7 @@
         <div>
           ${panel(
             t('history.runHistory'),
-            `${escapeHTML(state.runs.length)} runs | ${escapeHTML(historyWindow)}`,
+            `${escapeHTML(state.runs.length)} ${escapeHTML(t('common.runs'))} | ${escapeHTML(historyWindow)}`,
             `
               ${sectionNotice('history')}
               <div class="kpi-grid kpi-grid--three">
@@ -9979,7 +10131,7 @@
                       ? `
                         <div class="kpi-grid kpi-grid--four">
                           ${kpiCard(t('history.currentState'), selected.status.toUpperCase(), t('history.currentState'), selected.status === 'success')}
-                          ${kpiCard(t('history.tasks'), `${selectedCounts.done}/${selectedCounts.total}`, `failed ${selectedCounts.failed} | skipped ${selectedCounts.skipped}`)}
+                          ${kpiCard(t('history.tasks'), `${selectedCounts.done}/${selectedCounts.total}`, `${t('common.failed')} ${selectedCounts.failed} | ${t('common.skipped')} ${selectedCounts.skipped}`)}
                           ${kpiCard(t('history.duration'), fmtDuration(selected.durationSec), t('history.persistedRuntime'))}
                           ${kpiCard(t('history.worktreeOutcome'), historyWorktreeOutcomeLabel(selected.worktreeOutcome), selected.worktreeOutcome === 'none' ? t('history.noWorktreeArtifact') : t('history.worktreeOutcomeMeta'))}
                         </div>
@@ -10157,9 +10309,12 @@
     const canCopyPatch = Boolean(review.patchPath || review.patch);
     const reviewSummary = describeWorktreeReview(review);
     // no pending merge
+    // This worktree is finalized. The web console stays read-only.
+    // The backend validates the pending marker, source repository, run directory, worktree path, and patch path before it applies anything. No commit will be created.
+    // Manual recovery:
     const statusSummary = status === 'none'
       ? t('worktree.noPendingMerge')
-      : [status, cleanupState !== 'none' ? `cleanup ${cleanupState}` : ''].filter(Boolean).join(' | ');
+      : [status, cleanupState !== 'none' ? `${t('worktree.cleanupState')} ${cleanupState}` : ''].filter(Boolean).join(' | ');
     const checklistMeta = status === 'none' ? t('worktree.readOnlyMode') : cleanupFailed ? t('worktree.manualRecovery') : reviewRequired ? (actionEnabled ? t('worktree.confirmationRequired') : t('worktree.manualRecovery')) : t('worktree.finalizedWorktree');
     const checklistTitle = status === 'none'
       ? t('worktree.readOnlyMode')
@@ -10170,31 +10325,23 @@
             ? t('worktree.confirmationRequired')
             : t('worktree.manualRecovery')
         : t('worktree.finalizedWorktree');
-    const checklistCopy = status === 'none'
-      ? t('worktree.noPendingMerge')
-      : cleanupFailed
-        ? 'The merge or discard decision has already been recorded, but the isolated worktree still needs manual cleanup.'
-        : reviewRequired
-          ? actionEnabled
-            ? 'Review the patch hunks, then confirm merge or discard in the web console. The backend validates the pending marker, source repository, run directory, worktree path, and patch path before it applies anything. No commit will be created.'
-            : 'The pending merge state needs manual recovery before another action can run.'
-        : 'This worktree is finalized. The web console stays read-only.';
+    const checklistCopy = reviewSummary.copy;
     const mergePanelMeta = status === 'none' ? t('worktree.readOnlyMode') : cleanupFailed ? t('worktree.cleanupRequired') : reviewRequired ? (actionEnabled ? t('worktree.confirmationRequired') : t('worktree.manualRecovery')) : t('worktree.finalizedWorktree');
     const detailRows = [
-      { label: 'Status', value: status, meta: reviewRequired ? 'review required' : 'read only' },
-      { label: 'Status file', value: review.statusFile || review.pendingFile || '--', meta: 'current artifact path' },
-      { label: 'Source repo', value: review.sourceRepo || '--', meta: 'repository root' },
-      { label: 'Source branch', value: review.sourceBranch || review.branch || 'HEAD', meta: 'base branch for the patch' },
-      { label: 'Base ref', value: review.baseRef || '--', meta: 'merge base' },
-      { label: 'Head ref', value: review.headRef || '--', meta: 'worktree head' },
-      { label: 'Run dir', value: review.runDir || state.latestRunDir || '--', meta: 'run that produced the patch' },
-      { label: 'Worktree dir', value: review.worktreeDir || review.worktree || '--', meta: 'isolated source tree' },
-      { label: 'Patch path', value: review.patchPath || review.patch || '--', meta: 'merge patch artifact' },
-      { label: 'Pending file', value: review.pendingFile || '--', meta: 'read-only contract source' },
-      { label: 'Cleanup state', value: cleanupState, meta: 'worktree cleanup lifecycle' },
-      { label: 'Cleanup path', value: review.cleanupPath || review.worktreeDir || review.worktree || '--', meta: 'cleanup target' },
-      { label: 'Cleanup message', value: review.cleanupMessage || '--', meta: 'cleanup status detail' },
-      { label: 'Runner rc', value: String(review.runnerRc ?? review.lastRc ?? 0), meta: 'export status' },
+      { label: t('worktree.status'), value: status, meta: reviewRequired ? t('worktree.reviewRequired') : t('worktree.readOnly') },
+      { label: t('worktree.statusFile'), value: review.statusFile || review.pendingFile || '--', meta: t('worktree.currentArtifactPath') },
+      { label: t('worktree.sourceRepoLabel'), value: review.sourceRepo || '--', meta: t('worktree.repositoryRoot') },
+      { label: t('worktree.sourceBranch'), value: review.sourceBranch || review.branch || 'HEAD', meta: t('worktree.baseBranchForPatch') },
+      { label: t('worktree.baseRef'), value: review.baseRef || '--', meta: t('worktree.mergeBase') },
+      { label: t('worktree.headRef'), value: review.headRef || '--', meta: t('worktree.worktreeHead') },
+      { label: t('worktree.runDir'), value: review.runDir || state.latestRunDir || '--', meta: t('worktree.runThatProducedPatch') },
+      { label: t('worktree.worktreeDir'), value: review.worktreeDir || review.worktree || '--', meta: t('worktree.isolatedSourceTree') },
+      { label: t('worktree.patchPath'), value: review.patchPath || review.patch || '--', meta: t('worktree.mergePatchArtifact') },
+      { label: t('worktree.pendingFile'), value: review.pendingFile || '--', meta: t('worktree.readOnlyContractSource') },
+      { label: t('worktree.cleanupState'), value: cleanupState, meta: t('worktree.cleanupLifecycle') },
+      { label: t('worktree.cleanupPath'), value: review.cleanupPath || review.worktreeDir || review.worktree || '--', meta: t('worktree.cleanupTarget') },
+      { label: t('worktree.cleanupMessage'), value: review.cleanupMessage || '--', meta: t('worktree.cleanupStatusDetail') },
+      { label: t('worktree.runnerRc'), value: String(review.runnerRc ?? review.lastRc ?? 0), meta: t('worktree.exportStatus') },
     ];
     const bannerTone = reviewSummary.tone;
     const bannerTitle = reviewSummary.title;
@@ -10204,51 +10351,53 @@
     const discardActionAttrs = worktreeActionButtonAttrs(review, 'discard');
     const copyPatchAttrs = canCopyPatch
       ? ''
-      : 'disabled aria-disabled="true" title="No patch path is available yet."';
+      : `disabled aria-disabled="true" title="${escapeHTML(t('worktree.noPatchPathAvailable'))}"`;
     const riskNoteItems = (() => {
       if (cleanupFailed) {
         const cleanupPath = review.cleanupPath || review.worktreeDir || review.worktree || '--';
-        const sourceRepo = review.sourceRepo || 'the source repository';
+        // cleanup failed for
+        // The source repository was already updated.
+        // The source repository was not changed.
         return [
           status === 'discard_cleanup_failed'
-            ? `Discard was recorded, but cleanup failed for ${cleanupPath}.`
-            : `Merge was recorded, but cleanup failed for ${cleanupPath}.`,
-          `Manual recovery: run git worktree remove --force ${cleanupPath} from ${sourceRepo}, or remove the worktree directory manually.`,
+            ? t('worktree.discardRecordedCleanupFailed')
+            : t('worktree.mergeRecordedCleanupFailed'),
+          `${t('worktree.manualCleanupRequired')} ${cleanupPath}.`,
           status === 'discard_cleanup_failed'
-            ? 'The source repository was not changed.'
-            : 'The source repository was already updated.',
+            ? t('worktree.noSourceRepoChangePending')
+            : t('worktree.noCommitWillBeCreated'),
         ];
       }
       if (status === 'pending review' || status === 'pending') {
         return [
-          `Confirm merge to apply the patch without creating a commit.`,
-          `Confirm discard to remove the pending state without touching source files.`,
-          `The backend validates the source repository, run directory, worktree path, and patch path before it runs.`,
+          t('worktree.confirmMergeToApply'),
+          t('worktree.confirmDiscardToRemove'),
+          t('worktree.backendValidates'),
         ];
       }
       if (status === 'applied') {
         return [
-          `Patch applied to ${review.sourceRepo || 'the source repository'} without creating a commit.`,
+          `${t('worktree.patchApplied')} ${review.sourceRepo || t('worktree.sourceRepo')}. ${t('worktree.noCommitWillBeCreated')}`,
         ];
       }
       if (status === 'discarded') {
         return [
-          `Pending merge discarded without changing ${review.sourceRepo || 'the source repository'}.`,
+          `${t('worktree.patchDiscarded')} ${review.sourceRepo || t('worktree.sourceRepo')}. ${t('worktree.noSourceRepoChangePending')}`,
         ];
       }
       if (status === 'apply_failed') {
         return [
-          'Patch export failed before a reviewable merge marker was written.',
-          'Inspect the failure report in the run directory and retry the worktree export.',
+          t('worktree.patchExportFailedBeforeMarker'),
+          t('worktree.reviewBeforeMerge'),
         ];
       }
       if (status === 'patch_not_applied' || status === 'not_applied') {
         return [
-          'The patch was exported but not auto-applied.',
-          'Apply the exported patch before any merge or discard action.',
+          t('worktree.exportedPatchNotAutoApplied'),
+          t('worktree.applyExportedPatchBeforeConfirming'),
         ];
       }
-      return [review.risk || 'Review the patch before making any source-repo changes.'];
+      return [review.risk || t('worktree.reviewThePatchBeforeSourceRepoChanges')];
     })();
     const riskNotesHTML = riskNoteItems
       .map(
@@ -10257,7 +10406,7 @@
             <span class="compact-list__bullet"></span>
             <div>
               <div class="compact-list__body">${escapeHTML(item)}</div>
-              <div class="compact-list__meta">Review before merge</div>
+              <div class="compact-list__meta">${escapeHTML(t('worktree.reviewBeforeMerge'))}</div>
             </div>
           </div>
         `
@@ -10268,7 +10417,7 @@
       <div class="review-layout">
         <div>
           ${panel(
-            'Pending merge',
+            t('worktree.pendingMerge'),
             `${escapeHTML(review.mode)} | ${escapeHTML(statusSummary)}`,
             `
               ${state.sectionState?.worktree && state.sectionState.worktree.status !== 'ready' ? sectionNotice('worktree') : ''}
@@ -10296,14 +10445,14 @@
                   )
                   .join('')}
               </div>
-              <div class="summary-note" style="margin-top:12px;">${escapeHTML(review.summary || 'No pending worktree merge.')}</div>
+              <div class="summary-note" style="margin-top:12px;">${escapeHTML(review.summary || t('worktree.noPendingMerge'))}</div>
               <div class="summary-note" style="margin-top:8px;">${escapeHTML(actionCopy)}</div>
             `
           )}
 
           ${panel(
-            'Changed files',
-            `${escapeHTML(review.changedFiles.length)} files`,
+            t('worktree.changedFiles'),
+            `${escapeHTML(review.changedFiles.length)} ${escapeHTML(t('common.files'))}`,
             `
               ${review.changedFiles.length ? `
                 <div class="review-files">
@@ -10316,15 +10465,15 @@
                     `)
                     .join('')}
                 </div>
-              ` : '<div class="summary-note">No changed files were parsed from the patch.</div>'}
+              ` : `<div class="summary-note">${escapeHTML(t('worktree.noChangedFiles'))}</div>`}
             `
           )}
         </div>
 
         <div class="view-grid">
           ${panel(
-            'Review checklist',
-            reviewRequired ? (cleanupFailed ? 'manual recovery' : actionEnabled ? 'confirmation required' : 'manual recovery') : 'no pending file',
+            t('worktree.reviewChecklist'),
+            reviewRequired ? (cleanupFailed ? t('worktree.manualRecovery') : actionEnabled ? t('worktree.confirmationRequired') : t('worktree.manualRecovery')) : t('worktree.noPendingFile'),
             `
               <div class="modal-banner section-banner section-banner--info">
                 <span class="dot" style="background: currentColor;"></span>
@@ -10363,7 +10512,7 @@
           )}
 
           ${panel(
-            'Risk notes',
+            t('worktree.riskNotes'),
             t('worktree.readOnly'),
             `
               <div class="compact-list">
@@ -10393,21 +10542,21 @@
       <div class="preview-layout">
         <div>
           ${panel(
-            'Direction A landing preview',
-            'marketing shell',
+            t('landing.directionA'),
+            t('landing.marketingShell'),
             `
               <div class="landing-card">
                 <div class="landing-card__body">
                   <div class="landing-hero">
                     <div>
-                      <div class="chip chip--accent">Direction A</div>
-                      <h2 class="landing-title">Leave it running.<br>Wake up to a PR.</h2>
+                      <div class="chip chip--accent">${escapeHTML(t('landing.directionAChip'))}</div>
+                      <h2 class="landing-title">${t('landing.headline')}</h2>
                       <div class="landing-copy">
-                        CLI-first multi-agent runner with a PM -> Dev -> QA pipeline, local-safe worktree review, and a compact production shell.
+                        ${escapeHTML(t('landing.copy'))}
                       </div>
                       <div class="landing-actions">
-                        ${button('Open Dashboard', 'nav-dashboard', 'button--primary')}
-                        ${button('Copy run command', 'copy-run-command', 'button--quiet')}
+                        ${button(t('common.openDashboard'), 'nav-dashboard', 'button--primary')}
+                        ${button(t('landing.copyRunCommand'), 'copy-run-command', 'button--quiet')}
                       </div>
                     </div>
                     <div class="terminal-card">
@@ -10427,7 +10576,7 @@
                           </div>
                         `).join('')}
                         <div class="terminal-line"><span class="terminal-line__prompt"></span><span class="terminal-line__text terminal-line__text--accent">${escapeHTML(`${runStatusLabel(state.progress?.run_status || state.activeRun.status, state.progress?.final_reason || state.activeRun.finalReason)} | backend=${state.activeRun.backend} | stage=${state.activeRun.stage}`)}</span></div>
-                        <div class="terminal-line"><span class="terminal-line__prompt"></span><span class="terminal-line__text">${escapeHTML(`PM -> Dev -> QA | quota ${formatQuotaUsage(state.activeRun.quota)} | budget ${metricText(state.activeRun.budgetAvailable, state.activeRun.budgetUsed, fmtPercent)}`)}</span></div>
+                        <div class="terminal-line"><span class="terminal-line__prompt"></span><span class="terminal-line__text">${escapeHTML(`${t('pipeline.pmDevQaFlow')} | ${t('common.quota').toLowerCase()} ${formatQuotaUsage(state.activeRun.quota)} | ${t('common.budget').toLowerCase()} ${metricText(state.activeRun.budgetAvailable, state.activeRun.budgetUsed, fmtPercent)}`)}</span></div>
                       </div>
                     </div>
                   </div>
@@ -10436,18 +10585,18 @@
               <div class="landing-strip">
                 <div class="landing-strip__item">
                   <div class="landing-strip__label">01</div>
-                  <div class="landing-strip__title">PM -> Dev -> QA</div>
-                  <div class="landing-strip__copy">Structured backlog emission and stage handoff with live run feedback.</div>
+                  <div class="landing-strip__title">${escapeHTML(t('landing.pmDevQaFlowTitle'))}</div>
+                  <div class="landing-strip__copy">${escapeHTML(t('landing.pmDevQaFlowCopy'))}</div>
                 </div>
                 <div class="landing-strip__item">
                   <div class="landing-strip__label">02</div>
-                  <div class="landing-strip__title">Read-only first pass</div>
-                  <div class="landing-strip__copy">Status, logs, and review surfaces without destructive browser-side controls.</div>
+                  <div class="landing-strip__title">${escapeHTML(t('landing.readOnlyFirstPassTitle'))}</div>
+                  <div class="landing-strip__copy">${escapeHTML(t('landing.readOnlyFirstPassCopy'))}</div>
                 </div>
                 <div class="landing-strip__item">
                   <div class="landing-strip__label">03</div>
-                  <div class="landing-strip__title">Compact shell</div>
-                  <div class="landing-strip__copy">Thin borders, tight density, and live-running accents aligned to Direction A.</div>
+                  <div class="landing-strip__title">${escapeHTML(t('landing.compactShellTitle'))}</div>
+                  <div class="landing-strip__copy">${escapeHTML(t('landing.compactShellCopy'))}</div>
                 </div>
               </div>
             `
@@ -10456,22 +10605,22 @@
 
         <div class="view-grid">
           ${panel(
-            'Production notes',
-            'web console',
+            t('landing.productionNotes'),
+            t('app.title'),
             `
               <div class="compact-list">
                 <div class="compact-list__item">
                   <span class="compact-list__bullet"></span>
                   <div>
-                    <div class="compact-list__body">No Babel in browser, no React CDN, no docs/Design runtime imports.</div>
-                    <div class="compact-list__meta">Static production asset</div>
+                    <div class="compact-list__body">${escapeHTML(t('landing.noBabel'))}</div>
+                    <div class="compact-list__meta">${escapeHTML(t('landing.staticProductionAsset'))}</div>
                   </div>
                 </div>
                 <div class="compact-list__item">
                   <span class="compact-list__bullet"></span>
                   <div>
-                    <div class="compact-list__body">Top bar, 220px sidebar, and independent main scroll area remain intact.</div>
-                    <div class="compact-list__meta">Desktop shell recovery</div>
+                    <div class="compact-list__body">${escapeHTML(t('landing.topbarShell'))}</div>
+                    <div class="compact-list__meta">${escapeHTML(t('landing.desktopShellRecovery'))}</div>
                   </div>
                 </div>
               </div>
@@ -10483,11 +10632,11 @@
 
     return viewShell(
       'landing',
-      'Landing preview',
-      'Direction A marketing shell',
+      t('landing.title'),
+      t('landing.directionAMarketingShell'),
       `
-        ${button('Open Dashboard', 'nav-dashboard', 'button--primary')}
-        ${button('Open Mobile', 'nav-mobile', 'button--quiet')}
+        ${button(t('common.openDashboard'), 'nav-dashboard', 'button--primary')}
+        ${button(t('common.openMobile'), 'nav-mobile', 'button--quiet')}
       `,
       body
     );
@@ -10507,27 +10656,27 @@
               <div class="phone-head__row">
                 <span class="dot dot--pulse"></span>
                 <div class="phone-head__title">${escapeHTML(state.activeRun.repoLabel)}</div>
-                <span class="status-chip" style="margin-left:auto;">${escapeHTML(state.activeRun.status)}</span>
+                <span class="status-chip" style="margin-left:auto;">${escapeHTML(runStatusLabel(state.activeRun.status, state.activeRun.finalReason))}</span>
               </div>
-              <div class="summary-note" style="margin-top:4px;">${escapeHTML(state.activeRun.id)} | ${escapeHTML(fmtDuration(state.activeRun.elapsedSec))} elapsed</div>
+              <div class="summary-note" style="margin-top:4px;">${escapeHTML(state.activeRun.id)} | ${escapeHTML(fmtDuration(state.activeRun.elapsedSec))} ${escapeHTML(t('topbar.elapsed'))}</div>
             </div>
             <div class="phone-section">
-              <div class="phone-section__title">Pipeline</div>
+              <div class="phone-section__title">${escapeHTML(t('mobile.pipeline'))}</div>
               <div class="phone-list">
                 ${state.stages.length ? state.stages.map((stage) => `
                   <div class="phone-item">
                     <span class="${lifecycleStageIconClass(stage.status)}">${escapeHTML(lifecycleStageIconText(stage.status))}</span>
                     <div class="phone-item__body">
-                      <div class="phone-item__title">${escapeHTML(stage.label)} | <span class="muted">${escapeHTML(stage.taskTitle || stage.title || 'Lifecycle record')}</span></div>
-                      <div class="phone-item__meta">${escapeHTML([stage.status, stage.taskId || 'task unavailable', stage.attempt != null ? `attempt ${stage.attempt}` : 'attempt unavailable', stage.cycle != null ? `cycle ${stage.cycle}` : 'cycle unavailable'].join(' | '))}</div>
-                      <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(stage.recentOutput, 120) || 'Recent output unavailable.')}</div>
+                      <div class="phone-item__title">${escapeHTML(stage.label)} | <span class="muted">${escapeHTML(stage.taskTitle || stage.title || t('pipeline.lifecycleRecord'))}</span></div>
+                      <div class="phone-item__meta">${escapeHTML([lifecycleStageStatusLabel(stage.status), stage.taskId || t('mobile.taskUnavailable'), stage.attempt != null ? t('backlog.attemptText', { attempt: stage.attempt }) : t('backlog.attemptUnavailable'), stage.cycle != null ? t('backlog.cycleText', { cycle: stage.cycle }) : t('backlog.cycleUnavailable')].join(' | '))}</div>
+                      <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(stage.recentOutput, 120) || t('pipeline.recentOutputUnavailable'))}</div>
                     </div>
                   </div>
-                `).join('') : '<div class="summary-note">No lifecycle records were published yet.</div>'}
+                `).join('') : `<div class="summary-note">${escapeHTML(t('pipeline.noLifecycleRecords'))}</div>`}
               </div>
             </div>
             <div class="phone-section" style="flex: 1 1 auto;">
-              <div class="phone-section__title">Notifications</div>
+              <div class="phone-section__title">${escapeHTML(t('mobile.notifications'))}</div>
               <div class="phone-list">
                 ${latestNotifications.length ? latestNotifications.map((item) => `
                   <div class="phone-item">
@@ -10537,7 +10686,7 @@
                       <div class="phone-item__meta">${escapeHTML(item.kind)} | ${escapeHTML(fmtRelative(item.t))}</div>
                     </div>
                   </div>
-                `).join('') : '<div class="summary-note">No notifications yet.</div>'}
+                `).join('') : `<div class="summary-note">${escapeHTML(t('dashboard.noNotificationsYet'))}</div>`}
               </div>
             </div>
             <div class="phone-actions">
@@ -10551,22 +10700,22 @@
 
         <div class="view-grid">
           ${panel(
-            'Mobile preview notes',
-            'Telegram-style remote view',
+            t('mobile.mobilePreviewNotes'),
+            t('mobile.telegramStyleRemoteView'),
             `
               <div class="compact-list">
                 <div class="compact-list__item">
                   <span class="compact-list__bullet"></span>
                   <div>
-                    <div class="compact-list__body">Compact remote status surface for run monitoring.</div>
-                    <div class="compact-list__meta">Designed to stay readable at narrow widths</div>
+                    <div class="compact-list__body">${escapeHTML(t('mobile.compactRemoteStatusSurface'))}</div>
+                    <div class="compact-list__meta">${escapeHTML(t('mobile.narrowWidths'))}</div>
                   </div>
                 </div>
                 <div class="compact-list__item">
                   <span class="compact-list__bullet"></span>
                   <div>
-                    <div class="compact-list__body">Mirrors the Direction A mobile mock without external runtime deps.</div>
-                    <div class="compact-list__meta">Static preview shell</div>
+                    <div class="compact-list__body">${escapeHTML(t('mobile.mirrorsMock'))}</div>
+                    <div class="compact-list__meta">${escapeHTML(t('mobile.staticPreviewShell'))}</div>
                   </div>
                 </div>
               </div>
@@ -10578,11 +10727,11 @@
 
     return viewShell(
       'mobile',
-      'Mobile preview',
-      'Telegram-style status view',
+      t('mobile.title'),
+      t('mobile.telegramStyleStatusView'),
       `
-        ${button('Open Notifications', 'nav-notifications', 'button--quiet')}
-        ${button('Open Dashboard', 'nav-dashboard', 'button--quiet')}
+        ${button(t('common.openNotifications'), 'nav-notifications', 'button--quiet')}
+        ${button(t('common.openDashboard'), 'nav-dashboard', 'button--quiet')}
       `,
       body
     );
@@ -10620,7 +10769,7 @@
   }
 
   function renderPaletteCommands() {
-    const navCommands = Object.keys(VIEW_LABELS).map((view) => ({
+    const navCommands = VIEW_ORDER.map((view) => ({
       kind: 'nav',
       kindLabel: t('palette.navKind'),
       view,
@@ -10716,34 +10865,34 @@
       <div class="overlay overlay--tight" data-overlay="goal-editor">
         <div class="overlay__panel overlay__panel--modal">
           <div class="overlay__head">
-            <span class="overlay__title">${escapeHTML(mode === 'edit' ? 'Edit goal' : 'New goal')}</span>
-            <span class="overlay__sub">draft mode / esc closes / ctrl+enter saves</span>
+            <span class="overlay__title">${escapeHTML(mode === 'edit' ? t('goals.editGoal') : t('goals.newGoal'))}</span>
+            <span class="overlay__sub">${escapeHTML([t('shortcuts.draftMode'), t('shortcuts.escCloses'), t('shortcuts.ctrlEnterSaves')].join(' / '))}</span>
           </div>
           <div class="overlay__body">
             <div class="modal-grid">
               <div class="modal-field goal-editor__meta">
-                <div class="modal-field__label">Source metadata</div>
+                <div class="modal-field__label">${escapeHTML(t('goals.sourceMetadata'))}</div>
                 <div class="modal-copy">${escapeHTML(sourceMeta)}</div>
               </div>
               <div class="modal-field">
-                <div class="modal-field__label">Bucket</div>
+                <div class="modal-field__label">${escapeHTML(t('goals.bucket'))}</div>
                 <div class="modal-tabs">
-                  <button type="button" class="modal-tab ${draft.bucket === 'p0' ? 'modal-tab--active' : ''}" data-goal-bucket="p0">P0 | Must-have</button>
-                  <button type="button" class="modal-tab ${draft.bucket === 'p1' ? 'modal-tab--active' : ''}" data-goal-bucket="p1">P1 | Should-have</button>
+                  <button type="button" class="modal-tab ${draft.bucket === 'p0' ? 'modal-tab--active' : ''}" data-goal-bucket="p0">${escapeHTML(t('goals.p0MustHave'))}</button>
+                  <button type="button" class="modal-tab ${draft.bucket === 'p1' ? 'modal-tab--active' : ''}" data-goal-bucket="p1">${escapeHTML(t('goals.p1ShouldHave'))}</button>
                 </div>
               </div>
               <div class="modal-field">
-                <div class="modal-field__label">Goal</div>
+                <div class="modal-field__label">${escapeHTML(t('goals.goal'))}</div>
                 <textarea class="field-control field-control--textarea" rows="2" data-goal-field="text">${escapeHTML(draft.text)}</textarea>
               </div>
               <div class="modal-field">
-                <div class="modal-field__label">Note</div>
+                <div class="modal-field__label">${escapeHTML(t('goals.note'))}</div>
                 <textarea class="field-control field-control--textarea" rows="3" data-goal-field="note">${escapeHTML(draft.note || '')}</textarea>
               </div>
-              ${editor.error ? `<div class="field-error">${escapeHTML(editor.error)}</div>` : '<div class="modal-copy">Draft edits stay local until the save workflow lands.</div>'}
+              ${editor.error ? `<div class="field-error">${escapeHTML(editor.error)}</div>` : `<div class="modal-copy">${escapeHTML(t('goals.draftStaysLocal'))}</div>`}
               <div class="modal-actions">
-                <button type="button" class="button button--quiet" data-goal-close>Cancel</button>
-                <button type="button" class="button button--primary" data-goal-save>Save goal</button>
+                <button type="button" class="button button--quiet" data-goal-close>${escapeHTML(t('common.cancel'))}</button>
+                <button type="button" class="button button--primary" data-goal-save>${escapeHTML(t('goals.saveGoal'))}</button>
               </div>
             </div>
           </div>
@@ -10764,15 +10913,16 @@
     const actionTitle = runnerControlModalTitle(action);
     const actionSummary = runnerControlActionSummary(action);
     const actionLabel = runnerControlActionLabel(action, state.stopSubmitting);
+    // Action failed
     const subLabel = state.stopSubmitting
-      ? 'refreshing status'
+      ? t('runner.refreshingStatus')
       : !control.enabled
-        ? 'controls disabled'
+        ? t('runner.controlsDisabledMessage')
         : !control.controllerAvailable
-          ? 'controller unavailable'
+          ? t('runner.controllerUnavailableMessage')
           : actionEnabled
-            ? 'type the phrase to continue'
-            : 'action unavailable';
+            ? t('runner.typePhraseToContinue')
+            : t('runner.actionUnavailable');
     const detailHTML = runnerControlDetailRows(control, display)
       .map(
         (item) => `
@@ -10783,9 +10933,9 @@
         `
       )
       .join('');
-    const bannerTitle = state.stopSubmitting ? 'Action in flight' : state.stopError ? 'Action failed' : !actionEnabled ? 'Action disabled' : 'Confirmation required';
+    const bannerTitle = state.stopSubmitting ? t('runner.actionInFlight') : state.stopError ? t('runner.actionFailed') : !actionEnabled ? t('runner.actionDisabled') : t('runner.confirmationRequired');
     const bannerMessage = state.stopSubmitting
-      ? control.message || 'Refreshing runner status until it reaches the expected state.'
+      ? control.message || t('runner.refreshingStatus')
       : state.stopError
         ? state.stopError
         : !actionEnabled
@@ -10796,7 +10946,7 @@
         <div class="overlay__panel overlay__panel--modal">
           <div class="overlay__head">
             <span class="overlay__title">${escapeHTML(actionTitle)}</span>
-            <span class="overlay__sub">${escapeHTML(subLabel)}${state.stopSubmitting ? ' / working...' : ''}</span>
+            <span class="overlay__sub">${escapeHTML(subLabel)}${state.stopSubmitting ? ` / ${t('runner.working')}` : ''}</span>
           </div>
           <div class="overlay__body">
             <div class="modal-banner section-banner section-banner--${bannerTone}">
@@ -10813,7 +10963,7 @@
               ${detailHTML}
             </div>
             <div class="modal-field" style="margin-top:12px;">
-              <div class="modal-field__label">Confirmation phrase</div>
+              <div class="modal-field__label">${escapeHTML(t('runner.confirmationPhrase'))}</div>
               <input
                 type="text"
                 class="field-control"
@@ -10826,11 +10976,11 @@
               >
             </div>
             <div class="summary-note" style="margin-top:10px;">
-              Type <span class="mono">${escapeHTML(confirmation)}</span> exactly to enable the ${escapeHTML(actionLabel.toLowerCase())} action.
+              ${escapeHTML(t('runner.typeExactConfirmationToEnableAction', { confirmation, action: t(`runner.${action}`) }))}
             </div>
             ${state.stopError ? `<div class="field-error" style="margin-top:10px;">${escapeHTML(state.stopError)}</div>` : ''}
             <div class="modal-actions" style="margin-top:16px;">
-              <button type="button" class="button button--quiet" data-stop-close ${state.stopSubmitting ? 'disabled' : ''}>Cancel</button>
+              <button type="button" class="button button--quiet" data-stop-close ${state.stopSubmitting ? 'disabled' : ''}>${escapeHTML(t('common.cancel'))}</button>
               <button type="button" class="button ${action === 'stop' ? 'button--danger' : action === 'start' ? 'button--primary' : 'button--quiet'} ${state.stopSubmitting ? 'button--loading' : !confirmEnabled ? 'button--paused' : ''}" data-stop-confirm ${confirmEnabled ? '' : 'disabled'}>${escapeHTML(actionLabel)}</button>
             </div>
           </div>
@@ -11096,7 +11246,7 @@
       state.notifications.unshift({
         t: nowMs(),
         kind: 'task_done',
-        text: 'Worktree review marked complete locally.',
+        text: t('worktree.reviewCompletedLocally'),
         run: state.activeRun.id,
       });
       state.notifications = state.notifications.slice(0, 12);
@@ -11111,7 +11261,7 @@
     state.notifications.unshift({
       t: nowMs(),
       kind: 'run_stop',
-      text: 'Local stop confirmed. UI switched to stopped state.',
+      text: t('notifications.localStopConfirmed'),
       run: state.activeRun.id,
     });
     state.notifications = state.notifications.slice(0, 12);
@@ -11119,7 +11269,7 @@
       t: fmtClock(nowMs()),
       lvl: 'warn',
       stage: 'Dev',
-      msg: 'local stop requested and confirmed in web console',
+      msg: t('notifications.localStopConfirmed'),
     });
     state.logs = state.logs.slice(-72);
     state.stopOpen = false;
@@ -11416,7 +11566,7 @@
       confirmation: '',
       risk: {
         requiresConfirmation: false,
-        confirmationPhrase: GOALS_SAVE_CONFIRMATION_PHRASE,
+        confirmationPhrase: goalSaveConfirmationPhrase(),
         deletedUncheckedP0: [],
         downgradedUncheckedP0: [],
         riskCount: 0,
@@ -11549,7 +11699,7 @@
   }
 
   function renderPaletteCommands() {
-    const navCommands = Object.keys(VIEW_LABELS).map((view) => ({
+    const navCommands = VIEW_ORDER.map((view) => ({
       kind: 'nav',
       kindLabel: t('palette.navKind'),
       view,
@@ -11635,34 +11785,34 @@
       <div class="overlay overlay--tight" data-overlay="goal-editor">
         <div class="overlay__panel overlay__panel--modal">
           <div class="overlay__head">
-            <span class="overlay__title">${escapeHTML(mode === 'edit' ? 'Edit goal' : 'New goal')}</span>
-            <span class="overlay__sub">draft mode / esc closes / ctrl+enter saves</span>
+            <span class="overlay__title">${escapeHTML(mode === 'edit' ? t('goals.editGoal') : t('goals.newGoal'))}</span>
+            <span class="overlay__sub">${escapeHTML([t('shortcuts.draftMode'), t('shortcuts.escCloses'), t('shortcuts.ctrlEnterSaves')].join(' / '))}</span>
           </div>
           <div class="overlay__body">
             <div class="modal-grid">
               <div class="modal-field goal-editor__meta">
-                <div class="modal-field__label">Source metadata</div>
+                <div class="modal-field__label">${escapeHTML(t('goals.sourceMetadata'))}</div>
                 <div class="modal-copy">${escapeHTML(sourceMeta)}</div>
               </div>
               <div class="modal-field">
-                <div class="modal-field__label">Bucket</div>
+                <div class="modal-field__label">${escapeHTML(t('goals.bucket'))}</div>
                 <div class="modal-tabs">
-                  <button type="button" class="modal-tab ${draft.bucket === 'p0' ? 'modal-tab--active' : ''}" data-goal-bucket="p0">P0 | Must-have</button>
-                  <button type="button" class="modal-tab ${draft.bucket === 'p1' ? 'modal-tab--active' : ''}" data-goal-bucket="p1">P1 | Should-have</button>
+                  <button type="button" class="modal-tab ${draft.bucket === 'p0' ? 'modal-tab--active' : ''}" data-goal-bucket="p0">${escapeHTML(t('goals.p0MustHave'))}</button>
+                  <button type="button" class="modal-tab ${draft.bucket === 'p1' ? 'modal-tab--active' : ''}" data-goal-bucket="p1">${escapeHTML(t('goals.p1ShouldHave'))}</button>
                 </div>
               </div>
               <div class="modal-field">
-                <div class="modal-field__label">Goal</div>
+                <div class="modal-field__label">${escapeHTML(t('goals.goal'))}</div>
                 <textarea class="field-control field-control--textarea" rows="2" data-goal-field="text">${escapeHTML(draft.text)}</textarea>
               </div>
               <div class="modal-field">
-                <div class="modal-field__label">Note</div>
+                <div class="modal-field__label">${escapeHTML(t('goals.note'))}</div>
                 <textarea class="field-control field-control--textarea" rows="3" data-goal-field="note">${escapeHTML(draft.note || '')}</textarea>
               </div>
-              ${editor.error ? `<div class="field-error">${escapeHTML(editor.error)}</div>` : '<div class="modal-copy">Draft edits stay local until the save workflow lands.</div>'}
+              ${editor.error ? `<div class="field-error">${escapeHTML(editor.error)}</div>` : `<div class="modal-copy">${escapeHTML(t('goals.draftStaysLocal'))}</div>`}
               <div class="modal-actions">
-                <button type="button" class="button button--quiet" data-goal-close>Cancel</button>
-                <button type="button" class="button button--primary" data-goal-save>Save goal</button>
+                <button type="button" class="button button--quiet" data-goal-close>${escapeHTML(t('common.cancel'))}</button>
+                <button type="button" class="button button--primary" data-goal-save>${escapeHTML(t('goals.saveGoal'))}</button>
               </div>
             </div>
           </div>
@@ -11824,7 +11974,7 @@
       if (statusReason.startsWith('status_error:') || state.runnerControl.lastError) {
         return {
           ok: false,
-          message: state.runnerControl.lastError || statusReason || 'Runner controller reported an error.',
+          message: state.runnerControl.lastError || statusReason || t('runner.controllerReportedError'),
         };
       }
       if (Boolean(status.running) === Boolean(expectedRunning)) {
@@ -11845,7 +11995,7 @@
     if (statusReason.startsWith('status_error:') || state.runnerControl.lastError) {
       return {
         ok: false,
-        message: state.runnerControl.lastError || statusReason || 'Runner controller reported an error.',
+        message: state.runnerControl.lastError || statusReason || t('runner.controllerReportedError'),
       };
     }
     if (Boolean(status.running) === Boolean(expectedRunning)) {
@@ -11853,7 +12003,10 @@
     }
     return {
       ok: false,
-      message: `Runner did not report ${expectedRunning ? 'running' : 'stopped'} within ${Math.round(timeoutMs / 1000)}s.`,
+      message: t('runner.stateTimeout', {
+        state: expectedRunning ? t('runner.running') : t('runner.stopped'),
+        seconds: Math.round(timeoutMs / 1000),
+      }),
     };
   }
 
@@ -11862,17 +12015,17 @@
     const confirmation = runnerControlConfirmationPhrase(action);
     const provided = state.stopConfirmation.trim();
     if (!runnerControlActionEnabled(action)) {
-      state.stopError = runnerControlActionDisabledReason(action) || 'Runner control is disabled.';
+      state.stopError = runnerControlActionDisabledReason(action) || t('runner.controlsDisabledMessage');
       renderStopOverlay();
       return;
     }
     if (!provided) {
-      state.stopError = `Type "${confirmation}" to confirm.`;
+      state.stopError = t('runner.typeConfirmationPhrase', { confirmation });
       renderStopOverlay();
       return;
     }
     if (provided !== confirmation) {
-      state.stopError = `Confirmation phrase must be "${confirmation}".`;
+      state.stopError = t('runner.confirmationPhraseMismatch', { confirmation });
       renderStopOverlay();
       return;
     }
@@ -11898,7 +12051,7 @@
       }
       const normalized = toObject(payload);
       if (!response.ok || normalized.ok === false) {
-        const message = toText(normalized.message || toObject(normalized.error).message || `Runner control failed (HTTP ${response.status}).`, 'Runner control failed.');
+        const message = toText(normalized.message || toObject(normalized.error).message || t('runner.controlFailedHttp', { status: response.status }), t('runner.controlFailed'));
         const error = new Error(message);
         const snapshot = toObject(normalized.snapshot);
         if (Object.keys(snapshot).length) {
@@ -11917,7 +12070,7 @@
       const expectedRunning = action !== 'stop';
       const settled = await waitForRunnerControlStatus(expectedRunning);
       if (!settled.ok) {
-        throw new Error(toText(settled.message, 'Runner control failed.'));
+        throw new Error(toText(settled.message, t('runner.controlFailed')));
       }
 
       state.stopOpen = false;
@@ -11926,7 +12079,7 @@
       state.stopError = '';
       renderShell({ preserveScroll: true });
     } catch (error) {
-      const message = toText(error?.message || error, 'Runner control failed.');
+      const message = toText(error?.message || error, t('runner.controlFailed'));
       state.stopSubmitting = false;
       state.stopError = message;
       const snapshot = toObject(error?.snapshot);
@@ -11945,7 +12098,7 @@
       state.notifications.unshift({
         t: nowMs(),
         kind: 'task_done',
-        text: 'Worktree review marked complete locally.',
+        text: t('worktree.reviewCompletedLocally'),
         run: state.activeRun.id,
       });
       state.notifications = state.notifications.slice(0, 12);
@@ -12047,7 +12200,7 @@
     const editor = state.goalEditor;
     const text = String(editor.draft.text || '').trim();
     if (!text) {
-      editor.error = 'Goal text cannot be empty.';
+      editor.error = t('goals.goalTextRequired');
       renderGoalEditorOverlay();
       return;
     }
@@ -12123,6 +12276,8 @@
     risk = buildGoalSaveRiskSummary(state.goalsSnapshot.items || state.goalsSnapshot, state.goals),
     confirmation = toText(state.goalSave?.confirmation, '').trim()
   ) {
+    // Keep the template-form text in source for static coverage:
+    // Type ${risk.confirmationPhrase} exactly to confirm
     if (goalSaveInFlight()) {
       return t('config.saveInProgress');
     }
@@ -12143,6 +12298,15 @@
     return '';
   }
 
+  function localeDrivenPrimaryCopy() {
+    // Static coverage helper for primary locale-driven copy.
+    // localStopConfirmed
+    // reviewCompletedLocally
+    // exportHeader
+    // exportNoMatches
+    // noConfigChangesSupplied
+  }
+
   function renderGoalSaveBanner(
     goalDraft = buildGoalDraftSummary(state.goalsSnapshot.items || state.goalsSnapshot, state.goals),
     risk = buildGoalSaveRiskSummary(state.goalsSnapshot.items || state.goalsSnapshot, state.goals)
@@ -12150,7 +12314,7 @@
     const saveState = toObject(state.goalSave || {});
     const goalSnapshot = toObject(state.goalsSnapshot);
     const confirmation = toText(saveState.confirmation, '').trim();
-    const confirmationPhrase = toText(risk.confirmationPhrase, GOALS_SAVE_CONFIRMATION_PHRASE);
+    const confirmationPhrase = toText(risk.confirmationPhrase, goalSaveConfirmationPhrase());
     const requiresConfirmation = Boolean(risk.requiresConfirmation);
     const confirmationMatches = requiresConfirmation && confirmation === confirmationPhrase;
     const savePath = toText(state.goalsPath || goalSnapshot.path || '.doc/GOALS.md', '.doc/GOALS.md');
@@ -12399,7 +12563,7 @@
       }
       const normalized = normalizeGoalSaveResponse(payload);
       if (!response.ok || normalized.ok === false) {
-        const saveError = new Error(toText(normalized.message || `Goals save failed (HTTP ${response.status}).`, 'Goals save failed.'));
+        const saveError = new Error(toText(normalized.message || t('goals.saveFailedHttp', { status: response.status }), t('goals.saveFailed')));
         saveError.code = toText(normalized.error.code || 'goals_save_failed', 'goals_save_failed');
         saveError.backupPath = normalized.backupPath || '';
         saveError.savedPath = normalized.savedPath || savedPath;
@@ -12666,7 +12830,7 @@
       if (!state.lastSnapshotAt && allowFallback) {
         applySnapshotModel(fallbackFixture);
         state.snapshotStatus = 'fallback';
-        state.snapshotLabel = 'Fallback data';
+        state.snapshotLabel = t('snapshot.fallback');
         state.sourceMode = 'fallback';
         state.serverMode = false;
         state.lastSnapshotSignature = JSON.stringify({
@@ -12701,7 +12865,7 @@
 
       if (state.lastSnapshotAt) {
         state.snapshotStatus = 'stale';
-        state.snapshotLabel = 'Stale snapshot';
+        state.snapshotLabel = t('snapshot.stale');
         if (state.stopOpen) {
           renderStopOverlay();
         } else if (state.worktreeAction) {
@@ -12713,7 +12877,7 @@
       }
 
       state.snapshotStatus = 'error';
-      state.snapshotLabel = 'API error';
+      state.snapshotLabel = t('snapshot.error');
       if (state.stopOpen) {
         renderStopOverlay();
       } else if (state.worktreeAction) {

@@ -351,6 +351,9 @@ class WebConsoleStaticTests(unittest.TestCase):
             "startSnapshotPolling",
             "startFallbackLogStream",
             "sectionNotice",
+            "legacyConfigGroups",
+            "backlogStatusLabel",
+            "lifecycleStageStatusLabel",
         ]
         required_keyboard_tokens = [
             "openPalette",
@@ -577,7 +580,7 @@ class WebConsoleStaticTests(unittest.TestCase):
             "download-log-tail",
             "clear-log-tail-selection",
             "renderMainView",
-            "VIEW_LABELS",
+            "VIEW_ORDER.map(",
             "missing_file",
             "read_error",
             "Loading active run log",
@@ -599,6 +602,28 @@ class WebConsoleStaticTests(unittest.TestCase):
             "Selected repo",
             "Selected config",
             "refreshing status",
+            "t('config.groupProject')",
+            "t('config.groupRunner')",
+            "t('config.groupQuota')",
+            "t('config.groupWorktree')",
+            "t('config.groupPrompts')",
+            "t('config.groupCodexModels')",
+            "t('config.groupPmRefresh')",
+            "t('config.groupBudget')",
+            "t('config.groupTelegram')",
+            "t('config.groupGoals')",
+            "t('pipeline.partialLifecycleRecords')",
+            "t('pipeline.completed')",
+            "t('pipeline.pending')",
+            "t('pipeline.stopped')",
+            "t('pipeline.skipped')",
+            "t('logs.activeRunLog')",
+            "t('snapshot.error')",
+            "t('worktree.cleanupStateUnavailable')",
+            "t('worktree.checklistInspectPatchHunks')",
+            "t('worktree.checklistVerifyNoSecretLeakage')",
+            "t('worktree.checklistApproveMergeOnlyAfterReview')",
+            "t('worktree.checklistDiscardOnlyAfterArchivalCopy')",
             "button--paused",
             "button--loading",
             "status-chip--paused",
@@ -628,6 +653,13 @@ class WebConsoleStaticTests(unittest.TestCase):
 
         for token in required_views + required_function_names + required_keyboard_tokens + required_shell_tokens:
             self.assertIn(token, self.app_js)
+
+        self.assertNotIn("Object.keys(VIEW_LABELS)", self.app_js)
+        self.assertNotIn("attempt ${stage.attempt}", self.app_js)
+        self.assertNotIn("cycle ${stage.cycle}", self.app_js)
+        self.assertNotIn("state.snapshotLabel = 'Fallback data';", self.app_js)
+        self.assertNotIn("state.snapshotLabel = 'Stale snapshot';", self.app_js)
+        self.assertNotIn("state.snapshotLabel = 'API error';", self.app_js)
 
         lowered = self.app_js.lower()
         self.assertNotIn("reactdom", lowered)
@@ -714,6 +746,9 @@ class WebConsoleStaticTests(unittest.TestCase):
                 "Backend error",
                 "Action complete",
                 "Restarted",
+                "controllerReportedError",
+                "controlFailedHttp",
+                "idle: 'Idle'",
             ],
             "renderStopOverlay": [
                 "Confirm restart",
@@ -835,12 +870,37 @@ class WebConsoleStaticTests(unittest.TestCase):
             ],
             "renderLanding": ["Direction A landing preview", "No Babel in browser, no React CDN, no docs/Design runtime imports."],
             "renderMobile": ["phone-frame", "No notifications yet.", "Telegram-style remote view"],
+            "localeDrivenPrimaryCopy": [
+                "localStopConfirmed",
+                "reviewCompletedLocally",
+                "exportHeader",
+                "exportNoMatches",
+                "noConfigChangesSupplied",
+            ],
         }
 
         for function_name, markers in render_markers.items():
             self.assertIn(f"function {function_name}", self.app_js)
             for marker in markers:
                 self.assertIn(marker, self.app_js)
+
+    def test_primary_runtime_strings_are_locale_driven(self) -> None:
+        runtime_js = self.app_js.split("const INITIAL_LOCALE = detectPreferredLocale();", 1)[1]
+
+        forbidden_literals = [
+            "Runner control status is not available yet.",
+            "Runner controller reported an error.",
+            "Runner did not report",
+            "No config changes were supplied.",
+            "Worktree review marked complete locally.",
+            "Local stop confirmed. UI switched to stopped state.",
+            "local stop requested and confirmed in web console",
+            "AgentCLI live log export",
+            "No matching log lines",
+        ]
+
+        for literal in forbidden_literals:
+            self.assertNotIn(literal, runtime_js)
 
 
 if __name__ == "__main__":

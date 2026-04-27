@@ -105,7 +105,7 @@
 
 - [x] Add a locale state model with `en` and `ko` options and persisted browser preference.
 - [x] Add a visible language toggle in the shell header or settings area.
-- [ ] Translate primary navigation, page titles, buttons, badges, empty states, validation errors, and confirmation text to English.
+- [x] Translate primary navigation, page titles, buttons, badges, empty states, validation errors, and confirmation text to English.
 - [ ] Translate primary navigation, page titles, buttons, badges, empty states, validation errors, and confirmation text to Korean.
 - [x] Ensure command palette and keyboard shortcut labels use the active locale.
 - [x] Add Playwright checks that Dashboard and Config render in both English and Korean.
