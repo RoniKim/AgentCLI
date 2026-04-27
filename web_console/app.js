@@ -1579,6 +1579,7 @@
       actionNeeded: '조치 필요',
       eventsReadFrom: '이벤트는 수명주기 기록과 제어 평면 스냅샷에서 읽어옵니다. 플레이스홀더 피드는 사용하지 않습니다.',
       localStopConfirmed: '로컬 중지가 확인되었고 UI가 중지 상태로 전환되었습니다.',
+      observedKindsNote: '실제 알림 행에서 파생된 종류입니다.',
     },
     runner: {
       ...LOCALE_TEXT.ko.runner,
@@ -2161,15 +2162,16 @@
 
   function runStatusLabel(status, finalReason = '') {
     const normalized = String(status || 'idle').toLowerCase();
-    if (normalized === 'completed') return 'completed';
+    if (normalized === 'completed') return t('common.complete');
     if (normalized === 'success' || normalized === 'complete' || normalized === 'done') {
-      return finalReason ? 'completed' : 'success';
+      return finalReason ? t('common.complete') : t('common.success');
     }
-    if (normalized === 'running') return 'running';
-    if (normalized === 'stopping' || normalized === 'stopped') return 'stopped';
-    if (normalized === 'failed' || normalized === 'error') return 'failed';
-    if (normalized === 'idle') return 'idle';
-    return normalized || 'idle';
+    if (normalized === 'running') return t('runner.running');
+    if (normalized === 'stopping') return t('runner.stopping');
+    if (normalized === 'stopped') return t('runner.stopped');
+    if (normalized === 'failed' || normalized === 'error') return t('common.failed');
+    if (normalized === 'idle') return t('runner.idle');
+    return t('common.unknown');
   }
 
   function runStatusTone(status, finalReason = '') {
@@ -2835,17 +2837,17 @@
   function lifecycleStageIconText(status) {
     switch (normalizeStageStatus(status, 'pending')) {
       case 'done':
-        return 'OK';
+        return t('common.complete');
       case 'running':
-        return 'RUN';
+        return t('pipeline.inProgress');
       case 'failed':
-        return 'ERR';
+        return t('common.failed');
       case 'stopped':
-        return 'STOP';
+        return t('pipeline.stopped');
       case 'skipped':
-        return 'SKIP';
+        return t('pipeline.skipped');
       default:
-        return 'WAIT';
+        return t('pipeline.pending');
     }
   }
 
@@ -5445,13 +5447,13 @@
     const status = toText(lastRunSummary.status, toText(raw.status, ''));
     const rc = lastRunSummary.rc ?? raw.rc;
     if (finalReason) {
-      parts.push(`run_summary.final.reason=${finalReason}`);
+      parts.push(`${t('history.persistedSummary')}: ${finalReason}`);
     }
     if (status || rc != null) {
-      parts.push(`last_run_summary.status=${status || 'unknown'}${rc != null ? ` rc=${rc}` : ''}`);
+      parts.push(`${t('history.currentState')}: ${runStatusLabel(status, finalReason)}${rc != null ? ` rc=${rc}` : ''}`);
     }
     if (shutdownReason && shutdownReason !== finalReason) {
-      parts.push(`shutdown=${shutdownReason}`);
+      parts.push(`${t('history.shutdownReason')}: ${shutdownReason}`);
     }
     if (counts.cycles) {
       parts.push(t('history.cycles', { count: counts.cycles }));
@@ -5460,8 +5462,37 @@
   }
 
   function historyWorktreeOutcomeLabel(outcome) {
-    const value = toText(outcome, 'none').replace(/_/g, ' ');
-    return value || t('common.none');
+    const value = toText(outcome, 'none').toLowerCase();
+    if (!value || value === 'none') return t('common.none');
+    if (value === 'applied') return t('worktree.patchApplied');
+    if (value === 'discarded') return t('worktree.patchDiscarded');
+    if (value === 'patch_not_applied' || value === 'not_applied') return t('worktree.patchNotApplied');
+    if (value === 'applied_cleanup_failed') return t('worktree.mergeRecordedCleanupFailed');
+    if (value === 'discard_cleanup_failed') return t('worktree.discardRecordedCleanupFailed');
+    if (value === 'pending review' || value === 'pending') return t('worktree.reviewRequired');
+    if (value === 'failed' || value === 'error') return t('common.failed');
+    return t('common.unknown');
+  }
+
+  function notificationKindLabel(kind) {
+    switch (toText(kind, '').toLowerCase()) {
+      case 'run_start':
+        return t('notifications.filterRunStart');
+      case 'run_stop':
+        return t('notifications.filterRunStop');
+      case 'task_done':
+        return t('notifications.filterTaskDone');
+      case 'task_failed':
+        return t('notifications.filterTaskFailed');
+      case 'quota':
+        return t('notifications.filterQuota');
+      case 'error':
+        return t('notifications.filterError');
+      case 'stalled':
+        return t('notifications.filterStalled');
+      default:
+        return t('common.unknown');
+    }
   }
 
   function renderTimelineConnector(nextStatus) {
@@ -5638,7 +5669,7 @@
 
   function renderNotificationItem(item) {
     const color = kindColor(item.kind);
-    const kindText = item.kind.replace(/_/g, '.').toUpperCase();
+    const kindText = notificationKindLabel(item.kind);
     return `
       <div class="notification-feed__item">
         <div class="notification-feed__kind">
@@ -5657,19 +5688,20 @@
 
   function renderHistoryRow(run) {
     const selected = state.historySelection === run.id;
+    const statusTone = runStatusTone(run.status, run.finalReason);
     const color =
-      run.status === 'success'
+      statusTone === 'success' || statusTone === 'completed'
         ? 'var(--accent)'
-        : run.status === 'failed'
+        : statusTone === 'failed'
           ? 'var(--err)'
-          : run.status === 'stopped'
+          : statusTone === 'stopped'
             ? 'var(--warn)'
             : 'var(--info)';
     return `
       <button type="button" class="history-table__row ${selected ? 'config-row--active' : ''}" data-history-select="${escapeHTML(run.id)}">
         <span class="history-table__status" style="color:${color}">
-          <span class="${run.status === 'running' ? 'dot dot--pulse' : 'dot'}" style="background:${color}"></span>
-          ${escapeHTML(run.status.toUpperCase())}
+          <span class="${statusTone === 'running' ? 'dot dot--pulse' : 'dot'}" style="background:${color}"></span>
+          ${escapeHTML(runStatusLabel(run.status, run.finalReason))}
         </span>
         <span>
           <span>${escapeHTML(run.branch)}</span>
@@ -9111,7 +9143,7 @@
         <div class="task-card">
           <div class="task-card__head">
             <span class="task-card__id">${escapeHTML(stage.label)}</span>
-            <span class="chip ${lifecycleStatusToneClass(stage.status)}">${escapeHTML(normalizeStageStatus(stage.status, 'pending').replace(/_/g, ' '))}</span>
+            <span class="chip ${lifecycleStatusToneClass(stage.status)}">${escapeHTML(lifecycleStageStatusLabel(stage.status))}</span>
           </div>
           <div class="task-card__title">${escapeHTML(stage.taskTitle || stage.title || t('pipeline.lifecycleRecord'))}</div>
           <div class="task-card__meta">
@@ -9144,7 +9176,7 @@
 
           ${panel(
             t('pipeline.currentStageOutput'),
-            escapeHTML(state.activeRun.task || `${state.stages.length} ${t('pipeline.lifecycleRecord')}${state.stages.length === 1 ? '' : 's'}`),
+            escapeHTML(state.activeRun.task || (state.stages.length ? `${state.stages.length} ${t('pipeline.lifecycleRecord')}` : t('pipeline.noLifecycleRecords'))),
             `
               <div class="view-grid view-grid--three">
                 ${outputs.join('')}
@@ -10131,10 +10163,10 @@
               <div class="history-details">
                 <div class="history-details__body">
                   ${
-                    selected
+                  selected
                       ? `
                         <div class="kpi-grid kpi-grid--four">
-                          ${kpiCard(t('history.currentState'), selected.status.toUpperCase(), t('history.currentState'), selected.status === 'success')}
+                          ${kpiCard(t('history.currentState'), runStatusLabel(selected.status, selected.finalReason), t('history.currentState'), ['success', 'completed'].includes(toText(selected.status, '')))}
                           ${kpiCard(t('history.tasks'), `${selectedCounts.done}/${selectedCounts.total}`, `${t('common.failed')} ${selectedCounts.failed} | ${t('common.skipped')} ${selectedCounts.skipped}`)}
                           ${kpiCard(t('history.duration'), fmtDuration(selected.durationSec), t('history.persistedRuntime'))}
                           ${kpiCard(t('history.worktreeOutcome'), historyWorktreeOutcomeLabel(selected.worktreeOutcome), selected.worktreeOutcome === 'none' ? t('history.noWorktreeArtifact') : t('history.worktreeOutcomeMeta'))}
@@ -10142,10 +10174,10 @@
                         <div class="compact-list">
                           ${compactFactItem(t('history.branchId'), selected.branch || t('common.none'), t('history.persistedSummary'))}
                           ${compactFactItem(t('history.persistedRuntime'), selectedRunDir, t('history.readOnlyRunArtifacts'))}
-                          ${compactFactItem(t('history.currentState'), selectedFinalReason || t('common.unavailable'), 'run_summary.json final.reason')}
-                          ${compactFactItem(t('history.shutdownReason'), selectedShutdownReason || t('common.unavailable'), 'last_run_summary.json stop_reason')}
-                          ${compactFactItem(t('history.persistedSummary'), selectedSummary, 'run_summary.json + last_run_summary.json')}
-                          ${compactFactItem(t('history.worktreeOutcome'), selectedWorktreeOutcome, 'worktree artifacts')}
+                          ${compactFactItem(t('history.currentState'), selectedFinalReason || t('common.unavailable'), t('history.persistedSummary'))}
+                          ${compactFactItem(t('history.shutdownReason'), selectedShutdownReason || t('common.unavailable'), t('history.readOnlyRunArtifacts'))}
+                          ${compactFactItem(t('history.persistedSummary'), selectedSummary, t('history.readOnlyRunArtifacts'))}
+                          ${compactFactItem(t('history.worktreeOutcome'), selectedWorktreeOutcome, t('history.worktreeOutcomeMeta'))}
                         </div>
                         <div class="summary-note">${escapeHTML(t('history.persistedSummariesDriveThisView'))}</div>
                       `
@@ -10199,9 +10231,26 @@
     const configuredEvents = fmtList(state.config?.telegram?.notify_events || []);
     const stalledSeconds = toNumber(state.config?.telegram?.stalled_seconds || 0, 0);
     const controlPlaneStatus = state.runnerControl.controllerAvailable
-      ? (state.runnerControl.enabled ? (state.runnerControl.busy ? 'busy' : 'enabled') : 'disabled')
-      : 'unavailable';
+      ? (state.runnerControl.enabled ? (state.runnerControl.busy ? t('runner.working') : t('common.enabled')) : t('common.disabled'))
+      : t('common.unavailable');
     const controlPlaneEvent = state.runnerControl.status.lastEvent || state.runnerControl.lastAction || state.runnerControl.lastMessage || '';
+    const controlPlaneEventLabel = (() => {
+      const normalized = toText(controlPlaneEvent, '').toLowerCase();
+      if (!normalized) return t('common.none');
+      if (normalized === 'busy') return t('runner.working');
+      if (normalized === 'enabled') return t('common.enabled');
+      if (normalized === 'disabled') return t('common.disabled');
+      if (normalized === 'unavailable') return t('common.unavailable');
+      if (normalized === 'start') return t('runner.start');
+      if (normalized === 'stop') return t('runner.stop');
+      if (normalized === 'reload') return t('runner.reload');
+      if (normalized === 'restart') return t('runner.restart');
+      if (['running', 'stopping', 'stopped', 'success', 'completed', 'complete', 'done', 'failed', 'error', 'idle'].includes(normalized)) {
+        return runStatusLabel(normalized);
+      }
+      const notificationLabel = notificationKindLabel(normalized);
+      return notificationLabel === t('common.unknown') ? t('common.unknown') : notificationLabel;
+    })();
     const emptyMessage = state.notifications.length
       ? t('notifications.noMatchCurrentFilter')
       : state.sectionState.notifications?.status === 'error'
@@ -10252,12 +10301,12 @@
         <div class="view-grid">
           ${panel(
             t('notifications.notificationSource'),
-            escapeHTML(latestNotification ? `${latestNotification.kind} | ${fmtRelative(latestNotification.t)}` : t('notifications.noEventsYet')),
+            escapeHTML(latestNotification ? `${notificationKindLabel(latestNotification.kind)} | ${fmtRelative(latestNotification.t)}` : t('notifications.noEventsYet')),
             `
               <div class="compact-list">
-                ${compactFactItem(t('notifications.observedKinds'), observedKinds.length ? observedKinds.join(', ') : t('common.none'), 'Kinds derived from actual notification rows')}
-                ${compactFactItem(t('notifications.newestEvent'), latestNotification ? `${latestNotification.kind} | ${fmtDateTime(latestNotification.t)}` : t('common.none'), latestNotification ? latestNotification.text : t('notifications.noRecorded'))}
-                ${compactFactItem(t('notifications.controlPlaneLastEvent'), controlPlaneEvent || t('common.none'), state.runnerControl.lastMessage || state.runnerControl.lastError || t('notifications.runnerControlSnapshot'))}
+                ${compactFactItem(t('notifications.observedKinds'), observedKinds.length ? observedKinds.map((kind) => notificationKindLabel(kind)).join(', ') : t('common.none'), t('notifications.observedKindsNote'))}
+                ${compactFactItem(t('notifications.newestEvent'), latestNotification ? `${notificationKindLabel(latestNotification.kind)} | ${fmtDateTime(latestNotification.t)}` : t('common.none'), latestNotification ? latestNotification.text : t('notifications.noRecorded'))}
+                ${compactFactItem(t('notifications.controlPlaneLastEvent'), controlPlaneEventLabel, state.runnerControl.lastMessage || state.runnerControl.lastError || t('notifications.runnerControlSnapshot'))}
               </div>
             `
           )}
@@ -10282,7 +10331,7 @@
               <div class="compact-list">
                 ${compactFactItem(t('notifications.configuredEvents'), configuredEvents || t('common.none'), 'telegram.notify_events')}
                 ${compactFactItem(t('notifications.stalledThreshold'), stalledSeconds ? `${stalledSeconds}s` : t('common.unavailable'), 'telegram.stalled_seconds')}
-                ${compactFactItem(t('notifications.controlPlaneStatus'), controlPlaneStatus, 'runner_control snapshot')}
+                ${compactFactItem(t('notifications.controlPlaneStatus'), controlPlaneStatus, t('notifications.runnerControlSnapshot'))}
               </div>
               <div class="summary-note">${escapeHTML(t('notifications.eventsReadFrom'))}</div>
             `

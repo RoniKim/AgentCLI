@@ -369,7 +369,9 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
 
             page.locator('#topbar [data-action="set-locale-ko"]').click()
             self.expect(page.locator("html")).to_have_attribute("lang", "ko")
-            self.expect(page.locator("#main h2")).not_to_have_text("Dashboard")
+            self.expect(page.get_by_role("button", name="대시보드")).to_be_visible()
+            self.expect(page.locator("#main h2")).to_have_text("대시보드")
+            self.expect(page.locator(".topbar__status")).to_contain_text("완료")
 
             page.locator('#topbar [data-action="set-locale-en"]').click()
             self.expect(page.locator("html")).to_have_attribute("lang", "en")
