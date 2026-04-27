@@ -1139,6 +1139,433 @@ def _payload_text(payload: dict[str, object], *keys: str) -> str:
     return ""
 
 
+def _worktree_text_path(value: Path | str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return Path(raw).expanduser().resolve().as_posix()
+    except Exception:
+        return raw.replace("\\", "/")
+
+
+def _worktree_safe_name(value: str, fallback: str) -> str:
+    text = str(value or "").strip()
+    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text)
+    return cleaned or fallback
+
+
+def _generated_worktree_home(repo: Path) -> Path:
+    repo_resolved = repo.expanduser().resolve()
+    configured_root = os.environ.get("AGENTCLI_WORKTREE_HOME", "").strip()
+    if configured_root:
+        base = Path(configured_root).expanduser()
+    else:
+        base = repo_resolved.parent / ".agentcli_worktrees"
+    repo_name = _worktree_safe_name(repo_resolved.name or "repo", "repo")
+    return (base / repo_name).resolve()
+
+
+def _worktree_run_dirs(repo: Path) -> list[Path]:
+    runs_root = repo.expanduser().resolve() / ".AgentCLI" / "agent_runs"
+    if not runs_root.exists():
+        return []
+    try:
+        return sorted([candidate for candidate in runs_root.iterdir() if candidate.is_dir()], key=lambda path: path.name)
+    except Exception:
+        return []
+
+
+def _worktree_pending_stale_reason(payload: dict[str, object], pending_path: Path) -> str:
+    run_dir_value = _worktree_text_path(payload.get("run_dir") or payload.get("runDir"))
+    patch_path = _worktree_text_path(payload.get("patch_path") or payload.get("patchPath") or payload.get("patch"))
+    worktree_dir = _worktree_text_path(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree"))
+    status = str(payload.get("status") or "").strip().lower()
+    required_fields = {
+        "source_repo": ("source_repo", "sourceRepo"),
+        "run_dir": ("run_dir", "runDir"),
+        "worktree_dir": ("worktree_dir", "worktreeDir", "worktree"),
+        "patch_path": ("patch_path", "patchPath", "patch"),
+        "base_ref": ("base_ref", "baseRef"),
+        "head_ref": ("head_ref", "headRef"),
+    }
+    missing_fields = [field for field, aliases in required_fields.items() if not _payload_text(payload, *aliases)]
+    if missing_fields:
+        return f"missing required fields ({', '.join(missing_fields)})"
+    if status != "pending":
+        return f"pending marker status must be pending (got {status or 'empty'})"
+    if worktree_dir and not Path(worktree_dir).exists():
+        return f"worktree directory is missing ({worktree_dir})"
+    if not patch_path or not Path(patch_path).exists():
+        return "patch path is missing or no longer exists"
+    if run_dir_value:
+        expected_pending = Path(run_dir_value) / WORKTREE_MERGE_PENDING
+        if pending_path.resolve() != expected_pending.resolve() and not expected_pending.exists():
+            return f"run-local pending file is missing ({expected_pending.as_posix()})"
+    return ""
+
+
+def _worktree_diagnostics_issue(
+    kind: str,
+    message: str,
+    *,
+    severity: str = "warn",
+    path: str = "",
+    details: dict[str, object] | None = None,
+) -> dict[str, object]:
+    issue: dict[str, object] = {
+        "kind": str(kind),
+        "severity": str(severity or "warn"),
+        "message": str(message),
+    }
+    if path:
+        issue["path"] = str(path)
+    if details:
+        issue["details"] = dict(details)
+    return issue
+
+
+def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
+    repo_resolved = repo.expanduser().resolve()
+    source_root = git_show_toplevel(repo_resolved) or repo_resolved.as_posix()
+    scanned_at = now_iso()
+    run_dirs = _worktree_run_dirs(repo_resolved)
+    central_pending = repo_resolved / ".AgentCLI" / WORKTREE_MERGE_PENDING
+    generated_root = _generated_worktree_home(repo_resolved)
+    generated_worktrees: list[dict[str, object]] = []
+    pending_markers: list[dict[str, object]] = []
+    cleanup_failed: list[dict[str, object]] = []
+    issues: list[dict[str, object]] = []
+    referenced_worktrees: set[str] = set()
+    seen_missing_patch_paths: set[str] = set()
+
+    def add_issue(
+        kind: str,
+        message: str,
+        *,
+        severity: str = "warn",
+        path: str = "",
+        details: dict[str, object] | None = None,
+    ) -> None:
+        issues.append(_worktree_diagnostics_issue(kind, message, severity=severity, path=path, details=details))
+
+    def register_reference(worktree_dir: str) -> None:
+        if worktree_dir:
+            referenced_worktrees.add(_worktree_text_path(worktree_dir))
+
+    def register_missing_patch(patch_path: str, *, reason: str, marker_path: str, run_dir: str, scope: str) -> None:
+        patch_path_text = _worktree_text_path(patch_path)
+        if not patch_path_text or patch_path_text in seen_missing_patch_paths:
+            return
+        seen_missing_patch_paths.add(patch_path_text)
+        add_issue(
+            "missing_patch",
+            f"Pending worktree patch is missing: {reason}",
+            severity="warn",
+            path=patch_path_text,
+            details={
+                "marker": marker_path,
+                "run_dir": run_dir,
+                "scope": scope,
+                "patch_path": patch_path_text,
+            },
+        )
+
+    def scan_pending_marker(path: Path, *, scope: str, run_dir_text: str = "") -> None:
+        marker_path = path.resolve().as_posix()
+        if not path.exists():
+            return
+        try:
+            payload = read_pending_worktree_merge(path)
+            if not isinstance(payload, dict):
+                raise TypeError("Pending merge payload must be a JSON object.")
+        except Exception as ex:
+            reason = str(ex).strip() or ex.__class__.__name__
+            pending_markers.append(
+                {
+                    "path": marker_path,
+                    "scope": scope,
+                    "status": "malformed",
+                    "reason": reason,
+                    "run_dir": run_dir_text,
+                    "source_repo": "",
+                    "worktree_dir": "",
+                    "patch_path": "",
+                    "base_ref": "",
+                    "head_ref": "",
+                    "exists": True,
+                    "stale": True,
+                }
+            )
+            add_issue(
+                "stale_pending_marker",
+                f"Pending worktree marker is malformed: {reason}",
+                severity="warn",
+                path=marker_path,
+                details={"scope": scope, "run_dir": run_dir_text, "reason": reason},
+            )
+            return
+
+        payload_run_dir = _worktree_text_path(payload.get("run_dir") or payload.get("runDir") or run_dir_text)
+        payload_worktree_dir = _worktree_text_path(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree"))
+        payload_patch_path = _worktree_text_path(payload.get("patch_path") or payload.get("patchPath") or payload.get("patch"))
+        payload_source_repo = _worktree_text_path(payload.get("source_repo") or payload.get("sourceRepo"))
+        payload_base_ref = _payload_text(payload, "base_ref", "baseRef")
+        payload_head_ref = _payload_text(payload, "head_ref", "headRef")
+        reason = _worktree_pending_stale_reason(payload, path)
+        is_stale = bool(reason)
+        pending_markers.append(
+            {
+                "path": marker_path,
+                "scope": scope,
+                "status": "stale" if is_stale else "pending",
+                "reason": reason,
+                "run_dir": payload_run_dir,
+                "source_repo": payload_source_repo,
+                "worktree_dir": payload_worktree_dir,
+                "patch_path": payload_patch_path,
+                "base_ref": payload_base_ref,
+                "head_ref": payload_head_ref,
+                "exists": True,
+                "stale": is_stale,
+            }
+        )
+        register_reference(payload_worktree_dir)
+        if reason:
+            add_issue(
+                "stale_pending_marker",
+                f"Pending worktree marker is stale: {reason}",
+                severity="warn",
+                path=marker_path,
+                details={
+                    "scope": scope,
+                    "run_dir": payload_run_dir,
+                    "worktree_dir": payload_worktree_dir,
+                    "patch_path": payload_patch_path,
+                    "reason": reason,
+                },
+            )
+        if payload_patch_path and not Path(payload_patch_path).exists():
+            register_missing_patch(
+                payload_patch_path,
+                reason=reason or "patch path is missing or no longer exists",
+                marker_path=marker_path,
+                run_dir=payload_run_dir,
+                scope=scope,
+            )
+
+    scan_pending_marker(central_pending, scope="central", run_dir_text="")
+    for run_dir in run_dirs:
+        scan_pending_marker(run_dir / WORKTREE_MERGE_PENDING, scope="run", run_dir_text=run_dir.resolve().as_posix())
+
+        for artifact_name in ("WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json", "WORKTREE_MERGE_DISCARD_CLEANUP_FAILED.json"):
+            artifact_path = run_dir / artifact_name
+            if not artifact_path.exists():
+                continue
+            try:
+                payload = _read_json_payload(artifact_path)
+            except Exception as ex:
+                reason = str(ex).strip() or ex.__class__.__name__
+                cleanup_failed.append(
+                    {
+                        "path": artifact_path.resolve().as_posix(),
+                        "status": "malformed",
+                        "run_dir": run_dir.resolve().as_posix(),
+                        "source_repo": "",
+                        "worktree_dir": "",
+                        "patch_path": "",
+                        "cleanup_path": "",
+                        "cleanup_message": reason,
+                        "cleanup_details": {},
+                        "cleanup_attempts": [],
+                    }
+                )
+                add_issue(
+                    "cleanup_failed",
+                    f"Cleanup-failed artifact is malformed: {reason}",
+                    severity="error",
+                    path=artifact_path.resolve().as_posix(),
+                    details={"run_dir": run_dir.resolve().as_posix(), "reason": reason},
+                )
+                continue
+
+            payload_worktree_dir = _worktree_text_path(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree"))
+            payload_patch_path = _worktree_text_path(payload.get("patch_path") or payload.get("patchPath") or payload.get("patch"))
+            payload_cleanup_path = _worktree_text_path(payload.get("cleanup_path") or payload.get("cleanupPath") or payload_worktree_dir)
+            payload_cleanup_message = _payload_text(payload, "cleanup_message", "cleanupMessage", "message", "cleanup_error")
+            payload_cleanup_details = payload.get("cleanup_details") if isinstance(payload.get("cleanup_details"), dict) else payload.get("cleanupDetails")
+            if not isinstance(payload_cleanup_details, dict):
+                payload_cleanup_details = {}
+            payload_cleanup_attempts = payload.get("cleanup_attempts") if isinstance(payload.get("cleanup_attempts"), list) else payload.get("cleanupAttempts")
+            if not isinstance(payload_cleanup_attempts, list):
+                payload_cleanup_attempts = []
+            status = _payload_text(payload, "status").lower() or "cleanup_failed"
+            cleanup_failed.append(
+                {
+                    "path": artifact_path.resolve().as_posix(),
+                    "status": status,
+                    "run_dir": run_dir.resolve().as_posix(),
+                    "source_repo": _worktree_text_path(payload.get("source_repo") or payload.get("sourceRepo")),
+                    "worktree_dir": payload_worktree_dir,
+                    "patch_path": payload_patch_path,
+                    "cleanup_path": payload_cleanup_path,
+                    "cleanup_message": payload_cleanup_message,
+                    "cleanup_details": payload_cleanup_details,
+                    "cleanup_attempts": payload_cleanup_attempts,
+                }
+            )
+            register_reference(payload_worktree_dir)
+            add_issue(
+                "cleanup_failed",
+                f"Cleanup failed for {payload_cleanup_path or payload_worktree_dir or artifact_path.as_posix()}: {payload_cleanup_message or status}",
+                severity="error",
+                path=artifact_path.resolve().as_posix(),
+                details={
+                    "run_dir": run_dir.resolve().as_posix(),
+                    "worktree_dir": payload_worktree_dir,
+                    "patch_path": payload_patch_path,
+                    "cleanup_path": payload_cleanup_path,
+                    "cleanup_message": payload_cleanup_message,
+                    "status": status,
+                },
+            )
+            if payload_patch_path and not Path(payload_patch_path).exists():
+                register_missing_patch(
+                    payload_patch_path,
+                    reason=payload_cleanup_message or "cleanup-failed artifact references a missing patch",
+                    marker_path=artifact_path.resolve().as_posix(),
+                    run_dir=run_dir.resolve().as_posix(),
+                    scope="cleanup_failed",
+                )
+
+    generated_root_entries: list[Path] = []
+    if generated_root.exists():
+        try:
+            generated_root_entries = sorted([candidate for candidate in generated_root.iterdir() if candidate.is_dir()], key=lambda path: path.name)
+        except Exception:
+            generated_root_entries = []
+
+    contracts_by_worktree: dict[str, dict[str, object]] = {}
+    for run_dir in run_dirs:
+        contract_path = run_dir / WORKTREE_REUSE_CONTRACT
+        if not contract_path.exists():
+            continue
+        try:
+            contract = _read_json_payload(contract_path)
+        except Exception:
+            continue
+        if not isinstance(contract, dict):
+            continue
+        worktree_dir_text = _worktree_text_path(contract.get("worktree_dir") or contract.get("worktreeDir") or contract.get("worktree"))
+        if not worktree_dir_text:
+            continue
+        contracts_by_worktree[worktree_dir_text] = {
+            "path": contract_path.resolve().as_posix(),
+            "run_dir": run_dir.resolve().as_posix(),
+            "worktree_dir": worktree_dir_text,
+            "source_repo": _worktree_text_path(contract.get("source_repo") or contract.get("sourceRepo")),
+            "source_repo_root": _worktree_text_path(contract.get("source_repo_root") or contract.get("sourceRepoRoot")),
+            "branch": _payload_text(contract, "branch", "source_branch", "sourceBranch"),
+            "expected_head": _payload_text(contract, "expected_head", "expectedHead", "base_ref", "baseRef"),
+            "head_ref": _payload_text(contract, "head_ref", "headRef"),
+            "source_repo_state": _payload_text(contract, "source_repo_state", "sourceRepoState"),
+            "worktree_state": _payload_text(contract, "worktree_state", "worktreeState"),
+            "worktree_branch": _payload_text(contract, "worktree_branch", "worktreeBranch"),
+        }
+
+    for worktree_dir in generated_root_entries:
+        worktree_path = worktree_dir.resolve().as_posix()
+        contract = contracts_by_worktree.get(worktree_path)
+        worktree_exists = worktree_dir.exists()
+        active_reference = worktree_path in referenced_worktrees
+        contract_path = _worktree_text_path(contract.get("path")) if contract else ""
+        contract_run_dir = _worktree_text_path(contract.get("run_dir")) if contract else ""
+        contract_status = "tracked"
+        reason = ""
+        if not contract:
+            contract_status = "missing_contract"
+            reason = "missing reuse contract"
+        elif contract_run_dir and not Path(contract_run_dir).exists():
+            contract_status = "orphaned"
+            reason = f"run directory is missing ({contract_run_dir})"
+        elif not active_reference:
+            contract_status = "orphaned"
+            reason = "no pending or cleanup-failed marker references it"
+
+        is_orphaned = bool(
+            (contract and contract_status == "orphaned")
+            or (not contract and not active_reference)
+        )
+
+        generated_worktrees.append(
+            {
+                "path": worktree_path,
+                "exists": worktree_exists,
+                "contract_path": contract_path,
+                "contract_run_dir": contract_run_dir,
+                "contract_status": contract_status,
+                "reason": reason,
+                "tracked": contract_status == "tracked" and active_reference,
+                "orphaned": is_orphaned,
+                "referenced": active_reference,
+            }
+        )
+        if is_orphaned:
+            add_issue(
+                "orphaned_worktree",
+                f"Generated worktree is orphaned: {reason}",
+                severity="warn",
+                path=worktree_path,
+                details={
+                    "contract_path": contract_path,
+                    "run_dir": contract_run_dir,
+                    "reason": reason,
+                },
+            )
+
+    issues_sorted = sorted(
+        issues,
+        key=lambda item: (
+            0 if item.get("severity") == "error" else 1,
+            str(item.get("kind") or ""),
+            str(item.get("path") or ""),
+        ),
+    )
+    severity_order = [str(issue.get("severity") or "warn") for issue in issues_sorted]
+    if any(severity == "error" for severity in severity_order):
+        status = "error"
+    elif issues_sorted:
+        status = "warning"
+    else:
+        status = "ok"
+
+    summary = {
+        "run_dirs_scanned": len(run_dirs),
+        "pending_markers": len(pending_markers),
+        "stale_pending_markers": sum(1 for marker in pending_markers if marker.get("stale")),
+        "missing_patches": sum(1 for issue in issues_sorted if issue.get("kind") == "missing_patch"),
+        "cleanup_failed": len(cleanup_failed),
+        "generated_worktrees": len(generated_worktrees),
+        "orphaned_worktrees": sum(1 for worktree in generated_worktrees if worktree.get("orphaned")),
+        "issue_count": len(issues_sorted),
+        "healthy": not issues_sorted,
+    }
+
+    return {
+        "schema_version": 1,
+        "status": status,
+        "source_repo": repo_resolved.as_posix(),
+        "source_repo_root": source_root,
+        "generated_worktree_home": generated_root.as_posix(),
+        "scanned_at": scanned_at,
+        "summary": summary,
+        "issues": issues_sorted,
+        "pending_markers": pending_markers,
+        "cleanup_failed": cleanup_failed,
+        "generated_worktrees": generated_worktrees,
+    }
+
+
 def _worktree_contract_path(run_dir: Path) -> Path:
     return run_dir / WORKTREE_REUSE_CONTRACT
 

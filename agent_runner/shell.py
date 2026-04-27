@@ -34,6 +34,7 @@ from .gitops import (
     discard_pending_worktree_merge,
     find_pending_worktree_merge,
     read_pending_worktree_merge,
+    scan_worktree_diagnostics,
 )
 
 # prompt_toolkit is an optional dependency at import time (for nicer UX).
@@ -856,6 +857,7 @@ class RunnerShell:
             "Commands (명령어):",
             "  /help                     도움말 표시",
             "  /doctor                   환경/설정 진단 보고서 생성",
+            "  /worktree                 읽기 전용 워크트리 진단 목록 출력",
             "  /repo <path>               레포지토리 루트 설정",
             "  /config [--all]            현재 적용 설정 요약 출력 (--all: 전체 JSON 출력)",
             "  /set <key> <value>         설정 값을 덮어쓰기(타입은 기본값 기준)",
@@ -877,6 +879,103 @@ class RunnerShell:
             "  - backend=claudecode 사용 시 Claude Code 로그인(claude auth login)과 claude-agent-sdk가 필요합니다.",
         ]
         print("\n".join(lines))
+
+    def worktree(self, args: list[str]) -> None:
+        if not self.repo:
+            print("[ERR] repo is not set; use /repo <path>")
+            return
+
+        diagnostics = scan_worktree_diagnostics(self.repo)
+        summary = diagnostics.get("summary") if isinstance(diagnostics.get("summary"), dict) else {}
+        issues = diagnostics.get("issues") if isinstance(diagnostics.get("issues"), list) else []
+        pending_markers = diagnostics.get("pending_markers") if isinstance(diagnostics.get("pending_markers"), list) else []
+        cleanup_failed = diagnostics.get("cleanup_failed") if isinstance(diagnostics.get("cleanup_failed"), list) else []
+        generated_worktrees = diagnostics.get("generated_worktrees") if isinstance(diagnostics.get("generated_worktrees"), list) else []
+
+        print("\n=== Worktree Diagnostics ===")
+        print(f"status:   {diagnostics.get('status') or 'unknown'}")
+        print(f"source:   {diagnostics.get('source_repo_root') or self.repo.as_posix()}")
+        print(f"scanned:  {diagnostics.get('scanned_at') or '(unknown)'}")
+        print(f"home:     {diagnostics.get('generated_worktree_home') or '(unknown)'}")
+        print(
+            "summary:  "
+            f"runs={int(summary.get('run_dirs_scanned') or 0)} "
+            f"markers={int(summary.get('pending_markers') or 0)} "
+            f"stale={int(summary.get('stale_pending_markers') or 0)} "
+            f"missing_patches={int(summary.get('missing_patches') or 0)} "
+            f"cleanup_failed={int(summary.get('cleanup_failed') or 0)} "
+            f"worktrees={int(summary.get('generated_worktrees') or 0)} "
+            f"orphaned={int(summary.get('orphaned_worktrees') or 0)} "
+            f"issues={int(summary.get('issue_count') or 0)}"
+        )
+
+        if pending_markers:
+            print("pending markers:")
+            for marker in pending_markers:
+                status = str(marker.get("status") or "pending").strip()
+                reason = str(marker.get("reason") or "").strip()
+                path = str(marker.get("path") or "").strip()
+                worktree_dir = str(marker.get("worktree_dir") or "").strip()
+                patch_path = str(marker.get("patch_path") or "").strip()
+                bits = [status]
+                if reason:
+                    bits.append(reason)
+                if worktree_dir:
+                    bits.append(worktree_dir)
+                if patch_path:
+                    bits.append(f"patch={patch_path}")
+                print(f"  - {path}: {' | '.join(bits)}")
+
+        if cleanup_failed:
+            print("cleanup-failed:")
+            for item in cleanup_failed:
+                path = str(item.get("path") or "").strip()
+                worktree_dir = str(item.get("worktree_dir") or "").strip()
+                cleanup_path = str(item.get("cleanup_path") or "").strip()
+                message = str(item.get("cleanup_message") or "").strip()
+                bits = [item.get("status") or "cleanup_failed"]
+                if worktree_dir:
+                    bits.append(worktree_dir)
+                if cleanup_path:
+                    bits.append(f"cleanup={cleanup_path}")
+                if message:
+                    bits.append(message)
+                print(f"  - {path}: {' | '.join(str(bit) for bit in bits)}")
+
+        if generated_worktrees:
+            print("generated worktrees:")
+            for item in generated_worktrees:
+                path = str(item.get("path") or "").strip()
+                contract_path = str(item.get("contract_path") or "").strip()
+                reason = str(item.get("reason") or "").strip()
+                state = "orphaned" if item.get("orphaned") else "tracked"
+                bits = [state]
+                if contract_path:
+                    bits.append(f"contract={contract_path}")
+                if reason:
+                    bits.append(reason)
+                print(f"  - {path}: {' | '.join(bits)}")
+
+        if issues:
+            print("issues:")
+            for issue in issues:
+                kind = str(issue.get("kind") or "issue").strip()
+                severity = str(issue.get("severity") or "warn").strip()
+                message = str(issue.get("message") or "").strip()
+                path = str(issue.get("path") or "").strip()
+                details = issue.get("details") if isinstance(issue.get("details"), dict) else {}
+                detail_bits = []
+                if isinstance(details, dict):
+                    for key in ("reason", "run_dir", "worktree_dir", "patch_path", "cleanup_path"):
+                        value = str(details.get(key) or "").strip()
+                        if value:
+                            detail_bits.append(f"{key}={value}")
+                suffix = f" ({'; '.join(detail_bits)})" if detail_bits else ""
+                print(f"  - [{severity}] {kind}: {message} {path}{suffix}".rstrip())
+        else:
+            print("issues: none")
+
+        print("============================\n")
 
     def doctor(self) -> None:
         if not self.repo:
@@ -1129,6 +1228,7 @@ def _build_completer() -> Any:
         {
             "/help": None,
             "/doctor": None,
+            "/worktree": None,
             "/repo": None,
             "/config": None,
             "/set": set_keys,
@@ -1246,6 +1346,9 @@ def _dispatch(sh: RunnerShell, line: str) -> bool:
         return False
     if cmd == "/doctor":
         sh.doctor()
+        return False
+    if cmd in {"/worktree", "/worktree-list", "/worktree-doctor"}:
+        sh.worktree(args)
         return False
     if cmd == "/repo":
         if not args:

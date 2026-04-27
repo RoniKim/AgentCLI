@@ -10,8 +10,10 @@ Verified on 2026-04-26 with a local server and Playwright:
 
 - Static console serving works from `agent_runner.web`.
 - Read-only endpoints exist for health, status, progress, config, prompts, logs, history, and worktree review state.
+- Read-only worktree diagnostics now scan `.AgentCLI/agent_runs`, the central pending marker, patch paths, cleanup-failed artifacts, and generated worktree directories without deleting anything by default.
 - Additional read-only contracts now cover Goals metadata and backend log tailing.
 - The UI has first-pass routes for Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, and Worktree Review.
+- The shell now exposes `/worktree` for the same diagnostics summary.
 - Checked-in Playwright smoke coverage now exercises Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, EN/KO Dashboard and Config locale switching, and a mobile-width viewport.
 - Runner controls are disabled by default and require explicit opt-in.
 - Config saves now reuse that opt-in and create a timestamped backup before atomic disk writes.
@@ -116,3 +118,13 @@ python -B .\tests\web_console_playwright_smoke.py
 ```
 
 The web smoke path should cover the primary views, Dashboard and Config locale switching, prompt read loading, worktree review, and the mobile-width layout before marking the product complete.
+
+## Worktree Diagnostics
+
+Use the read-only diagnostics endpoint when you need to inspect stale markers, missing patches, cleanup-failed artifacts, or orphaned generated worktrees:
+
+```text
+GET /api/worktree/diagnostics
+```
+
+The shell command `/worktree` prints the same report in a concise text form. It is read-only by default and does not delete any generated artifacts.

@@ -161,6 +161,9 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
         central_marker = self.repo / ".AgentCLI" / "WORKTREE_MERGE_PENDING.json"
         if central_marker.exists():
             central_marker.unlink()
+        generated_root = self._tmp / ".agentcli_worktrees"
+        if generated_root.exists():
+            shutil.rmtree(generated_root, ignore_errors=True)
 
     def _write_status_artifact(self, relative: str, payload: dict[str, object]) -> Path:
         path = self.run_dir / relative
@@ -186,6 +189,7 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
         snapshot = self._build_snapshot()
         normalized = _run_adapter_harness([snapshot])[0]
         worktree = snapshot["worktree"]
+        diagnostics = snapshot["worktree_diagnostics"]
 
         self.assertIsNone(snapshot["latest_run_dir"])
         self.assertEqual("idle", snapshot["active_run"]["status"])
@@ -204,6 +208,103 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
         self.assertEqual(0, worktree["runnerRc"])
         self.assertEqual("No pending worktree merge.", worktree["reviewRequiredMessage"])
         self.assertEqual("empty", normalized["sectionState"]["worktree"]["status"])
+        self.assertEqual("ok", diagnostics["status"])
+        self.assertTrue(diagnostics["summary"]["healthy"])
+        self.assertEqual([], diagnostics["issues"])
+
+    def test_worktree_diagnostics_contract_reports_stale_missing_cleanup_and_orphaned_cases(self) -> None:
+        try:
+            from agent_runner.web import create_app
+            from fastapi.testclient import TestClient
+        except Exception as exc:
+            self.skipTest(f"FastAPI test client is unavailable: {exc}")
+
+        client = TestClient(create_app(self.repo, web_dir=WEB_CONSOLE))
+
+        def read_diagnostics() -> dict[str, object]:
+            snapshot = self._build_snapshot()
+            api_payload = client.get("/api/worktree/diagnostics").json()
+            self.assertEqual(snapshot["worktree_diagnostics"]["status"], api_payload["status"])
+            self.assertEqual(snapshot["worktree_diagnostics"]["summary"], api_payload["summary"])
+            return api_payload
+
+        def marker_payload() -> dict[str, object]:
+            return {
+                "schema_version": 1,
+                "status": "pending",
+                "created_at": "2026-04-26T12:03:00",
+                "source_repo": self.repo.as_posix(),
+                "run_dir": self.run_dir.as_posix(),
+                "worktree_dir": self.worktree_dir.as_posix(),
+                "patch_path": self.patch_path.as_posix(),
+                "base_ref": "main",
+                "head_ref": "abc12345",
+                "last_rc": 0,
+            }
+
+        with self.subTest("stale-and-missing-patch"):
+            self._clear_worktree_artifacts()
+            _write(self.patch_path, "diff --git a/src/app.py b/src/app.py\n")
+            _write(self.pending_path, json.dumps(marker_payload(), ensure_ascii=False, indent=2) + "\n")
+            self.patch_path.unlink()
+
+            diagnostics = read_diagnostics()
+            issue_kinds = {str(issue["kind"]) for issue in diagnostics["issues"]}
+
+            self.assertEqual("warning", diagnostics["status"])
+            self.assertIn("stale_pending_marker", issue_kinds)
+            self.assertIn("missing_patch", issue_kinds)
+            self.assertTrue(diagnostics["pending_markers"][0]["stale"])
+
+        with self.subTest("cleanup-failed"):
+            self._clear_worktree_artifacts()
+            generated_worktree = self._tmp / ".agentcli_worktrees" / self.repo.name / "cleanup-failed"
+            generated_worktree.mkdir(parents=True, exist_ok=True)
+            _write(generated_worktree / ".git", "gitdir: ../.git/worktrees/cleanup-failed\n")
+            _write(self.patch_path, "diff --git a/src/app.py b/src/app.py\n")
+            _write(
+                self.run_dir / "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json",
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "applied_cleanup_failed",
+                        "created_at": "2026-04-26T12:04:00",
+                        "source_repo": self.repo.as_posix(),
+                        "run_dir": self.run_dir.as_posix(),
+                        "worktree_dir": generated_worktree.as_posix(),
+                        "patch_path": self.patch_path.as_posix(),
+                        "cleanup_path": generated_worktree.as_posix(),
+                        "cleanup_message": "cleanup failed",
+                        "base_ref": "main",
+                        "head_ref": "abc12345",
+                        "last_rc": 0,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+            )
+
+            diagnostics = read_diagnostics()
+            issue_kinds = {str(issue["kind"]) for issue in diagnostics["issues"]}
+
+            self.assertEqual("error", diagnostics["status"])
+            self.assertIn("cleanup_failed", issue_kinds)
+            self.assertTrue(diagnostics["cleanup_failed"])
+            self.assertFalse(diagnostics["generated_worktrees"][0]["orphaned"])
+
+        with self.subTest("orphaned"):
+            self._clear_worktree_artifacts()
+            orphaned_worktree = self._tmp / ".agentcli_worktrees" / self.repo.name / "orphaned"
+            orphaned_worktree.mkdir(parents=True, exist_ok=True)
+            _write(orphaned_worktree / ".git", "gitdir: ../.git/worktrees/orphaned\n")
+
+            diagnostics = read_diagnostics()
+            issue_kinds = {str(issue["kind"]) for issue in diagnostics["issues"]}
+
+            self.assertEqual("warning", diagnostics["status"])
+            self.assertIn("orphaned_worktree", issue_kinds)
+            self.assertTrue(any(item["orphaned"] for item in diagnostics["generated_worktrees"]))
 
     def test_valid_pending_file_surfaces_review_required_fields(self) -> None:
         _write(

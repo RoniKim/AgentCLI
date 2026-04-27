@@ -31,6 +31,7 @@ from .gitops import (
     find_pending_worktree_merge,
     git_head,
     read_pending_worktree_merge,
+    scan_worktree_diagnostics,
     WorktreeSafetyError,
 )
 from .prompts import (
@@ -4584,6 +4585,7 @@ def build_snapshot(
         final_reason=str(progress.get("final_reason") or ""),
     )
     worktree = _build_worktree_payload(repo_root, latest_run_dir, branch=branch)
+    worktree_diagnostics = scan_worktree_diagnostics(repo_root)
     runner_control = _runner_control_payload(
         controller,
         repo=repo_root,
@@ -4701,6 +4703,7 @@ def build_snapshot(
         "metrics": metrics,
         "notifications": notifications,
         "worktree": worktree,
+        "worktree_diagnostics": worktree_diagnostics,
         "runner_control": runner_control,
         "progress": {
             "latest_run_dir": latest_run_dir.as_posix() if latest_run_dir else None,
@@ -6534,6 +6537,10 @@ def create_app(
     @app.get("/api/worktree")
     def api_worktree() -> dict[str, Any]:
         return _section("worktree")
+
+    @app.get("/api/worktree/diagnostics")
+    def api_worktree_diagnostics() -> dict[str, Any]:
+        return scan_worktree_diagnostics(repo_root)
 
     def _serve_static_file(request_path: str = "") -> Any:
         clean = request_path.strip().lstrip("/").replace("\\", "/")

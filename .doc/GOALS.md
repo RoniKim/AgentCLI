@@ -124,8 +124,8 @@
 - [x] Stale central `WORKTREE_MERGE_PENDING.json` markers are detected and treated as invalid when the run-local pending file or patch path is missing.
 - [x] Existing isolated worktree directories are reused only when run id, expected head, current branch, clean/dirty state, and source repo ownership match the active run contract.
 - [x] Worktree merge preflight blocks unsafe apply when the source repo is dirty, source `HEAD` differs from `base_ref`, the patch hash does not match metadata, or `git apply --check` fails.
-- [ ] Worktree cleanup on Windows retries locked-path removal, records exact permission failures, and keeps cleanup-failed states visible until reconciled.
-- [ ] A worktree doctor/list/prune command or API can report orphaned worktrees, stale pending markers, missing patches, and cleanup-failed artifacts without mutating source files by default.
+- [x] Worktree cleanup on Windows retries locked-path removal, records exact permission failures, and keeps cleanup-failed states visible until reconciled.
+- [x] A worktree doctor/list/prune command or API can report orphaned worktrees, stale pending markers, missing patches, and cleanup-failed artifacts without mutating source files by default.
 - [ ] Shell, web, and remote-controller starts create a new `run_dir` by default; latest run reuse requires explicit resume or `--run-dir` intent.
 - [ ] `STATE.json` done/failed counts are scoped to the current backlog generation so stale task ids from previous backlogs cannot inflate progress or history.
 - [ ] Web snapshots separate execution status from project completion status, so `rc=0`/`reason=ok` does not appear as project success while required goals or backlog items remain incomplete.
