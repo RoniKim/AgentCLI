@@ -262,6 +262,44 @@ index 0000000..7c890e8
         self.assertEqual(locked_file.as_posix(), cleanup_payload["cleanup_path"])
         self.assertEqual(str(cleanup_error), cleanup_payload["cleanup_message"])
 
+    def test_apply_pending_worktree_merge_fast_forwards_commits_before_dirty_patch(self) -> None:
+        base_ref = self._init_repo(source_text="base\n")
+        branch = self._source_branch()
+        create_worktree(self.repo, self.worktree, run_dir=self.fixture_root)
+
+        (self.worktree / "README.md").write_text("committed\n", encoding="utf-8")
+        self._git("add", "README.md", cwd=self.worktree)
+        self._git("commit", "-m", "committed worktree change", cwd=self.worktree)
+        head_ref = self._git("rev-parse", "HEAD", cwd=self.worktree).strip()
+        (self.worktree / "dirty.txt").write_text("dirty worktree change\n", encoding="utf-8")
+
+        stale_full_patch = """diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-not the source content
++committed
+"""
+        self._write_pending_payload(
+            patch_text=stale_full_patch,
+            base_ref=base_ref,
+            expected_head=base_ref,
+            branch=branch,
+            head_ref=head_ref,
+        )
+
+        result = apply_pending_worktree_merge(self.pending_path)
+
+        self.assertEqual("applied", result["status"])
+        self.assertEqual("fast_forward_then_patch", result["merge_mode"])
+        self.assertEqual(head_ref, self._git("rev-parse", "HEAD").strip())
+        self.assertEqual("committed\n", (self.repo / "README.md").read_text(encoding="utf-8"))
+        self.assertEqual("dirty worktree change\n", (self.repo / "dirty.txt").read_text(encoding="utf-8"))
+        self.assertTrue((self.fixture_root / "worktree_dirty_uncommitted.patch").exists())
+        self.assertFalse(self.pending_path.exists())
+        self.assertTrue((self.fixture_root / "WORKTREE_MERGE_APPLIED.json").exists())
+        self.assertFalse(self.worktree.exists())
+
     def test_discard_pending_worktree_merge_records_cleanup_failure_without_raising(self) -> None:
         self._init_repo()
         self.worktree.mkdir()

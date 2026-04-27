@@ -5,7 +5,7 @@
 > This file is the target backlog, not a status report. Current implementation notes belong in `docs/WEB_CONSOLE_STATUS.md`.
 > Do not downgrade, remove, or merge unmet P0 goals to make progress look complete; implement them until they are true.
 > Task sizing rule: each unchecked P0 item should be small enough for one focused AgentCLI task branch.
-> Last reviewed: 2026-04-27.
+> Last reviewed: 2026-04-28.
 
 ## P0 (Must-Have)
 
@@ -126,8 +126,8 @@
 - [x] Worktree merge preflight blocks unsafe apply when the source repo is dirty, source `HEAD` differs from `base_ref`, the patch hash does not match metadata, or `git apply --check` fails.
 - [x] Worktree cleanup on Windows retries locked-path removal, records exact permission failures, and keeps cleanup-failed states visible until reconciled.
 - [x] A worktree doctor/list/prune command or API can report orphaned worktrees, stale pending markers, missing patches, and cleanup-failed artifacts without mutating source files by default.
-- [ ] Shell, web, and remote-controller starts create a new `run_dir` by default; latest run reuse requires explicit resume or `--run-dir` intent.
-- [ ] `STATE.json` done/failed counts are scoped to the current backlog generation so stale task ids from previous backlogs cannot inflate progress or history.
+- [x] Shell, web, and remote-controller starts create a new `run_dir` by default; latest run reuse requires explicit resume or `--run-dir` intent.
+- [x] `STATE.json` done/failed counts are scoped to the current backlog generation so stale task ids from previous backlogs cannot inflate progress or history.
 - [x] Web snapshots separate execution status from project completion status, so `rc=0`/`reason=ok` does not appear as project success while required goals or backlog items remain incomplete.
 - [x] Goals parsing treats missing or malformed required priority sections as invalid/incomplete instead of silently completing P0/P1 modes.
 - [x] Goals auto-refresh and completion checks use the same configured `goals_completion_level` in shell, runner, web, and tests.
@@ -141,19 +141,19 @@
 - [x] Start controls expose the same practical run modes operators use in the shell: autopilot, continuous, loop, one-shot, max cycles, profile, backend, and config path.
 - [x] Start controls validate incompatible run options before launch and show the exact command-equivalent runner arguments that will be used.
 - [x] Stop controls show phase-by-phase progress from request, stop file write, child termination, runner wait, final artifact collection, timeout, and finalized states.
-- [ ] Stop timeout state stays visibly actionable in the browser, including whether the runner is still alive, which child PIDs remain tracked, and which files may still be locked.
-- [ ] Browser restart/reload flows preserve intended run options instead of falling back to hidden defaults.
+- [x] Stop timeout state stays visibly actionable in the browser, including whether the runner is still alive, which child PIDs remain tracked, and which files may still be locked.
+- [x] Browser restart/reload flows preserve intended run options instead of falling back to hidden defaults.
 - [ ] The browser can distinguish "runner process alive", "task backend alive", "tracked children alive", and "artifact writer still flushing" as separate states.
 - [ ] Runner control events are written to durable artifacts so shell, web, and remote-controller views agree after refresh or reconnect.
 
 ### P0-N. Real-Time Monitoring Completeness
 
-- [ ] Active run state updates use one consistent polling or streaming model with backoff, reconnect, stale-data detection, and visible last-updated timestamps.
-- [ ] Dashboard, Pipeline, Logs, Notifications, and Runner Controls consume the same normalized live-run contract instead of each reconstructing status independently.
+- [x] Active run state updates use one consistent polling or streaming model with backoff, reconnect, stale-data detection, and visible last-updated timestamps.
+- [x] Dashboard, Pipeline, Logs, Notifications, and Runner Controls consume the same normalized live-run contract instead of each reconstructing status independently.
 - [ ] A long-running PM/Dev/QA task shows elapsed time, last log line, latest backend event, and "no output for N minutes" warning without requiring terminal access.
-- [ ] Live logs preserve scroll position, selection, pause state, and filters across route changes and refreshes.
+- [x] Live logs preserve scroll position, selection, pause state, and filters across route changes and refreshes.
 - [ ] Log tailing can switch between `run.log`, `error.log`, `events.jsonl`, `cycle_summary.log`, and backend transcript sources when available.
-- [ ] UI explicitly marks stale snapshots when the run directory, controller state, and process table disagree.
+- [x] UI explicitly marks stale snapshots when the run directory, controller state, and process table disagree.
 - [ ] Playwright coverage verifies a simulated long-running task, stop-in-progress sequence, reconnect, stale snapshot, and completed-run transition.
 
 ### P0-O. Enterprise-Grade Config And Role Management
@@ -172,6 +172,8 @@
 - [ ] Worktree Review includes an inspectable per-file diff view with binary, deleted, renamed, and large-file states handled explicitly.
 - [ ] Merge preflight details are shown in the UI: source dirty state, source `HEAD`, expected base ref, patch hash, `git apply --check`, and pending marker path.
 - [ ] Merge conflicts or patch apply failures show exact failed files/hunks and leave the pending state recoverable.
+- [x] Worktree merge prefers fast-forwarding committed worktree history before applying a dirty-only patch when `head_ref` descends from `base_ref`, so one stale hunk in a cumulative patch cannot block an otherwise mergeable run.
+- [ ] Worktree Review shows split-merge metadata, including fast-forward ref, dirty patch path, and whether the dirty patch was applied, when a merge uses the fast-forward-then-patch recovery path.
 - [ ] Discard and cleanup actions distinguish source-safe discard, generated worktree removal, stale marker pruning, and cleanup-failed reconciliation.
 - [ ] Worktree diagnostics can filter active, pending, stale, orphaned, cleanup-failed, and missing-patch entries without mutating files by default.
 - [ ] Cleanup-failed artifacts are cleared automatically only after the worktree path and marker state are actually reconciled.
@@ -194,6 +196,8 @@
 - [ ] All primary routes have dense but readable desktop layouts with no nested-card clutter, no text overlap, and stable control dimensions.
 - [ ] Mobile routes match the intended operational workflow, not only a visual preview, with usable navigation, filters, editors, and confirmations.
 - [ ] Background and surface colors use a neutral charcoal base; green is reserved for success/accent/status signals rather than global page tint.
+- [ ] Direction A visual fidelity is reviewed against `docs/Design/project/AgentCLI Web - A.html`, covering shell/nav density, command palette, dashboard/Pipeline composition, mobile Telegram-style view, and status color semantics with desktop/mobile screenshots.
+- [ ] Design-token audit aligns production `web_console/styles.css` with Direction A's deep near-black/green terminal palette while preserving readable contrast and reserving green for success/accent/status semantics.
 - [ ] Destructive, mutating, and long-running actions use consistent confirmation, busy, disabled, success, failure, timeout, and retry states.
 - [ ] Empty, partial, loading, stale, permission-denied, and backend-unavailable states are visually distinct across every screen.
 - [ ] Keyboard navigation covers route switching, command palette, modals, editors, diff views, logs, and confirmation dialogs.

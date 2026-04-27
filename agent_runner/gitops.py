@@ -1123,6 +1123,23 @@ def apply_patch_to_repo(repo: Path, patch_path: Path) -> None:
         raise RuntimeError(f"git apply failed: rc={code}\n{out}")
 
 
+def _patch_has_changes(patch_path: Path) -> bool:
+    try:
+        for line in patch_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("diff --git "):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _git_is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    if not ancestor or not descendant:
+        return False
+    code, _ = run_cmd(["git", "merge-base", "--is-ancestor", ancestor, descendant], cwd=repo, timeout_sec=60)
+    return code == 0
+
+
 WORKTREE_MERGE_PENDING = "WORKTREE_MERGE_PENDING.json"
 WORKTREE_MERGE_PENDING_MD = "WORKTREE_MERGE_PENDING.md"
 WORKTREE_REUSE_CONTRACT = "WORKTREE_REUSE_CONTRACT.json"
@@ -1817,6 +1834,10 @@ def read_pending_worktree_merge(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8", errors="replace"))
 
 
+def _worktree_split_patch_path(run_dir: Path) -> Path:
+    return run_dir / "worktree_dirty_uncommitted.patch"
+
+
 def _pending_companion_paths(payload: dict[str, object], pending_path: Path) -> list[Path]:
     out = [pending_path]
     run_dir = str(payload.get("run_dir") or "").strip()
@@ -1901,6 +1922,89 @@ def _cleanup_failure_result(
     result = dict(payload)
     result["status"] = status
     result.update(updates)
+    return result
+
+
+def _apply_fast_forward_then_dirty_patch(
+    payload: dict[str, object],
+    pending_path: Path,
+    *,
+    source_repo: Path,
+    worktree_dir: Path,
+    run_dir: Path,
+    base_ref: str,
+    head_ref: str,
+) -> dict[str, object] | None:
+    resolved_base_ref = git_rev_parse_ref(source_repo, base_ref)
+    resolved_head_ref = git_rev_parse_ref(source_repo, head_ref)
+    if not resolved_base_ref or not resolved_head_ref or resolved_base_ref == resolved_head_ref:
+        return None
+    if not _git_is_ancestor(source_repo, resolved_base_ref, resolved_head_ref):
+        return None
+
+    dirty_patch_path = _worktree_split_patch_path(run_dir)
+    export_worktree_patch(worktree_dir, dirty_patch_path, base_ref=resolved_head_ref)
+    dirty_patch_has_changes = _patch_has_changes(dirty_patch_path)
+
+    merge_rc, merge_out = run_cmd(["git", "merge", "--ff-only", resolved_head_ref], cwd=source_repo, timeout_sec=120)
+    if merge_rc != 0:
+        raise WorktreeSafetyError(
+            "worktree_fast_forward_failed",
+            "Committed worktree history could not be fast-forwarded into the source repository.",
+            details={
+                "base_ref": resolved_base_ref,
+                "head_ref": resolved_head_ref,
+                "source_repo": source_repo.as_posix(),
+                "output": merge_out,
+            },
+        )
+
+    if dirty_patch_has_changes:
+        check_rc, check_out = run_cmd(
+            ["git", "apply", "--check", "--binary", "--whitespace=nowarn", str(dirty_patch_path)],
+            cwd=source_repo,
+            timeout_sec=120,
+        )
+        if check_rc != 0:
+            rollback_rc, rollback_out = run_cmd(["git", "reset", "--hard", resolved_base_ref], cwd=source_repo, timeout_sec=120)
+            raise WorktreeSafetyError(
+                "worktree_patch_check_failed",
+                "Worktree dirty patch did not pass git apply --check preflight after fast-forward.",
+                details={
+                    "path": dirty_patch_path.as_posix(),
+                    "source_repo": source_repo.as_posix(),
+                    "run_dir": run_dir.as_posix(),
+                    "worktree_dir": worktree_dir.as_posix(),
+                    "base_ref": resolved_base_ref,
+                    "head_ref": resolved_head_ref,
+                    "output": check_out,
+                    "merge_mode": "fast_forward_then_patch",
+                    "rollback": {"rc": rollback_rc, "output": rollback_out},
+                },
+            )
+        apply_patch_to_repo(source_repo, dirty_patch_path)
+
+    updates: dict[str, object] = {
+        "merge_mode": "fast_forward_then_patch",
+        "fast_forward_ref": resolved_head_ref,
+        "dirty_patch_path": dirty_patch_path.as_posix(),
+        "dirty_patch_applied": dirty_patch_has_changes,
+    }
+    result_payload = dict(payload)
+    result_payload.update(updates)
+    try:
+        remove_worktree(source_repo, worktree_dir)
+    except Exception as ex:
+        return _cleanup_failure_result(
+            result_payload,
+            pending_path,
+            "applied_cleanup_failed",
+            ex,
+            fallback_cleanup_path=worktree_dir,
+        )
+    _write_pending_status(result_payload, pending_path, "applied", extra=updates)
+    result = dict(result_payload)
+    result["status"] = "applied"
     return result
 
 
@@ -2027,6 +2131,18 @@ def apply_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
             "Pending worktree patch hash does not match the exported patch.",
             details={"expected": patch_hash, "actual": current_patch_hash},
         )
+
+    split_result = _apply_fast_forward_then_dirty_patch(
+        payload,
+        pending_path,
+        source_repo=source_repo,
+        worktree_dir=worktree_dir,
+        run_dir=run_dir,
+        base_ref=base_ref,
+        head_ref=head_ref,
+    )
+    if split_result is not None:
+        return split_result
 
     check_rc, check_out = run_cmd(
         ["git", "apply", "--check", "--binary", "--whitespace=nowarn", str(patch_path)],

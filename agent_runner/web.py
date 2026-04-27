@@ -2016,6 +2016,7 @@ def _runner_control_status_payload(
             "reason": "",
             "last_event": "",
             "stop_progress": {},
+            "stopProgress": {},
             "start_options": start_options_contract,
             "startOptions": start_options_contract,
         }
@@ -2046,6 +2047,7 @@ def _runner_control_status_payload(
             "reason": REDACTED_VALUE if redact_sensitive else f"status_error: {ex}",
             "last_event": "",
             "stop_progress": {},
+            "stopProgress": {},
             "start_options": start_options_contract,
             "startOptions": start_options_contract,
         }
@@ -2088,6 +2090,7 @@ def _runner_control_status_payload(
         "reason": str(status.get("reason") or "").strip(),
         "last_event": str(status.get("last_event") or "").strip(),
         "stop_progress": stop_progress,
+        "stopProgress": stop_progress,
         "start_options": start_options,
         "startOptions": start_options,
     }
