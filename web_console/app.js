@@ -4260,7 +4260,7 @@
         options: ['PM', 'Security', 'Dev', 'QA'],
         restart: false,
         desc: 'Stages enabled in the pipeline.',
-        hint: 'PM usually runs first. Security can run before Dev when enabled.',
+        hint: 'PM usually runs first. Security requires security.enabled=true and can run before Dev.',
       },
       autopilot: {
         kind: 'bool',

@@ -735,6 +735,7 @@ async def run_shared_cycle_once(
 
     async def security_phase(ci: int) -> StageOutcome:
         if not deps.security_enabled:
+            deps.metrics.event("security_skipped", cycle=ci, reason="security_disabled")
             return StageOutcome.skip("security_disabled")
         if deps.stop_path.exists():
             return StageOutcome.stop(deps.stop_reason_stop_file)

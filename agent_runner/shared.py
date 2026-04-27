@@ -9,6 +9,21 @@ from .utils import read_text_robust
 from .skills.parser import parse_skill_text
 
 
+def coerce_roles_arg(value: Any, *, default: str = "PM,Dev,QA") -> str:
+    """Normalize the roles arg into a comma-separated string.
+
+    Web UI persists multienum values as a list while CLI passes a string.
+    Both eventually flow into argparse.Namespace and reach pipeline
+    construction; without coercion str(list) corrupts parse_roles and can
+    silently empty the stage list.
+    """
+    if isinstance(value, (list, tuple)):
+        joined = ",".join(str(item).strip() for item in value if str(item).strip())
+        return joined or default
+    text = str(value or "").strip()
+    return text or default
+
+
 def load_json_if_exists(path: Path, default: Any) -> Any:
     if path.exists():
         try:

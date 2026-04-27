@@ -112,7 +112,12 @@ from ..skills import (
     summarize_skills_index_capped,
     write_skills_snapshot,
 )
-from ..shared import load_json_if_exists as _load_json_if_exists, inline_skills_for as _inline_skills_for, format_skill_selection as _format_skill_selection
+from ..shared import (
+    load_json_if_exists as _load_json_if_exists,
+    inline_skills_for as _inline_skills_for,
+    format_skill_selection as _format_skill_selection,
+    coerce_roles_arg as _coerce_roles_arg,
+)
 from ..task_history import format_history_block as _format_history_block, format_split_history_blocks as _format_split_history_blocks, count_unresolved_failures as _count_unresolved_failures, count_consecutive_title_failures as _count_consecutive_title_failures
 from ..progress import print_cycle_report, TokenTracker, extract_claude_tokens
 from ..utils import (
@@ -1001,7 +1006,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
     continuous = bool(getattr(args, "continuous", False) or getattr(args, "loop", False))
 
-    roles_raw = str(getattr(args, "roles", "PM,Dev,QA") or "PM,Dev,QA")
+    roles_raw = _coerce_roles_arg(getattr(args, "roles", None))
     plugins_allowlist = getattr(args, "plugins_allowlist", []) or []
     if isinstance(plugins_allowlist, str):
         plugins_allowlist = [p.strip() for p in plugins_allowlist.split(",") if p.strip()]

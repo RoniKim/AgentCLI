@@ -42,6 +42,9 @@ class PipelineManager:
         if session.has_stop():
             return CycleResult(rc=0, reason="stop_file", done_delta=0, stages=[])
 
+        if not self.stages:
+            return CycleResult(rc=1, reason="no_stages_configured", done_delta=0, stages=[])
+
         # If PM is disabled, require an existing backlog before any non-PM stage.
         if not self._has_stage("PM"):
             try:
