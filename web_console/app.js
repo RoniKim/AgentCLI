@@ -175,6 +175,7 @@
         state: 'State',
         runMode: 'Run mode',
         runStatus: 'Run status',
+        stopProgress: 'Stop progress',
         lastAction: 'Last action',
         lastMessage: 'Last message',
         lastError: 'Last error',
@@ -1495,6 +1496,7 @@
       requestInFlight: '실행기 제어 요청이 이미 진행 중입니다.',
       typePhraseToContinue: '계속하려면 문구를 입력하세요',
       refreshingStatus: '예상 상태가 될 때까지 실행기 상태를 새로고침합니다.',
+      stopProgress: '중지 진행',
       actionUnavailable: '작업을 사용할 수 없음',
       controllerUnavailableMessage: '실행기 컨트롤러를 사용할 수 없습니다.',
       controlsDisabledMessage: '실행기 컨트롤이 비활성화되었습니다.',
@@ -2260,6 +2262,7 @@
     const current = toObject(control);
     const status = toObject(current.status);
     const statusReason = toText(status.reason, '');
+    const stopProgress = normalizeStopProgress(status.stopProgress);
     const busyAction = runnerControlBusyAction();
     if (current.busy || state.stopSubmitting) {
       const action = state.stopSubmitting ? (busyAction || current.lastAction || state.stopAction || 'start') : '';
@@ -2296,6 +2299,15 @@
         label: t('runner.controlsDisabled'),
         title: t('runner.controlsDisabled'),
         copy: current.message || t('runner.controlsDisabled'),
+      };
+    }
+    if (stopProgress.active) {
+      return {
+        chipTone: 'loading',
+        bannerTone: 'info',
+        label: t('runner.stopping'),
+        title: t('runner.stopProgress'),
+        copy: stopProgress.message || stopProgress.phase,
       };
     }
     if (current.lastMessage) {
@@ -2342,7 +2354,8 @@
   function runnerControlDetailRows(control, display) {
     const current = toObject(control);
     const status = toObject(current.status);
-    return [
+    const stopProgress = normalizeStopProgress(status.stopProgress);
+    const rows = [
       { label: t('runner.source'), value: current.source || 'unknown', className: 'runner-control__value--muted' },
       { label: t('runner.selectedRepo'), value: status.repo || 'unknown', className: 'runner-control__value--muted' },
       { label: t('runner.selectedConfig'), value: status.configPath || 'unknown', className: 'runner-control__value--muted' },
@@ -2358,6 +2371,15 @@
         value: current.runStatus || (status.running ? 'running' : 'idle'),
         className: status.running ? 'runner-control__value--accent' : 'runner-control__value--muted',
       },
+    ];
+    if (stopProgress.phase) {
+      rows.push({
+        label: t('runner.stopProgress'),
+        value: `${stopProgress.phase} ${stopProgress.elapsedSeconds}s`,
+        className: stopProgress.active ? 'runner-control__value--warn' : 'runner-control__value--muted',
+      });
+    }
+    rows.push(
       {
         label: t('runner.lastAction'),
         value: current.lastAction || 'none',
@@ -2373,7 +2395,8 @@
         value: current.lastError || 'none',
         className: current.lastError ? 'runner-control__value--err' : 'runner-control__value--muted',
       },
-    ];
+    );
+    return rows;
   }
 
   function createRunnerControlModel(overrides = {}) {
@@ -2410,6 +2433,7 @@
         exitCode: overrides.exitCode == null ? null : overrides.exitCode,
         stopFile: toText(overrides.stopFile, 'STOP'),
         stopFileExists: Boolean(overrides.stopFileExists),
+        stopProgress: normalizeStopProgress(overrides.stopProgress),
         done: toNumber(overrides.done, 0),
         failed: toNumber(overrides.failed, 0),
         warnings: toNumber(overrides.warnings, 0),
@@ -2447,6 +2471,19 @@
       lastAction: toText(overrides.lastAction, ''),
       lastMessage: toText(overrides.lastMessage, ''),
       lastError: toText(overrides.lastError, ''),
+    };
+  }
+
+  function normalizeStopProgress(raw) {
+    const item = toObject(raw);
+    const phase = toText(item.phase, '');
+    const finalPhases = new Set(['finalized', 'timeout', 'failed', 'not_running']);
+    return {
+      phase,
+      message: toText(item.message, ''),
+      elapsedSeconds: toNumber(item.elapsed_seconds || item.elapsedSeconds, 0),
+      updatedAt: toText(item.updated_at || item.updatedAt, ''),
+      active: Boolean(phase && !finalPhases.has(phase)),
     };
   }
 
@@ -2497,6 +2534,7 @@
         exitCode: status.exit_code == null ? null : status.exit_code,
         stopFile: toText(status.stop_file || status.stopFile, 'STOP'),
         stopFileExists: Boolean(status.stop_file_exists || status.stopFileExists),
+        stopProgress: normalizeStopProgress(status.stop_progress || status.stopProgress),
         done: toNumber(status.done, 0),
         failed: toNumber(status.failed, 0),
         warnings: toNumber(status.warnings, 0),
@@ -12598,6 +12636,9 @@
           normalized.runnerControl.status.running,
           normalized.runnerControl.runStatus,
           normalized.runnerControl.message,
+          normalized.runnerControl.status.stopProgress.phase,
+          normalized.runnerControl.status.stopProgress.message,
+          normalized.runnerControl.status.stopProgress.elapsedSeconds,
           normalized.runnerControl.lastAction,
           normalized.runnerControl.lastMessage,
           normalized.runnerControl.lastError,

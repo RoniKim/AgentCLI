@@ -9,7 +9,7 @@ Usage::
     result = await codex_exec(
         "Summarise the project",
         instructions="You are a senior developer.",
-        model="gpt-5.1-codex-mini",
+        model="gpt-5.5",
         cwd=repo,
     )
     print(result.final_output)
@@ -179,7 +179,7 @@ async def codex_exec(
     prompt: str,
     *,
     instructions: str = "",
-    model: str = "gpt-5.1-codex-mini",
+    model: str = "gpt-5.5",
     reasoning_effort: str = "",
     full_auto: bool = False,
     cwd: Path | None = None,
@@ -438,6 +438,19 @@ async def codex_exec(
 
         if result.exit_code != 0 and not result.error:
             result.error = f"codex exec exited with code {result.exit_code}"
+
+        if result.final_output.strip():
+            try:
+                from .structured import is_model_error_payload, model_error_message
+
+                payload = json.loads(result.final_output)
+                if is_model_error_payload(payload):
+                    msg = model_error_message(payload) or "codex model error"
+                    result.error = msg
+                    if result.exit_code == 0:
+                        result.exit_code = 1
+            except Exception:
+                pass
 
         # Quota detection
         combined = "\n".join(filter(None, [result.final_output, result.error or "", stderr_text]))

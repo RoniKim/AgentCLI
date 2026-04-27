@@ -210,6 +210,8 @@ def normalize_pm_output_dict(data: Any, *, kind_hint: str = "") -> Optional[dict
     """Normalize common PM JSON variants into PMOutputV2-compatible dict."""
     if not isinstance(data, dict):
         return None
+    if is_model_error_payload(data):
+        return None
 
     out: dict[str, Any] = {}
 
@@ -294,6 +296,41 @@ def normalize_pm_output_dict(data: Any, *, kind_hint: str = "") -> Optional[dict
     return out
 
 
+def is_model_error_payload(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    payload_type = str(data.get("type") or "").strip().lower()
+    error_obj = data.get("error")
+    status = data.get("status")
+    try:
+        status_int = int(status)
+    except Exception:
+        status_int = 0
+    if payload_type in {"error", "invalid_request_error", "rate_limit_error"}:
+        return True
+    if status_int >= 400 and error_obj:
+        return True
+    if isinstance(error_obj, dict) and (error_obj.get("message") or error_obj.get("type")):
+        pm_keys = {"kind", "summary", "tasks", "backlog", "items", "notes_md"}
+        return not bool(pm_keys.intersection(data.keys()))
+    return False
+
+
+def model_error_message(data: Any) -> str:
+    if not isinstance(data, dict):
+        return ""
+    error_obj = data.get("error")
+    if isinstance(error_obj, dict):
+        msg = str(error_obj.get("message") or "").strip()
+        typ = str(error_obj.get("type") or "").strip()
+        if msg and typ:
+            return f"{typ}: {msg}"
+        return msg or typ
+    if error_obj:
+        return str(error_obj).strip()
+    return str(data.get("message") or data.get("type") or "").strip()
+
+
 def parse_pm_output(text: str, *, kind_hint: str = "") -> Optional["PMOutputV2"]:
     """Parse and validate PM final output robustly.
 
@@ -315,6 +352,8 @@ def parse_pm_output(text: str, *, kind_hint: str = "") -> Optional["PMOutputV2"]
     if data is None:
         data = loads_json_object(text)
     if data is None:
+        return None
+    if is_model_error_payload(data):
         return None
     try:
         return PMOutputV2.model_validate(data)  # type: ignore[attr-defined]
@@ -412,6 +451,9 @@ def parse_pm_output_with_errors(text: str, *, kind_hint: str = "") -> tuple[Opti
         data = loads_json_object(text)
     if data is None:
         return None, ["<json_parse_failed>"], []
+    if is_model_error_payload(data):
+        detail = model_error_message(data)
+        return None, [f"<model_error:{detail}>" if detail else "<model_error>"], []
     try:
         return PMOutputV2.model_validate(data), [], []  # type: ignore[attr-defined]
     except Exception:

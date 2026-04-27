@@ -27,6 +27,8 @@ from .run_dir import find_latest_run_dir
 from .todo import ensure_todo_file, read_current_todo, set_current_todo, open_path
 from .preflight import run_preflight
 from .process_guard import init_process_guard, terminate_all_children
+from .stop_progress import clear_stop_progress, read_stop_progress, write_stop_progress
+from .utils import STOP_REASON_STOP_FILE
 from .gitops import (
     apply_pending_worktree_merge,
     discard_pending_worktree_merge,
@@ -471,6 +473,11 @@ class RunnerShell:
                 stop_path.unlink()
         except Exception:
             pass
+        clear_stop_progress(run_dir)
+        try:
+            init_process_guard(stop_path_func=lambda p=stop_path: p)
+        except Exception:
+            pass
 
         eff = self.effective()
         # NOTE: DEFAULTS includes "repo" so passing repo twice will crash.
@@ -505,9 +512,29 @@ class RunnerShell:
         print(f" - stop:   /stop  (creates {stop_file})")
         print(" - status: /status\n")
 
+    def _print_stop_progress(self, progress: dict[str, Any]) -> None:
+        phase = str(progress.get("phase") or "unknown").strip()
+        elapsed = int(progress.get("elapsed_seconds") or 0)
+        running = progress.get("running")
+        message = str(progress.get("message") or "").strip()
+        last_event = str(progress.get("last_event") or "").strip()
+        running_part = f" runner={'alive' if running else 'idle'}" if running is not None else ""
+        event_part = f" last_event={last_event}" if last_event else ""
+        print(f"[STOP] phase={phase} elapsed={elapsed}s{running_part}{event_part} {message}".rstrip(), flush=True)
+
+    def _controller_stop(self, wait: bool) -> dict[str, Any]:
+        if self._controller is None:
+            return {}
+        if wait:
+            try:
+                return self._controller.stop(wait=wait, progress_callback=self._print_stop_progress)
+            except TypeError:
+                return self._controller.stop(wait=wait)
+        return self._controller.stop(wait=wait)
+
     def stop(self, wait: bool = False) -> None:
         if self._controller is not None:
-            result = self._controller.stop(wait=wait)
+            result = self._controller_stop(wait=wait)
             ok = bool(result.get("ok", False))
             prefix = "[OK]" if ok else "[ERR]"
             print(f"{prefix} {result.get('message') or 'stop failed'}")
@@ -530,22 +557,83 @@ class RunnerShell:
 
         stop_file = str(self.effective().get("stop_file") or "STOP")
         stop_path = self.run_dir / stop_file
+        requested_at = time.monotonic()
+        self._print_stop_progress(
+            write_stop_progress(
+                self.run_dir,
+                phase="requested",
+                message="Stop requested.",
+                requested_at_monotonic=requested_at,
+                running=self._runner_is_alive(),
+            )
+        )
         try:
-            stop_path.write_text("stop requested\n", encoding="utf-8", errors="replace")
+            stop_path.write_text(STOP_REASON_STOP_FILE + "\n", encoding="utf-8", errors="replace")
             print(f"[OK] Stop requested via: {stop_path}")
+            self._print_stop_progress(
+                write_stop_progress(
+                    self.run_dir,
+                    phase="stop_file_written",
+                    message=f"Stop file written: {stop_path}",
+                    requested_at_monotonic=requested_at,
+                    running=self._runner_is_alive(),
+                )
+            )
         except Exception as ex:
+            self._print_stop_progress(
+                write_stop_progress(
+                    self.run_dir,
+                    phase="failed",
+                    message=f"Failed to create stop file: {ex}",
+                    requested_at_monotonic=requested_at,
+                    running=self._runner_is_alive(),
+                )
+            )
             print(f"[ERR] Failed to create stop file: {ex}")
             return
 
         # Kill any tracked child processes immediately
         try:
+            self._print_stop_progress(
+                write_stop_progress(
+                    self.run_dir,
+                    phase="terminating_children",
+                    message="Terminating tracked child processes.",
+                    requested_at_monotonic=requested_at,
+                    running=self._runner_is_alive(),
+                )
+            )
             terminate_all_children()
         except Exception:
             pass
 
         if wait and self._runner_thread:
-            print("[INFO] Waiting for runner to exit...")
-            self._runner_thread.join(timeout=60)
+            deadline = time.monotonic() + 60
+            while self._runner_thread.is_alive() and time.monotonic() < deadline:
+                self._print_stop_progress(
+                    write_stop_progress(
+                        self.run_dir,
+                        phase="waiting_runner",
+                        message="Waiting for runner shutdown and final artifacts.",
+                        requested_at_monotonic=requested_at,
+                        running=True,
+                    )
+                )
+                try:
+                    self._runner_thread.join(timeout=1.0)
+                except KeyboardInterrupt:
+                    print("[STOP] Stop is already in progress; keep waiting for cleanup.", flush=True)
+            alive = self._runner_thread.is_alive()
+            self._print_stop_progress(
+                write_stop_progress(
+                    self.run_dir,
+                    phase="timeout" if alive else "finalized",
+                    message="Runner is still alive after stop wait timeout." if alive else "Runner stop sequence finished.",
+                    requested_at_monotonic=requested_at,
+                    running=alive,
+                    exit_code=self._runner_exit_code,
+                )
+            )
             self.status()
 
     def status(self) -> None:
@@ -573,6 +661,14 @@ class RunnerShell:
             last_event = str(data.get("last_event") or "").strip()
             if last_event:
                 print(f"last_event: {last_event}")
+            stop_progress = data.get("stop_progress") if isinstance(data.get("stop_progress"), dict) else {}
+            if stop_progress:
+                print(
+                    "stop:    "
+                    f"phase={stop_progress.get('phase') or 'unknown'} "
+                    f"elapsed={int(stop_progress.get('elapsed_seconds') or 0)}s "
+                    f"message={stop_progress.get('message') or ''}"
+                )
             print("=====================\n")
             self._print_pending_worktree_merge_hint()
             return
@@ -586,6 +682,14 @@ class RunnerShell:
         print(f"run_dir: {_shorten(self.run_dir)}")
         print(f"uptime:  {dur}")
         print(f"exit:    {self._runner_exit_code if (not alive) else '(running)'}")
+        stop_progress = read_stop_progress(self.run_dir)
+        if stop_progress:
+            print(
+                "stop:    "
+                f"phase={stop_progress.get('phase') or 'unknown'} "
+                f"elapsed={int(stop_progress.get('elapsed_seconds') or 0)}s "
+                f"message={stop_progress.get('message') or ''}"
+            )
         print("=====================\n")
         self._print_pending_worktree_merge_hint()
 
@@ -1084,6 +1188,10 @@ def shell_main(argv: list[str] | None = None, shell_instance: RunnerShell | None
                 try:
                     line = session.prompt("> ").strip()
                 except (EOFError, KeyboardInterrupt):
+                    if sh._runner_is_alive():
+                        print("\n[INTERRUPT] Runner is active; requesting /stop --wait instead of exiting.")
+                        sh.stop(wait=True)
+                        continue
                     print("\n[EXIT]")
                     return 0
 
@@ -1100,6 +1208,10 @@ def shell_main(argv: list[str] | None = None, shell_instance: RunnerShell | None
         try:
             line = input("> ").strip()
         except (EOFError, KeyboardInterrupt):
+            if sh._runner_is_alive():
+                print("\n[INTERRUPT] Runner is active; requesting /stop --wait instead of exiting.")
+                sh.stop(wait=True)
+                continue
             print("\n[EXIT]")
             return 0
         if not line:

@@ -170,9 +170,9 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
 
     # Models (cost saver defaults)
     pm_model = _ask_str("PM model", str(defaults.get("pm_model", "gpt-5-mini")))
-    dev_model = _ask_str("Dev model (base)", str(defaults.get("dev_model", "gpt-5.1-codex-mini")))
-    dev_model_tier1 = _ask_str("Dev model tier1 (escalation)", str(defaults.get("dev_model_tier1", "gpt-5.1-codex")))
-    dev_model_tier2 = _ask_str("Dev model tier2 (escalation)", str(defaults.get("dev_model_tier2", "gpt-5.2-codex")))
+    dev_model = _ask_str("Dev model (base)", str(defaults.get("dev_model", "gpt-5.4-mini")))
+    dev_model_tier1 = _ask_str("Dev model tier1 (escalation)", str(defaults.get("dev_model_tier1", "gpt-5.4")))
+    dev_model_tier2 = _ask_str("Dev model tier2 (escalation)", str(defaults.get("dev_model_tier2", "gpt-5.5")))
     dev_auto_escalate = _ask_bool("Dev auto-escalate on failures", bool(defaults.get("dev_auto_escalate", True)))
     dev_max_escalations = _ask_int("Dev max escalations per task", int(defaults.get("dev_max_escalations", 2)))
     reporter_model = _ask_str("Reporter model (shutdown report)", str(defaults.get("reporter_model", "gpt-5-nano")))

@@ -1420,6 +1420,7 @@ def _runner_control_status_payload(
             "warnings": 0,
             "reason": "",
             "last_event": "",
+            "stop_progress": {},
         }
 
     try:
@@ -1440,7 +1441,12 @@ def _runner_control_status_payload(
             "warnings": 0,
             "reason": f"status_error: {ex}",
             "last_event": "",
+            "stop_progress": {},
         }
+
+    stop_progress = status.get("stop_progress")
+    if not isinstance(stop_progress, dict):
+        stop_progress = {}
 
     return {
         "running": bool(status.get("running")),
@@ -1457,6 +1463,7 @@ def _runner_control_status_payload(
         "warnings": int(status.get("warnings") or 0),
         "reason": str(status.get("reason") or "").strip(),
         "last_event": str(status.get("last_event") or "").strip(),
+        "stop_progress": stop_progress,
     }
 
 
@@ -3533,7 +3540,7 @@ def _stage_payload(
     stage_model_defaults = {
         "PM": str(config.get("pm_model") or "gpt-5.5"),
         "Dev": str(config.get("dev_model") or "gpt-5.4-mini"),
-        "QA": str(config.get("qa_model") or "gpt-5.4-mini"),
+        "QA": str(config.get("qa_model") or "gpt-5.5"),
     }
 
     active_status = str(active_run.get("status") or progress.get("run_status") or "idle").strip().lower()

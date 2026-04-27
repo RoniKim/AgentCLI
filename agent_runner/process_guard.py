@@ -670,6 +670,10 @@ def init_process_guard(
             # Update stop_path_func if provided (runner may set it later)
             if stop_path_func is not None:
                 _stop_path_func = stop_path_func
+                try:
+                    install_signal_handlers(stop_path_func)
+                except ValueError:
+                    logger.debug("[ProcessGuard] L3: Signal handlers skipped (not main thread)")
             return
 
         _session_dir = _resolve_session_dir(session_dir)

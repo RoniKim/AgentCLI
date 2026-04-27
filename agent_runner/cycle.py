@@ -133,7 +133,14 @@ from .goals import (
     should_attempt_goals_refresh,
 )
 from .schemas import PMOutputV2
-from .structured import parse_pm_output_with_errors, dump_pretty, describe_parse_failure, parse_qa_followups
+from .structured import (
+    parse_pm_output_with_errors,
+    dump_pretty,
+    describe_parse_failure,
+    parse_qa_followups,
+    is_model_error_payload,
+    model_error_message,
+)
 from .skills import (
     build_skills_index,
     resolve_skills_roots,
@@ -495,14 +502,23 @@ async def main_async(args: argparse.Namespace) -> int:
                     heartbeat_callback=lambda: metrics.event("heartbeat", stage="reporter"),
                 )
                 out = (res.final_output or "").strip()
+                report_error = (res.error or "").strip()
                 if out:
+                    try:
+                        out_payload = json.loads(out)
+                    except Exception:
+                        out_payload = None
+                    if is_model_error_payload(out_payload):
+                        report_error = model_error_message(out_payload) or "model error"
+                        out = ""
+                if out and res.exit_code == 0 and not report_error:
                     # Detect and remove duplicate report content (PM model repeating itself)
                     half = len(out) // 2
                     if half > 200 and out[:half].strip() == out[half:].strip():
                         out = out[:half].strip()
                     report_path.write_text(out + "\n", encoding="utf-8", errors="replace")
                     (run_dir / "PM_SHUTDOWN_REPORT_OUTPUT.txt").write_text(out + "\n", encoding="utf-8", errors="replace")
-                metrics.event("shutdown_report", cycle=cycle, step=step, reason=stop_reason, ok=bool(out))
+                metrics.event("shutdown_report", cycle=cycle, step=step, reason=stop_reason, ok=bool(out), error=report_error)
             except Exception as ex:
                 metrics.event("shutdown_report", cycle=cycle, step=step, reason=stop_reason, ok=False, error=str(ex))
 
@@ -647,6 +663,12 @@ async def main_async(args: argparse.Namespace) -> int:
                     logger.stage_event("pm", "quota_detected", cycle=cycle_idx)
                     metrics.event("pm_garbage_detected", cycle=cycle_idx, kind="quota")
                     raise Exception("quota exceeded - detected in PM output")
+                model_errors = [m for m in missing if str(m).startswith("<model_error")]
+                if model_errors:
+                    detail = model_errors[0].strip("<>")
+                    logger.stage_event("pm", "model_error", cycle=cycle_idx)
+                    metrics.event("pm_model_error", cycle=cycle_idx, detail=detail)
+                    raise Exception(f"PM model error - {detail}")
                 if "<repetitive_output>" in missing:
                     eprint("[PM] Repetitive/garbage output detected - aborting PM structured retries.")
                     metrics.event("pm_garbage_detected", cycle=cycle_idx, kind="repetitive")
@@ -2148,7 +2170,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 refresh_prompt = build_goals_refresh_prompt(_gt or "")
                 _gr_res = await codex_exec(
                     refresh_prompt,
-                    model=str(getattr(args, "pm_model", "gpt-5.1-codex-mini") or "gpt-5.1-codex-mini"),
+                    model=str(getattr(args, "pm_model", "gpt-5.5") or "gpt-5.5"),
                     reasoning_effort=codex_reasoning_effort,
                     cwd=repo,
                     timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),

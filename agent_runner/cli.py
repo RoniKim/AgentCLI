@@ -196,9 +196,9 @@ DEFAULTS: Dict[str, Any] = {
     "build_timeout_seconds": 1800,
 
     # Models (all Codex; single billing)
-    "pm_model": "gpt-5.1-codex-mini",
-    "dev_model": "gpt-5.1-codex-mini",
-    "qa_model": "gpt-5.1-codex-mini",
+    "pm_model": "gpt-5.5",
+    "dev_model": "gpt-5.4-mini",
+    "qa_model": "gpt-5.5",
     # Optional codex exec override: -c model_reasoning_effort="<value>"
     # Empty = use Codex CLI/global config default.
     "codex_reasoning_effort": "",
@@ -207,14 +207,14 @@ DEFAULTS: Dict[str, Any] = {
     "max_qa_followups": 5,
 
     # Reporter / shutdown report
-    "reporter_model": "gpt-5.1-codex-mini",
+    "reporter_model": "gpt-5.4-mini",
     "report_max_turns": 8,
 
     # Dev cost controls
     "dev_auto_escalate": True,
     "dev_max_escalations": 2,
-    "dev_model_tier1": "gpt-5.1-codex",
-    "dev_model_tier2": "gpt-5.2-codex",
+    "dev_model_tier1": "gpt-5.4",
+    "dev_model_tier2": "gpt-5.5",
     "dev_escalate_on": ["no_diff", "build_failed", "test_failed", "no_commits"],
 
     # Timeouts (seconds) - referenced by cycle.py

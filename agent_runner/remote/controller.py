@@ -16,6 +16,7 @@ from ..config import AGENT_WORK_DIR, resolve_prompts_dir
 from ..process_guard import register_pid, terminate_all_children, terminate_process_tree, unregister_pid_if_exited
 from ..run_dir import find_latest_run_dir, make_run_dir
 from ..runner_entry import run as run_runner
+from ..stop_progress import clear_stop_progress, read_stop_progress, write_stop_progress
 from ..utils import STOP_REASON_STOP_FILE, detect_stop_reason, rotate_log_file
 
 
@@ -201,6 +202,7 @@ class RunnerController:
                         stop_path.unlink()
                 except Exception:
                     pass
+            clear_stop_progress(run_dir)
 
             args = argparse.Namespace(**eff)
             self._runner_exit_code = None
@@ -221,36 +223,135 @@ class RunnerController:
         finally:
             self._start_lock.release()
 
-    def stop(self, *, wait: bool = False) -> dict[str, Any]:
+    def _emit_stop_progress(
+        self,
+        run_dir: Path,
+        *,
+        phase: str,
+        message: str,
+        requested_at_monotonic: float,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        **fields: Any,
+    ) -> dict[str, Any]:
+        progress = write_stop_progress(
+            run_dir,
+            phase=phase,
+            message=message,
+            requested_at_monotonic=requested_at_monotonic,
+            running=self._runner_is_alive(),
+            runner_mode=self.runner_mode,
+            last_event=self._latest_event(run_dir),
+            **fields,
+        )
+        if progress_callback is not None:
+            try:
+                progress_callback(progress)
+            except Exception:
+                pass
+        return progress
+
+    def stop(
+        self,
+        *,
+        wait: bool = False,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         context = {"repo": self.repo.as_posix(), "config_path": self._config_path_name()}
         run_dir = self.run_dir or find_latest_run_dir(self.repo)
         if run_dir is None:
             return {"ok": False, "message": "\uc2e4\ud589 \ub514\ub809\ud1a0\ub9ac\ub97c \ucc3e\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.", **context}
         self.run_dir = run_dir
+        requested_at = time.monotonic()
+        self._emit_stop_progress(
+            run_dir,
+            phase="requested",
+            message="Stop requested.",
+            requested_at_monotonic=requested_at,
+            progress_callback=progress_callback,
+        )
 
         stop_path = run_dir / self._stop_file_name()
         try:
             stop_path.write_text(STOP_REASON_STOP_FILE + "\n", encoding="utf-8", errors="replace")
         except Exception as ex:
+            self._emit_stop_progress(
+                run_dir,
+                phase="failed",
+                message=f"Failed to create stop file: {ex}",
+                requested_at_monotonic=requested_at,
+                progress_callback=progress_callback,
+            )
             return {"ok": False, "message": f"\uc815\uc9c0 \ud30c\uc77c \uc0dd\uc131 \uc2e4\ud328: {ex}", **context}
+
+        self._emit_stop_progress(
+            run_dir,
+            phase="stop_file_written",
+            message=f"Stop file written: {stop_path.as_posix()}",
+            requested_at_monotonic=requested_at,
+            progress_callback=progress_callback,
+        )
 
         if self.runner_mode == "thread":
             try:
+                self._emit_stop_progress(
+                    run_dir,
+                    phase="terminating_children",
+                    message="Terminating tracked child processes.",
+                    requested_at_monotonic=requested_at,
+                    progress_callback=progress_callback,
+                )
                 terminate_all_children()
             except Exception:
                 pass
 
             if wait and self._runner_thread and self._runner_thread.is_alive():
-                self._runner_thread.join(timeout=60)
+                deadline = time.monotonic() + 60
+                while self._runner_thread.is_alive() and time.monotonic() < deadline:
+                    self._emit_stop_progress(
+                        run_dir,
+                        phase="waiting_runner",
+                        message="Waiting for runner shutdown and final artifacts.",
+                        requested_at_monotonic=requested_at,
+                        progress_callback=progress_callback,
+                    )
+                    self._runner_thread.join(timeout=1.0)
         else:
             self._refresh_process_state()
             if wait and self._runner_process and self._runner_process.poll() is None:
-                try:
-                    self._runner_process.wait(timeout=12)
-                except subprocess.TimeoutExpired:
+                grace_deadline = time.monotonic() + 12
+                while self._runner_process and self._runner_process.poll() is None and time.monotonic() < grace_deadline:
+                    self._emit_stop_progress(
+                        run_dir,
+                        phase="waiting_subprocess",
+                        message="Waiting for runner subprocess to exit.",
+                        requested_at_monotonic=requested_at,
+                        progress_callback=progress_callback,
+                        pid=int(self._runner_process.pid) if self._runner_process.pid else None,
+                    )
+                    time.sleep(1.0)
+                self._refresh_process_state()
+                if self._runner_process and self._runner_process.poll() is None:
                     try:
+                        self._emit_stop_progress(
+                            run_dir,
+                            phase="forcing_process_tree",
+                            message="Grace period expired; terminating runner process tree.",
+                            requested_at_monotonic=requested_at,
+                            progress_callback=progress_callback,
+                            pid=int(self._runner_process.pid) if self._runner_process.pid else None,
+                        )
                         terminate_process_tree(int(self._runner_process.pid), include_root=True)
-                        self._runner_process.wait(timeout=20)
+                        force_deadline = time.monotonic() + 20
+                        while self._runner_process and self._runner_process.poll() is None and time.monotonic() < force_deadline:
+                            self._emit_stop_progress(
+                                run_dir,
+                                phase="waiting_forced_exit",
+                                message="Waiting after forced process-tree termination.",
+                                requested_at_monotonic=requested_at,
+                                progress_callback=progress_callback,
+                                pid=int(self._runner_process.pid) if self._runner_process.pid else None,
+                            )
+                            time.sleep(1.0)
                     except Exception:
                         try:
                             self._runner_process.kill()
@@ -258,11 +359,32 @@ class RunnerController:
                             pass
                 self._refresh_process_state()
 
+        running = self._runner_is_alive()
+        if running:
+            final_phase = "timeout" if wait else "stop_requested"
+            final_message = (
+                "Runner is still alive after stop wait timeout."
+                if wait
+                else "Stop requested; runner is still shutting down."
+            )
+        else:
+            final_phase = "finalized"
+            final_message = "Runner stop sequence finished."
+        self._emit_stop_progress(
+            run_dir,
+            phase=final_phase,
+            message=final_message,
+            requested_at_monotonic=requested_at,
+            progress_callback=progress_callback,
+            exit_code=self._runner_exit_code,
+        )
+
         return {
             "ok": True,
             "message": f"\uc911\uc9c0 \uc694\uccad\ub428: {stop_path.as_posix()}",
-            "running": self._runner_is_alive(),
+            "running": running,
             "run_dir": run_dir.as_posix(),
+            "stop_progress": read_stop_progress(run_dir),
             **context,
         }
 
@@ -514,6 +636,7 @@ class RunnerController:
             "warnings": 0,
             "reason": "",
             "last_event": "",
+            "stop_progress": {},
         }
         if run_dir is None:
             return status
@@ -526,4 +649,5 @@ class RunnerController:
         status["warnings"] = counts["warnings"]
         status["reason"] = self._stop_reason(run_dir)
         status["last_event"] = self._latest_event(run_dir)
+        status["stop_progress"] = read_stop_progress(run_dir)
         return status
