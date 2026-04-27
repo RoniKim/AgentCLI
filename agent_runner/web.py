@@ -50,7 +50,7 @@ from .prompts import (
 from .process_guard import init_process_guard, terminate_all_children
 from .run_dir import find_latest_run_dir
 from .remote.controller import RunnerController
-from .state import TaskItem, load_backlog_json, load_state, parse_backlog_md
+from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, load_state, parse_backlog_md
 from .utils import atomic_write_json, atomic_write_text, now_iso, run_cmd
 
 try:  # Optional dependency: the app must still import when FastAPI is absent.
@@ -1458,6 +1458,7 @@ def _runner_control_status_payload(
             "done": 0,
             "failed": 0,
             "warnings": 0,
+            "state_counts": {"done": 0, "failed": 0, "warnings": 0},
             "reason": "",
             "last_event": "",
             "stop_progress": {},
@@ -1479,6 +1480,7 @@ def _runner_control_status_payload(
             "done": 0,
             "failed": 0,
             "warnings": 0,
+            "state_counts": {"done": 0, "failed": 0, "warnings": 0},
             "reason": f"status_error: {ex}",
             "last_event": "",
             "stop_progress": {},
@@ -1487,6 +1489,9 @@ def _runner_control_status_payload(
     stop_progress = status.get("stop_progress")
     if not isinstance(stop_progress, dict):
         stop_progress = {}
+    state_counts = status.get("state_counts")
+    if not isinstance(state_counts, dict):
+        state_counts = {}
 
     return {
         "running": bool(status.get("running")),
@@ -1501,6 +1506,11 @@ def _runner_control_status_payload(
         "done": int(status.get("done") or 0),
         "failed": int(status.get("failed") or 0),
         "warnings": int(status.get("warnings") or 0),
+        "state_counts": {
+            "done": int(state_counts.get("done") or status.get("done") or 0),
+            "failed": int(state_counts.get("failed") or status.get("failed") or 0),
+            "warnings": int(state_counts.get("warnings") or status.get("warnings") or 0),
+        },
         "reason": str(status.get("reason") or "").strip(),
         "last_event": str(status.get("last_event") or "").strip(),
         "stop_progress": stop_progress,
@@ -3924,33 +3934,24 @@ def _history_item(
 ) -> dict[str, Any]:
     state = load_state(run_dir / "STATE.json")
     backlog = _load_tasks(run_dir)
+    backlog_task_ids = load_backlog_task_ids(run_dir / "BACKLOG.json")
+    state_counts = count_state_task_ids(state, backlog_task_ids)
     run_summary = _safe_json(run_dir / "run_summary.json", {})
     last_summary = _safe_json(run_dir / "last_run_summary.json", {})
 
-    done_ids = set(str(item) for item in (state.get("done") or []) if str(item).strip())
-    failed_ids = {
-        str(item.get("task") or "").strip()
-        for item in (state.get("failed") if isinstance(state.get("failed"), list) else [])
-        if isinstance(item, dict) and str(item.get("task") or "").strip()
-    }
-    task_ids = [item.id for item in backlog]
     final = run_summary.get("final") if isinstance(run_summary.get("final"), dict) else {}
     final_reason = _pick_text(final.get("reason"), last_summary.get("reason"), last_summary.get("stop_reason"))
     shutdown_reason = _pick_text(last_summary.get("stop_reason"), final_reason)
     if not final_reason:
         final_reason = shutdown_reason
 
-    tasks_done = _coerce_optional_int(_pick_value(last_summary.get("done"), last_summary.get("tasks_done")))
-    if tasks_done is None:
-        tasks_done = len([tid for tid in task_ids if tid in done_ids])
+    tasks_done = state_counts["done"]
 
     tasks_total = _coerce_optional_int(_pick_value(last_summary.get("total_tasks"), last_summary.get("tasks_total")))
     if tasks_total is None:
         tasks_total = len(backlog)
 
-    tasks_failed = _coerce_optional_int(_pick_value(last_summary.get("failed_count"), last_summary.get("failed"), last_summary.get("tasks_failed")))
-    if tasks_failed is None:
-        tasks_failed = len(failed_ids)
+    tasks_failed = state_counts["failed"]
 
     tasks_skipped = _coerce_optional_int(_pick_value(last_summary.get("skipped"), last_summary.get("tasks_skipped")))
     if tasks_skipped is None:
@@ -4003,6 +4004,7 @@ def _history_item(
         "tasksTotal": tasks_total,
         "tasksFailed": tasks_failed,
         "tasksSkipped": tasks_skipped,
+        "state_counts": state_counts,
         "taskCounts": {
             "done": tasks_done,
             "failed": tasks_failed,
@@ -4233,23 +4235,14 @@ def _build_progress_payload(
     controller_data = controller_status if isinstance(controller_status, dict) else {}
     state = load_state(run_dir / "STATE.json") if run_dir else {"done": [], "failed": [], "warnings": []}
     backlog = _load_backlog_payload(run_dir, state, current_task_id=_pick_text(controller_data.get("current_task_id"), controller_data.get("task_id"), controller_data.get("task")), events=events)
+    backlog_task_ids = load_backlog_task_ids(run_dir / "BACKLOG.json") if run_dir else set()
+    state_counts = count_state_task_ids(state, backlog_task_ids)
     completion_level = str(config.get("goals_completion_level") or "all").strip() or "all"
     goals = _build_goals_payload(repo, completion_level=completion_level)
     backlog_items = backlog["items"]
-    done_ids = set(str(item) for item in (state.get("done") or []) if str(item).strip())
-    failed_items = state.get("failed") if isinstance(state.get("failed"), list) else []
-    failed_ids = {
-        str(item.get("task") or "").strip()
-        for item in failed_items
-        if isinstance(item, dict) and str(item.get("task") or "").strip()
-    }
     tasks_total = len(backlog_items)
-    tasks_done = _coerce_optional_int(controller_data.get("done"))
-    if tasks_done is None:
-        tasks_done = len([item for item in backlog_items if item["id"] in done_ids])
-    tasks_failed = _coerce_optional_int(controller_data.get("failed"))
-    if tasks_failed is None:
-        tasks_failed = len([item for item in backlog_items if item["id"] in failed_ids])
+    tasks_done = state_counts["done"]
+    tasks_failed = state_counts["failed"]
     run_summary = _safe_json(run_dir / "run_summary.json", {}) if run_dir else {}
     last_run_summary = _safe_json(run_dir / "last_run_summary.json", {}) if run_dir else {}
     final = run_summary.get("final") if isinstance(run_summary.get("final"), dict) else {}
@@ -4319,6 +4312,7 @@ def _build_progress_payload(
         "tasks_done": tasks_done,
         "tasks_total": tasks_total,
         "tasks_failed": tasks_failed,
+        "state_counts": state_counts,
         "progress": round(progress_value, 3) if progress_value is not None else None,
         "progress_available": progress_available,
         "current_task_id": current_task,

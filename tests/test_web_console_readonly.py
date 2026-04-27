@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -82,60 +83,68 @@ def _write_run_bundle(
     final_rc: int = 0,
     final_reason: str = "project_complete",
     stop_file: bool = False,
+    backlog_tasks: list[dict[str, object]] | None = None,
+    state_payload: dict[str, object] | None = None,
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
     (run_dir / "tasks").mkdir(parents=True, exist_ok=True)
     (run_dir / "dev_logs").mkdir(parents=True, exist_ok=True)
 
-    backlog_task_status = "done" if status == "success" else ("failed" if status == "failed" else "in_progress")
-    secondary_task_id = "T-021"
     task_files = ["agent_runner/web.py", "web_console/app.js"]
     if status == "failed":
         task_files.append("tests/test_web_console_readonly.py")
+    backlog_task_status = "done" if status == "success" else ("failed" if status == "failed" else "in_progress")
+    default_backlog_tasks = [
+        {
+            "id": task_id,
+            "title": task_title,
+            "prompt": "Read-only web console snapshot.",
+            "files": task_files,
+            "done_when": "Snapshot is stable.",
+            "skills": ["observability"],
+            "skills_rationale": "Surface the lifecycle contract in the browser.",
+            "depends_on": [],
+            "status": backlog_task_status,
+        },
+        {
+            "id": "T-021",
+            "title": "Backlog follows lifecycle records",
+            "prompt": "Keep the backlog view aligned with lifecycle artifacts.",
+            "files": ["web_console/app.js", "web_console/styles.css"],
+            "done_when": "Dependency, attempt, file scope, and failure information render in the browser.",
+            "skills": ["ui"],
+            "skills_rationale": "Keep the backlog panel readable.",
+            "depends_on": [task_id],
+            "status": "pending",
+        },
+    ]
+    backlog_tasks_payload = default_backlog_tasks if backlog_tasks is None else [dict(task) for task in backlog_tasks]
+    if backlog_tasks_payload:
+        task_id = str(backlog_tasks_payload[0].get("id") or task_id)
+        task_title = str(backlog_tasks_payload[0].get("title") or task_title)
+    secondary_task_id = str(backlog_tasks_payload[1].get("id") or "T-021") if len(backlog_tasks_payload) > 1 else "T-021"
     _write(
         run_dir / "BACKLOG.json",
         json.dumps(
             {
                 "generated_at": "2026-04-26T12:00:00",
-                "tasks": [
-                    {
-                        "id": task_id,
-                        "title": task_title,
-                        "prompt": "Read-only web console snapshot.",
-                        "files": task_files,
-                        "done_when": "Snapshot is stable.",
-                        "skills": ["observability"],
-                        "skills_rationale": "Surface the lifecycle contract in the browser.",
-                        "depends_on": [],
-                        "status": backlog_task_status,
-                    },
-                    {
-                        "id": secondary_task_id,
-                        "title": "Backlog follows lifecycle records",
-                        "prompt": "Keep the backlog view aligned with lifecycle artifacts.",
-                        "files": ["web_console/app.js", "web_console/styles.css"],
-                        "done_when": "Dependency, attempt, file scope, and failure information render in the browser.",
-                        "skills": ["ui"],
-                        "skills_rationale": "Keep the backlog panel readable.",
-                        "depends_on": [task_id],
-                        "status": "pending",
-                    },
-                ],
+                "tasks": backlog_tasks_payload,
             },
             ensure_ascii=False,
             indent=2,
         )
         + "\n",
     )
-    state_payload: dict[str, object] = {"done": [], "failed": [], "warnings": []}
+    default_state_payload: dict[str, object] = {"done": [], "failed": [], "warnings": []}
     if status == "success":
-        state_payload["done"] = [task_id]
+        default_state_payload["done"] = [task_id]
     elif status == "failed":
-        state_payload["failed"] = [
+        default_state_payload["failed"] = [
             {"task": task_id, "reason": final_reason, "detail": "Dev attempt 2 failed during the build step.", "attempt": 2, "cycle": 1, "step": 0, "rc": final_rc}
         ]
-    _write(run_dir / "STATE.json", json.dumps(state_payload, ensure_ascii=False, indent=2) + "\n")
+    _write(run_dir / "STATE.json", json.dumps(state_payload if state_payload is not None else default_state_payload, ensure_ascii=False, indent=2) + "\n")
+    task_count = len(backlog_tasks_payload)
 
     cycle = 1
     step = 0
@@ -200,7 +209,7 @@ def _write_run_bundle(
         ]
     )
     metrics_entries.append(
-        {"ts": "2026-04-26T12:08:00", "seq": 11, "level": "info", "event": "cycle_end", "stage": "Dev", "cycle": cycle, "rc": 0 if status == "success" else final_rc, "done": 1 if status == "success" else 0, "total": 2, "failed": 1 if status == "failed" else 0, "duration_seconds": 480, "message": "cycle end"}
+        {"ts": "2026-04-26T12:08:00", "seq": 11, "level": "info", "event": "cycle_end", "stage": "Dev", "cycle": cycle, "rc": 0 if status == "success" else final_rc, "done": 1 if status == "success" else 0, "total": task_count, "failed": 1 if status == "failed" else 0, "duration_seconds": 480, "message": "cycle end"}
     )
     _write(run_dir / "metrics.jsonl", "\n".join(json.dumps(item, ensure_ascii=False) for item in metrics_entries) + "\n")
 
@@ -233,7 +242,7 @@ def _write_run_bundle(
                 "run_dir": str(run_dir),
                 "done": 1 if status == "success" else 0,
                 "skipped": 0,
-                "total_tasks": 2,
+                "total_tasks": task_count,
                 "failed_count": 1 if status == "failed" else 0,
                 "duration_seconds": 480,
                 "status": status if status in {"success", "failed", "stopped"} else "running",
@@ -245,7 +254,7 @@ def _write_run_bundle(
         )
         + "\n",
     )
-    _write(run_dir / "cycle_summary.log", f"2026-04-26T12:08:00 cycle=1 done={1 if status == 'success' else 0}/2 failed={1 if status == 'failed' else 0} dt=480.0s\n")
+    _write(run_dir / "cycle_summary.log", f"2026-04-26T12:08:00 cycle=1 done={1 if status == 'success' else 0}/{task_count} failed={1 if status == 'failed' else 0} dt=480.0s\n")
     if stop_file:
         _write(run_dir / "STOP", "")
 
@@ -2188,6 +2197,124 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("build_failed", failed["backlog"]["items"][0]["failure_reason"])
         self.assertEqual("agent_runner/web.py, web_console/app.js, tests/test_web_console_readonly.py", failed["backlog"]["items"][0]["file_scope"])
         self.assertEqual(["T-020"], failed["backlog"]["items"][1]["depends_on"])
+
+    def test_stale_state_ids_are_filtered_to_current_backlog_generation(self) -> None:
+        stale_repo = self._tmp / "stale-repo"
+        stale_repo.mkdir(parents=True, exist_ok=True)
+        stale_config_path = stale_repo / "config" / "agentcli.json"
+        _write_config(stale_config_path, stale_repo)
+
+        run_dir = stale_repo / ".AgentCLI" / "agent_runs" / "20260426-150000"
+        _write_run_bundle(
+            run_dir,
+            status="failed",
+            final_rc=3,
+            final_reason="build_failed",
+            branch="main",
+            backlog_tasks=[
+                {
+                    "id": "T-020",
+                    "title": "Current backlog task",
+                    "prompt": "Read-only web console snapshot.",
+                    "files": ["agent_runner/web.py", "web_console/app.js"],
+                    "done_when": "Snapshot is stable.",
+                    "skills": ["observability"],
+                    "skills_rationale": "Surface the lifecycle contract in the browser.",
+                    "depends_on": [],
+                    "status": "failed",
+                }
+            ],
+            state_payload={
+                "done": ["T-OLD-DONE"],
+                "failed": [
+                    {
+                        "task": "T-020",
+                        "reason": "build_failed",
+                        "detail": "Current backlog task failed during the build step.",
+                        "attempt": 2,
+                        "cycle": 1,
+                        "step": 0,
+                        "rc": 3,
+                    },
+                    {
+                        "task": "T-OLD-FAIL",
+                        "reason": "stale_failure",
+                        "detail": "Stale failure from a previous backlog generation.",
+                        "attempt": 1,
+                        "cycle": 0,
+                        "step": 0,
+                        "rc": 1,
+                    },
+                ],
+                "warnings": [
+                    {
+                        "task": "T-OLD-WARN",
+                        "reason": "stale_warning",
+                        "detail": "Stale warning from a previous backlog generation.",
+                        "attempt": 1,
+                        "cycle": 0,
+                        "step": 0,
+                    }
+                ],
+            },
+        )
+
+        from agent_runner import web as web_module
+        from agent_runner.remote.controller import RunnerController
+        from agent_runner.web import create_app
+        from fastapi.testclient import TestClient
+
+        controller = RunnerController(
+            repo=stale_repo,
+            base_args=argparse.Namespace(config_path=stale_config_path.as_posix(), run_dir=run_dir.as_posix()),
+        )
+        controller_status = controller.status()
+        self.assertEqual({"done": 0, "failed": 1, "warnings": 0}, controller_status["state_counts"])
+        self.assertEqual(0, controller_status["done"])
+        self.assertEqual(1, controller_status["failed"])
+        self.assertEqual(0, controller_status["warnings"])
+
+        with patch.object(web_module, "_build_runner_controller", return_value=FakeRunnerController(controller_status)):
+            client = TestClient(create_app(stale_repo, web_dir=WEB_CONSOLE, config_path=stale_config_path.as_posix()))
+            payload = client.get("/api/status").json()
+
+        self.assertEqual({"done": 0, "failed": 1, "warnings": 0}, payload["runner_control"]["status"]["state_counts"])
+        self.assertEqual(0, payload["runner_control"]["status"]["done"])
+        self.assertEqual(1, payload["runner_control"]["status"]["failed"])
+        self.assertEqual(0, payload["runner_control"]["status"]["warnings"])
+        self.assertEqual(1, payload["progress"]["tasks_total"])
+        self.assertEqual(0, payload["progress"]["tasks_done"])
+        self.assertEqual(1, payload["progress"]["tasks_failed"])
+        self.assertEqual({"done": 0, "failed": 1, "warnings": 0}, payload["progress"]["state_counts"])
+        self.assertEqual(1, payload["history"]["items"][0]["taskCounts"]["total"])
+        self.assertEqual(0, payload["history"]["items"][0]["taskCounts"]["done"])
+        self.assertEqual(1, payload["history"]["items"][0]["taskCounts"]["failed"])
+        self.assertEqual({"done": 0, "failed": 1, "warnings": 0}, payload["history"]["items"][0]["state_counts"])
+        self.assertEqual(1, payload["history"]["summary"]["tasksTotal"])
+        self.assertEqual(0, payload["history"]["summary"]["tasksDone"])
+        self.assertEqual(1, payload["history"]["summary"]["tasksFailed"])
+
+        browser_payload = json.loads(json.dumps(payload))
+        browser_payload["history"]["items"][0]["tasksDone"] = 19
+        browser_payload["history"]["items"][0]["tasksFailed"] = 21
+        browser_payload["history"]["items"][0]["taskCounts"]["done"] = 19
+        browser_payload["history"]["items"][0]["taskCounts"]["failed"] = 21
+        browser_payload["history"]["summary"]["tasksDone"] = 19
+        browser_payload["history"]["summary"]["tasksFailed"] = 21
+        adapted = _run_adapter_harness([{"kind": "snapshot", "data": browser_payload}])[0]
+
+        adapted_history_item = adapted["history"][0]
+        self.assertEqual(0, adapted_history_item["tasksDone"])
+        self.assertEqual(1, adapted_history_item["tasksFailed"])
+        self.assertEqual({"done": 0, "failed": 1, "warnings": 0}, adapted_history_item["stateCounts"])
+        self.assertEqual(1, adapted_history_item["tasksTotal"])
+        self.assertEqual(1, adapted_history_item["taskCounts"]["total"])
+        self.assertEqual(0, adapted["historySummary"]["tasksDone"])
+        self.assertEqual(1, adapted["historySummary"]["tasksFailed"])
+        self.assertEqual(1, adapted["historySummary"]["tasksTotal"])
+        self.assertEqual(0, adapted["runnerControl"]["status"]["done"])
+        self.assertEqual(1, adapted["runnerControl"]["status"]["failed"])
+        self.assertEqual(0, adapted["runnerControl"]["status"]["warnings"])
 
     def test_api_status_surfaces_runner_control_controller_errors(self) -> None:
         from agent_runner import web as web_module

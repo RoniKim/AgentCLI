@@ -3400,24 +3400,33 @@
   function normalizeHistoryItem(run) {
     const raw = toObject(run);
     const taskCounts = toObject(raw.taskCounts || raw.task_counts);
+    const stateCounts = toObject(raw.stateCounts || raw.state_counts);
     const runSummary = toObject(raw.runSummary || raw.run_summary);
     const lastRunSummary = toObject(raw.lastRunSummary || raw.last_run_summary);
     const runCycles = toArray(runSummary.cycles);
+    const doneCount = toNumber(stateCounts.done ?? raw.tasksDone ?? taskCounts.done ?? lastRunSummary.done ?? 0, 0);
+    const failedCount = toNumber(stateCounts.failed ?? raw.tasksFailed ?? taskCounts.failed ?? lastRunSummary.failed_count ?? 0, 0);
+    const warningCount = toNumber(stateCounts.warnings ?? raw.warnings ?? raw.warningCount ?? raw.warning_count ?? 0, 0);
     return {
       id: toText(raw.id, 'run'),
       startedAt: toNumber(raw.startedAt || raw.started_at || 0, 0),
       endedAt: toNumber(raw.endedAt || raw.ended_at || 0, 0),
       status: toText(raw.status, 'idle'),
-      tasksDone: toNumber(raw.tasksDone ?? taskCounts.done ?? lastRunSummary.done ?? 0, 0),
+      tasksDone: doneCount,
       tasksTotal: toNumber(raw.tasksTotal ?? taskCounts.total ?? lastRunSummary.total_tasks ?? 0, 0),
-      tasksFailed: toNumber(raw.tasksFailed ?? taskCounts.failed ?? lastRunSummary.failed_count ?? 0, 0),
+      tasksFailed: failedCount,
       tasksSkipped: toNumber(raw.tasksSkipped ?? taskCounts.skipped ?? lastRunSummary.skipped ?? 0, 0),
       taskCounts: {
-        done: toNumber(taskCounts.done ?? raw.tasksDone ?? lastRunSummary.done ?? 0, 0),
-        failed: toNumber(taskCounts.failed ?? raw.tasksFailed ?? lastRunSummary.failed_count ?? 0, 0),
+        done: doneCount,
+        failed: failedCount,
         skipped: toNumber(taskCounts.skipped ?? raw.tasksSkipped ?? lastRunSummary.skipped ?? 0, 0),
         total: toNumber(taskCounts.total ?? raw.tasksTotal ?? lastRunSummary.total_tasks ?? 0, 0),
         cycles: toNumber(taskCounts.cycles ?? raw.cycleCount ?? runCycles.length, runCycles.length),
+      },
+      stateCounts: {
+        done: doneCount,
+        failed: failedCount,
+        warnings: warningCount,
       },
       branch: toText(raw.branch || runSummary.branch || lastRunSummary.branch, 'HEAD'),
       durationSec: toNumber(raw.durationSec || raw.duration_seconds || lastRunSummary.duration_seconds || lastRunSummary.durationSec || 0, 0),
@@ -4004,17 +4013,22 @@
   function adaptHistory(history, context = {}) {
     const raw = toObject(history);
     const items = toArray(raw.items).map(normalizeHistoryItem);
+    const summary = toObject(raw.summary);
+    const tasksDone = items.reduce((sum, run) => sum + run.tasksDone, 0);
+    const tasksTotal = items.reduce((sum, run) => sum + run.tasksTotal, 0);
+    const tasksFailed = items.reduce((sum, run) => sum + run.tasksFailed, 0);
+    const tasksSkipped = items.reduce((sum, run) => sum + run.tasksSkipped, 0);
     return {
       items,
       summary: {
-        runs: toNumber(toObject(raw.summary).runs || items.length, items.length),
-        successes: toNumber(toObject(raw.summary).successes || items.filter((run) => run.status === 'success').length, 0),
-        failures: toNumber(toObject(raw.summary).failures || items.filter((run) => run.status === 'failed').length, 0),
-        stopped: toNumber(toObject(raw.summary).stopped || items.filter((run) => run.status === 'stopped').length, 0),
-        tasksDone: toNumber(toObject(raw.summary).tasksDone || items.reduce((sum, run) => sum + run.tasksDone, 0), 0),
-        tasksTotal: toNumber(toObject(raw.summary).tasksTotal || items.reduce((sum, run) => sum + run.tasksTotal, 0), 0),
-        tasksFailed: toNumber(toObject(raw.summary).tasksFailed || items.reduce((sum, run) => sum + run.tasksFailed, 0), 0),
-        tasksSkipped: toNumber(toObject(raw.summary).tasksSkipped || items.reduce((sum, run) => sum + run.tasksSkipped, 0), 0),
+        runs: toNumber(summary.runs || items.length, items.length),
+        successes: toNumber(summary.successes || items.filter((run) => run.status === 'success').length, 0),
+        failures: toNumber(summary.failures || items.filter((run) => run.status === 'failed').length, 0),
+        stopped: toNumber(summary.stopped || items.filter((run) => run.status === 'stopped').length, 0),
+        tasksDone,
+        tasksTotal,
+        tasksFailed,
+        tasksSkipped,
       },
       state: buildSectionState('history', items.length ? 'ready' : 'empty', items.length ? '' : fallbackSectionMessage('history')),
     };
@@ -5530,13 +5544,14 @@
   function historyTaskCounts(run) {
     const raw = toObject(run);
     const counts = toObject(raw.taskCounts);
+    const stateCounts = toObject(raw.stateCounts || raw.state_counts);
     const runSummary = toObject(raw.runSummary);
     const lastRunSummary = toObject(raw.lastRunSummary);
     const runCycles = toArray(runSummary.cycles);
     return {
-      done: toNumber(counts.done ?? raw.tasksDone ?? lastRunSummary.done ?? 0, 0),
+      done: toNumber(stateCounts.done ?? counts.done ?? raw.tasksDone ?? lastRunSummary.done ?? 0, 0),
       total: toNumber(counts.total ?? raw.tasksTotal ?? lastRunSummary.total_tasks ?? 0, 0),
-      failed: toNumber(counts.failed ?? raw.tasksFailed ?? lastRunSummary.failed_count ?? 0, 0),
+      failed: toNumber(stateCounts.failed ?? counts.failed ?? raw.tasksFailed ?? lastRunSummary.failed_count ?? 0, 0),
       skipped: toNumber(counts.skipped ?? raw.tasksSkipped ?? lastRunSummary.skipped ?? 0, 0),
       cycles: toNumber(counts.cycles ?? raw.cycleCount ?? runCycles.length, runCycles.length),
     };

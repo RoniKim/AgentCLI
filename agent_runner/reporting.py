@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from .docs import read_text_robust
 from .gitops import git_head, git_porcelain, list_untracked
-from .state import TaskItem, load_backlog_json, parse_backlog_md, load_state
+from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, parse_backlog_md, load_state
 from .todo import read_current_todo
 from .utils import now_iso
 
@@ -86,12 +86,13 @@ def collect_shutdown_context(repo: Path, run_dir: Path) -> dict[str, Any]:
         state = {"done": [], "failed": []}
 
     tasks = _load_backlog_tasks(run_dir)
-    task_ids = [t.id for t in tasks]
+    state_counts = count_state_task_ids(state, load_backlog_task_ids(run_dir / "BACKLOG.json"))
     done_set = set(state.get("done", []) or [])
 
     ctx["state"] = state
     ctx["tasks_total"] = len(tasks)
-    ctx["tasks_done"] = len([tid for tid in task_ids if tid in done_set])
+    ctx["tasks_done"] = state_counts["done"]
+    ctx["state_counts"] = state_counts
 
     backlog_lines: list[str] = []
     for t in tasks[:200]:
@@ -300,11 +301,18 @@ def build_local_shutdown_report(
     lines.append("## State")
     lines.append("")
     state = ctx.get("state") or {}
+    state_counts = ctx.get("state_counts") or {}
     try:
         failed = state.get("failed") or []
         warnings = state.get("warnings") or []
-        lines.append(f"- failed_count: {len(failed)}")
-        lines.append(f"- warnings_count: {len(warnings)}")
+        failed_count = state_counts.get("failed") if isinstance(state_counts, dict) else None
+        if failed_count is None:
+            failed_count = len(failed)
+        warnings_count = state_counts.get("warnings") if isinstance(state_counts, dict) else None
+        if warnings_count is None:
+            warnings_count = len(warnings)
+        lines.append(f"- failed_count: {int(failed_count)}")
+        lines.append(f"- warnings_count: {int(warnings_count)}")
         if failed:
             lines.append("")
             lines.append("### Failed")

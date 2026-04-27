@@ -216,6 +216,76 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
         safe_write_text(path, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
 
 
+def _task_id_text(value: Any) -> str:
+    if isinstance(value, TaskItem):
+        return str(value.id or "").strip()
+    if isinstance(value, dict):
+        for key in ("task", "task_id", "id", "key"):
+            text = str(value.get(key) or "").strip()
+            if text:
+                return text
+        return ""
+    return str(value or "").strip()
+
+
+def _task_id_set(items: Any) -> set[str]:
+    if items is None:
+        return set()
+    if isinstance(items, (str, bytes)):
+        text = str(items).strip()
+        return {text} if text else set()
+    if isinstance(items, dict) or isinstance(items, TaskItem):
+        text = _task_id_text(items)
+        return {text} if text else set()
+    try:
+        iterator = iter(items)
+    except TypeError:
+        text = _task_id_text(items)
+        return {text} if text else set()
+
+    out: set[str] = set()
+    for item in iterator:
+        text = _task_id_text(item)
+        if text:
+            out.add(text)
+    return out
+
+
+def load_backlog_task_ids(path: Path) -> set[str]:
+    """Return the sanitized task IDs from the current BACKLOG.json generation."""
+    if not path.exists():
+        return set()
+    try:
+        return _task_id_set(load_backlog_json(path))
+    except Exception:
+        return set()
+
+
+def count_state_task_ids(state: dict[str, Any], backlog_task_ids: Any) -> dict[str, int]:
+    """Count state task IDs that belong to the current backlog generation only."""
+    allowed_ids = _task_id_set(backlog_task_ids)
+    if not allowed_ids:
+        return {"done": 0, "failed": 0, "warnings": 0}
+
+    def _count(entries: Any) -> int:
+        if not isinstance(entries, list):
+            return 0
+        seen: set[str] = set()
+        for entry in entries:
+            task_id = _task_id_text(entry)
+            if not task_id or task_id not in allowed_ids or task_id in seen:
+                continue
+            seen.add(task_id)
+        return len(seen)
+
+    state = state if isinstance(state, dict) else {}
+    return {
+        "done": _count(state.get("done")),
+        "failed": _count(state.get("failed")),
+        "warnings": _count(state.get("warnings")),
+    }
+
+
 def mark_backlog_done(backlog_md: Path, task_id: str) -> None:
     if not backlog_md.exists():
         return

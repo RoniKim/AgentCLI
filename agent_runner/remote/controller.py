@@ -18,6 +18,7 @@ from ..process_guard import register_pid, terminate_all_children, terminate_proc
 from ..run_dir import find_latest_run_dir, make_run_dir
 from ..runner_entry import run as run_runner
 from ..stop_progress import clear_stop_progress, read_stop_progress, write_stop_progress
+from ..state import count_state_task_ids, load_backlog_task_ids, load_state
 from ..utils import STOP_REASON_STOP_FILE, detect_stop_reason, rotate_log_file
 
 
@@ -484,17 +485,9 @@ class RunnerController:
         return " ".join(fields).strip()
 
     def _state_counts(self, run_dir: Path) -> dict[str, int]:
-        payload = self._load_json(run_dir / "STATE.json", {})
-        if not isinstance(payload, dict):
-            payload = {}
-        done = payload.get("done") if isinstance(payload.get("done"), list) else []
-        failed = payload.get("failed") if isinstance(payload.get("failed"), list) else []
-        warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
-        return {
-            "done": len(done),
-            "failed": len(failed),
-            "warnings": len(warnings),
-        }
+        state = load_state(run_dir / "STATE.json")
+        backlog_task_ids = load_backlog_task_ids(run_dir / "BACKLOG.json")
+        return count_state_task_ids(state, backlog_task_ids)
 
     def _stop_reason(self, run_dir: Path) -> str:
         stop_paths = [run_dir / self._stop_file_name(), run_dir / "STOP"]
@@ -526,6 +519,7 @@ class RunnerController:
             "done": counts["done"],
             "failed": counts["failed"],
             "warnings": counts["warnings"],
+            "state_counts": dict(counts),
             "reason": self._stop_reason(run_dir),
             "last_cycle": cycle_tail,
         }
@@ -668,6 +662,7 @@ class RunnerController:
             "done": 0,
             "failed": 0,
             "warnings": 0,
+            "state_counts": {"done": 0, "failed": 0, "warnings": 0},
             "reason": "",
             "last_event": "",
             "stop_progress": {},
@@ -681,6 +676,7 @@ class RunnerController:
         status["done"] = counts["done"]
         status["failed"] = counts["failed"]
         status["warnings"] = counts["warnings"]
+        status["state_counts"] = dict(counts)
         status["reason"] = self._stop_reason(run_dir)
         status["last_event"] = self._latest_event(run_dir)
         status["stop_progress"] = read_stop_progress(run_dir)

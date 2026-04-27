@@ -92,10 +92,12 @@ from ..pipeline.shared_runtime import (
     write_pm_output_artifacts,
     write_run_summary_file,
 )
+from ..state import count_state_task_ids
 from ..run_dir import make_run_dir, find_latest_run_dir
 from ..schemas import PMOutputV2, pm_output_json_schema
 from ..state import (
     load_backlog_json,
+    load_backlog_task_ids,
     parse_backlog_md,
     load_state,
     save_state,
@@ -1498,6 +1500,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         task_results: list[dict] = []  # Per-task results for cycle-end progress report
         token_tracker = TokenTracker()  # Per-cycle token usage accumulator
         task_ids = {t.id for t in tasks}
+        class _ScopedDoneSet(set[str]):
+            def __len__(self) -> int:
+                return len(set.intersection(self, task_ids))
+
+        done_set = _ScopedDoneSet(done_set)
         before_done = len(done_set.intersection(task_ids))
 
         pm_refresh = await maybe_refresh_tasks_after_pm(
@@ -2280,21 +2287,35 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
         ran_tasks = (len(done_set) > before_done)
         cycle_dt = time.time() - cycle_t0
-        # Count unique failed tasks (not raw entries - one task can have multiple failure records)
-        failed_count = len({f.get("task") for f in state.get("failed", []) if f.get("task")})
-        done_count = len(done_set.intersection(task_ids))
+        state_counts = count_state_task_ids(state, load_backlog_task_ids(run_dir / "BACKLOG.json"))
+        done_count = state_counts["done"]
+        failed_count = state_counts["failed"]
+        warnings_count = state_counts["warnings"]
         total_count = len(task_ids)
         skipped_count = len(skipped_set.intersection(task_ids))
         summary = {
             "ts": now_iso(), "cycle": cycle_idx, "run_dir": str(run_dir),
             "done": done_count, "skipped": skipped_count,
             "total_tasks": total_count, "failed_count": failed_count,
+            "warnings_count": warnings_count,
             "duration_seconds": cycle_dt, "build_enabled": build_enabled,
             "run_tests": run_tests, "policy_scan_enabled": policy_scan_enabled,
         }
         last_run_summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")
-        append_cycle_summary(f"{now_iso()} cycle={cycle_idx} done={done_count}/{total_count} failed={failed_count} dt={cycle_dt:.1f}s")
-        metrics.event("cycle_end", cycle=cycle_idx, rc=0, done=done_count, total=total_count, failed=failed_count, duration_seconds=cycle_dt, tokens=token_tracker.summary())
+        append_cycle_summary(
+            f"{now_iso()} cycle={cycle_idx} done={done_count}/{total_count} failed={failed_count} warnings={warnings_count} dt={cycle_dt:.1f}s"
+        )
+        metrics.event(
+            "cycle_end",
+            cycle=cycle_idx,
+            rc=0,
+            done=done_count,
+            total=total_count,
+            failed=failed_count,
+            warnings=warnings_count,
+            duration_seconds=cycle_dt,
+            tokens=token_tracker.summary(),
+        )
         print_cycle_report(cycle_idx, cycle_dt, task_results, done_count, total_count, failed_count, skipped_count, token_tracker=token_tracker)
 
         done_delta = done_count - before_done
