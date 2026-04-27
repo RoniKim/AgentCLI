@@ -35,7 +35,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -360,6 +360,44 @@ def unregister_pid_if_exited(pid: int) -> bool:
         return False
     unregister_pid(pid)
     return True
+
+
+def tracked_pids(*, alive_only: bool = True) -> list[int]:
+    """Return tracked child PIDs, optionally pruning exited ones."""
+    with _lock:
+        pids = sorted(_tracked_pids)
+    if not alive_only:
+        return pids
+    live_pids: list[int] = []
+    for pid in pids:
+        if unregister_pid_if_exited(pid):
+            live_pids.append(pid)
+    return live_pids
+
+
+def tracked_pid_details(*, alive_only: bool = True) -> list[dict[str, Any]]:
+    """Return tracked child PID records with their session file paths."""
+    with _lock:
+        pids = sorted(_tracked_pids)
+    records: list[dict[str, Any]] = []
+    for pid in pids:
+        alive = _pid_alive(pid)
+        if alive_only and not alive:
+            if unregister_pid_if_exited(pid):
+                continue
+        session_file = _session_file(pid)
+        record = {
+            "pid": pid,
+            "alive": alive,
+            "session_file": session_file.as_posix(),
+            "session_exists": False,
+        }
+        try:
+            record["session_exists"] = bool(session_file.exists())
+        except Exception:
+            pass
+        records.append(record)
+    return records
 
 
 def _kill_pid(pid: int) -> bool:

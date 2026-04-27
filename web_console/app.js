@@ -203,7 +203,20 @@
         backend: 'Backend',
         configPath: 'Config path',
         runStatus: 'Run status',
+        runnerAlive: 'Runner alive',
         stopProgress: 'Stop progress',
+        currentStopPhase: 'Current phase',
+        phaseHistory: 'Phase history',
+        trackedChildPids: 'Tracked child PIDs',
+        remainingTrackedChildPids: 'Remaining tracked PIDs',
+        stopFilePaths: 'Stop file paths',
+        lastArtifactSignal: 'Last artifact write',
+        lastLogSignal: 'Last log write',
+        timeoutGuidance: 'Timeout guidance',
+        manualCleanupHints: 'Manual cleanup hints',
+        lockedFilePaths: 'Locked file paths',
+        stopTimedOut: 'Stop timed out',
+        retryStop: 'Retry stop',
         lastAction: 'Last action',
         lastMessage: 'Last message',
         lastError: 'Last error',
@@ -2910,6 +2923,44 @@
     return summaries[action] || t('runner.confirmAction');
   }
 
+  function stopProgressPhaseTrail(stopProgress) {
+    return toArray(stopProgress?.history)
+      .map((entry) => toText(entry?.phaseLabel || entry?.phase, '').trim())
+      .filter(Boolean)
+      .join(' → ');
+  }
+
+  function stopProgressProcessSummary(records) {
+    return toArray(records)
+      .map((record) => {
+        const pid = toText(record?.pid, '');
+        if (!pid) {
+          return '';
+        }
+        const sessionFile = redactionAwareText(record?.sessionFile || '', '');
+        return sessionFile ? `PID ${pid} (${sessionFile})` : `PID ${pid}`;
+      })
+      .filter(Boolean)
+      .join(' · ');
+  }
+
+  function stopProgressSignalSummary(signal) {
+    const item = toObject(signal);
+    const path = redactionAwareText(item.path || '', '');
+    const updatedAt = toText(item.updatedAt, '');
+    if (!path && !updatedAt) {
+      return '';
+    }
+    return [path, updatedAt ? `(${updatedAt})` : ''].filter(Boolean).join(' ');
+  }
+
+  function stopProgressPathSummary(paths) {
+    return Object.entries(toObject(paths))
+      .map(([key, value]) => `${key}: ${redactionAwareText(value, '')}`)
+      .filter(Boolean)
+      .join(' · ');
+  }
+
   function runnerControlStateInfo(control = state.runnerControl) {
     const current = toObject(control);
     const status = toObject(current.status);
@@ -2920,6 +2971,9 @@
     const lastErrorText = redactionAwareText(current.lastError, '');
     const stopProgress = normalizeStopProgress(status.stopProgress);
     const stopProgressMessageText = redactionAwareText(stopProgress.message, '');
+    const stopProgressGuidanceText = redactionAwareText(stopProgress.timeoutGuidance?.summary, '');
+    const stopProgressPhaseText = redactionAwareText(stopProgress.currentPhase?.message || stopProgress.message, '');
+    const stopProgressPhaseLabelText = redactionAwareText(stopProgress.currentPhase?.phaseLabel || stopProgress.phase, '');
     const busyAction = runnerControlBusyAction();
     if (current.busy || state.stopSubmitting) {
       const action = state.stopSubmitting ? (busyAction || current.lastAction || state.stopAction || 'start') : '';
@@ -2958,13 +3012,31 @@
         copy: currentMessageText || t('runner.controlsDisabled'),
       };
     }
+    if (stopProgress.phase === 'timeout') {
+      return {
+        chipTone: 'warn',
+        bannerTone: 'warn',
+        label: t('runner.stopTimedOut'),
+        title: t('runner.stopTimedOut'),
+        copy: stopProgressGuidanceText || stopProgressMessageText || stopProgressPhaseText || t('runner.retryStop'),
+      };
+    }
     if (stopProgress.active) {
       return {
         chipTone: 'loading',
         bannerTone: 'info',
         label: t('runner.stopping'),
         title: t('runner.stopProgress'),
-        copy: stopProgressMessageText || stopProgress.phase,
+        copy: stopProgressMessageText || stopProgressPhaseText || stopProgressPhaseLabelText || t('runner.working'),
+      };
+    }
+    if (stopProgress.phase === 'finalized') {
+      return {
+        chipTone: 'success',
+        bannerTone: 'success',
+        label: t('runner.stopped'),
+        title: t('runner.actionComplete'),
+        copy: stopProgressMessageText || stopProgressPhaseText || t('runner.stopped'),
       };
     }
     if (current.lastMessage) {
@@ -3056,11 +3128,96 @@
       },
     ];
     if (stopProgress.phase) {
+      const stopPhaseValue = stopProgress.currentPhase?.phaseLabel || stopProgress.phase || t('common.unknown');
+      const historyTrail = stopProgressPhaseTrail(stopProgress);
+      const stopFilePaths = stopProgressPathSummary(stopProgress.stopFilePaths);
+      const timeoutActive = stopProgress.phase === 'timeout';
+      const trackedPidsLabel = timeoutActive ? t('runner.remainingTrackedChildPids') : t('runner.trackedChildPids');
+      const trackedChildPids = toArray(stopProgress.trackedChildPids).map((pid) => toText(pid, '')).filter(Boolean).join(', ');
+      const trackedChildProcesses = stopProgressProcessSummary(stopProgress.trackedChildProcesses);
+      const currentSignalParts = [stopProgressSignalSummary(stopProgress.lastArtifactSignal), stopProgressSignalSummary(stopProgress.lastLogSignal)].filter(Boolean);
+      const timeoutSummary = stopProgress.timeoutGuidance?.summary || '';
+      const runnerAliveValue = stopProgress.runnerAlive ? t('runner.running') : t('runner.stopped');
       rows.push({
-        label: t('runner.stopProgress'),
-        value: `${stopProgress.phase} ${stopProgress.elapsedSeconds}s`,
-        className: stopProgress.active ? 'runner-control__value--warn' : 'runner-control__value--muted',
+        label: t('runner.currentStopPhase'),
+        value: `${stopPhaseValue}${stopProgress.elapsedSeconds ? ` ${stopProgress.elapsedSeconds}s` : ''}`,
+        className: stopProgress.phase === 'timeout'
+          ? 'runner-control__value--warn'
+          : stopProgress.active
+            ? 'runner-control__value--accent'
+            : 'runner-control__value--muted',
       });
+      if (historyTrail) {
+        rows.push({
+          label: t('runner.phaseHistory'),
+          value: historyTrail,
+          className: stopProgress.phase === 'timeout'
+            ? 'runner-control__value--warn'
+            : stopProgress.active
+              ? 'runner-control__value--accent'
+              : 'runner-control__value--muted',
+        });
+      }
+      rows.push({
+        label: t('runner.runnerAlive'),
+        value: runnerAliveValue,
+        className: stopProgress.runnerAlive
+          ? 'runner-control__value--accent'
+          : timeoutActive
+            ? 'runner-control__value--warn'
+            : 'runner-control__value--muted',
+      });
+      if (trackedChildPids || trackedChildProcesses) {
+        rows.push({
+          label: trackedPidsLabel,
+          value: trackedChildProcesses || trackedChildPids,
+          className: 'runner-control__value--warn',
+        });
+      }
+      if (stopFilePaths) {
+        rows.push({
+          label: t('runner.stopFilePaths'),
+          value: stopFilePaths,
+          className: 'runner-control__value--muted',
+        });
+      }
+      if (currentSignalParts.length) {
+        if (stopProgress.lastArtifactSignal) {
+          rows.push({
+            label: t('runner.lastArtifactSignal'),
+            value: stopProgressSignalSummary(stopProgress.lastArtifactSignal),
+            className: 'runner-control__value--muted',
+          });
+        }
+        if (stopProgress.lastLogSignal) {
+          rows.push({
+            label: t('runner.lastLogSignal'),
+            value: stopProgressSignalSummary(stopProgress.lastLogSignal),
+            className: 'runner-control__value--muted',
+          });
+        }
+      }
+      if (timeoutSummary) {
+        rows.push({
+          label: t('runner.timeoutGuidance'),
+          value: timeoutSummary,
+          className: stopProgress.timeoutGuidance?.canRetry ? 'runner-control__value--warn' : 'runner-control__value--muted',
+        });
+      }
+      if (stopProgress.manualCleanupHints?.length) {
+        rows.push({
+          label: t('runner.manualCleanupHints'),
+          value: stopProgress.manualCleanupHints.join(' · '),
+          className: 'runner-control__value--warn',
+        });
+      }
+      if (stopProgress.lockedFilePaths?.length) {
+        rows.push({
+          label: t('runner.lockedFilePaths'),
+          value: stopProgress.lockedFilePaths.join(' · '),
+          className: 'runner-control__value--warn',
+        });
+      }
     }
     rows.push(
       {
@@ -3080,6 +3237,161 @@
       },
     );
     return rows;
+  }
+
+  function renderStopProgressSection(rawStopProgress) {
+    const stopProgress = normalizeStopProgress(rawStopProgress);
+    const currentPhase = toObject(stopProgress.currentPhase);
+    const history = toArray(stopProgress.history);
+    const phaseHistoryHTML = history.length
+      ? history
+        .map((entry, index) => {
+          const phaseName = toText(entry.phaseLabel || entry.phase, t('common.unknown'));
+          const phaseMessage = redactionAwareText(entry.message, '');
+          const metaBits = [];
+          if (entry.elapsedSeconds != null) {
+            metaBits.push(`${entry.elapsedSeconds}s`);
+          }
+          if (entry.updatedAt) {
+            metaBits.push(entry.updatedAt);
+          }
+          const meta = metaBits.join(' · ');
+          return `
+            <div class="stop-progress__history-item ${index === history.length - 1 ? 'stop-progress__history-item--current' : ''}">
+              <div class="stop-progress__history-title">${escapeHTML(phaseName)}</div>
+              ${meta ? `<div class="stop-progress__history-meta">${escapeHTML(meta)}</div>` : ''}
+              ${phaseMessage ? `<div class="stop-progress__history-message">${escapeHTML(phaseMessage)}</div>` : ''}
+            </div>
+          `;
+        })
+        .join('')
+      : `<div class="stop-progress__empty">${escapeHTML(t('common.none'))}</div>`;
+    const trackedChildProcesses = toArray(stopProgress.trackedChildProcesses);
+    const trackedChildPids = toArray(stopProgress.trackedChildPids).map((pid) => toText(pid, '').trim()).filter(Boolean);
+    const trackedChipValues = trackedChildProcesses.length
+      ? trackedChildProcesses.map((record) => `PID ${record.pid}${record.sessionFile ? ` (${record.sessionFile})` : ''}`)
+      : trackedChildPids.map((pid) => `PID ${pid}`);
+    const trackedPidsHTML = trackedChipValues.length
+      ? trackedChipValues.map((value) => `<span class="chip chip--warn">${escapeHTML(value)}</span>`).join('')
+      : `<span class="stop-progress__empty">${escapeHTML(t('common.none'))}</span>`;
+    const stopFilePaths = stopProgress.stopFilePaths || {};
+    const stopFilePathHTML = Object.entries(stopFilePaths).length
+      ? Object.entries(stopFilePaths)
+        .map(([key, value]) => `
+          <div class="stop-progress__kv">
+            <div class="stop-progress__kv-key">${escapeHTML(key.replace(/_/g, ' '))}</div>
+            <div class="stop-progress__kv-value">${escapeHTML(redactionAwareText(value, ''))}</div>
+          </div>
+        `)
+        .join('')
+      : `<div class="stop-progress__empty">${escapeHTML(t('common.none'))}</div>`;
+    const artifactSignal = stopProgressSignalSummary(stopProgress.lastArtifactSignal);
+    const logSignal = stopProgressSignalSummary(stopProgress.lastLogSignal);
+    const signalHTML = [artifactSignal, logSignal]
+      .filter(Boolean)
+      .map((value) => `<div class="stop-progress__signal">${escapeHTML(value)}</div>`)
+      .join('');
+    const guidance = toObject(stopProgress.timeoutGuidance);
+    const guidanceStepsHTML = toArray(guidance.steps).length
+      ? `
+        <div class="compact-list stop-progress__steps">
+          ${toArray(guidance.steps)
+            .map((step) => `
+              <div class="compact-list__item">
+                <span class="compact-list__bullet"></span>
+                <div class="compact-list__body">${escapeHTML(redactionAwareText(step, ''))}</div>
+              </div>
+            `)
+            .join('')}
+        </div>
+      `
+      : '';
+    const guidanceHintsHTML = (toArray(stopProgress.manualCleanupHints).length || toArray(stopProgress.lockedFilePaths).length)
+      ? `
+        <div class="stop-progress__hint-grid">
+          ${toArray(stopProgress.manualCleanupHints).length ? `
+            <div class="stop-progress__hint">
+              <div class="stop-progress__section-title">${escapeHTML(t('runner.manualCleanupHints'))}</div>
+              <div class="stop-progress__hint-text">${escapeHTML(redactionAwareText(toArray(stopProgress.manualCleanupHints).join(' · '), ''))}</div>
+            </div>
+          ` : ''}
+          ${toArray(stopProgress.lockedFilePaths).length ? `
+            <div class="stop-progress__hint">
+              <div class="stop-progress__section-title">${escapeHTML(t('runner.lockedFilePaths'))}</div>
+              <div class="stop-progress__hint-text">${escapeHTML(redactionAwareText(toArray(stopProgress.lockedFilePaths).join(' · '), ''))}</div>
+            </div>
+          ` : ''}
+        </div>
+      `
+      : '';
+    const currentPhaseName = toText(currentPhase.phaseLabel || stopProgress.phase, t('common.unknown'));
+    const currentPhaseMessage = redactionAwareText(currentPhase.message || stopProgress.message, '');
+    const currentPhaseTrail = stopProgressPhaseTrail(stopProgress);
+    const timeoutActive = stopProgress.phase === 'timeout';
+    const finalizedState = stopProgress.phase === 'finalized';
+    const runnerAliveText = stopProgress.runnerAlive ? t('runner.running') : t('runner.stopped');
+    const trackedPidsLabel = timeoutActive ? t('runner.remainingTrackedChildPids') : t('runner.trackedChildPids');
+    return `
+      <div class="stop-progress">
+        <div class="stop-progress__head">
+          <div class="stop-progress__head-copy">
+            <div class="stop-progress__section-title">${escapeHTML(t('runner.currentStopPhase'))}</div>
+            <div class="stop-progress__headline">${escapeHTML(currentPhaseName)}</div>
+            ${currentPhaseMessage ? `<div class="stop-progress__copy">${escapeHTML(currentPhaseMessage)}</div>` : ''}
+          </div>
+          <div class="stop-progress__head-state">
+            <span class="status-chip ${timeoutActive ? 'status-chip--warn' : stopProgress.active ? 'status-chip--loading' : finalizedState ? 'status-chip--success' : 'status-chip--running'}">
+              <span class="dot" style="color: currentColor; background: currentColor;"></span>
+              ${escapeHTML(timeoutActive ? t('runner.stopTimedOut') : stopProgress.active ? t('runner.stopping') : t('runner.stopped'))}
+            </span>
+            <div class="stop-progress__elapsed">${escapeHTML(`${stopProgress.elapsedSeconds || 0}s`)}</div>
+            <div class="stop-progress__state-note">${escapeHTML(`${t('runner.runnerAlive')}: ${runnerAliveText}`)}</div>
+          </div>
+        </div>
+        ${currentPhaseTrail ? `<div class="stop-progress__trail">${escapeHTML(currentPhaseTrail)}</div>` : ''}
+        <div class="stop-progress__section">
+          <div class="stop-progress__section-title">${escapeHTML(t('runner.phaseHistory'))}</div>
+          <div class="stop-progress__history">${phaseHistoryHTML}</div>
+        </div>
+        <div class="stop-progress__grid">
+          <div class="stop-progress__section">
+            <div class="stop-progress__section-title">${escapeHTML(trackedPidsLabel)}</div>
+            <div class="runner-control__chips">${trackedPidsHTML}</div>
+          </div>
+          <div class="stop-progress__section">
+            <div class="stop-progress__section-title">${escapeHTML(t('runner.stopFilePaths'))}</div>
+            <div class="stop-progress__kv-list">${stopFilePathHTML}</div>
+          </div>
+        </div>
+        ${(artifactSignal || logSignal) ? `
+          <div class="stop-progress__grid">
+            ${artifactSignal ? `
+              <div class="stop-progress__section">
+                <div class="stop-progress__section-title">${escapeHTML(t('runner.lastArtifactSignal'))}</div>
+                <div class="stop-progress__signal">${escapeHTML(artifactSignal)}</div>
+              </div>
+            ` : ''}
+            ${logSignal ? `
+              <div class="stop-progress__section">
+                <div class="stop-progress__section-title">${escapeHTML(t('runner.lastLogSignal'))}</div>
+                <div class="stop-progress__signal">${escapeHTML(logSignal)}</div>
+              </div>
+            ` : ''}
+          </div>
+        ` : ''}
+        ${guidance.summary ? `
+          <div class="section-banner section-banner--${stopProgress.phase === 'timeout' ? 'warn' : 'info'}">
+            <span class="dot" style="background: currentColor;"></span>
+            <div>
+              <div class="section-banner__title">${escapeHTML(t('runner.timeoutGuidance'))}</div>
+              <div class="section-banner__copy">${escapeHTML(redactionAwareText(guidance.summary, ''))}</div>
+            </div>
+          </div>
+        ` : ''}
+        ${guidanceStepsHTML}
+        ${guidanceHintsHTML}
+      </div>
+    `;
   }
 
   function createRunnerControlModel(overrides = {}) {
@@ -3158,17 +3470,203 @@
     };
   }
 
-  function normalizeStopProgress(raw) {
+  function normalizeStopProgressTextList(raw) {
+    return toArray(raw)
+      .map((item) => toText(item, '').trim())
+      .filter(Boolean);
+  }
+
+  function normalizeStopProgressPathMap(raw) {
     const item = toObject(raw);
-    const phase = toText(item.phase, '');
-    const finalPhases = new Set(['finalized', 'timeout', 'failed', 'not_running']);
+    const paths = {};
+    Object.entries(item).forEach(([key, value]) => {
+      const text = toText(value, '').trim();
+      if (text) {
+        paths[String(key)] = text.replace(/\\/g, '/');
+      }
+    });
+    return paths;
+  }
+
+  function normalizeStopProgressSignal(raw, kind = '') {
+    const item = toObject(raw);
+    const path = toText(item.path || item.pathText, '').trim().replace(/\\/g, '/');
+    const paths = normalizeStopProgressTextList(item.paths).map((entry) => entry.replace(/\\/g, '/'));
+    const updatedAt = toText(item.updated_at || item.updatedAt, '');
+    const updatedAtEpoch = toMaybeNumber(item.updated_at_epoch ?? item.updatedAtEpoch);
+    const sizeBytes = toMaybeNumber(item.size_bytes ?? item.sizeBytes);
+    const signalKind = toText(item.kind, kind || '').trim() || kind || '';
+    if (!path && !paths.length && !updatedAt && updatedAtEpoch == null && sizeBytes == null && !signalKind) {
+      return null;
+    }
+    return {
+      path,
+      paths,
+      updatedAt,
+      updatedAtEpoch,
+      sizeBytes,
+      kind: signalKind,
+    };
+  }
+
+  function normalizeStopProgressGuidance(raw) {
+    const item = toObject(raw);
+    const summary = toText(item.summary || item.message || item.text, '');
+    const steps = normalizeStopProgressTextList(item.steps || item.next_steps || item.nextSteps);
+    const manualCleanupHints = normalizeStopProgressTextList(item.manual_cleanup_hints || item.manualCleanupHints);
+    const lockedFilePaths = normalizeStopProgressTextList(item.locked_file_paths || item.lockedFilePaths).map((entry) => entry.replace(/\\/g, '/'));
+    const retryable = item.recoverable ?? item.canRetry ?? item.can_retry ?? item.retryable;
+    const canRetry = retryable == null ? false : Boolean(retryable);
+    return {
+      summary,
+      message: summary,
+      steps,
+      manualCleanupHints,
+      lockedFilePaths,
+      recoverable: canRetry,
+      canRetry,
+      retryable: canRetry,
+    };
+  }
+
+  function normalizeStopProgressPhaseEntry(raw, fallbackPhase = '') {
+    const item = toObject(raw);
+    const phase = toText(item.phase, fallbackPhase);
+    const phaseLabel = toText(item.phase_label || item.phaseLabel, phase || fallbackPhase);
+    const guidance = normalizeStopProgressGuidance(item.timeout_guidance || item.timeoutGuidance);
     return {
       phase,
+      phaseLabel,
       message: toText(item.message, ''),
-      elapsedSeconds: toNumber(item.elapsed_seconds || item.elapsedSeconds, 0),
       updatedAt: toText(item.updated_at || item.updatedAt, ''),
-      active: Boolean(phase && !finalPhases.has(phase)),
+      elapsedSeconds: toNumber(item.elapsed_seconds ?? item.elapsedSeconds, 0),
+      requestedAt: toText(item.requested_at || item.requestedAt, ''),
+      runnerAlive: Boolean(item.runner_alive ?? item.runnerAlive ?? item.running),
+      running: Boolean(item.running ?? item.runnerAlive ?? item.runner_alive),
+      runnerPid: toMaybeNumber(item.runner_pid ?? item.runnerPid),
+      trackedChildPids: normalizeStopProgressTextList(item.tracked_child_pids || item.trackedChildPids).map((pid) => Number(pid)).filter((pid) => Number.isFinite(pid) && pid > 0),
+      trackedChildProcesses: toArray(item.tracked_child_processes || item.trackedChildProcesses)
+        .map((record) => normalizeStopProgressProcessRecord(record))
+        .filter(Boolean),
+      stopFilePaths: normalizeStopProgressPathMap(item.stop_file_paths || item.stopFilePaths),
+      lastArtifactSignal: normalizeStopProgressSignal(item.last_artifact_signal || item.lastArtifactSignal, 'artifact'),
+      lastLogSignal: normalizeStopProgressSignal(item.last_log_signal || item.lastLogSignal, 'log'),
+      timeoutGuidance: guidance,
+      manualCleanupHints: normalizeStopProgressTextList(item.manual_cleanup_hints || item.manualCleanupHints),
+      lockedFilePaths: normalizeStopProgressTextList(item.locked_file_paths || item.lockedFilePaths).map((entry) => entry.replace(/\\/g, '/')),
     };
+  }
+
+  function normalizeStopProgressProcessRecord(raw) {
+    const item = toObject(raw);
+    const pid = toMaybeNumber(item.pid ?? item.child_pid ?? item.childPid);
+    if (!pid) {
+      return null;
+    }
+    const sessionFile = toText(item.session_file || item.sessionFile || item.session_path || item.sessionPath, '').trim().replace(/\\/g, '/');
+    const alive = item.alive == null ? Boolean(item.running) : Boolean(item.alive);
+    const sessionExists = item.session_exists == null ? item.sessionExists : item.session_exists;
+    return {
+      pid,
+      childPid: pid,
+      alive,
+      sessionFile,
+      sessionExists: sessionExists == null ? false : Boolean(sessionExists),
+    };
+  }
+
+  function normalizeStopProgressHistory(raw, currentPhase) {
+    const history = [];
+    toArray(raw).forEach((entry) => {
+      const normalized = normalizeStopProgressPhaseEntry(entry, currentPhase?.phase || '');
+      if (normalized.phase) {
+        history.push(normalized);
+      }
+    });
+    if (!history.length || history[history.length - 1].phase !== currentPhase.phase) {
+      history.push(currentPhase);
+    }
+    const deduped = [];
+    history.forEach((entry) => {
+      if (deduped.length && deduped[deduped.length - 1].phase === entry.phase) {
+        deduped[deduped.length - 1] = entry;
+      } else {
+        deduped.push(entry);
+      }
+    });
+    return deduped;
+  }
+
+  function normalizeStopProgress(raw) {
+    const item = toObject(raw);
+    const currentPhaseRaw = toObject(item.current_phase || item.currentPhase);
+    const currentSource = { ...item, ...currentPhaseRaw };
+    const currentPhase = normalizeStopProgressPhaseEntry(currentSource, toText(currentSource.phase, ''));
+    const historySource = item.history || item.phase_history || item.phaseHistory;
+    const history = normalizeStopProgressHistory(historySource, currentPhase);
+    const phase = currentPhase.phase || toText(item.phase, '');
+    const stopFilePaths = normalizeStopProgressPathMap(item.stop_file_paths || item.stopFilePaths || currentPhase.stopFilePaths || currentPhase.stop_file_paths);
+    const trackedChildPids = toArray(item.tracked_child_pids || item.trackedChildPids || currentPhase.trackedChildPids || currentPhase.tracked_child_pids)
+      .map((pid) => toMaybeNumber(pid))
+      .filter((pid) => pid != null && pid > 0);
+    const trackedChildProcesses = toArray(item.tracked_child_processes || item.trackedChildProcesses || currentPhase.trackedChildProcesses || currentPhase.tracked_child_processes)
+      .map((record) => normalizeStopProgressProcessRecord(record))
+      .filter(Boolean);
+    const lastArtifactSignal = normalizeStopProgressSignal(item.last_artifact_signal || item.lastArtifactSignal || currentPhase.lastArtifactSignal || currentPhase.last_artifact_signal, 'artifact');
+    const lastLogSignal = normalizeStopProgressSignal(item.last_log_signal || item.lastLogSignal || currentPhase.lastLogSignal || currentPhase.last_log_signal, 'log');
+    const timeoutGuidance = normalizeStopProgressGuidance(item.timeout_guidance || item.timeoutGuidance || currentPhase.timeoutGuidance || currentPhase.timeout_guidance);
+    const manualCleanupHints = normalizeStopProgressTextList(item.manual_cleanup_hints || item.manualCleanupHints || timeoutGuidance.manualCleanupHints);
+    const lockedFilePaths = normalizeStopProgressTextList(item.locked_file_paths || item.lockedFilePaths || timeoutGuidance.lockedFilePaths).map((entry) => entry.replace(/\\/g, '/'));
+    const runnerAlive = item.runner_alive ?? item.runnerAlive ?? currentPhase.runnerAlive ?? currentPhase.runner_alive ?? item.running ?? currentPhase.running;
+    const running = item.running ?? currentPhase.running ?? runnerAlive;
+    const finalPhases = new Set(['finalized', 'timeout', 'failed', 'not_running']);
+    const active = Boolean(phase && !finalPhases.has(phase));
+    const phaseIndex = Math.max(0, history.length - 1);
+    const normalized = {
+      phase,
+      phaseLabel: currentPhase.phaseLabel || phase,
+      message: toText(item.message || currentPhase.message, ''),
+      elapsedSeconds: toNumber(item.elapsed_seconds ?? item.elapsedSeconds ?? currentPhase.elapsedSeconds, 0),
+      updatedAt: toText(item.updated_at || item.updatedAt || currentPhase.updatedAt, ''),
+      requestedAt: toText(item.requested_at || item.requestedAt || currentPhase.requestedAt, ''),
+      currentPhase,
+      current_phase: currentPhase,
+      currentPhaseRaw,
+      history,
+      phaseHistory: history,
+      phase_history: history,
+      historyCount: history.length,
+      history_count: history.length,
+      phaseIndex,
+      phase_index: phaseIndex,
+      runnerAlive: Boolean(runnerAlive),
+      runner_alive: Boolean(runnerAlive),
+      running: Boolean(running),
+      trackedChildPids,
+      tracked_child_pids: trackedChildPids,
+      trackedChildProcesses,
+      tracked_child_processes: trackedChildProcesses,
+      stopFilePaths,
+      stop_file_paths: stopFilePaths,
+      lastArtifactSignal,
+      last_artifact_signal: lastArtifactSignal,
+      lastLogSignal,
+      last_log_signal: lastLogSignal,
+      timeoutGuidance,
+      timeout_guidance: timeoutGuidance,
+      manualCleanupHints,
+      manual_cleanup_hints: manualCleanupHints,
+      lockedFilePaths,
+      locked_file_paths: lockedFilePaths,
+      recoverableTimeout: Boolean(timeoutGuidance.canRetry),
+      canRetry: Boolean(timeoutGuidance.canRetry),
+      active,
+    };
+    normalized.currentPhase = normalized.currentPhase || currentPhase;
+    normalized.current_phase = normalized.currentPhase;
+    normalized.phaseHistory = history;
+    normalized.phase_history = history;
+    return normalized;
   }
 
   function normalizeRunnerControlAction(action) {
@@ -5783,6 +6281,12 @@
     updateRunnerControlStartMode,
     toggleRunnerControlAutopilot,
     updateRunnerControlStartField,
+    normalizeStopProgress,
+    runnerControlStateInfo,
+    runnerControlDetailRows,
+    runnerControlActionEnabled,
+    runnerControlActionDisabledReason,
+    renderStopProgressSection,
     normalizeSnapshot: normalizeApiSnapshot,
     createBlankModel,
     createFallbackFixture,
@@ -8376,9 +8880,11 @@
     return toObject(actions[action]);
   }
 
-  function runnerControlActionEnabled(action) {
-    const statusReason = toText(state.runnerControl.status?.reason, '');
-    if (!state.runnerControl.enabled || !state.runnerControl.controllerAvailable || state.runnerControl.busy) {
+  function runnerControlActionEnabled(action, control = state.runnerControl) {
+    const current = toObject(control);
+    const statusReason = toText(current.status?.reason, '');
+    const stopProgress = normalizeStopProgress(current.status?.stopProgress);
+    if (!current.enabled || !current.controllerAvailable || current.busy) {
       return false;
     }
     if (statusReason.startsWith('status_error:')) {
@@ -8388,25 +8894,33 @@
     if (busyAction) {
       return false;
     }
+    if (String(action || '').toLowerCase() === 'stop' && stopProgress.phase === 'timeout' && stopProgress.canRetry !== false) {
+      return true;
+    }
     return Boolean(runnerControlActionState(action).enabled);
   }
 
-  function runnerControlActionDisabledReason(action) {
-    if (state.stopSubmitting || state.runnerControl.busy) {
+  function runnerControlActionDisabledReason(action, control = state.runnerControl) {
+    const current = toObject(control);
+    if (state.stopSubmitting || current.busy) {
       return t('runner.requestInFlight');
     }
-    const statusReason = toText(state.runnerControl.status?.reason, '');
+    const statusReason = toText(current.status?.reason, '');
     if (statusReason.startsWith('status_error:')) {
-      return redactionAwareText(state.runnerControl.lastError, '') || redactionAwareText(statusReason, '') || t('runner.backendError');
+      return redactionAwareText(current.lastError, '') || redactionAwareText(statusReason, '') || t('runner.backendError');
     }
-    if (!state.runnerControl.enabled) {
-      return redactionAwareText(state.runnerControl.message, t('runner.controlsDisabledMessage'));
+    if (!current.enabled) {
+      return redactionAwareText(current.message, t('runner.controlsDisabledMessage'));
     }
-    if (!state.runnerControl.controllerAvailable) {
-      return redactionAwareText(state.runnerControl.message, t('runner.controllerUnavailableMessage'));
+    if (!current.controllerAvailable) {
+      return redactionAwareText(current.message, t('runner.controllerUnavailableMessage'));
+    }
+    const stopProgress = normalizeStopProgress(current.status?.stopProgress);
+    if (String(action || '').toLowerCase() === 'stop' && stopProgress.phase === 'timeout') {
+      return redactionAwareText(stopProgress.timeoutGuidance?.summary || stopProgress.message || t('runner.stopTimedOut'), '');
     }
     const actionState = runnerControlActionState(action);
-    return redactionAwareText(actionState.disabledReason || actionState.disabled_reason || state.runnerControl.message, '');
+    return redactionAwareText(actionState.disabledReason || actionState.disabled_reason || current.message, '');
   }
 
   function runnerControlButtonAttrs(action) {
@@ -12045,19 +12559,39 @@
     const action = state.stopAction || 'stop';
     const control = state.runnerControl;
     const display = runnerControlStateInfo(control);
+    const stopProgress = normalizeStopProgress(toObject(control.status).stopProgress);
+    const timeoutActive = stopProgress.phase === 'timeout';
+    const finalizedState = stopProgress.phase === 'finalized';
     const confirmation = runnerControlConfirmationPhrase(action);
     const confirmationValue = state.stopConfirmation.trim();
     const actionEnabled = runnerControlActionEnabled(action);
     const startAction = action === 'start' || action === 'reload' || action === 'restart';
     const startOptionsValidation = startAction ? runnerControlStartOptionsValidation(control, state.stopStartOptions) : null;
     const confirmEnabled = actionEnabled && confirmationValue === confirmation && !state.stopSubmitting && (!startAction || startOptionsValidation.valid);
-    const bannerTone = state.stopSubmitting ? 'info' : state.stopError ? 'err' : !actionEnabled ? 'warn' : startAction && startOptionsValidation && !startOptionsValidation.valid ? 'warn' : 'idle';
+    const bannerTone = state.stopSubmitting
+      ? 'info'
+      : timeoutActive
+        ? 'warn'
+        : finalizedState
+          ? 'success'
+          : state.stopError
+            ? 'err'
+            : !actionEnabled
+              ? 'warn'
+              : startAction && startOptionsValidation && !startOptionsValidation.valid
+                ? 'warn'
+                : 'idle';
     const actionTitle = runnerControlModalTitle(action);
     const actionSummary = runnerControlActionSummary(action);
-    const actionLabel = runnerControlActionLabel(action, state.stopSubmitting);
-    // Action failed
+    const actionLabel = timeoutActive && action === 'stop' && !state.stopSubmitting
+      ? t('runner.retryStop')
+      : runnerControlActionLabel(action, state.stopSubmitting);
     const subLabel = state.stopSubmitting
       ? t('runner.refreshingStatus')
+      : timeoutActive
+        ? t('runner.retryStop')
+        : finalizedState
+          ? t('runner.stopped')
       : !control.enabled
         ? t('runner.controlsDisabledMessage')
         : !control.controllerAvailable
@@ -12065,36 +12599,45 @@
           : actionEnabled
             ? t('runner.typePhraseToContinue')
             : t('runner.actionUnavailable');
-      const detailHTML = runnerControlDetailRows(control, display)
-        .map(
-          (item) => `
-            <div class="runner-control__detail">
-              <div class="runner-control__label">${escapeHTML(item.label)}</div>
+    const detailHTML = runnerControlDetailRows(control, display)
+      .map(
+        (item) => `
+          <div class="runner-control__detail">
+            <div class="runner-control__label">${escapeHTML(item.label)}</div>
             <div class="runner-control__value ${escapeHTML(item.className || '')}">${escapeHTML(item.value)}</div>
           </div>
-          `
-        )
-        .join('');
-      const startOptionsHTML = startAction ? renderRunnerControlStartOptionsSection(control, actionEnabled, startOptionsValidation) : '';
-      const bannerTitle = state.stopSubmitting
-        ? t('runner.actionInFlight')
-        : state.stopError
-          ? t('runner.actionFailed')
-          : !actionEnabled
-            ? t('runner.actionDisabled')
-            : startAction && startOptionsValidation && !startOptionsValidation.valid
-              ? 'Fix the highlighted start options before continuing.'
-              : t('runner.confirmationRequired');
-      const stopErrorText = redactionAwareText(state.stopError, t('runner.controlFailed'));
-      const bannerMessage = state.stopSubmitting
-        ? redactionAwareText(control.message, t('runner.refreshingStatus'))
-        : state.stopError
-          ? stopErrorText
-          : !actionEnabled
-            ? runnerControlActionDisabledReason(action)
-            : startAction && startOptionsValidation && !startOptionsValidation.valid
-              ? startOptionsValidation.message || 'Fix the highlighted start options before continuing.'
-            : redactionAwareText(control.message, actionSummary);
+        `
+      )
+      .join('');
+    const stopProgressHTML = stopProgress.phase ? renderStopProgressSection(stopProgress) : '';
+    const startOptionsHTML = startAction ? renderRunnerControlStartOptionsSection(control, actionEnabled, startOptionsValidation) : '';
+    const bannerTitle = state.stopSubmitting
+      ? t('runner.actionInFlight')
+      : timeoutActive
+        ? t('runner.stopTimedOut')
+        : finalizedState
+          ? t('runner.actionComplete')
+          : state.stopError
+            ? t('runner.actionFailed')
+            : !actionEnabled
+              ? t('runner.actionDisabled')
+              : startAction && startOptionsValidation && !startOptionsValidation.valid
+                ? 'Fix the highlighted start options before continuing.'
+                : t('runner.confirmationRequired');
+    const stopErrorText = redactionAwareText(state.stopError, t('runner.controlFailed'));
+    const bannerMessage = state.stopSubmitting
+      ? redactionAwareText(control.message, t('runner.refreshingStatus'))
+      : timeoutActive
+        ? redactionAwareText(stopProgress.timeoutGuidance?.summary || stopProgress.currentPhase?.message || stopProgress.message, t('runner.retryStop'))
+        : finalizedState
+          ? redactionAwareText(stopProgress.currentPhase?.message || stopProgress.message, t('runner.stopped'))
+          : state.stopError
+            ? stopErrorText
+            : !actionEnabled
+              ? runnerControlActionDisabledReason(action)
+              : startAction && startOptionsValidation && !startOptionsValidation.valid
+                ? startOptionsValidation.message || 'Fix the highlighted start options before continuing.'
+                : redactionAwareText(control.message, actionSummary);
     overlayRoot().innerHTML = `
       <div class="overlay overlay--tight" data-overlay="stop">
         <div class="overlay__panel overlay__panel--modal">
@@ -12116,6 +12659,7 @@
             <div class="runner-control__details" style="margin-top:12px;">
               ${detailHTML}
             </div>
+            ${stopProgressHTML ? `<div style="margin-top:12px;">${stopProgressHTML}</div>` : ''}
             ${startOptionsHTML}
             <div class="modal-field" style="margin-top:12px;">
               <div class="modal-field__label">${escapeHTML(t('runner.confirmationPhrase'))}</div>
@@ -13224,7 +13768,23 @@
         payload = {};
       }
       const normalized = toObject(payload);
+      const responseStatus = toText(normalized.status, '').trim().toLowerCase();
+      const responseError = toObject(normalized.error);
+      const responseErrorCode = toText(responseError.code || responseError.errorCode || normalized.error_code || normalized.errorCode, '').trim().toLowerCase();
+      const timeoutResponse = responseStatus === 'timeout' || responseErrorCode === 'runner_stop_timeout';
       if (!response.ok || normalized.ok === false) {
+        if (timeoutResponse) {
+          const snapshot = toObject(normalized.snapshot);
+          if (Object.keys(snapshot).length) {
+            applyServerSnapshot(snapshot);
+          } else {
+            await refreshSnapshot({ silent: true });
+          }
+          state.stopSubmitting = false;
+          state.stopError = '';
+          renderStopOverlay();
+          return;
+        }
         const message = toText(normalized.message || toObject(normalized.error).message || t('runner.controlFailedHttp', { status: response.status }), t('runner.controlFailed'));
         const error = new Error(message);
         const snapshot = toObject(normalized.snapshot);

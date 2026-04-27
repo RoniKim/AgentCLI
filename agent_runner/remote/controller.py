@@ -14,10 +14,18 @@ from typing import Any, Callable, Optional
 from ..cli import DEFAULTS
 from ..config import AGENT_WORK_DIR, default_config_path, resolve_config_path, resolve_prompts_dir
 from ..logger import close_all_loggers
-from ..process_guard import register_pid, terminate_all_children, terminate_process_tree, unregister_pid_if_exited
+from ..process_guard import register_pid, terminate_all_children, terminate_process_tree, tracked_pid_details, unregister_pid_if_exited
 from ..run_dir import find_latest_run_dir, make_run_dir
 from ..runner_entry import run as run_runner
-from ..stop_progress import clear_stop_progress, read_stop_progress, write_stop_progress
+from ..stop_progress import (
+    STOP_PROGRESS_FILE,
+    STOP_PROGRESS_LOG_FILE,
+    clear_stop_progress,
+    file_write_signal,
+    normalize_stop_progress_payload,
+    read_stop_progress,
+    write_stop_progress,
+)
 from ..state import count_state_task_ids, load_backlog_task_ids, load_state
 from ..utils import STOP_REASON_STOP_FILE, detect_stop_reason, rotate_log_file
 
@@ -652,6 +660,208 @@ class RunnerController:
             value = 180
         return max(1, value)
 
+    def _runner_process_pid(self) -> int | None:
+        proc = self._runner_process
+        if proc is None or not proc.pid:
+            return None
+        return int(proc.pid)
+
+    def _stop_file_paths(self, run_dir: Path) -> dict[str, str]:
+        stop_file_name = self._stop_file_name()
+        paths = {
+            "stop_file_path": (run_dir / stop_file_name).as_posix(),
+            "stop_progress_path": (run_dir / STOP_PROGRESS_FILE).as_posix(),
+            "stop_progress_log_path": (run_dir / STOP_PROGRESS_LOG_FILE).as_posix(),
+        }
+        runner_pid = self._runner_process_pid()
+        if runner_pid is not None:
+            paths["runner_process_log_path"] = (run_dir / "telegram_runner_subprocess.log").as_posix()
+        return paths
+
+    def _stop_artifact_candidates(self, run_dir: Path) -> list[Path]:
+        return [
+            run_dir / "run_summary.json",
+            run_dir / "last_run_summary.json",
+            run_dir / "cycle_summary.log",
+            run_dir / "STATE.json",
+            run_dir / "metrics.jsonl",
+            run_dir / "BACKLOG.json",
+            run_dir / "NOTES.md",
+        ]
+
+    def _stop_log_candidates(self, run_dir: Path) -> list[Path]:
+        return [
+            run_dir / "logs" / "run.log",
+            run_dir / "telegram_runner_subprocess.log",
+            run_dir / "cycle_summary.log",
+            run_dir / STOP_PROGRESS_LOG_FILE,
+        ]
+
+    def _latest_signal(self, paths: list[Path], *, kind: str) -> dict[str, Any] | None:
+        latest: dict[str, Any] | None = None
+        latest_epoch = -1.0
+        for path in paths:
+            signal = file_write_signal(path, kind=kind)
+            if not signal:
+                continue
+            try:
+                epoch = float(signal.get("updated_at_epoch") or 0.0)
+            except Exception:
+                epoch = 0.0
+            if latest is None or epoch >= latest_epoch:
+                latest = signal
+                latest_epoch = epoch
+        return latest
+
+    def _stop_timeout_guidance(
+        self,
+        *,
+        phase: str,
+        runner_alive: bool,
+        tracked_child_pids: list[int],
+        tracked_child_processes: list[dict[str, Any]] | None,
+        stop_file_paths: dict[str, str],
+        runner_pid: int | None,
+        last_artifact_signal: dict[str, Any] | None,
+        last_log_signal: dict[str, Any] | None,
+        manual_cleanup_hints: list[str] | None = None,
+        locked_file_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        active_phase = str(phase or "").strip().lower()
+        retryable = bool(runner_alive or active_phase in {"runner_wait", "timeout"})
+        next_steps: list[str] = []
+        if runner_alive:
+            next_steps.append("Keep the panel open and retry stop after the runner settles.")
+        elif active_phase == "timeout":
+            next_steps.append("The stop wait timed out after the runner finished or was still settling.")
+        if tracked_child_pids:
+            joined = ", ".join(str(pid) for pid in tracked_child_pids)
+            next_steps.append(f"Tracked child PIDs: {joined}.")
+        if tracked_child_processes:
+            details: list[str] = []
+            for record in tracked_child_processes:
+                pid = record.get("pid")
+                if pid in (None, "", False):
+                    continue
+                piece = f"PID {pid}"
+                session_file = str(record.get("session_file") or record.get("sessionFile") or "").strip()
+                if session_file:
+                    piece = f"{piece} ({session_file})"
+                details.append(piece)
+            if details:
+                next_steps.append(f"Tracked child records: {'; '.join(details)}.")
+        if runner_pid is not None:
+            next_steps.append(f"Runner PID: {runner_pid}.")
+        if last_artifact_signal and last_artifact_signal.get("path"):
+            next_steps.append(f"Latest artifact write: {last_artifact_signal.get('path')}.")
+        if last_log_signal and last_log_signal.get("path"):
+            next_steps.append(f"Latest log write: {last_log_signal.get('path')}.")
+        for path_key, label in (
+            ("stop_file_path", "Stop file path"),
+            ("stop_progress_path", "Stop progress file"),
+            ("stop_progress_log_path", "Stop progress log"),
+            ("runner_process_log_path", "Runner process log"),
+        ):
+            path_value = stop_file_paths.get(path_key)
+            if path_value:
+                next_steps.append(f"{label}: {path_value}.")
+        if manual_cleanup_hints:
+            next_steps.extend([str(item).strip() for item in manual_cleanup_hints if str(item).strip()])
+        if active_phase == "timeout":
+            summary = "Stop wait timed out. Retry the stop action or inspect the tracked child processes."
+        elif retryable:
+            summary = "Runner is still shutting down. Retry the stop action or inspect the tracked child processes."
+        else:
+            summary = "Stop sequence finalized."
+        guidance = {
+            "recoverable": retryable,
+            "can_retry": retryable,
+            "summary": summary,
+            "message": summary,
+            "steps": next_steps,
+            "manual_cleanup_hints": list(dict.fromkeys([str(item).strip() for item in (manual_cleanup_hints or []) if str(item).strip()])),
+            "locked_file_paths": list(dict.fromkeys([str(item).strip() for item in (locked_file_paths or []) if str(item).strip()])),
+        }
+        return guidance
+
+    def _stop_progress_context(self, run_dir: Path, *, phase: str, manual_cleanup_hints: list[str] | None = None, locked_file_paths: list[str] | None = None) -> dict[str, Any]:
+        runner_alive = self._runner_is_alive()
+        tracked_child_processes = tracked_pid_details()
+        tracked_child_pids = [int(record.get("pid")) for record in tracked_child_processes if record.get("pid") not in (None, "", False)]
+        runner_pid = self._runner_process_pid()
+        stop_file_paths = self._stop_file_paths(run_dir)
+        last_artifact_signal = self._latest_signal(self._stop_artifact_candidates(run_dir), kind="artifact")
+        last_log_signal = self._latest_signal(self._stop_log_candidates(run_dir), kind="log")
+        timeout_guidance = self._stop_timeout_guidance(
+            phase=phase,
+            runner_alive=runner_alive,
+            tracked_child_pids=tracked_child_pids,
+            tracked_child_processes=tracked_child_processes,
+            stop_file_paths=stop_file_paths,
+            runner_pid=runner_pid,
+            last_artifact_signal=last_artifact_signal,
+            last_log_signal=last_log_signal,
+            manual_cleanup_hints=manual_cleanup_hints,
+            locked_file_paths=locked_file_paths,
+        )
+        return {
+            "runner_alive": runner_alive,
+            "runnerAlive": runner_alive,
+            "running": runner_alive,
+            "runner_pid": runner_pid,
+            "runnerPid": runner_pid,
+            "tracked_child_pids": tracked_child_pids,
+            "trackedChildPids": tracked_child_pids,
+            "tracked_child_processes": tracked_child_processes,
+            "trackedChildProcesses": tracked_child_processes,
+            "stop_file_paths": stop_file_paths,
+            "stopFilePaths": stop_file_paths,
+            "last_artifact_signal": last_artifact_signal,
+            "lastArtifactSignal": last_artifact_signal,
+            "last_log_signal": last_log_signal,
+            "lastLogSignal": last_log_signal,
+            "timeout_guidance": timeout_guidance,
+            "timeoutGuidance": timeout_guidance,
+            "manual_cleanup_hints": list(timeout_guidance.get("manual_cleanup_hints") or []),
+            "manualCleanupHints": list(timeout_guidance.get("manual_cleanup_hints") or []),
+            "locked_file_paths": list(timeout_guidance.get("locked_file_paths") or []),
+            "lockedFilePaths": list(timeout_guidance.get("locked_file_paths") or []),
+        }
+
+    def _stop_progress_snapshot(self, run_dir: Path | None, *, phase: str | None = None) -> dict[str, Any]:
+        if run_dir is None:
+            return {}
+        snapshot = normalize_stop_progress_payload(read_stop_progress(run_dir))
+        if not snapshot:
+            return {}
+        current_phase = snapshot.get("current_phase") if isinstance(snapshot.get("current_phase"), dict) else {}
+        phase_name = str(phase or snapshot.get("phase") or current_phase.get("phase") or "").strip()
+        context = self._stop_progress_context(
+            run_dir,
+            phase=phase_name,
+            manual_cleanup_hints=list(snapshot.get("manual_cleanup_hints") or snapshot.get("manualCleanupHints") or []),
+            locked_file_paths=list(snapshot.get("locked_file_paths") or snapshot.get("lockedFilePaths") or []),
+        )
+        snapshot.update(context)
+        if not snapshot.get("stop_file_paths"):
+            snapshot["stop_file_paths"] = self._stop_file_paths(run_dir)
+            snapshot["stopFilePaths"] = dict(snapshot["stop_file_paths"])
+        if not snapshot.get("timeout_guidance"):
+            snapshot["timeout_guidance"] = self._stop_timeout_guidance(
+                phase=phase_name,
+                runner_alive=bool(snapshot.get("runner_alive")),
+                tracked_child_pids=list(snapshot.get("tracked_child_pids") or []),
+                tracked_child_processes=list(snapshot.get("tracked_child_processes") or []),
+                stop_file_paths=dict(snapshot.get("stop_file_paths") or {}),
+                runner_pid=snapshot.get("runner_pid") if isinstance(snapshot.get("runner_pid"), int) else None,
+                last_artifact_signal=snapshot.get("last_artifact_signal") if isinstance(snapshot.get("last_artifact_signal"), dict) else None,
+                last_log_signal=snapshot.get("last_log_signal") if isinstance(snapshot.get("last_log_signal"), dict) else None,
+                manual_cleanup_hints=list(snapshot.get("manual_cleanup_hints") or []),
+                locked_file_paths=list(snapshot.get("locked_file_paths") or []),
+            )
+            snapshot["timeoutGuidance"] = dict(snapshot["timeout_guidance"])
+        return snapshot
+
     def _effective_dict(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         eff: dict[str, Any] = {}
         for key, default_value in DEFAULTS.items():
@@ -849,15 +1059,29 @@ class RunnerController:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         **fields: Any,
     ) -> dict[str, Any]:
+        extra_fields = dict(fields)
+        manual_cleanup_hints = extra_fields.pop("manual_cleanup_hints", extra_fields.pop("manualCleanupHints", None))
+        locked_file_paths = extra_fields.pop("locked_file_paths", extra_fields.pop("lockedFilePaths", None))
+        context_fields = self._stop_progress_context(
+            run_dir,
+            phase=phase,
+            manual_cleanup_hints=list(manual_cleanup_hints or []),
+            locked_file_paths=list(locked_file_paths or []),
+        )
+        context_fields.update(extra_fields)
+        runner_alive = bool(context_fields.pop("runner_alive", False))
+        context_fields.pop("runnerAlive", None)
+        context_fields.pop("running", None)
         progress = write_stop_progress(
             run_dir,
             phase=phase,
             message=message,
             requested_at_monotonic=requested_at_monotonic,
-            running=self._runner_is_alive(),
+            running=runner_alive,
+            runner_alive=runner_alive,
             runner_mode=self.runner_mode,
             last_event=self._latest_event(run_dir),
-            **fields,
+            **context_fields,
         )
         if progress_callback is not None:
             try:
@@ -880,7 +1104,7 @@ class RunnerController:
         requested_at = time.monotonic()
         self._emit_stop_progress(
             run_dir,
-            phase="requested",
+            phase="request",
             message="Stop requested.",
             requested_at_monotonic=requested_at,
             progress_callback=progress_callback,
@@ -901,7 +1125,7 @@ class RunnerController:
 
         self._emit_stop_progress(
             run_dir,
-            phase="stop_file_written",
+            phase="stop_file_write",
             message=f"Stop file written: {stop_path.as_posix()}",
             requested_at_monotonic=requested_at,
             progress_callback=progress_callback,
@@ -911,7 +1135,7 @@ class RunnerController:
             try:
                 self._emit_stop_progress(
                     run_dir,
-                    phase="terminating_children",
+                    phase="child_termination",
                     message="Terminating tracked child processes.",
                     requested_at_monotonic=requested_at,
                     progress_callback=progress_callback,
@@ -926,7 +1150,7 @@ class RunnerController:
                 while self._runner_thread.is_alive() and time.monotonic() < deadline:
                     self._emit_stop_progress(
                         run_dir,
-                        phase="waiting_runner",
+                        phase="runner_wait",
                         message="Waiting for runner shutdown and final artifacts.",
                         requested_at_monotonic=requested_at,
                         progress_callback=progress_callback,
@@ -939,7 +1163,7 @@ class RunnerController:
                 while self._runner_process and self._runner_process.poll() is None and time.monotonic() < grace_deadline:
                     self._emit_stop_progress(
                         run_dir,
-                        phase="waiting_subprocess",
+                        phase="runner_wait",
                         message="Waiting for runner subprocess to exit.",
                         requested_at_monotonic=requested_at,
                         progress_callback=progress_callback,
@@ -951,7 +1175,7 @@ class RunnerController:
                     try:
                         self._emit_stop_progress(
                             run_dir,
-                            phase="forcing_process_tree",
+                            phase="child_termination",
                             message="Grace period expired; terminating runner process tree.",
                             requested_at_monotonic=requested_at,
                             progress_callback=progress_callback,
@@ -962,7 +1186,7 @@ class RunnerController:
                         while self._runner_process and self._runner_process.poll() is None and time.monotonic() < force_deadline:
                             self._emit_stop_progress(
                                 run_dir,
-                                phase="waiting_forced_exit",
+                                phase="runner_wait",
                                 message="Waiting after forced process-tree termination.",
                                 requested_at_monotonic=requested_at,
                                 progress_callback=progress_callback,
@@ -977,33 +1201,75 @@ class RunnerController:
                 self._refresh_process_state()
 
         running = self._runner_is_alive()
-        if wait and not running:
+        if not running:
             close_all_loggers()
-        if running:
-            final_phase = "timeout" if wait else "stop_requested"
-            final_message = (
-                f"Runner is still alive after {self._stop_wait_timeout_seconds()}s stop wait timeout."
-                if wait
-                else "Stop requested; runner is still shutting down."
+            self._emit_stop_progress(
+                run_dir,
+                phase="final_artifact_collection",
+                message="Collecting final artifacts and logs.",
+                requested_at_monotonic=requested_at,
+                progress_callback=progress_callback,
+                exit_code=self._runner_exit_code,
             )
-        else:
             final_phase = "finalized"
             final_message = "Runner stop sequence finished."
-        self._emit_stop_progress(
-            run_dir,
-            phase=final_phase,
-            message=final_message,
-            requested_at_monotonic=requested_at,
-            progress_callback=progress_callback,
-            exit_code=self._runner_exit_code,
-        )
+            self._emit_stop_progress(
+                run_dir,
+                phase=final_phase,
+                message=final_message,
+                requested_at_monotonic=requested_at,
+                progress_callback=progress_callback,
+                exit_code=self._runner_exit_code,
+            )
+        elif wait:
+            final_phase = "timeout"
+            final_message = f"Runner is still alive after {self._stop_wait_timeout_seconds()}s stop wait timeout."
+            self._emit_stop_progress(
+                run_dir,
+                phase=final_phase,
+                message=final_message,
+                requested_at_monotonic=requested_at,
+                progress_callback=progress_callback,
+                exit_code=self._runner_exit_code,
+            )
+        else:
+            final_phase = "runner_wait"
+            final_message = "Stop requested; runner is still shutting down."
+            self._emit_stop_progress(
+                run_dir,
+                phase=final_phase,
+                message=final_message,
+                requested_at_monotonic=requested_at,
+                progress_callback=progress_callback,
+                exit_code=self._runner_exit_code,
+            )
+
+        final_progress = read_stop_progress(run_dir)
 
         return {
             "ok": not (wait and running),
             "message": final_message if wait and running else f"\uc911\uc9c0 \uc694\uccad\ub428: {stop_path.as_posix()}",
             "running": running,
+            "runner_alive": running,
+            "runnerAlive": running,
             "run_dir": run_dir.as_posix(),
-            "stop_progress": read_stop_progress(run_dir),
+            "tracked_child_pids": list(final_progress.get("tracked_child_pids") or []),
+            "trackedChildPids": list(final_progress.get("tracked_child_pids") or []),
+            "tracked_child_processes": list(final_progress.get("tracked_child_processes") or []),
+            "trackedChildProcesses": list(final_progress.get("tracked_child_processes") or []),
+            "stop_file_paths": dict(final_progress.get("stop_file_paths") or {}),
+            "stopFilePaths": dict(final_progress.get("stop_file_paths") or {}),
+            "last_artifact_signal": final_progress.get("last_artifact_signal"),
+            "lastArtifactSignal": final_progress.get("last_artifact_signal"),
+            "last_log_signal": final_progress.get("last_log_signal"),
+            "lastLogSignal": final_progress.get("last_log_signal"),
+            "timeout_guidance": dict(final_progress.get("timeout_guidance") or {}),
+            "timeoutGuidance": dict(final_progress.get("timeout_guidance") or {}),
+            "manual_cleanup_hints": list(final_progress.get("manual_cleanup_hints") or []),
+            "manualCleanupHints": list(final_progress.get("manual_cleanup_hints") or []),
+            "locked_file_paths": list(final_progress.get("locked_file_paths") or []),
+            "lockedFilePaths": list(final_progress.get("locked_file_paths") or []),
+            "stop_progress": final_progress,
             **context,
         }
 

@@ -428,6 +428,194 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertFalse(body["runner_control"]["enabled"])
         self.assertFalse(app.state.runner_controller.start_calls)
 
+    def test_runner_control_timeout_stop_response_is_retryable_and_surfaces_stop_progress(self) -> None:
+        timeout_progress = {
+            "phase": "timeout",
+            "message": "Runner is still alive after 1s stop wait timeout.",
+            "elapsed_seconds": 12,
+            "updated_at": "2026-04-28T00:00:12",
+            "requested_at": "2026-04-28T00:00:00",
+            "history": [
+                {"phase": "request", "message": "Stop requested.", "elapsed_seconds": 0, "updated_at": "2026-04-28T00:00:00"},
+                {"phase": "stop_file_write", "message": "Stop file written: C:/temp/STOP", "elapsed_seconds": 1, "updated_at": "2026-04-28T00:00:01"},
+                {"phase": "child_termination", "message": "Terminating tracked child processes.", "elapsed_seconds": 2, "updated_at": "2026-04-28T00:00:02"},
+                {"phase": "runner_wait", "message": "Waiting for runner shutdown and final artifacts.", "elapsed_seconds": 6, "updated_at": "2026-04-28T00:00:06"},
+                {"phase": "timeout", "message": "Runner is still alive after 1s stop wait timeout.", "elapsed_seconds": 12, "updated_at": "2026-04-28T00:00:12"},
+            ],
+            "runner_alive": True,
+            "tracked_child_pids": [321, 654],
+            "tracked_child_processes": [
+                {
+                    "pid": 321,
+                    "alive": True,
+                    "session_file": "C:/temp/session_321.json",
+                    "session_exists": True,
+                }
+            ],
+            "stop_file_paths": {
+                "stop_file_path": "C:/temp/STOP",
+                "stop_progress_path": "C:/temp/STOP_PROGRESS.json",
+                "stop_progress_log_path": "C:/temp/stop_progress.log",
+            },
+            "last_artifact_signal": {
+                "path": "C:/temp/run_summary.json",
+                "updated_at": "2026-04-28T00:00:10",
+            },
+            "last_log_signal": {
+                "path": "C:/temp/cycle_summary.log",
+                "updated_at": "2026-04-28T00:00:11",
+            },
+            "timeout_guidance": {
+                "summary": "Retry stop after checking the runner.",
+                "recoverable": True,
+                "steps": [
+                    "Retry stop after checking the runner.",
+                    "Inspect the tracked child PIDs.",
+                ],
+                "manual_cleanup_hints": ["Close the runner."],
+                "locked_file_paths": ["C:/temp/locked.txt"],
+            },
+            "current_phase": {
+                "phase": "timeout",
+                "message": "Runner is still alive after 1s stop wait timeout.",
+                "elapsed_seconds": 12,
+                "updated_at": "2026-04-28T00:00:12",
+                "runner_alive": True,
+                "tracked_child_pids": [321, 654],
+                "tracked_child_processes": [
+                    {
+                        "pid": 321,
+                        "alive": True,
+                        "session_file": "C:/temp/session_321.json",
+                        "session_exists": True,
+                    }
+                ],
+                "stop_file_paths": {
+                    "stop_file_path": "C:/temp/STOP",
+                    "stop_progress_path": "C:/temp/STOP_PROGRESS.json",
+                    "stop_progress_log_path": "C:/temp/stop_progress.log",
+                },
+                "last_artifact_signal": {
+                    "path": "C:/temp/run_summary.json",
+                    "updated_at": "2026-04-28T00:00:10",
+                },
+                "last_log_signal": {
+                    "path": "C:/temp/cycle_summary.log",
+                    "updated_at": "2026-04-28T00:00:11",
+                },
+                "timeout_guidance": {
+                    "summary": "Retry stop after checking the runner.",
+                    "recoverable": True,
+                    "steps": [
+                        "Retry stop after checking the runner.",
+                        "Inspect the tracked child PIDs.",
+                    ],
+                    "manual_cleanup_hints": ["Close the runner."],
+                    "locked_file_paths": ["C:/temp/locked.txt"],
+                },
+            },
+        }
+
+        class TimeoutRunnerController:
+            def __init__(self, *, repo: Path, base_args: SimpleNamespace, run_dir: Path, status_payload: dict[str, object], stop_result: dict[str, object]) -> None:
+                self.repo = repo
+                self.base_args = base_args
+                self.run_dir = run_dir
+                self._status = dict(status_payload)
+                self._stop_result = dict(stop_result)
+                self.start_calls = 0
+                self.stop_calls: list[bool] = []
+
+            def status(self) -> dict[str, object]:
+                return dict(self._status)
+
+            def stop(self, *, wait: bool = False) -> dict[str, object]:
+                self.stop_calls.append(bool(wait))
+                return dict(self._stop_result)
+
+        status_payload = {
+            "running": True,
+            "runner_mode": "thread",
+            "repo": self.repo.as_posix(),
+            "config_path": self.config_path.as_posix(),
+            "run_dir": self.run_dir.as_posix(),
+            "uptime_seconds": 18,
+            "exit_code": None,
+            "stop_file": "STOP",
+            "stop_file_exists": True,
+            "done": 0,
+            "failed": 0,
+            "warnings": 0,
+            "state_counts": {"done": 0, "failed": 0, "warnings": 0},
+            "reason": "",
+            "last_event": "2026-04-26T12:08:00 cycle_end",
+            "stop_progress": timeout_progress,
+            "start_options": {},
+        }
+        stop_result = {
+            "ok": False,
+            "status": "timeout",
+            "message": "Runner is still alive after 1s stop wait timeout.",
+            "running": True,
+            "runner_alive": True,
+            "runnerAlive": True,
+            "run_dir": self.run_dir.as_posix(),
+            "repo": self.repo.as_posix(),
+            "config_path": self.config_path.as_posix(),
+            "tracked_child_pids": [321, 654],
+            "trackedChildPids": [321, 654],
+            "tracked_child_processes": timeout_progress["tracked_child_processes"],
+            "trackedChildProcesses": timeout_progress["tracked_child_processes"],
+            "stop_file_paths": timeout_progress["stop_file_paths"],
+            "stopFilePaths": timeout_progress["stop_file_paths"],
+            "last_artifact_signal": timeout_progress["last_artifact_signal"],
+            "lastArtifactSignal": timeout_progress["last_artifact_signal"],
+            "last_log_signal": timeout_progress["last_log_signal"],
+            "lastLogSignal": timeout_progress["last_log_signal"],
+            "timeout_guidance": timeout_progress["timeout_guidance"],
+            "timeoutGuidance": timeout_progress["timeout_guidance"],
+            "manual_cleanup_hints": ["Close the runner."],
+            "manualCleanupHints": ["Close the runner."],
+            "locked_file_paths": ["C:/temp/locked.txt"],
+            "lockedFilePaths": ["C:/temp/locked.txt"],
+            "stop_progress": timeout_progress,
+        }
+        controller = TimeoutRunnerController(
+            repo=self.repo,
+            base_args=SimpleNamespace(config_path=self.config_path.as_posix(), config=self.config_path.as_posix()),
+            run_dir=self.run_dir,
+            status_payload=status_payload,
+            stop_result=stop_result,
+        )
+        client, _ = _create_client(
+            self.repo,
+            enable_runner_controls=True,
+            config_path=self.config_path,
+            runner_controller=controller,
+        )
+
+        control_status = client.get("/api/runner/status")
+        self.assertEqual(200, control_status.status_code)
+        control_payload = control_status.json()
+        self.assertTrue(control_payload["runner_control"]["actions"]["stop"]["enabled"])
+        self.assertEqual("timeout", control_payload["status"]["stop_progress"]["phase"])
+        self.assertEqual(["request", "stop_file_write", "child_termination", "runner_wait", "timeout"], [entry["phase"] for entry in control_payload["status"]["stop_progress"]["history"]])
+        self.assertEqual("timeout", control_payload["runner_control"]["status"]["stopProgress"]["phase"])
+        self.assertEqual([321, 654], control_payload["runner_control"]["status"]["stopProgress"]["trackedChildPids"])
+        self.assertEqual(["Close the runner."], control_payload["runner_control"]["status"]["stopProgress"]["manualCleanupHints"])
+        self.assertEqual(["C:/temp/locked.txt"], control_payload["runner_control"]["status"]["stopProgress"]["lockedFilePaths"])
+
+        response = client.post("/api/runner/stop", json={"confirmation": "STOP RUNNER"})
+        self.assertEqual(409, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("timeout", payload["status"])
+        self.assertEqual("runner_stop_timeout", payload["error"]["code"])
+        self.assertEqual("timeout", payload["result"]["stop_progress"]["phase"])
+        self.assertEqual("timeout", payload["runner_control"]["status"]["stopProgress"]["phase"])
+        self.assertEqual([321, 654], payload["runner_control"]["status"]["stopProgress"]["trackedChildPids"])
+        self.assertTrue(controller.stop_calls and controller.stop_calls[-1])
+
     def test_lan_snapshot_redacts_sensitive_surfaces(self) -> None:
         prompts_dir = self.home / "prompts" / "agentcli"
         _write(

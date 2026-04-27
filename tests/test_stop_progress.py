@@ -33,15 +33,55 @@ class StopProgressTests(unittest.TestCase):
 
         progress = write_stop_progress(
             run_dir,
-            phase="waiting_runner",
-            message="Waiting for runner shutdown.",
+            phase="requested",
+            message="Stop requested.",
             requested_at_monotonic=requested_at,
             running=True,
+            runner_alive=True,
+            tracked_child_pids=[321, 654],
+            tracked_child_processes=[
+                {
+                    "pid": 321,
+                    "alive": True,
+                    "session_file": "C:/temp/session_321.json",
+                }
+            ],
+            stop_file_paths={
+                "stop_file_path": "C:/temp/STOP",
+                "stop_progress_path": "C:/temp/STOP_PROGRESS.json",
+                "stop_progress_log_path": "C:/temp/stop_progress.log",
+            },
+            last_artifact_signal={
+                "path": "C:/temp/run_summary.json",
+                "updated_at": "2026-04-28T00:00:00",
+            },
+            last_log_signal={
+                "path": "C:/temp/cycle_summary.log",
+                "updated_at": "2026-04-28T00:00:00",
+            },
+            timeout_guidance={
+                "summary": "Retry stop after checking the runner.",
+                "recoverable": True,
+                "steps": ["Retry stop after checking the runner."],
+                "manual_cleanup_hints": ["Close the runner."],
+                "locked_file_paths": ["C:/temp/locked.txt"],
+            },
         )
 
-        self.assertEqual("waiting_runner", progress["phase"])
+        self.assertEqual("request", progress["phase"])
         self.assertTrue(stop_progress_is_active(progress))
-        self.assertEqual("waiting_runner", read_stop_progress(run_dir)["phase"])
+        read_progress = read_stop_progress(run_dir)
+        self.assertEqual("request", read_progress["phase"])
+        self.assertEqual("request", read_progress["current_phase"]["phase"])
+        self.assertEqual(["request"], [entry["phase"] for entry in read_progress["history"]])
+        self.assertTrue(read_progress["runner_alive"])
+        self.assertEqual([321, 654], read_progress["tracked_child_pids"])
+        self.assertEqual("C:/temp/STOP", read_progress["stop_file_paths"]["stop_file_path"])
+        self.assertTrue(read_progress["timeout_guidance"]["can_retry"])
+        self.assertEqual(["Close the runner."], read_progress["manual_cleanup_hints"])
+        self.assertEqual(["C:/temp/locked.txt"], read_progress["locked_file_paths"])
+        self.assertEqual(321, read_progress["tracked_child_processes"][0]["pid"])
+        self.assertEqual("C:/temp/session_321.json", read_progress["tracked_child_processes"][0]["session_file"])
         self.assertTrue((run_dir / STOP_PROGRESS_FILE).exists())
         self.assertTrue((run_dir / STOP_PROGRESS_LOG_FILE).exists())
 
@@ -62,9 +102,15 @@ class StopProgressTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["running"])
         phases = [str(event.get("phase")) for event in events]
-        self.assertIn("requested", phases)
-        self.assertIn("stop_file_written", phases)
-        self.assertEqual("finalized", read_stop_progress(run_dir)["phase"])
+        self.assertEqual(["request", "stop_file_write", "child_termination", "final_artifact_collection", "finalized"], phases)
+        progress = read_stop_progress(run_dir)
+        self.assertEqual("finalized", progress["phase"])
+        self.assertEqual("finalized", progress["current_phase"]["phase"])
+        self.assertEqual(
+            ["request", "stop_file_write", "child_termination", "final_artifact_collection", "finalized"],
+            [entry["phase"] for entry in progress["history"]],
+        )
+        self.assertFalse(progress["timeout_guidance"]["can_retry"])
 
     def test_controller_stop_wait_timeout_is_configurable(self) -> None:
         repo = _scratch_dir("controller_stop_timeout") / "repo"
@@ -87,7 +133,9 @@ class StopProgressTests(unittest.TestCase):
         thread.start()
 
         try:
-            with patch("agent_runner.remote.controller.close_all_loggers") as close_loggers:
+            with patch("agent_runner.remote.controller.close_all_loggers") as close_loggers, patch(
+                "agent_runner.remote.controller.terminate_all_children"
+            ) as terminate_children:
                 result = controller.stop(wait=True)
         finally:
             release.set()
@@ -95,10 +143,17 @@ class StopProgressTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertTrue(result["running"])
+        self.assertEqual("timeout", result["stop_progress"]["phase"])
+        self.assertTrue(result["timeoutGuidance"]["canRetry"])
         close_loggers.assert_not_called()
+        terminate_children.assert_called()
         progress = read_stop_progress(run_dir)
         self.assertEqual("timeout", progress["phase"])
+        self.assertEqual("timeout", progress["current_phase"]["phase"])
         self.assertIn("1s stop wait timeout", progress["message"])
+        self.assertIn("runner_wait", [entry["phase"] for entry in progress["history"]])
+        self.assertTrue(progress["runner_alive"])
+        self.assertTrue(progress["timeout_guidance"]["recoverable"])
 
     def test_controller_start_creates_fresh_run_dir_by_default_and_reuses_only_when_explicit(self) -> None:
         repo = _scratch_dir("controller_start") / "repo"

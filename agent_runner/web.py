@@ -54,6 +54,7 @@ from .remote.controller import (
     build_runner_start_options_contract,
     normalize_runner_start_options,
 )
+from .stop_progress import normalize_stop_progress_payload
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, load_state, parse_backlog_md
 from .utils import atomic_write_json, atomic_write_text, now_iso, run_cmd
 
@@ -2037,6 +2038,8 @@ def _runner_control_status_payload(
     stop_progress = status.get("stop_progress")
     if not isinstance(stop_progress, dict):
         stop_progress = {}
+    else:
+        stop_progress = normalize_stop_progress_payload(stop_progress)
     state_counts = status.get("state_counts")
     if not isinstance(state_counts, dict):
         state_counts = {}
@@ -2080,6 +2083,11 @@ def _runner_control_actions(
     running = bool(status_payload.get("running"))
     status_reason = str(status_payload.get("reason") or "").strip()
     status_error = status_reason.startswith("status_error:")
+    stop_progress = normalize_stop_progress_payload(status_payload.get("stop_progress"))
+    stop_timeout_retryable = bool(
+        str(stop_progress.get("phase") or "").strip().lower() == "timeout"
+        and stop_progress.get("timeout_guidance", {}).get("can_retry", True) is not False
+    )
     disabled_reason = "Runner controls are disabled until the server is started with AGENTCLI_WEB_RUNNER_CONTROLS=1 or --enable-runner-controls."
     controller_reason = "Runner controller is unavailable."
     busy_reason = "A runner control request is already in flight."
@@ -2110,7 +2118,7 @@ def _runner_control_actions(
             ),
         ),
         "stop": _action(
-            enabled and controller_available and running and not status_error,
+            enabled and controller_available and (running or stop_timeout_retryable) and not status_error,
             busy_reason if busy else (
                 disabled_reason
                 if not enabled
@@ -2120,7 +2128,7 @@ def _runner_control_actions(
                     else (
                         controller_status_reason
                         if status_error
-                        else ("Runner is not running." if not running else "")
+                        else ("" if (running or stop_timeout_retryable) else "Runner is not running.")
                     )
                 )
             ),
@@ -5993,16 +6001,26 @@ def create_app(
                 result = controller.stop(wait=True)
                 if not bool(result.get("ok")):
                     message = str(result.get("message") or "Runner stop failed.")
+                    stop_progress = result.get("stop_progress")
+                    if not isinstance(stop_progress, dict):
+                        stop_progress = {}
+                    stop_phase = str(
+                        stop_progress.get("phase")
+                        or (stop_progress.get("current_phase") or {}).get("phase")
+                        or ""
+                    ).strip().lower()
                     control_state["last_action"] = normalized_action
                     control_state["last_message"] = ""
                     control_state["last_error"] = message
+                    error_code = "runner_stop_timeout" if stop_phase == "timeout" else "runner_stop_failed"
                     return _runner_control_response(
                         action=normalized_action,
                         status_code=409,
                         ok=False,
-                        status="error",
+                        status="timeout" if stop_phase == "timeout" else "error",
                         message=message,
-                        error_code="runner_stop_failed",
+                        error_code=error_code,
+                        details={"stop_progress": stop_progress} if stop_phase == "timeout" else None,
                         result=result,
                         busy_override=False,
                     )

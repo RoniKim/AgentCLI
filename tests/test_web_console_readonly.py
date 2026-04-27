@@ -5069,6 +5069,254 @@ Another unsupported line.
         self.assertIn("runner-control__option--invalid", card_html)
         self.assertIn("field-error", card_html)
 
+    def test_runner_control_timeout_stop_progress_renders_history_and_retry_state(self) -> None:
+        timeout_progress = {
+            "phase": "timeout",
+            "message": "Runner is still alive after 1s stop wait timeout.",
+            "elapsed_seconds": 12,
+            "updated_at": "2026-04-28T00:00:12",
+            "requested_at": "2026-04-28T00:00:00",
+            "history": [
+                {
+                    "phase": "request",
+                    "message": "Stop requested.",
+                    "elapsed_seconds": 0,
+                    "updated_at": "2026-04-28T00:00:00",
+                },
+                {
+                    "phase": "stop_file_write",
+                    "message": "Stop file written: C:/temp/STOP",
+                    "elapsed_seconds": 1,
+                    "updated_at": "2026-04-28T00:00:01",
+                },
+                {
+                    "phase": "child_termination",
+                    "message": "Terminating tracked child processes.",
+                    "elapsed_seconds": 2,
+                    "updated_at": "2026-04-28T00:00:02",
+                },
+                {
+                    "phase": "runner_wait",
+                    "message": "Waiting for runner shutdown and final artifacts.",
+                    "elapsed_seconds": 6,
+                    "updated_at": "2026-04-28T00:00:06",
+                },
+                {
+                    "phase": "timeout",
+                    "message": "Runner is still alive after 1s stop wait timeout.",
+                    "elapsed_seconds": 12,
+                    "updated_at": "2026-04-28T00:00:12",
+                },
+            ],
+            "current_phase": {
+                "phase": "timeout",
+                "message": "Runner is still alive after 1s stop wait timeout.",
+                "elapsed_seconds": 12,
+                "updated_at": "2026-04-28T00:00:12",
+                "runner_alive": True,
+                "tracked_child_pids": [321, 654],
+                "tracked_child_processes": [
+                    {
+                        "pid": 321,
+                        "alive": True,
+                        "session_file": "C:/temp/session_321.json",
+                        "session_exists": True,
+                    }
+                ],
+                "stop_file_paths": {
+                    "stop_file_path": "C:/temp/STOP",
+                    "stop_progress_path": "C:/temp/STOP_PROGRESS.json",
+                    "stop_progress_log_path": "C:/temp/stop_progress.log",
+                },
+                "last_artifact_signal": {
+                    "path": "C:/temp/run_summary.json",
+                    "updated_at": "2026-04-28T00:00:10",
+                },
+                "last_log_signal": {
+                    "path": "C:/temp/cycle_summary.log",
+                    "updated_at": "2026-04-28T00:00:11",
+                },
+                "timeout_guidance": {
+                    "summary": "Retry stop after checking the runner.",
+                    "recoverable": True,
+                    "steps": [
+                        "Retry stop after checking the runner.",
+                        "Inspect the tracked child PIDs.",
+                    ],
+                    "manual_cleanup_hints": ["Close the runner."],
+                    "locked_file_paths": ["C:/temp/locked.txt"],
+                },
+            },
+            "runner_alive": True,
+            "tracked_child_pids": [321, 654],
+            "tracked_child_processes": [
+                {
+                    "pid": 321,
+                    "alive": True,
+                    "session_file": "C:/temp/session_321.json",
+                    "session_exists": True,
+                }
+            ],
+            "stop_file_paths": {
+                "stop_file_path": "C:/temp/STOP",
+                "stop_progress_path": "C:/temp/STOP_PROGRESS.json",
+                "stop_progress_log_path": "C:/temp/stop_progress.log",
+            },
+            "last_artifact_signal": {
+                "path": "C:/temp/run_summary.json",
+                "updated_at": "2026-04-28T00:00:10",
+            },
+            "last_log_signal": {
+                "path": "C:/temp/cycle_summary.log",
+                "updated_at": "2026-04-28T00:00:11",
+            },
+            "timeout_guidance": {
+                "summary": "Retry stop after checking the runner.",
+                "recoverable": True,
+                "steps": [
+                    "Retry stop after checking the runner.",
+                    "Inspect the tracked child PIDs.",
+                ],
+                "manual_cleanup_hints": ["Close the runner."],
+                "locked_file_paths": ["C:/temp/locked.txt"],
+            },
+        }
+        finalized_progress = {
+            "phase": "finalized",
+            "message": "Runner stop sequence finished.",
+            "elapsed_seconds": 16,
+            "updated_at": "2026-04-28T00:00:16",
+            "requested_at": "2026-04-28T00:00:00",
+            "history": [
+                {"phase": "request", "message": "Stop requested.", "elapsed_seconds": 0, "updated_at": "2026-04-28T00:00:00"},
+                {"phase": "stop_file_write", "message": "Stop file written: C:/temp/STOP", "elapsed_seconds": 1, "updated_at": "2026-04-28T00:00:01"},
+                {"phase": "child_termination", "message": "Terminating tracked child processes.", "elapsed_seconds": 2, "updated_at": "2026-04-28T00:00:02"},
+                {"phase": "final_artifact_collection", "message": "Collecting final artifacts and logs.", "elapsed_seconds": 15, "updated_at": "2026-04-28T00:00:15"},
+                {"phase": "finalized", "message": "Runner stop sequence finished.", "elapsed_seconds": 16, "updated_at": "2026-04-28T00:00:16"},
+            ],
+            "current_phase": {
+                "phase": "finalized",
+                "message": "Runner stop sequence finished.",
+                "elapsed_seconds": 16,
+                "updated_at": "2026-04-28T00:00:16",
+                "runner_alive": False,
+                "tracked_child_pids": [],
+                "tracked_child_processes": [],
+                "stop_file_paths": {
+                    "stop_file_path": "C:/temp/STOP",
+                    "stop_progress_path": "C:/temp/STOP_PROGRESS.json",
+                    "stop_progress_log_path": "C:/temp/stop_progress.log",
+                },
+                "timeout_guidance": {
+                    "summary": "Stop sequence finalized.",
+                    "recoverable": False,
+                    "steps": [],
+                    "manual_cleanup_hints": [],
+                    "locked_file_paths": [],
+                },
+            },
+            "runner_alive": False,
+            "tracked_child_pids": [],
+            "tracked_child_processes": [],
+            "stop_file_paths": {
+                "stop_file_path": "C:/temp/STOP",
+                "stop_progress_path": "C:/temp/STOP_PROGRESS.json",
+                "stop_progress_log_path": "C:/temp/stop_progress.log",
+            },
+            "timeout_guidance": {
+                "summary": "Stop sequence finalized.",
+                "recoverable": False,
+                "steps": [],
+                "manual_cleanup_hints": [],
+                "locked_file_paths": [],
+            },
+        }
+
+        control = {
+            "enabled": True,
+            "controllerAvailable": True,
+            "busy": False,
+            "message": "Runner is stopping.",
+            "lastAction": "stop",
+            "lastMessage": "",
+            "lastError": "",
+            "status": {
+                "running": True,
+                "runnerMode": "thread",
+                "repo": self.repo.as_posix(),
+                "configPath": self.config_path.as_posix(),
+                "runDir": self.run_dir.as_posix(),
+                "stopProgress": timeout_progress,
+                "reason": "",
+                "lastEvent": "2026-04-26T12:08:00 cycle_end",
+            },
+        }
+        finalized_control = {
+            **control,
+            "message": "Runner stop sequence finished.",
+            "status": {
+                **control["status"],
+                "running": False,
+                "stopProgress": finalized_progress,
+                "lastEvent": "2026-04-26T12:08:00 cycle_end",
+            },
+        }
+
+        results = _run_adapter_harness(
+            [
+                {"kind": "call", "name": "normalizeStopProgress", "args": [timeout_progress]},
+                {"kind": "call", "name": "runnerControlStateInfo", "args": [control]},
+                {"kind": "call", "name": "runnerControlDetailRows", "args": [control, {"chipTone": "warn", "label": "Stop timed out"}]},
+                {"kind": "call", "name": "renderStopProgressSection", "args": [timeout_progress]},
+                {"kind": "call", "name": "normalizeStopProgress", "args": [finalized_progress]},
+                {"kind": "call", "name": "runnerControlStateInfo", "args": [finalized_control]},
+            ]
+        )
+
+        normalized_timeout = results[0]
+        timeout_display = results[1]
+        timeout_rows = results[2]
+        timeout_html = results[3]
+        normalized_finalized = results[4]
+        finalized_display = results[5]
+
+        self.assertEqual("timeout", normalized_timeout["phase"])
+        self.assertEqual(["request", "stop_file_write", "child_termination", "runner_wait", "timeout"], [entry["phase"] for entry in normalized_timeout["history"]])
+        self.assertTrue(normalized_timeout["runnerAlive"])
+        self.assertEqual([321, 654], normalized_timeout["trackedChildPids"])
+        self.assertTrue(normalized_timeout["timeoutGuidance"]["canRetry"])
+        self.assertEqual(["Close the runner."], normalized_timeout["manualCleanupHints"])
+        self.assertEqual(["C:/temp/locked.txt"], normalized_timeout["lockedFilePaths"])
+        self.assertEqual("warn", timeout_display["chipTone"])
+        self.assertEqual("Stop timed out", timeout_display["label"])
+        self.assertEqual("Stop timed out", timeout_display["title"])
+        self.assertIn("Retry stop", timeout_display["copy"])
+        self.assertIn("stop-progress__history-item--current", timeout_html)
+        self.assertIn("Phase history", timeout_html)
+        self.assertIn("Remaining tracked PIDs", timeout_html)
+        self.assertIn("Manual cleanup hints", timeout_html)
+        self.assertIn("Locked file paths", timeout_html)
+
+        timeout_labels = {row["label"] for row in timeout_rows}
+        self.assertIn("Current phase", timeout_labels)
+        self.assertIn("Phase history", timeout_labels)
+        self.assertIn("Runner alive", timeout_labels)
+        self.assertIn("Remaining tracked PIDs", timeout_labels)
+        self.assertIn("Stop file paths", timeout_labels)
+        self.assertIn("Last artifact write", timeout_labels)
+        self.assertIn("Last log write", timeout_labels)
+        self.assertIn("Timeout guidance", timeout_labels)
+        self.assertIn("Manual cleanup hints", timeout_labels)
+        self.assertIn("Locked file paths", timeout_labels)
+
+        self.assertEqual("finalized", normalized_finalized["phase"])
+        self.assertEqual(["request", "stop_file_write", "child_termination", "final_artifact_collection", "finalized"], [entry["phase"] for entry in normalized_finalized["history"]])
+        self.assertFalse(normalized_finalized["timeoutGuidance"]["canRetry"])
+        self.assertEqual("success", finalized_display["chipTone"])
+        self.assertEqual("Stopped", finalized_display["label"])
+        self.assertEqual("Action complete", finalized_display["title"])
+        self.assertIn("Runner stop sequence finished.", finalized_display["copy"])
+
     def test_fast_web_worktree_regression_scope_detection_requires_repo_markers(self) -> None:
         from agent_runner.gates import repo_has_web_worktree_markers, should_run_fast_web_worktree_regression
 
