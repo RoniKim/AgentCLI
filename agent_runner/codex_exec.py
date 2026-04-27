@@ -284,15 +284,11 @@ async def codex_exec(
             async def _tree_watch_loop(root_pid: int) -> None:
                 while True:
                     try:
-                        from .process_guard import process_descendant_pids, register_pid
+                        from .process_guard import process_descendant_pids
 
                         for child_pid in process_descendant_pids(root_pid):
                             if child_pid not in observed_child_pids:
                                 observed_child_pids.add(child_pid)
-                                try:
-                                    register_pid(child_pid)
-                                except Exception:
-                                    pass
                     except Exception:
                         pass
                     await asyncio.sleep(1.0)
@@ -482,7 +478,6 @@ async def codex_exec(
             for child_pid in sorted(observed_child_pids, reverse=True):
                 try:
                     terminate_process_tree(child_pid, include_root=True)
-                    unregister_pid_if_exited(child_pid)
                 except Exception:
                     pass
         # Clean up temp files

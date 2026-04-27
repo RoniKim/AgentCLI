@@ -146,15 +146,11 @@ async def run_cmd_async(
         async def _tree_watch_loop(root_pid: int) -> None:
             while True:
                 try:
-                    from .process_guard import process_descendant_pids, register_pid
+                    from .process_guard import process_descendant_pids
 
                     for child_pid in process_descendant_pids(root_pid):
                         if child_pid not in observed_child_pids:
                             observed_child_pids.add(child_pid)
-                            try:
-                                register_pid(child_pid)
-                            except Exception:
-                                pass
                 except Exception:
                     pass
                 await asyncio.sleep(1.0)
@@ -258,18 +254,6 @@ async def run_cmd_async(
                 unregister_pid_if_exited(registered_pid)
             except Exception:
                 pass
-        if observed_child_pids:
-            try:
-                from .process_guard import unregister_pid_if_exited
-
-                for child_pid in sorted(observed_child_pids, reverse=True):
-                    try:
-                        unregister_pid_if_exited(child_pid)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
     if truncated:
         summary = (summary + " " if summary else "") + "truncated"
     if not summary:

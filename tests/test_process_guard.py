@@ -90,6 +90,31 @@ class ProcessGuardTests(unittest.TestCase):
 
         self.assertEqual({31, 32}, set(descendants))
 
+    def test_terminate_pids_uses_one_windows_snapshot_for_bulk_cleanup(self) -> None:
+        killed: list[int] = []
+        child_map = {
+            10: [11],
+            11: [12],
+            20: [21],
+        }
+
+        with (
+            patch.object(process_guard.sys, "platform", "win32"),
+            patch("agent_runner.process_guard.os.getpid", return_value=999),
+            patch("agent_runner.process_guard._windows_child_pid_map", return_value=child_map) as snapshot,
+            patch("agent_runner.process_guard._kill_pid", side_effect=lambda pid: killed.append(pid)),
+            patch("agent_runner.process_guard._pid_alive", return_value=False),
+        ):
+            process_guard._terminate_pids([10, 20, 10], wait=True)
+
+        self.assertEqual(1, snapshot.call_count)
+        self.assertEqual([12, 11, 10, 21, 20], killed)
+
+    def test_pid_summary_caps_large_stop_logs(self) -> None:
+        summary = process_guard._summarize_pids(list(range(45)), limit=5)
+
+        self.assertEqual("[0, 1, 2, 3, 4, ...] (45 total)", summary)
+
     def test_startup_orphan_detection_excludes_interactive_shell_images(self) -> None:
         def _looks_managed(image_name: str) -> bool:
             output = f'"{image_name}","1234","Console","1","10,000 K"\r\n'

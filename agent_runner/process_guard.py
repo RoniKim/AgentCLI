@@ -398,22 +398,56 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _summarize_pids(pids: list[int], *, limit: int = 40) -> str:
+    if len(pids) <= limit:
+        return str(pids)
+    head = ", ".join(str(pid) for pid in pids[:limit])
+    return f"[{head}, ...] ({len(pids)} total)"
+
+
+def _terminate_windows_pids_bulk(pids: list[int]) -> None:
+    """Terminate tracked Windows PIDs using a single process snapshot."""
+    child_map = _windows_child_pid_map()
+    seen: set[int] = set()
+    kill_order: list[int] = []
+    my_pid = os.getpid()
+
+    def _add(pid: int) -> None:
+        if pid <= 0 or pid == my_pid or pid in seen:
+            return
+        seen.add(pid)
+        kill_order.append(pid)
+
+    for pid in pids:
+        if pid <= 0 or pid == my_pid:
+            continue
+        for child_pid in reversed(_descendant_pids(pid, child_map)):
+            _add(child_pid)
+        _add(pid)
+
+    for pid in kill_order:
+        _kill_pid(pid)
+
+
 def _terminate_pids(pids: list[int], *, wait: bool = True) -> None:
     """Kill a list of PIDs. If wait=True on Unix, SIGTERM → wait → SIGKILL."""
     seen: set[int] = set()
+    unique_pids: list[int] = []
     for pid in pids:
-        if pid in seen:
-            continue
-        seen.add(pid)
-        if sys.platform == "win32":
-            terminate_process_tree(pid, include_root=True)
-        else:
+        if pid not in seen:
+            seen.add(pid)
+            unique_pids.append(pid)
+
+    if sys.platform == "win32":
+        _terminate_windows_pids_bulk(unique_pids)
+    else:
+        for pid in unique_pids:
             _kill_pid(pid)
 
     if wait and sys.platform != "win32":
         # On Windows, TerminateProcess is already a hard kill — no need to wait.
         time.sleep(0.5)
-        for pid in pids:
+        for pid in unique_pids:
             if _pid_alive(pid):
                 try:
                     os.kill(pid, signal.SIGKILL)
@@ -421,7 +455,7 @@ def _terminate_pids(pids: list[int], *, wait: bool = True) -> None:
                     pass
 
     # Cleanup tracked set and session files
-    for pid in pids:
+    for pid in unique_pids:
         unregister_pid_if_exited(pid)
 
 
@@ -437,7 +471,11 @@ def terminate_all_children(*, _from_signal: bool = False) -> None:
         pids = list(_tracked_pids)
     if not pids:
         return
-    logger.info(f"[ProcessGuard] Terminating {len(pids)} tracked child process(es): {pids}")
+    logger.info(
+        "[ProcessGuard] Terminating %d tracked child process(es): %s",
+        len(pids),
+        _summarize_pids(pids),
+    )
     _terminate_pids(pids, wait=not _from_signal)
 
 
