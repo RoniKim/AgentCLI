@@ -406,6 +406,8 @@ class WebConsoleSafetyTests(unittest.TestCase):
         start_options = control_payload["runner_control"]["startOptions"]
         self.assertEqual(self.config_path.as_posix(), start_options["path"])
         self.assertEqual(self.config_path.as_posix(), start_options["values"]["config_path"])
+        self.assertTrue(start_options["validation"]["valid"])
+        self.assertIsInstance(start_options["argv_preview"], list)
         self.assertTrue(start_options["defaults_path"])
         self.assertEqual(["one-shot", "continuous", "loop"], start_options["choices"]["run_mode"])
         self.assertEqual(["personal", "enterprise"], start_options["choices"]["profile"])
@@ -546,6 +548,9 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("[redacted]", status_payload["runner_control"]["startOptions"]["defaults_path"])
         self.assertEqual("[redacted]", status_payload["runner_control"]["startOptions"]["values"]["config_path"])
         self.assertEqual("[redacted]", status_payload["runner_control"]["startOptions"]["defaults"]["config_path"])
+        self.assertEqual("[redacted]", status_payload["runner_control"]["startOptions"]["argv_preview"][1])
+        self.assertEqual("[redacted]", status_payload["runner_control"]["startOptions"]["argv_preview"][3])
+        self.assertTrue(status_payload["runner_control"]["startOptions"]["validation"]["valid"])
 
         progress = client.get("/api/progress")
         self.assertEqual(200, progress.status_code)
@@ -610,6 +615,8 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("[redacted]", runner_status["status"]["config_path"])
         self.assertEqual("[redacted]", runner_status["runner_control"]["startOptions"]["path"])
         self.assertEqual("[redacted]", runner_status["runner_control"]["startOptions"]["values"]["config_path"])
+        self.assertEqual("[redacted]", runner_status["runner_control"]["startOptions"]["argv_preview"][1])
+        self.assertEqual("[redacted]", runner_status["runner_control"]["startOptions"]["argv_preview"][3])
         self.assertFalse(runner_status["enabled"])
 
     def test_lan_runner_control_responses_redact_runner_args(self) -> None:
@@ -632,6 +639,9 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("[redacted]", payload["runner_control"]["status"]["config_path"])
         self.assertEqual("[redacted]", payload["runner_control"]["startOptions"]["path"])
         self.assertEqual("[redacted]", payload["runner_control"]["startOptions"]["values"]["config_path"])
+        self.assertEqual("[redacted]", payload["runner_control"]["startOptions"]["argv_preview"][1])
+        self.assertEqual("[redacted]", payload["runner_control"]["startOptions"]["argv_preview"][3])
+        self.assertTrue(payload["runner_control"]["startOptions"]["validation"]["valid"])
         self.assertEqual("[redacted]", payload["result"]["config_path"])
         self.assertEqual(self.repo.as_posix(), payload["result"]["repo"])
         self.assertEqual("[redacted]", payload["snapshot"]["logs"]["files"]["cycle_summary"])
@@ -643,6 +653,107 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("[redacted]", runner_status["status"]["config_path"])
         self.assertEqual("[redacted]", runner_status["runner_control"]["startOptions"]["path"])
         self.assertEqual("[redacted]", runner_status["runner_control"]["startOptions"]["values"]["config_path"])
+        self.assertEqual("[redacted]", runner_status["runner_control"]["startOptions"]["argv_preview"][1])
+        self.assertEqual("[redacted]", runner_status["runner_control"]["startOptions"]["argv_preview"][3])
+        self.assertTrue(runner_status["runner_control"]["startOptions"]["validation"]["valid"])
+
+    def test_runner_control_status_surfaces_valid_loop_preview(self) -> None:
+        controller = FakeRunnerController(
+            repo=self.repo,
+            base_args=SimpleNamespace(
+                config_path=self.config_path.as_posix(),
+                config=self.config_path.as_posix(),
+                autopilot=True,
+                continuous=True,
+                loop=True,
+                loop_max_cycles=7,
+                profile="enterprise",
+                execution_backend="claudecode",
+                run_dir=(self.home / "runs" / "explicit").as_posix(),
+                resume_latest=False,
+            ),
+        )
+        client, _ = _create_client(
+            self.repo,
+            enable_runner_controls=True,
+            config_path=self.config_path,
+            runner_controller=controller,
+        )
+
+        status_payload = client.get("/api/runner/status").json()
+        start_options = status_payload["runner_control"]["startOptions"]
+        self.assertTrue(start_options["validation"]["valid"])
+        self.assertEqual(
+            [
+                "--repo",
+                self.repo.as_posix(),
+                "--config",
+                self.config_path.as_posix(),
+                "--autopilot",
+                "--continuous",
+                "--loop",
+                "--no-resume-latest",
+                "--loop-max-cycles",
+                "7",
+                "--profile",
+                "enterprise",
+                "--execution-backend",
+                "claudecode",
+                "--run-dir",
+                (self.home / "runs" / "explicit").as_posix(),
+            ],
+            start_options["argv_preview"],
+        )
+
+    def test_runner_start_options_surface_all_field_errors_together(self) -> None:
+        client, app = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+        explicit_run_dir = (self.home / "runs" / "explicit").resolve()
+
+        response = client.post(
+            "/api/runner/start",
+            json={
+                "confirmation": "START RUNNER",
+                "start_options": {
+                    "autopilot": True,
+                    "run_mode": "loop",
+                    "continuous": False,
+                    "loop": False,
+                    "one_shot": True,
+                    "loop_max_cycles": "-1",
+                    "profile": "bogus",
+                    "execution_backend": "bogus",
+                    "config_path": "",
+                    "run_dir": explicit_run_dir.as_posix(),
+                    "resume_latest": True,
+                },
+            },
+        )
+        self.assertEqual(400, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("runner_start_options_invalid", payload["error"]["code"])
+        self.assertEqual("Runner start options are invalid.", payload["message"])
+        details = payload["error"]["details"]
+        self.assertFalse(details["valid"])
+        self.assertEqual(8, details["error_count"])
+        self.assertIn("continuous", details["field_errors"])
+        self.assertIn("loop", details["field_errors"])
+        self.assertIn("one_shot", details["field_errors"])
+        self.assertIn("loop_max_cycles", details["field_errors"])
+        self.assertIn("profile", details["field_errors"])
+        self.assertIn("execution_backend", details["field_errors"])
+        self.assertIn("config_path", details["field_errors"])
+        self.assertIn("resume_latest", details["field_errors"])
+        self.assertTrue(any(error["field"] == "continuous" and error["code"] == "invalid_combination" for error in details["errors"]))
+        self.assertTrue(any(error["field"] == "loop" and error["code"] == "invalid_combination" for error in details["errors"]))
+        self.assertTrue(any(error["field"] == "one_shot" and error["code"] == "invalid_combination" for error in details["errors"]))
+        self.assertTrue(any(error["field"] == "profile" and error["code"] == "invalid_choice" for error in details["errors"]))
+        self.assertTrue(any(error["field"] == "execution_backend" and error["code"] == "invalid_choice" for error in details["errors"]))
+        self.assertTrue(any(error["field"] == "loop_max_cycles" and error["code"] == "invalid_value" for error in details["errors"]))
+        self.assertTrue(any(error["field"] == "config_path" and error["code"] == "required" for error in details["errors"]))
+        self.assertTrue(any(error["field"] == "resume_latest" and error["code"] == "invalid_combination" for error in details["errors"]))
+        self.assertEqual(0, app.state.runner_controller.start_calls)
+        self.assertEqual([], app.state.runner_controller.stop_calls)
 
     def test_web_app_initializes_process_guard_and_shutdown_stops_runner(self) -> None:
         from fastapi.testclient import TestClient
@@ -747,7 +858,7 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("enterprise", controller.start_overrides[0]["profile"])
         self.assertEqual("claudecode", controller.start_overrides[0]["execution_backend"])
         self.assertNotIn("run_dir", controller.start_overrides[0])
-        self.assertNotIn("resume_latest", controller.start_overrides[0])
+        self.assertFalse(controller.start_overrides[0]["resume_latest"])
         self.assertNotIn("run_mode", controller.start_overrides[0])
         start_run_dir = Path(start_body["result"]["run_dir"])
 
@@ -782,7 +893,7 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("personal", controller.start_overrides[1]["profile"])
         self.assertEqual("codex", controller.start_overrides[1]["execution_backend"])
         self.assertNotIn("run_dir", controller.start_overrides[1])
-        self.assertNotIn("resume_latest", controller.start_overrides[1])
+        self.assertFalse(controller.start_overrides[1]["resume_latest"])
         reload_run_dir = Path(reload_body["result"]["start"]["run_dir"])
         self.assertNotEqual(start_run_dir, reload_run_dir)
         self.assertTrue(reload_body["snapshot"]["runner_control"]["status"]["running"])
@@ -819,7 +930,7 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("enterprise", controller.start_overrides[2]["profile"])
         self.assertEqual("claudecode", controller.start_overrides[2]["execution_backend"])
         self.assertNotIn("run_dir", controller.start_overrides[2])
-        self.assertNotIn("resume_latest", controller.start_overrides[2])
+        self.assertFalse(controller.start_overrides[2]["resume_latest"])
         restart_run_dir = Path(restart_body["result"]["start"]["run_dir"])
         self.assertNotEqual(reload_run_dir, restart_run_dir)
         self.assertNotEqual(start_run_dir, restart_run_dir)

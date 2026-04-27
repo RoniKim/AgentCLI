@@ -2514,12 +2514,17 @@
     const raw = toObject(contract);
     const redaction = toObject(raw.redaction);
     return {
+      repo: toText(raw.repo, ''),
       path: toText(raw.path, ''),
       defaultsPath: toText(raw.defaults_path || raw.defaultsPath, ''),
+      runDir: toText(raw.run_dir || raw.runDir, ''),
+      resumeLatest: raw.resume_latest == null ? Boolean(raw.resumeLatest) : Boolean(raw.resume_latest),
       values: toObject(raw.values),
       defaults: toObject(raw.defaults),
       schema: toObject(raw.schema),
       choices: toObject(raw.choices),
+      validation: normalizeRunnerControlStartOptionsValidation(raw.validation),
+      argvPreview: toArray(raw.argv_preview || raw.argvPreview).map((item) => toText(item, '')),
       redaction: {
         active: Boolean(redaction.active),
         placeholder: toText(redaction.placeholder, REDACTED_VALUE),
@@ -2527,6 +2532,38 @@
         tokens: toArray(redaction.tokens),
         scope: toText(redaction.scope, ''),
       },
+    };
+  }
+
+  function normalizeRunnerControlStartOptionsValidation(validation) {
+    const raw = toObject(validation);
+    const rawErrors = toArray(raw.errors).map((item) => toObject(item));
+    const fieldErrors = {};
+    const rawFieldErrors = toObject(raw.field_errors || raw.fieldErrors);
+    Object.entries(rawFieldErrors).forEach(([field, value]) => {
+      const messages = toArray(value).map((item) => toText(item, '').trim()).filter(Boolean);
+      if (messages.length) {
+        fieldErrors[String(field)] = messages;
+      }
+    });
+    if (!Object.keys(fieldErrors).length) {
+      rawErrors.forEach((error) => {
+        const field = toText(error.field, '').trim();
+        const message = toText(error.message, '').trim();
+        if (field && message) {
+          if (!fieldErrors[field]) {
+            fieldErrors[field] = [];
+          }
+          fieldErrors[field].push(message);
+        }
+      });
+    }
+    return {
+      valid: raw.valid == null ? rawErrors.length === 0 : Boolean(raw.valid),
+      message: toText(raw.message, ''),
+      errorCount: toNumber(raw.error_count ?? raw.errorCount, rawErrors.length),
+      errors: rawErrors,
+      fieldErrors,
     };
   }
 
@@ -2566,6 +2603,17 @@
         '0',
       '0'
     );
+    const runDir = toText(source.run_dir || source.runDir || base.run_dir || base.runDir || contract.runDir || '', '');
+    const resumeLatest =
+      source.resume_latest != null
+        ? Boolean(source.resume_latest)
+        : source.resumeLatest != null
+          ? Boolean(source.resumeLatest)
+          : base.resume_latest != null
+            ? Boolean(base.resume_latest)
+            : base.resumeLatest != null
+              ? Boolean(base.resumeLatest)
+              : contract.resumeLatest;
     return {
       autopilot: source.autopilot == null ? Boolean(base.autopilot) : Boolean(source.autopilot),
       run_mode: runMode,
@@ -2585,6 +2633,8 @@
         'codex'
       ),
       config_path: fallbackConfigPath,
+      run_dir: runDir,
+      resume_latest: Boolean(resumeLatest),
       redaction: clone(toObject(contract.redaction)),
     };
   }
@@ -2634,6 +2684,8 @@
     const configPath = toText(current.config_path || current.configPath || current.config, '').trim();
     const configPathPlaceholder = toText(redaction.placeholder, REDACTED_VALUE).trim() || REDACTED_VALUE;
     const loopMaxCycles = toText(current.loop_max_cycles ?? current.loopMaxCycles ?? current.max_cycles ?? current.maxCycles ?? '', '');
+    const runDir = toText(current.run_dir || current.runDir, '').trim();
+    const resumeLatest = current.resume_latest != null ? Boolean(current.resume_latest) : Boolean(current.resumeLatest);
     const payload = {
       autopilot: Boolean(current.autopilot),
       run_mode: runMode,
@@ -2643,11 +2695,152 @@
       loop_max_cycles: loopMaxCycles,
       profile,
       execution_backend: executionBackend,
+      resume_latest: resumeLatest,
     };
     if (configPath && configPath !== REDACTED_VALUE && configPath !== configPathPlaceholder) {
       payload.config_path = configPath;
+    } else if (!configPath && !(redaction.active && configPathPlaceholder === REDACTED_VALUE)) {
+      payload.config_path = '';
+    }
+    if (runDir && runDir !== REDACTED_VALUE) {
+      payload.run_dir = runDir;
     }
     return payload;
+  }
+
+  function runnerControlStartOptionsArgvPreview(control = state.runnerControl, draft = state.stopStartOptions) {
+    const contract = runnerControlStartOptionsContract(control);
+    const current = toObject(draft && typeof draft === 'object' ? draft : runnerControlStartOptionsDraft(control));
+    const redaction = toObject(contract.redaction);
+    const placeholder = toText(redaction.placeholder, REDACTED_VALUE).trim() || REDACTED_VALUE;
+    const repoText = toText(contract.repo || toObject(toObject(control).status).repo || '', '');
+    const configPathText = toText(current.config_path || current.configPath || current.config || '', '');
+    const runDirText = toText(current.run_dir || current.runDir || contract.runDir || '', '');
+    const runModeRaw = toText(current.run_mode || current.runMode || current.mode, '').replace(/_/g, '-').trim().toLowerCase();
+    const runMode = ['continuous', 'loop'].includes(runModeRaw) ? runModeRaw : normalizeRunnerControlStartMode(runModeRaw);
+    const profile = toText(current.profile, 'personal').trim().toLowerCase() || 'personal';
+    const backend = toText(current.execution_backend || current.executionBackend || current.backend, 'codex').trim().toLowerCase() || 'codex';
+    const resumeLatest = current.resume_latest != null
+      ? Boolean(current.resume_latest)
+      : current.resumeLatest != null
+        ? Boolean(current.resumeLatest)
+        : Boolean(contract.resumeLatest);
+    const argv = [
+      '--repo',
+      repoText || '',
+      '--config',
+      configPathText === placeholder ? REDACTED_VALUE : configPathText,
+      Boolean(current.autopilot) ? '--autopilot' : '--no-autopilot',
+    ];
+    if (runMode === 'loop') {
+      argv.push('--continuous', '--loop');
+    } else if (runMode === 'continuous') {
+      argv.push('--continuous', '--no-loop');
+    } else {
+      argv.push('--no-continuous', '--no-loop');
+    }
+    argv.push(resumeLatest ? '--resume-latest' : '--no-resume-latest');
+    argv.push('--loop-max-cycles', toText(current.loop_max_cycles ?? current.loopMaxCycles ?? current.max_cycles ?? current.maxCycles ?? '0', '0'));
+    argv.push('--profile', profile);
+    argv.push('--execution-backend', backend);
+    if (runDirText && runDirText !== REDACTED_VALUE) {
+      argv.push('--run-dir', runDirText);
+    }
+    if (redaction.active) {
+      for (let index = 0; index < argv.length - 1; index += 1) {
+        if (argv[index] === '--repo' || argv[index] === '--config' || argv[index] === '--run-dir') {
+          argv[index + 1] = REDACTED_VALUE;
+        }
+      }
+    }
+    return argv;
+  }
+
+  function runnerControlStartOptionsValidation(control = state.runnerControl, draft = state.stopStartOptions) {
+    const contract = runnerControlStartOptionsContract(control);
+    const current = toObject(draft && typeof draft === 'object' ? draft : runnerControlStartOptionsDraft(control));
+    const redaction = toObject(contract.redaction);
+    const placeholder = toText(redaction.placeholder, REDACTED_VALUE).trim() || REDACTED_VALUE;
+    const errors = [];
+    const fieldErrors = {};
+    const addError = (field, code, message, details = null) => {
+      const error = { field, code, message };
+      if (details && Object.keys(details).length) {
+        error.details = details;
+      }
+      errors.push(error);
+      if (!fieldErrors[field]) {
+        fieldErrors[field] = [];
+      }
+      fieldErrors[field].push(message);
+    };
+
+    const runModeChoices = toArray(contract.choices.run_mode || ['one-shot', 'continuous', 'loop']);
+    const profileChoices = toArray(contract.choices.profile || ['personal', 'enterprise']);
+    const backendChoices = toArray(contract.choices.execution_backend || ['codex', 'claudecode']);
+    const rawRunMode = toText(current.run_mode || current.runMode || current.mode, '').replace(/_/g, '-').trim().toLowerCase();
+    const runMode = runModeChoices.includes(rawRunMode) ? rawRunMode : normalizeRunnerControlStartMode(rawRunMode);
+    const continuous = Boolean(current.continuous);
+    const loop = Boolean(current.loop);
+    const oneShot = current.one_shot == null ? runMode === 'one-shot' : Boolean(current.one_shot);
+    const configPath = toText(current.config_path || current.configPath || current.config || '', '').trim();
+    const configPathRedacted = configPath === REDACTED_VALUE || configPath === placeholder;
+    const runDir = toText(current.run_dir || current.runDir || contract.runDir || '', '').trim();
+    const resumeLatest = current.resume_latest != null
+      ? Boolean(current.resume_latest)
+      : current.resumeLatest != null
+        ? Boolean(current.resumeLatest)
+        : Boolean(contract.resumeLatest);
+    const loopMaxCyclesText = toText(current.loop_max_cycles ?? current.loopMaxCycles ?? current.max_cycles ?? current.maxCycles ?? '', '').trim();
+    const loopMaxCycles = loopMaxCyclesText === '' ? NaN : Number(loopMaxCyclesText);
+
+    if (rawRunMode && !runModeChoices.includes(rawRunMode)) {
+      addError('run_mode', 'invalid_choice', 'Run mode must be one-shot, continuous, or loop.', { choices: runModeChoices });
+    }
+    if (continuous !== (runMode === 'continuous' || runMode === 'loop')) {
+      addError('continuous', 'invalid_combination', 'Continuous does not match the selected run mode.');
+    }
+    if (loop !== (runMode === 'loop')) {
+      addError('loop', 'invalid_combination', 'Loop does not match the selected run mode.');
+    }
+    if (oneShot !== (runMode === 'one-shot')) {
+      addError('one_shot', 'invalid_combination', 'One-shot does not match the selected run mode.');
+    }
+    const autopilot = Boolean(current.autopilot);
+    if (typeof current.autopilot !== 'boolean' && current.autopilot != null) {
+      addError('autopilot', 'invalid_choice', 'Autopilot must be true or false.', { choices: [true, false] });
+    }
+    const profile = toText(current.profile, 'personal').trim().toLowerCase() || 'personal';
+    if (!profileChoices.includes(profile)) {
+      addError('profile', 'invalid_choice', 'Profile must be personal or enterprise.', { choices: profileChoices });
+    }
+    const backend = toText(current.execution_backend || current.executionBackend || current.backend, 'codex').trim().toLowerCase() || 'codex';
+    if (!backendChoices.includes(backend)) {
+      addError('execution_backend', 'invalid_choice', 'Backend must be codex or claudecode.', { choices: backendChoices });
+    }
+    if (!configPathRedacted && !configPath) {
+      addError('config_path', 'required', 'Config path cannot be empty.');
+    }
+    if (loopMaxCyclesText !== '' && (!Number.isFinite(loopMaxCycles) || loopMaxCycles < 0)) {
+      addError('loop_max_cycles', 'invalid_value', 'Max cycles must be an integer greater than or equal to 0.');
+    }
+    if (runDir && resumeLatest) {
+      addError('resume_latest', 'invalid_combination', 'Resume latest cannot be combined with an explicit run dir.');
+    }
+
+    return {
+      valid: errors.length === 0,
+      message: errors.length === 0 ? '' : 'Fix the highlighted start options before continuing.',
+      errorCount: errors.length,
+      errors,
+      fieldErrors,
+      argvPreview: runnerControlStartOptionsArgvPreview(control, current),
+      autopilot,
+      runMode,
+      runDir,
+      resumeLatest,
+      configPath,
+    };
   }
 
   function runnerControlStartOptionsState() {
@@ -2687,10 +2880,12 @@
   function updateRunnerControlStartField(field, value, { rerender = false } = {}) {
     const normalizedField = String(field || '');
     let normalizedValue = value;
-    if (normalizedField === 'loop_max_cycles' || normalizedField === 'config_path') {
+    if (normalizedField === 'loop_max_cycles' || normalizedField === 'config_path' || normalizedField === 'run_dir') {
       normalizedValue = toText(value, '');
     } else if (normalizedField === 'profile' || normalizedField === 'execution_backend') {
       normalizedValue = toText(value, '').trim().toLowerCase();
+    } else if (normalizedField === 'resume_latest' || normalizedField === 'autopilot') {
+      normalizedValue = Boolean(value);
     }
     updateRunnerControlStartOptionsDraft({ [normalizedField]: normalizedValue }, { rerender });
   }
@@ -5573,6 +5768,21 @@
     goalItemMatchKey,
     buildGoalDraftSummary,
     buildGoalSaveRiskSummary,
+    runnerControlStartOptionsContract,
+    runnerControlStartOptionsDraftFrom,
+    runnerControlStartOptionsDraft,
+    runnerControlStartOptionsDefaultDraft,
+    runnerControlStartOptionsPayload,
+    runnerControlStartOptionsArgvPreview,
+    runnerControlStartOptionsValidation,
+    runnerControlStartOptionMetaText,
+    runnerControlStartOptionsSummaryChips,
+    runnerControlStartOptionCard,
+    renderRunnerControlStartOptionsSection,
+    updateRunnerControlStartOptionsDraft,
+    updateRunnerControlStartMode,
+    toggleRunnerControlAutopilot,
+    updateRunnerControlStartField,
     normalizeSnapshot: normalizeApiSnapshot,
     createBlankModel,
     createFallbackFixture,
@@ -9452,9 +9662,11 @@
     controlHTML = '',
     disabled = false,
     extraClass = '',
+    errors = [],
   }) {
+    const normalizedErrors = toArray(errors).map((item) => toText(item, '').trim()).filter(Boolean);
     return `
-      <div class="runner-control__option ${escapeHTML(extraClass)}">
+      <div class="runner-control__option ${escapeHTML(extraClass)} ${normalizedErrors.length ? 'runner-control__option--invalid' : ''}">
         <div class="runner-control__option-head">
           <div class="runner-control__label">${escapeHTML(label)}</div>
         </div>
@@ -9462,11 +9674,12 @@
         <div class="runner-control__option-control ${disabled ? 'runner-control__option-control--disabled' : ''}">
           ${controlHTML}
         </div>
+        ${normalizedErrors.length ? `<div class="runner-control__option-errors">${normalizedErrors.map((error) => `<div class="field-error">${escapeHTML(error)}</div>`).join('')}</div>` : ''}
       </div>
     `;
   }
 
-  function renderRunnerControlStartOptionsSection(control = state.runnerControl, actionEnabled = false) {
+  function renderRunnerControlStartOptionsSection(control = state.runnerControl, actionEnabled = false, validation = null) {
     const contract = runnerControlStartOptionsContract(control);
     const current = state.stopStartOptions && typeof state.stopStartOptions === 'object'
       ? state.stopStartOptions
@@ -9476,6 +9689,8 @@
     const defaultValues = toObject(defaults);
     const schema = toObject(contract.schema);
     const redaction = toObject(contract.redaction);
+    const validationState = validation && typeof validation === 'object' ? validation : runnerControlStartOptionsValidation(control, current);
+    const fieldErrors = toObject(validationState.fieldErrors);
     const disabled = !actionEnabled || state.stopSubmitting;
     const selectedRunMode = normalizeRunnerControlStartMode(values.run_mode);
     const runModeOptions = toArray(schema.run_mode?.options || contract.choices?.run_mode || ['one-shot', 'continuous', 'loop']);
@@ -9510,6 +9725,21 @@
     `;
     const redactionNote = (redactedConfigPath || Boolean(redaction.active))
       ? `<div class="summary-note" style="margin-top:4px;">${escapeHTML(t('config.redactedHidden'))}</div>`
+      : '';
+    const argvPreview = toArray(validationState.argvPreview && validationState.argvPreview.length ? validationState.argvPreview : runnerControlStartOptionsArgvPreview(control, current));
+    const previewHTML = `
+      <div class="runner-control__preview">
+        <div class="runner-control__preview-head">
+          <div class="runner-control__preview-title">Command preview</div>
+          <div class="summary-note">Argument array shown exactly as the runner will receive it.</div>
+        </div>
+        <div class="runner-control__argv" role="list" aria-label="Command preview">
+          ${argvPreview.map((token) => `<span class="runner-control__argv-token" role="listitem">${escapeHTML(token || '""')}</span>`).join('')}
+        </div>
+      </div>
+    `;
+    const validationSummary = !validationState.valid
+      ? `<div class="field-error runner-control__validation-error">${escapeHTML(validationState.message || 'Fix the highlighted start options before continuing.')}</div>`
       : '';
     const maxCyclesControl = `
       <input
@@ -9557,6 +9787,7 @@
         hint: schema.autopilot?.hint || '',
         controlHTML: autopilotControl,
         disabled,
+        errors: fieldErrors.autopilot || [],
       }),
       runnerControlStartOptionCard({
         path: 'run_mode',
@@ -9566,6 +9797,7 @@
         hint: schema.run_mode?.hint || '',
         controlHTML: `<div class="modal-tabs runner-control__run-modes">${runModeButtons}</div>`,
         disabled,
+        errors: fieldErrors.run_mode || [],
       }),
       runnerControlStartOptionCard({
         path: 'loop_max_cycles',
@@ -9575,6 +9807,7 @@
         hint: schema.loop_max_cycles?.hint || '',
         controlHTML: maxCyclesControl,
         disabled,
+        errors: fieldErrors.loop_max_cycles || [],
       }),
       runnerControlStartOptionCard({
         path: 'profile',
@@ -9584,6 +9817,7 @@
         hint: schema.profile?.hint || '',
         controlHTML: profileControl,
         disabled,
+        errors: fieldErrors.profile || [],
       }),
       runnerControlStartOptionCard({
         path: 'execution_backend',
@@ -9593,6 +9827,7 @@
         hint: schema.execution_backend?.hint || '',
         controlHTML: backendControl,
         disabled,
+        errors: fieldErrors.execution_backend || [],
       }),
       runnerControlStartOptionCard({
         path: 'config_path',
@@ -9603,6 +9838,7 @@
         controlHTML: configPathControl,
         disabled,
         extraClass: 'runner-control__option--wide',
+        errors: fieldErrors.config_path || [],
       }),
     ].join('');
 
@@ -9618,6 +9854,8 @@
         <div class="runner-control__chips">
           ${runnerControlStartOptionsSummaryChips(control, values)}
         </div>
+        ${previewHTML}
+        ${validationSummary}
         <div class="runner-control__options-grid">
           ${cards}
         </div>
@@ -11811,8 +12049,9 @@
     const confirmationValue = state.stopConfirmation.trim();
     const actionEnabled = runnerControlActionEnabled(action);
     const startAction = action === 'start' || action === 'reload' || action === 'restart';
-    const confirmEnabled = actionEnabled && confirmationValue === confirmation && !state.stopSubmitting;
-    const bannerTone = state.stopSubmitting ? 'info' : state.stopError ? 'err' : !actionEnabled ? 'warn' : 'idle';
+    const startOptionsValidation = startAction ? runnerControlStartOptionsValidation(control, state.stopStartOptions) : null;
+    const confirmEnabled = actionEnabled && confirmationValue === confirmation && !state.stopSubmitting && (!startAction || startOptionsValidation.valid);
+    const bannerTone = state.stopSubmitting ? 'info' : state.stopError ? 'err' : !actionEnabled ? 'warn' : startAction && startOptionsValidation && !startOptionsValidation.valid ? 'warn' : 'idle';
     const actionTitle = runnerControlModalTitle(action);
     const actionSummary = runnerControlActionSummary(action);
     const actionLabel = runnerControlActionLabel(action, state.stopSubmitting);
@@ -11826,26 +12065,36 @@
           : actionEnabled
             ? t('runner.typePhraseToContinue')
             : t('runner.actionUnavailable');
-    const detailHTML = runnerControlDetailRows(control, display)
-      .map(
-        (item) => `
-          <div class="runner-control__detail">
-            <div class="runner-control__label">${escapeHTML(item.label)}</div>
+      const detailHTML = runnerControlDetailRows(control, display)
+        .map(
+          (item) => `
+            <div class="runner-control__detail">
+              <div class="runner-control__label">${escapeHTML(item.label)}</div>
             <div class="runner-control__value ${escapeHTML(item.className || '')}">${escapeHTML(item.value)}</div>
           </div>
-        `
-      )
-      .join('');
-    const startOptionsHTML = startAction ? renderRunnerControlStartOptionsSection(control, actionEnabled) : '';
-    const bannerTitle = state.stopSubmitting ? t('runner.actionInFlight') : state.stopError ? t('runner.actionFailed') : !actionEnabled ? t('runner.actionDisabled') : t('runner.confirmationRequired');
-    const stopErrorText = redactionAwareText(state.stopError, t('runner.controlFailed'));
-    const bannerMessage = state.stopSubmitting
-      ? redactionAwareText(control.message, t('runner.refreshingStatus'))
-      : state.stopError
-        ? stopErrorText
-        : !actionEnabled
-          ? runnerControlActionDisabledReason(action)
-          : redactionAwareText(control.message, actionSummary);
+          `
+        )
+        .join('');
+      const startOptionsHTML = startAction ? renderRunnerControlStartOptionsSection(control, actionEnabled, startOptionsValidation) : '';
+      const bannerTitle = state.stopSubmitting
+        ? t('runner.actionInFlight')
+        : state.stopError
+          ? t('runner.actionFailed')
+          : !actionEnabled
+            ? t('runner.actionDisabled')
+            : startAction && startOptionsValidation && !startOptionsValidation.valid
+              ? 'Fix the highlighted start options before continuing.'
+              : t('runner.confirmationRequired');
+      const stopErrorText = redactionAwareText(state.stopError, t('runner.controlFailed'));
+      const bannerMessage = state.stopSubmitting
+        ? redactionAwareText(control.message, t('runner.refreshingStatus'))
+        : state.stopError
+          ? stopErrorText
+          : !actionEnabled
+            ? runnerControlActionDisabledReason(action)
+            : startAction && startOptionsValidation && !startOptionsValidation.valid
+              ? startOptionsValidation.message || 'Fix the highlighted start options before continuing.'
+            : redactionAwareText(control.message, actionSummary);
     overlayRoot().innerHTML = `
       <div class="overlay overlay--tight" data-overlay="stop">
         <div class="overlay__panel overlay__panel--modal">
@@ -12942,6 +13191,13 @@
       renderStopOverlay();
       return;
     }
+    const startAction = action !== 'stop';
+    const startOptionsValidation = startAction ? runnerControlStartOptionsValidation(state.runnerControl, state.stopStartOptions) : null;
+    if (startAction && !startOptionsValidation.valid) {
+      state.stopError = startOptionsValidation.message || 'Fix the highlighted start options before continuing.';
+      renderStopOverlay();
+      return;
+    }
 
     state.stopSubmitting = true;
     state.stopError = '';
@@ -12949,7 +13205,7 @@
 
     try {
       const requestBody = { confirmation: provided };
-      if (action !== 'stop') {
+      if (startAction) {
         requestBody.start_options = runnerControlStartOptionsPayload(state.stopStartOptions);
         requestBody.startOptions = requestBody.start_options;
       }
@@ -13968,7 +14224,7 @@
     }
 
     if (state.stopOpen && event.target.matches('[data-runner-option-field]')) {
-      updateRunnerControlStartField(event.target.dataset.runnerOptionField, event.target.value);
+      updateRunnerControlStartField(event.target.dataset.runnerOptionField, event.target.value, { rerender: true });
       return;
     }
 

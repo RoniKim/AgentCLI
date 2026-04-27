@@ -99,6 +99,66 @@ def _runner_start_backend(value: Any, default: str = "codex") -> str:
     return default if default in RUNNER_START_BACKEND_CHOICES else "codex"
 
 
+def _runner_start_validation_payload(errors: list[dict[str, Any]]) -> dict[str, Any]:
+    normalized_errors = [dict(error) for error in errors]
+    field_errors: dict[str, list[str]] = {}
+    for error in normalized_errors:
+        field = str(error.get("field") or "").strip()
+        message = str(error.get("message") or "").strip()
+        if field and message:
+            field_errors.setdefault(field, []).append(message)
+    return {
+        "valid": not normalized_errors,
+        "message": "Runner start options are valid." if not normalized_errors else "Runner start options are invalid.",
+        "error_count": len(normalized_errors),
+        "errors": normalized_errors,
+        "field_errors": field_errors,
+    }
+
+
+def _runner_start_argv_preview(
+    *,
+    repo: str,
+    config_path: str,
+    autopilot: bool,
+    run_mode: str,
+    loop_max_cycles: Any,
+    profile: str,
+    execution_backend: str,
+    run_dir: str = "",
+    resume_latest: bool = False,
+    redact_paths: bool = False,
+) -> list[str]:
+    def _path_token(value: str) -> str:
+        text = _runner_start_path_text(value)
+        if not text:
+            return ""
+        return REDACTED_VALUE if redact_paths else text
+
+    mode = run_mode if run_mode in RUNNER_START_MODE_CHOICES else _runner_start_mode_from_flags(False, False)
+    argv = [
+        "--repo",
+        _path_token(repo),
+        "--config",
+        _path_token(config_path),
+        "--autopilot" if autopilot else "--no-autopilot",
+    ]
+    if mode == "loop":
+        argv.extend(["--continuous", "--loop"])
+    elif mode == "continuous":
+        argv.extend(["--continuous", "--no-loop"])
+    else:
+        argv.extend(["--no-continuous", "--no-loop"])
+    argv.extend(["--resume-latest" if resume_latest else "--no-resume-latest"])
+    argv.extend(["--loop-max-cycles", str(max(0, int(_runner_start_int(loop_max_cycles) or 0)))])
+    argv.extend(["--profile", _runner_start_profile(profile, "personal")])
+    argv.extend(["--execution-backend", _runner_start_backend(execution_backend, "codex")])
+    run_dir_token = _path_token(run_dir)
+    if run_dir_token:
+        argv.extend(["--run-dir", run_dir_token])
+    return argv
+
+
 def build_runner_start_options_contract(
     repo: Path,
     base_args: argparse.Namespace | None = None,
@@ -108,11 +168,16 @@ def build_runner_start_options_contract(
     repo_root = repo.expanduser().resolve()
     args = base_args or argparse.Namespace()
     default_cfg_path = default_config_path(repo_root)
+    repo_text = repo_root.as_posix()
 
     current_continuous = bool(getattr(args, "continuous", DEFAULTS.get("continuous", False)))
     current_loop = bool(getattr(args, "loop", DEFAULTS.get("loop", False)))
     default_continuous = bool(DEFAULTS.get("continuous", False))
     default_loop = bool(DEFAULTS.get("loop", False))
+    current_run_dir = _runner_start_path_text(getattr(args, "run_dir", getattr(args, "runDir", "")))
+    default_run_dir = _runner_start_path_text(DEFAULTS.get("run_dir", ""))
+    current_resume_latest = bool(getattr(args, "resume_latest", getattr(args, "resumeLatest", DEFAULTS.get("resume_latest", False))))
+    default_resume_latest = bool(DEFAULTS.get("resume_latest", False))
 
     current_config_path = _runner_start_path_text(
         getattr(args, "config_path", getattr(args, "config", "")) or default_cfg_path
@@ -120,6 +185,9 @@ def build_runner_start_options_contract(
     default_config_path_text = _runner_start_path_text(default_cfg_path)
     public_current_config_path = REDACTED_VALUE if redact_paths and current_config_path else current_config_path
     public_default_config_path_text = REDACTED_VALUE if redact_paths and default_config_path_text else default_config_path_text
+    public_repo_text = REDACTED_VALUE if redact_paths and repo_text else repo_text
+    public_current_run_dir = REDACTED_VALUE if redact_paths and current_run_dir else current_run_dir
+    public_default_run_dir = REDACTED_VALUE if redact_paths and default_run_dir else default_run_dir
 
     values = {
         "autopilot": bool(getattr(args, "autopilot", DEFAULTS.get("autopilot", False))),
@@ -134,7 +202,12 @@ def build_runner_start_options_contract(
             str(DEFAULTS.get("execution_backend", "codex") or "codex"),
         ),
         "config_path": public_current_config_path,
+        "run_dir": public_current_run_dir,
+        "resume_latest": current_resume_latest,
     }
+    validation_values = dict(values)
+    validation_values["config_path"] = current_config_path
+    validation_values["run_dir"] = current_run_dir
     defaults = {
         "autopilot": bool(DEFAULTS.get("autopilot", False)),
         "run_mode": _runner_start_mode_from_flags(default_continuous, default_loop),
@@ -145,6 +218,8 @@ def build_runner_start_options_contract(
         "profile": _runner_start_profile(DEFAULTS.get("profile", "personal"), "personal"),
         "execution_backend": _runner_start_backend(DEFAULTS.get("execution_backend", "codex"), "codex"),
         "config_path": public_default_config_path_text,
+        "run_dir": public_default_run_dir,
+        "resume_latest": default_resume_latest,
     }
     schema = {
         "autopilot": {
@@ -226,8 +301,25 @@ def build_runner_start_options_contract(
             "hint": "Leave blank to keep the current config path.",
             "group": "project",
         },
+        "run_dir": {
+            "kind": "text",
+            "label": "Run dir",
+            "allow_empty": True,
+            "desc": "Explicit run directory to reuse before starting.",
+            "hint": "Leave blank to create a new run directory.",
+            "group": "session",
+        },
+        "resume_latest": {
+            "kind": "bool",
+            "label": "Resume latest",
+            "choices": list(RUNNER_START_BOOL_CHOICES),
+            "desc": "Reuse the latest run directory before starting.",
+            "hint": "Use with explicit run-dir intent only when you mean to resume the latest run.",
+            "group": "session",
+        },
     }
-    return {
+    contract = {
+        "repo": public_repo_text,
         "path": current_config_path,
         "defaults_path": default_config_path_text,
         "values": values,
@@ -241,17 +333,48 @@ def build_runner_start_options_contract(
             "continuous": list(RUNNER_START_BOOL_CHOICES),
             "loop": list(RUNNER_START_BOOL_CHOICES),
             "one_shot": list(RUNNER_START_BOOL_CHOICES),
+            "resume_latest": list(RUNNER_START_BOOL_CHOICES),
         },
         "redaction": {
             "active": bool(redact_paths),
             "placeholder": REDACTED_VALUE,
             "paths": (
-                ["path", "defaults_path", "values.config_path", "defaults.config_path"]
+                [
+                    "repo",
+                    "path",
+                    "defaults_path",
+                    "values.config_path",
+                    "defaults.config_path",
+                    "values.run_dir",
+                    "defaults.run_dir",
+                    "argv_preview",
+                ]
                 if redact_paths
                 else []
             ),
         },
     }
+    _, validation_error = normalize_runner_start_options(
+        repo_root,
+        validation_values,
+        base_args=args,
+        contract=contract,
+    )
+    validation_errors = list((validation_error or {}).get("details", {}).get("errors") or [])
+    contract["validation"] = _runner_start_validation_payload(validation_errors)
+    contract["argv_preview"] = _runner_start_argv_preview(
+        repo=repo_text,
+        config_path=current_config_path,
+        autopilot=bool(values.get("autopilot")),
+        run_mode=str(values.get("run_mode") or "one-shot"),
+        loop_max_cycles=values.get("loop_max_cycles"),
+        profile=str(values.get("profile") or "personal"),
+        execution_backend=str(values.get("execution_backend") or "codex"),
+        run_dir=current_run_dir,
+        resume_latest=current_resume_latest,
+        redact_paths=redact_paths,
+    )
+    return contract
 
 
 def normalize_runner_start_options(
@@ -313,6 +436,8 @@ def normalize_runner_start_options(
         config_path_text = _runner_start_path_text(config_path_raw)
         if not config_path_text:
             _error("config_path", "required", "Config path cannot be empty.")
+        elif config_path_text == REDACTED_VALUE:
+            _error("config_path", "invalid_value", "Config path cannot be the redacted placeholder.")
         else:
             try:
                 resolved_config_path = resolve_config_path(repo_root, config_path_text)
@@ -329,6 +454,26 @@ def normalize_runner_start_options(
             _error("loop_max_cycles", "invalid_value", "Max cycles must be an integer greater than or equal to 0.")
         else:
             overrides["loop_max_cycles"] = loop_max_cycles
+
+    run_dir_present, run_dir_raw = _raw_value("run_dir", "runDir")
+    run_dir_text = ""
+    if run_dir_present:
+        run_dir_text = _runner_start_path_text(run_dir_raw)
+        if run_dir_text:
+            if run_dir_text == REDACTED_VALUE:
+                _error("run_dir", "invalid_value", "Run dir cannot be the redacted placeholder.")
+            else:
+                overrides["run_dir"] = run_dir_text
+        if run_dir_text == REDACTED_VALUE:
+            run_dir_text = ""
+
+    resume_latest_present, resume_latest_raw = _raw_value("resume_latest", "resumeLatest", "resume-latest")
+    if resume_latest_present:
+        resume_latest = _parse_bool("resume_latest", resume_latest_raw)
+        if resume_latest is not None:
+            overrides["resume_latest"] = resume_latest
+            if resume_latest and run_dir_text:
+                _error("resume_latest", "invalid_combination", "Resume latest cannot be combined with an explicit run dir.")
 
     run_mode_present, run_mode_raw = _raw_value("run_mode", "runMode", "mode")
     continuous_present, continuous_raw = _raw_value("continuous")
@@ -417,7 +562,7 @@ def normalize_runner_start_options(
         return {}, {
             "code": "runner_start_options_invalid",
             "message": "Runner start options are invalid.",
-            "details": {"errors": errors},
+            "details": _runner_start_validation_payload(errors),
         }
 
     if "config_path" not in overrides:
@@ -432,6 +577,12 @@ def normalize_runner_start_options(
         maybe_loop_max_cycles = _runner_start_int(current_values.get("loop_max_cycles"))
         if maybe_loop_max_cycles is not None:
             overrides["loop_max_cycles"] = max(0, maybe_loop_max_cycles)
+    if "run_dir" not in overrides and run_dir_present is False:
+        maybe_run_dir = _runner_start_path_text(current_values.get("run_dir"))
+        if maybe_run_dir:
+            overrides["run_dir"] = maybe_run_dir
+    if "resume_latest" not in overrides and resume_latest_present is False:
+        overrides["resume_latest"] = bool(current_values.get("resume_latest", False))
     return overrides, None
 
 
@@ -676,8 +827,6 @@ class RunnerController:
                 self._start_thread(args)
 
             updated_base = dict(eff)
-            updated_base.pop("run_dir", None)
-            updated_base.pop("resume_latest", None)
             self.base_args = argparse.Namespace(**updated_base)
 
             return {

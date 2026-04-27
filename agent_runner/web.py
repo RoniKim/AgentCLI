@@ -1146,13 +1146,13 @@ def _redact_web_runner_start_options(start_options: dict[str, Any]) -> dict[str,
     redaction_paths = []
     if isinstance(paths_value, list):
         redaction_paths = list(dict.fromkeys([str(path) for path in paths_value if str(path).strip()]))
-    for path in ("path", "defaults_path", "values.config_path", "defaults.config_path"):
+    for path in ("repo", "path", "defaults_path", "values.config_path", "defaults.config_path", "values.run_dir", "defaults.run_dir"):
         if path not in redaction_paths:
             redaction_paths.append(path)
     redaction["paths"] = redaction_paths
     redacted["redaction"] = redaction
     redacted["redacted"] = True
-    for key in ("path", "defaults_path"):
+    for key in ("repo", "path", "defaults_path"):
         if redacted.get(key) not in (None, "", False):
             redacted[key] = REDACTED_VALUE
     for key in ("values", "defaults"):
@@ -1161,7 +1161,16 @@ def _redact_web_runner_start_options(start_options: dict[str, Any]) -> dict[str,
             section_copy = deepcopy(section)
             if section_copy.get("config_path") not in (None, "", False):
                 section_copy["config_path"] = REDACTED_VALUE
+            if section_copy.get("run_dir") not in (None, "", False):
+                section_copy["run_dir"] = REDACTED_VALUE
             redacted[key] = section_copy
+    argv_preview = redacted.get("argv_preview")
+    if isinstance(argv_preview, list):
+        preview = list(argv_preview)
+        for idx, token in enumerate(preview):
+            if token in {"--repo", "--config", "--run-dir"} and idx + 1 < len(preview):
+                preview[idx + 1] = REDACTED_VALUE
+        redacted["argv_preview"] = preview
     return redacted
 
 
@@ -1179,10 +1188,14 @@ def _redact_web_runner_status_payload(status: dict[str, Any], *, redact_start_op
         redacted["startOptions"] = redacted_start_options
         redaction_fields.extend(
             [
+                "start_options.repo",
                 "start_options.path",
                 "start_options.defaults_path",
                 "start_options.values.config_path",
                 "start_options.defaults.config_path",
+                "start_options.values.run_dir",
+                "start_options.defaults.run_dir",
+                "start_options.argv_preview",
             ]
         )
     if redaction_fields:
@@ -1200,15 +1213,19 @@ def _redact_web_runner_control(control: dict[str, Any], *, redact_start_options:
         for key in ("config_path", "configPath"):
             if status.get(key) not in (None, "", False):
                 redaction_fields.append(f"status.{key}")
-        if redact_start_options and isinstance(status.get("start_options"), dict):
-            redaction_fields.extend(
-                [
-                    "status.start_options.path",
-                    "status.start_options.defaults_path",
-                    "status.start_options.values.config_path",
-                    "status.start_options.defaults.config_path",
-                ]
-            )
+            if redact_start_options and isinstance(status.get("start_options"), dict):
+                redaction_fields.extend(
+                    [
+                        "status.start_options.repo",
+                        "status.start_options.path",
+                        "status.start_options.defaults_path",
+                        "status.start_options.values.config_path",
+                        "status.start_options.defaults.config_path",
+                        "status.start_options.values.run_dir",
+                        "status.start_options.defaults.run_dir",
+                        "status.start_options.argv_preview",
+                    ]
+                )
     start_options = redacted.get("start_options")
     if redact_start_options and isinstance(start_options, dict):
         redacted_start_options = _redact_web_runner_start_options(start_options)
@@ -1216,10 +1233,14 @@ def _redact_web_runner_control(control: dict[str, Any], *, redact_start_options:
         redacted["startOptions"] = redacted_start_options
         redaction_fields.extend(
             [
+                "start_options.repo",
                 "start_options.path",
                 "start_options.defaults_path",
                 "start_options.values.config_path",
                 "start_options.defaults.config_path",
+                "start_options.values.run_dir",
+                "start_options.defaults.run_dir",
+                "start_options.argv_preview",
             ]
         )
     if redaction_fields:
@@ -2272,6 +2293,11 @@ def _runner_control_request_options(payload: dict[str, Any] | None) -> dict[str,
         "config_path",
         "configPath",
         "config",
+        "run_dir",
+        "runDir",
+        "resume_latest",
+        "resumeLatest",
+        "resume-latest",
     ):
         if key in data:
             options[key] = data[key]

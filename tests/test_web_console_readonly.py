@@ -1349,7 +1349,7 @@ class WebConsoleRedactionHelperTests(unittest.TestCase):
         self.assertEqual("[redacted]", redacted["files"]["run_log"])
         self.assertEqual("[redacted]", redacted["files"]["metrics"])
         self.assertEqual("[redacted]", redacted["source"]["path"])
-        self.assertEqual("metrics.jsonl", redacted["source"]["name"])
+        self.assertEqual("[redacted]", redacted["source"]["name"])
         self.assertIn("files.cycle_summary", redacted["redaction"]["fields"])
 
 
@@ -4961,6 +4961,113 @@ Another unsupported line.
         self.assertEqual(["prompts_dir"], normalized["configContract"]["groups"][0]["paths"])
         self.assertIn("telegram.bot_token", normalized["configContract"]["redaction"]["paths"])
         self.assertIn("telegram.bot_token", normalized["configContract"]["restart_required_paths"])
+
+    def test_runner_control_start_option_validation_and_preview_are_exposed_to_js(self) -> None:
+        from agent_runner.remote.controller import build_runner_start_options_contract
+
+        base_run_dir = self.home / "runs" / "explicit"
+        base_args = argparse.Namespace(
+            config_path=self.config_path.as_posix(),
+            config=self.config_path.as_posix(),
+            autopilot=True,
+            continuous=True,
+            loop=True,
+            loop_max_cycles=7,
+            profile="enterprise",
+            execution_backend="claudecode",
+            run_dir=base_run_dir.as_posix(),
+            resume_latest=True,
+        )
+        contract = build_runner_start_options_contract(self.repo, base_args)
+        invalid_draft = {
+            "autopilot": True,
+            "run_mode": "loop",
+            "continuous": False,
+            "loop": False,
+            "one_shot": True,
+            "loop_max_cycles": "-1",
+            "profile": "bogus",
+            "execution_backend": "bogus",
+            "config_path": "",
+            "run_dir": base_run_dir.as_posix(),
+            "resume_latest": True,
+        }
+        valid_draft = {
+            "autopilot": True,
+            "run_mode": "loop",
+            "continuous": True,
+            "loop": True,
+            "one_shot": False,
+            "loop_max_cycles": "7",
+            "profile": "enterprise",
+            "execution_backend": "claudecode",
+            "config_path": self.config_path.as_posix(),
+            "run_dir": base_run_dir.as_posix(),
+            "resume_latest": True,
+        }
+
+        results = _run_adapter_harness(
+            [
+                {"kind": "call", "name": "runnerControlStartOptionsValidation", "args": [{"startOptions": contract}, invalid_draft]},
+                {"kind": "call", "name": "runnerControlStartOptionsArgvPreview", "args": [{"startOptions": contract}, valid_draft]},
+                {
+                    "kind": "call",
+                    "name": "runnerControlStartOptionCard",
+                    "args": [
+                        {
+                            "path": "run_mode",
+                            "label": "Run mode",
+                            "currentValue": "loop",
+                            "defaultValue": "one-shot",
+                            "hint": "Pair with autopilot.",
+                            "controlHTML": "<button type=\"button\">loop</button>",
+                            "disabled": False,
+                            "errors": ["Loop does not match the selected run mode."],
+                        }
+                    ],
+                },
+            ]
+        )
+
+        validation = results[0]
+        self.assertFalse(validation["valid"])
+        self.assertEqual(8, validation["errorCount"])
+        self.assertIn("Fix the highlighted start options before continuing.", validation["message"])
+        self.assertIn("continuous", validation["fieldErrors"])
+        self.assertIn("loop", validation["fieldErrors"])
+        self.assertIn("one_shot", validation["fieldErrors"])
+        self.assertIn("loop_max_cycles", validation["fieldErrors"])
+        self.assertIn("profile", validation["fieldErrors"])
+        self.assertIn("execution_backend", validation["fieldErrors"])
+        self.assertIn("config_path", validation["fieldErrors"])
+        self.assertIn("resume_latest", validation["fieldErrors"])
+
+        preview = results[1]
+        self.assertEqual(
+            [
+                "--repo",
+                self.repo.as_posix(),
+                "--config",
+                self.config_path.as_posix(),
+                "--autopilot",
+                "--continuous",
+                "--loop",
+                "--resume-latest",
+                "--loop-max-cycles",
+                "7",
+                "--profile",
+                "enterprise",
+                "--execution-backend",
+                "claudecode",
+                "--run-dir",
+                base_run_dir.as_posix(),
+            ],
+            preview,
+        )
+
+        card_html = results[2]
+        self.assertIn("runner-control__option--invalid", card_html)
+        self.assertIn("field-error", card_html)
 
     def test_fast_web_worktree_regression_scope_detection_requires_repo_markers(self) -> None:
         from agent_runner.gates import repo_has_web_worktree_markers, should_run_fast_web_worktree_regression
