@@ -776,6 +776,89 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual(400, containment.status_code)
         self.assertEqual("worktree_path_inside_source_repo", containment.json()["error"]["code"])
 
+    def _prepare_worktree_merge_client(self):
+        from agent_runner.web import build_snapshot
+
+        fixture = self._prepare_pending_worktree()
+        snapshot = build_snapshot(self.repo)
+        body = self._worktree_action_payload(snapshot["worktree"], confirmation="MERGE WORKTREE")
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+        return fixture, snapshot, body, client
+
+    def test_worktree_merge_rejects_dirty_source_repo(self) -> None:
+        fixture, snapshot, body, client = self._prepare_worktree_merge_client()
+        source_file = Path(str(fixture["source_file"]))
+        source_text = str(fixture["source_text"])
+        source_file.write_text(source_text + "dirty\n", encoding="utf-8")
+
+        response = client.post("/api/worktree/merge", json=body)
+        self.assertEqual(409, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("worktree_source_repo_dirty", payload["error"]["code"])
+        self.assertTrue(self.pending_path.exists())
+        self.assertEqual(snapshot["worktree"]["sourceRepo"], payload["worktree"]["sourceRepo"])
+
+    def test_worktree_merge_rejects_head_mismatch(self) -> None:
+        fixture, snapshot, body, client = self._prepare_worktree_merge_client()
+        _write(self.repo / "advance.txt", "advance\n")
+        self._git("add", "advance.txt")
+        self._git("commit", "-m", "advance")
+
+        response = client.post("/api/worktree/merge", json=body)
+        self.assertEqual(409, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("worktree_base_ref_mismatch", payload["error"]["code"])
+        self.assertTrue(self.pending_path.exists())
+        self.assertEqual(snapshot["worktree"]["sourceRepo"], payload["worktree"]["sourceRepo"])
+
+    def test_worktree_merge_rejects_patch_hash_mismatch(self) -> None:
+        fixture, snapshot, body, client = self._prepare_worktree_merge_client()
+        pending = json.loads(self.pending_path.read_text(encoding="utf-8"))
+        pending["patch_hash"] = "0" * 64
+        pending["patchHash"] = "0" * 64
+        pending_text = json.dumps(pending, ensure_ascii=False, indent=2) + "\n"
+        self.pending_path.write_text(pending_text, encoding="utf-8")
+        (self.repo / ".AgentCLI" / "WORKTREE_MERGE_PENDING.json").write_text(pending_text, encoding="utf-8")
+
+        response = client.post("/api/worktree/merge", json=body)
+        self.assertEqual(409, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("worktree_patch_hash_mismatch", payload["error"]["code"])
+        self.assertTrue(self.pending_path.exists())
+        self.assertEqual(snapshot["worktree"]["sourceRepo"], payload["worktree"]["sourceRepo"])
+
+    def test_worktree_merge_rejects_git_apply_check_failure(self) -> None:
+        from agent_runner.gitops import sha256_text
+
+        fixture, snapshot, body, client = self._prepare_worktree_merge_client()
+        invalid_patch = (
+            "diff --git a/src/app.py b/src/app.py\n"
+            "--- a/src/app.py\n"
+            "+++ b/src/app.py\n"
+            "@@ -1 +1 @@\n"
+            "-this context does not exist\n"
+            "+still invalid\n"
+        )
+        self.patch_path.write_text(invalid_patch, encoding="utf-8")
+        pending = json.loads(self.pending_path.read_text(encoding="utf-8"))
+        patch_hash = sha256_text(invalid_patch)
+        pending["patch_hash"] = patch_hash
+        pending["patchHash"] = patch_hash
+        pending_text = json.dumps(pending, ensure_ascii=False, indent=2) + "\n"
+        self.pending_path.write_text(pending_text, encoding="utf-8")
+        (self.repo / ".AgentCLI" / "WORKTREE_MERGE_PENDING.json").write_text(pending_text, encoding="utf-8")
+
+        response = client.post("/api/worktree/merge", json=body)
+        self.assertEqual(409, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("worktree_patch_check_failed", payload["error"]["code"])
+        self.assertTrue(self.pending_path.exists())
+        self.assertEqual(snapshot["worktree"]["sourceRepo"], payload["worktree"]["sourceRepo"])
+
     def test_config_save_is_disabled_until_opt_in(self) -> None:
         _write_config(self.config_path, self.repo)
         client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=self.config_path)

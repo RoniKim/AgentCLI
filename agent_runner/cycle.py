@@ -253,7 +253,7 @@ async def main_async(args: argparse.Namespace) -> int:
     if bool(getattr(args, "worktree_isolation", False)):
         worktree_dir = default_worktree_dir(source_repo, run_dir)
         try:
-            create_worktree(source_repo, worktree_dir)
+            create_worktree(source_repo, worktree_dir, run_dir=run_dir)
         except Exception as ex:
             eprint(f"[STOP] Failed to create worktree: {ex}")
             return 2

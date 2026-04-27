@@ -31,6 +31,7 @@ from .gitops import (
     find_pending_worktree_merge,
     git_head,
     read_pending_worktree_merge,
+    WorktreeSafetyError,
 )
 from .prompts import (
     DEV_INSTRUCTIONS_DEFAULT,
@@ -5589,30 +5590,19 @@ def create_app(
             validated_pending_path, source_repo_path, run_dir_path, worktree_dir_path, patch_path_path, _expected_pending_path = validated
 
             if normalized_action == "merge":
-                check_rc, check_output = run_cmd(
-                    ["git", "apply", "--check", "--binary", "--whitespace=nowarn", str(patch_path_path)],
-                    cwd=source_repo_path,
-                    timeout_sec=120,
-                )
-                if check_rc != 0:
-                    return _worktree_action_response(
-                        action=normalized_action,
-                        status_code=409,
-                        ok=False,
-                        status="conflict",
-                        message="Worktree patch did not pass git apply --check preflight.",
-                        error_code="worktree_patch_check_failed",
-                        details={
-                            "path": patch_path_path.as_posix(),
-                            "source_repo": source_repo_path.as_posix(),
-                            "run_dir": run_dir_path.as_posix(),
-                            "worktree_dir": worktree_dir_path.as_posix(),
-                            "output": check_output,
-                        },
-                        busy_override=False,
-                    )
                 try:
                     result = apply_pending_worktree_merge(validated_pending_path)
+                except WorktreeSafetyError as ex:
+                    return _worktree_action_response(
+                        action=normalized_action,
+                        status_code=ex.status_code,
+                        ok=False,
+                        status=ex.status,
+                        message=str(ex),
+                        error_code=ex.code,
+                        details=ex.details or None,
+                        busy_override=False,
+                    )
                 except Exception as ex:
                     return _worktree_action_response(
                         action=normalized_action,

@@ -14,6 +14,34 @@ from typing import Sequence
 from .utils import run_cmd, now_iso, safe_write_text, eprint
 
 
+class WorktreeSafetyError(RuntimeError):
+    """Structured safety failure for worktree reuse/merge preflight."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: dict[str, object] | None = None,
+        status_code: int = 409,
+        status: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.details = dict(details or {})
+        self.status_code = int(status_code)
+        if status:
+            self.status = str(status)
+        elif self.status_code == 404:
+            self.status = "unavailable"
+        elif self.status_code >= 500:
+            self.status = "error"
+        elif self.status_code >= 409:
+            self.status = "conflict"
+        else:
+            self.status = "invalid_request"
+
+
 def check_and_remove_stale_git_lock(repo: Path, max_age_seconds: int = 300) -> bool:
     """Remove stale .git/index.lock if older than *max_age_seconds*.
 
@@ -97,6 +125,27 @@ def git_head(repo: Path) -> str:
     return lines[-1] if code == 0 and lines else ""
 
 
+def git_rev_parse_ref(repo: Path, ref: str) -> str:
+    ref_text = str(ref or "").strip()
+    if not ref_text:
+        return ""
+    code, out = run_cmd(["git", "rev-parse", ref_text], cwd=repo, timeout_sec=60)
+    lines = _git_data_lines(out)
+    return lines[-1] if code == 0 and lines else ""
+
+
+def git_current_branch(repo: Path) -> str:
+    code, out = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, timeout_sec=60)
+    lines = _git_data_lines(out)
+    return lines[-1] if code == 0 and lines else ""
+
+
+def git_show_toplevel(repo: Path) -> str:
+    code, out = run_cmd(["git", "rev-parse", "--show-toplevel"], cwd=repo, timeout_sec=60)
+    lines = _git_data_lines(out)
+    return lines[-1] if code == 0 and lines else ""
+
+
 def _git_data_lines(out: str) -> list[str]:
     """Return git stdout-like lines, dropping stderr warnings captured by run_cmd."""
     data: list[str] = []
@@ -109,6 +158,33 @@ def _git_data_lines(out: str) -> list[str]:
             continue
         data.append(raw.rstrip("\r\n"))
     return data
+
+
+def _git_status_path(line: str) -> str:
+    text = str(line or "").rstrip("\r\n")
+    if len(text) < 4:
+        return ""
+    path_part = text[3:].strip()
+    if "->" in path_part:
+        path_part = path_part.split("->", 1)[1].strip()
+    if path_part.startswith('"') and path_part.endswith('"'):
+        path_part = path_part[1:-1]
+    if "\\" in path_part:
+        import codecs
+
+        try:
+            path_part = codecs.decode(path_part, "unicode_escape")
+        except Exception:
+            pass
+    return path_part.replace("\\", "/")
+
+
+def _is_agentcli_metadata_path(path: str) -> bool:
+    normalized = str(path or "").replace("\\", "/").strip()
+    if not normalized:
+        return False
+    parts = [part for part in normalized.split("/") if part]
+    return any(part in {".AgentCLI", ".doc"} for part in parts)
 
 
 def has_new_commits(repo: Path, before_head: str) -> bool:
@@ -137,7 +213,15 @@ def git_changed_files(repo: Path, prev_head: str, curr_head: str) -> list[str]:
 
 def git_porcelain(repo: Path) -> str:
     code, out = run_cmd(["git", "status", "--porcelain"], cwd=repo, timeout_sec=60)
-    return "\n".join(_git_data_lines(out)) if code == 0 else ""
+    if code != 0:
+        return ""
+    lines = _git_data_lines(out)
+    filtered = [line for line in lines if not _is_agentcli_metadata_path(_git_status_path(line))]
+    return "\n".join(filtered)
+
+
+def git_repo_state(repo: Path) -> str:
+    return "dirty" if git_porcelain(repo).strip() else "clean"
 
 
 def git_untracked_files(repo: Path) -> list[str]:
@@ -797,7 +881,32 @@ def _safe_generated_worktree_path(worktree_dir: Path) -> bool:
     return ".agentcli_worktrees" in parts
 
 
-def create_worktree(repo: Path, worktree_dir: Path) -> None:
+def _validate_existing_worktree_reuse(repo: Path, worktree_dir: Path, run_dir: Path) -> None:
+    contract_path = _worktree_contract_path(run_dir)
+    if not contract_path.exists():
+        raise WorktreeSafetyError(
+            "worktree_reuse_contract_missing",
+            "Existing worktree cannot be reused without a run contract.",
+            details={
+                "run_dir": run_dir.as_posix(),
+                "worktree_dir": worktree_dir.expanduser().resolve().as_posix(),
+                "contract": contract_path.as_posix(),
+            },
+        )
+    try:
+        contract = _read_json_payload(contract_path)
+    except Exception as ex:
+        raise WorktreeSafetyError(
+            "worktree_reuse_contract_invalid",
+            f"Existing worktree reuse contract is malformed: {str(ex).strip() or ex.__class__.__name__}",
+            status_code=400,
+            details={"contract": contract_path.as_posix()},
+            status="invalid_request",
+        ) from ex
+    _validate_worktree_contract(repo=repo, worktree_dir=worktree_dir, run_dir=run_dir, contract=contract)
+
+
+def create_worktree(repo: Path, worktree_dir: Path, *, run_dir: Path | None = None) -> None:
     repo_resolved = repo.expanduser().resolve()
     worktree_resolved = worktree_dir.expanduser().resolve()
     if _path_is_relative_to(worktree_resolved, repo_resolved):
@@ -809,6 +918,16 @@ def create_worktree(repo: Path, worktree_dir: Path) -> None:
         error = _worktree_validation_error(repo, worktree_dir)
         if error is not None:
             raise RuntimeError(f"Existing worktree path is not a valid isolated git worktree: {error}")
+        if run_dir is None:
+            raise WorktreeSafetyError(
+                "worktree_reuse_contract_missing",
+                "Existing worktree cannot be reused without a run contract.",
+                details={
+                    "run_dir": "",
+                    "worktree_dir": worktree_resolved.as_posix(),
+                },
+            )
+        _validate_existing_worktree_reuse(repo, worktree_dir, run_dir)
         return
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
     code, out = run_cmd(["git", "worktree", "add", "--detach", str(worktree_dir), "HEAD"], cwd=repo, timeout_sec=120)
@@ -817,6 +936,11 @@ def create_worktree(repo: Path, worktree_dir: Path) -> None:
     error = _worktree_validation_error(repo, worktree_dir)
     if error is not None:
         raise RuntimeError(f"git worktree add did not create a valid isolated worktree: {error}")
+    if run_dir is not None:
+        try:
+            _write_worktree_contract(run_dir, _worktree_contract_payload(worktree_dir, repo, run_dir))
+        except Exception as ex:
+            raise RuntimeError(f"Failed to write worktree reuse contract: {ex}") from ex
 
 
 def remove_worktree(repo: Path, worktree_dir: Path) -> None:
@@ -876,6 +1000,179 @@ def apply_patch_to_repo(repo: Path, patch_path: Path) -> None:
 
 WORKTREE_MERGE_PENDING = "WORKTREE_MERGE_PENDING.json"
 WORKTREE_MERGE_PENDING_MD = "WORKTREE_MERGE_PENDING.md"
+WORKTREE_REUSE_CONTRACT = "WORKTREE_REUSE_CONTRACT.json"
+
+
+def _payload_text(payload: dict[str, object], *keys: str) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _worktree_contract_path(run_dir: Path) -> Path:
+    return run_dir / WORKTREE_REUSE_CONTRACT
+
+
+def _worktree_contract_payload(worktree_dir: Path, source_repo: Path, run_dir: Path) -> dict[str, object]:
+    source_repo_resolved = source_repo.expanduser().resolve()
+    worktree_resolved = worktree_dir.expanduser().resolve()
+    source_head = git_head(source_repo_resolved)
+    return {
+        "schema_version": 1,
+        "run_id": run_dir.name,
+        "created_at": now_iso(),
+        "source_repo": source_repo_resolved.as_posix(),
+        "source_repo_root": git_show_toplevel(source_repo_resolved) or source_repo_resolved.as_posix(),
+        "branch": git_current_branch(source_repo_resolved) or "HEAD",
+        "expected_head": source_head,
+        "base_ref": source_head,
+        "head_ref": git_head(worktree_resolved),
+        "source_repo_state": git_repo_state(source_repo_resolved),
+        "worktree_state": git_repo_state(worktree_resolved),
+        "worktree_branch": git_current_branch(worktree_resolved) or "HEAD",
+        "worktree_dir": worktree_resolved.as_posix(),
+    }
+
+
+def _write_worktree_contract(run_dir: Path, payload: dict[str, object]) -> None:
+    safe_write_text(_worktree_contract_path(run_dir), json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+
+def _read_json_payload(path: Path) -> dict[str, object]:
+    payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(payload, dict):
+        raise TypeError("Payload must be a JSON object.")
+    return payload
+
+
+def _validate_worktree_contract(
+    *,
+    repo: Path,
+    worktree_dir: Path,
+    run_dir: Path,
+    contract: dict[str, object],
+) -> None:
+    repo_resolved = repo.expanduser().resolve()
+    worktree_resolved = worktree_dir.expanduser().resolve()
+    current_source_root = git_show_toplevel(repo_resolved) or repo_resolved.as_posix()
+    current_source_branch = git_current_branch(repo_resolved) or "HEAD"
+    current_source_head = git_head(repo_resolved)
+    current_source_state = git_repo_state(repo_resolved)
+    current_worktree_branch = git_current_branch(worktree_resolved) or "HEAD"
+    current_worktree_head = git_head(worktree_resolved)
+    current_worktree_state = git_repo_state(worktree_resolved)
+
+    contract_run_id = _payload_text(contract, "run_id", "runId")
+    if not contract_run_id:
+        raise WorktreeSafetyError(
+            "worktree_reuse_contract_invalid",
+            "Existing worktree reuse contract is missing a run id.",
+            status_code=400,
+            details={"contract": _worktree_contract_path(run_dir).as_posix()},
+            status="invalid_request",
+        )
+    if contract_run_id != run_dir.name:
+        raise WorktreeSafetyError(
+            "worktree_reuse_run_id_mismatch",
+            "Existing worktree belongs to a different run id.",
+            details={"expected": run_dir.name, "actual": contract_run_id},
+        )
+
+    contract_repo = _payload_text(contract, "source_repo", "sourceRepo")
+    contract_root = _payload_text(contract, "source_repo_root", "sourceRepoRoot")
+    if not contract_repo or not contract_root:
+        raise WorktreeSafetyError(
+            "worktree_reuse_contract_invalid",
+            "Existing worktree reuse contract is missing source repository ownership metadata.",
+            status_code=400,
+            details={"contract": _worktree_contract_path(run_dir).as_posix()},
+            status="invalid_request",
+        )
+    if contract_repo != repo_resolved.as_posix() or contract_root != current_source_root:
+        raise WorktreeSafetyError(
+            "worktree_reuse_source_repo_mismatch",
+            "Existing worktree belongs to a different source repository.",
+            details={
+                "expected": {"source_repo": repo_resolved.as_posix(), "source_repo_root": current_source_root},
+                "actual": {"source_repo": contract_repo, "source_repo_root": contract_root},
+            },
+        )
+    contract_worktree_dir = _payload_text(contract, "worktree_dir", "worktreeDir", "worktree")
+    if contract_worktree_dir != worktree_resolved.as_posix():
+        raise WorktreeSafetyError(
+            "worktree_reuse_worktree_dir_mismatch",
+            "Existing worktree directory does not match the active run contract.",
+            details={"expected": worktree_resolved.as_posix(), "actual": contract_worktree_dir},
+        )
+
+    contract_branch = _payload_text(contract, "branch", "source_branch", "sourceBranch")
+    if not contract_branch:
+        raise WorktreeSafetyError(
+            "worktree_reuse_contract_invalid",
+            "Existing worktree reuse contract is missing the source branch.",
+            status_code=400,
+            details={"contract": _worktree_contract_path(run_dir).as_posix()},
+            status="invalid_request",
+        )
+    if contract_branch != current_source_branch or _payload_text(contract, "worktree_branch", "worktreeBranch") not in {"", current_worktree_branch}:
+        raise WorktreeSafetyError(
+            "worktree_reuse_branch_mismatch",
+            "Existing worktree branch no longer matches the active run contract.",
+            details={
+                "expected": {"branch": contract_branch, "worktree_branch": _payload_text(contract, "worktree_branch", "worktreeBranch")},
+                "actual": {"branch": current_source_branch, "worktree_branch": current_worktree_branch},
+            },
+        )
+
+    contract_expected_head = _payload_text(contract, "expected_head", "expectedHead", "base_ref", "baseRef")
+    if not contract_expected_head:
+        raise WorktreeSafetyError(
+            "worktree_reuse_contract_invalid",
+            "Existing worktree reuse contract is missing the expected head.",
+            status_code=400,
+            details={"contract": _worktree_contract_path(run_dir).as_posix()},
+            status="invalid_request",
+        )
+    if contract_expected_head != current_source_head or _payload_text(contract, "head_ref", "headRef") not in {"", current_worktree_head}:
+        raise WorktreeSafetyError(
+            "worktree_reuse_expected_head_mismatch",
+            "Existing worktree no longer matches the expected source head.",
+            details={
+                "expected": {"expected_head": contract_expected_head, "head_ref": _payload_text(contract, "head_ref", "headRef")},
+                "actual": {"expected_head": current_source_head, "head_ref": current_worktree_head},
+            },
+        )
+
+    contract_source_state = _payload_text(contract, "source_repo_state", "sourceRepoState")
+    contract_worktree_state = _payload_text(contract, "worktree_state", "worktreeState")
+    if not contract_source_state or not contract_worktree_state:
+        raise WorktreeSafetyError(
+            "worktree_reuse_contract_invalid",
+            "Existing worktree reuse contract is missing clean/dirty state metadata.",
+            status_code=400,
+            details={"contract": _worktree_contract_path(run_dir).as_posix()},
+            status="invalid_request",
+        )
+    if contract_source_state != current_source_state or contract_worktree_state != current_worktree_state:
+        raise WorktreeSafetyError(
+            "worktree_reuse_state_mismatch",
+            "Existing worktree clean/dirty state no longer matches the active run contract.",
+            details={
+                "expected": {
+                    "source_repo_state": contract_source_state,
+                    "worktree_state": contract_worktree_state,
+                },
+                "actual": {
+                    "source_repo_state": current_source_state,
+                    "worktree_state": current_worktree_state,
+                },
+            },
+        )
 
 
 def _worktree_pending_payload(
@@ -886,17 +1183,39 @@ def _worktree_pending_payload(
     base_ref: str,
     last_rc: int,
 ) -> dict[str, object]:
-    head_ref = git_head(worktree_dir)
+    source_repo_resolved = source_repo.expanduser().resolve()
+    worktree_resolved = worktree_dir.expanduser().resolve()
+    source_head = git_head(source_repo_resolved)
+    worktree_head = git_head(worktree_resolved)
+    source_state = git_repo_state(source_repo_resolved)
+    worktree_state = git_repo_state(worktree_resolved)
+    patch_hash = sha256_text(patch_path.read_text(encoding="utf-8", errors="replace"))
+    source_root = git_show_toplevel(source_repo_resolved) or source_repo_resolved.as_posix()
+    branch = git_current_branch(source_repo_resolved) or "HEAD"
+    resolved_base_ref = git_rev_parse_ref(source_repo_resolved, base_ref) or source_head
     return {
         "schema_version": 1,
         "status": "pending",
         "created_at": now_iso(),
-        "source_repo": str(source_repo.resolve()),
+        "run_id": run_dir.name,
+        "source_repo": source_repo_resolved.as_posix(),
+        "source_repo_root": source_root,
+        "branch": branch,
+        "expected_head": resolved_base_ref,
+        "source_repo_state": source_state,
+        "worktree_state": worktree_state,
+        "worktree_branch": git_current_branch(worktree_resolved) or "HEAD",
+        "source_branch": branch,
+        "sourceRepoState": source_state,
+        "worktreeState": worktree_state,
+        "sourceRepoRoot": source_root,
+        "patch_hash": patch_hash,
+        "patchHash": patch_hash,
         "run_dir": str(run_dir.resolve()),
-        "worktree_dir": str(worktree_dir.resolve()),
+        "worktree_dir": str(worktree_resolved),
         "patch_path": str(patch_path.resolve()),
-        "base_ref": base_ref,
-        "head_ref": head_ref,
+        "base_ref": resolved_base_ref,
+        "head_ref": worktree_head,
         "last_rc": last_rc,
     }
 
@@ -910,9 +1229,14 @@ def _write_pending_merge_files(source_repo: Path, run_dir: Path, payload: dict[s
     md = (
         "# Worktree Merge Pending\n\n"
         "AgentCLI completed work in an isolated git worktree. The source repository was not modified.\n\n"
+        f"- run id: `{payload.get('run_id')}`\n"
         f"- source repo: `{payload.get('source_repo')}`\n"
+        f"- branch: `{payload.get('branch')}`\n"
+        f"- source state: `{payload.get('source_repo_state')}`\n"
+        f"- worktree state: `{payload.get('worktree_state')}`\n"
         f"- worktree: `{payload.get('worktree_dir')}`\n"
         f"- patch: `{payload.get('patch_path')}`\n"
+        f"- patch hash: `{payload.get('patch_hash')}`\n"
         f"- base: `{payload.get('base_ref')}`\n"
         f"- head: `{payload.get('head_ref')}`\n"
         f"- runner rc: `{payload.get('last_rc')}`\n\n"
@@ -977,13 +1301,146 @@ def _write_pending_status(payload: dict[str, object], pending_path: Path, status
 
 def apply_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
     payload = read_pending_worktree_merge(pending_path)
-    source_repo = Path(str(payload.get("source_repo") or "")).expanduser().resolve()
-    worktree_dir = Path(str(payload.get("worktree_dir") or "")).expanduser().resolve()
-    patch_path = Path(str(payload.get("patch_path") or "")).expanduser().resolve()
+    source_repo_text = _payload_text(payload, "source_repo", "sourceRepo")
+    run_dir_text = _payload_text(payload, "run_dir", "runDir")
+    worktree_dir_text = _payload_text(payload, "worktree_dir", "worktreeDir", "worktree")
+    patch_path_text = _payload_text(payload, "patch_path", "patchPath", "patch")
+    base_ref = _payload_text(payload, "base_ref", "baseRef")
+    expected_head = _payload_text(payload, "expected_head", "expectedHead")
+    branch = _payload_text(payload, "branch", "source_branch", "sourceBranch")
+    source_repo_root = _payload_text(payload, "source_repo_root", "sourceRepoRoot")
+    run_id = _payload_text(payload, "run_id", "runId")
+    source_repo_state = _payload_text(payload, "source_repo_state", "sourceRepoState")
+    worktree_state = _payload_text(payload, "worktree_state", "worktreeState")
+    patch_hash = _payload_text(payload, "patch_hash", "patchHash")
+    head_ref = _payload_text(payload, "head_ref", "headRef")
+
+    required_fields = {
+        "run_id": run_id,
+        "source_repo": source_repo_text,
+        "source_repo_root": source_repo_root,
+        "run_dir": run_dir_text,
+        "worktree_dir": worktree_dir_text,
+        "patch_path": patch_path_text,
+        "base_ref": base_ref,
+        "expected_head": expected_head,
+        "branch": branch,
+        "source_repo_state": source_repo_state,
+        "worktree_state": worktree_state,
+        "patch_hash": patch_hash,
+        "head_ref": head_ref,
+    }
+    missing_fields = [name for name, value in required_fields.items() if not value]
+    if missing_fields:
+        raise WorktreeSafetyError(
+            "worktree_metadata_required",
+            "Pending worktree marker is missing required merge metadata.",
+            status_code=400,
+            details={"missing": missing_fields, "pending_file": pending_path.as_posix()},
+            status="invalid_request",
+        )
+
+    source_repo = Path(source_repo_text).expanduser().resolve()
+    worktree_dir = Path(worktree_dir_text).expanduser().resolve()
+    patch_path = Path(patch_path_text).expanduser().resolve()
+    run_dir = Path(run_dir_text).expanduser().resolve()
+
     if not source_repo.exists():
-        raise RuntimeError(f"Source repo not found: {source_repo}")
+        raise WorktreeSafetyError(
+            "worktree_source_repo_missing",
+            f"Source repo not found: {source_repo}",
+            status_code=404,
+            details={"source_repo": source_repo.as_posix()},
+            status="invalid_request",
+        )
     if not patch_path.exists():
-        raise RuntimeError(f"Worktree patch not found: {patch_path}")
+        raise WorktreeSafetyError(
+            "worktree_patch_missing",
+            f"Worktree patch not found: {patch_path}",
+            status_code=404,
+            details={"path": patch_path.as_posix()},
+            status="invalid_request",
+        )
+
+    current_source_root = git_show_toplevel(source_repo) or source_repo.as_posix()
+    if source_repo_root != current_source_root or source_repo.as_posix() != _payload_text(payload, "source_repo", "sourceRepo"):
+        raise WorktreeSafetyError(
+            "worktree_source_repo_mismatch",
+            "Pending worktree marker points at a different source repository.",
+            details={
+                "expected": {"source_repo": source_repo.as_posix(), "source_repo_root": current_source_root},
+                "actual": {"source_repo": _payload_text(payload, "source_repo", "sourceRepo"), "source_repo_root": source_repo_root},
+            },
+        )
+    if run_id != run_dir.name:
+        raise WorktreeSafetyError(
+            "worktree_run_id_mismatch",
+            "Pending worktree marker belongs to a different run id.",
+            details={"expected": run_dir.name, "actual": run_id},
+        )
+    current_source_branch = git_current_branch(source_repo) or "HEAD"
+    if branch != current_source_branch:
+        raise WorktreeSafetyError(
+            "worktree_branch_mismatch",
+            "Pending worktree marker no longer matches the source branch.",
+            details={"expected": branch, "actual": current_source_branch},
+        )
+
+    current_source_head = git_head(source_repo)
+    if expected_head != base_ref:
+        raise WorktreeSafetyError(
+            "worktree_expected_head_mismatch",
+            "Pending worktree marker has inconsistent expected head metadata.",
+            details={"expected_head": expected_head, "base_ref": base_ref},
+        )
+    if current_source_head != base_ref:
+        raise WorktreeSafetyError(
+            "worktree_base_ref_mismatch",
+            "Source HEAD does not match the pending base ref.",
+            details={"expected": base_ref, "actual": current_source_head},
+        )
+
+    current_source_state = git_repo_state(source_repo)
+    if source_repo_state != "clean" or current_source_state != "clean":
+        raise WorktreeSafetyError(
+            "worktree_source_repo_dirty",
+            "Source repository must be clean before merging the pending worktree patch.",
+            details={"expected": "clean", "actual": current_source_state, "metadata": source_repo_state},
+        )
+
+    if worktree_state != "dirty":
+        raise WorktreeSafetyError(
+            "worktree_state_mismatch",
+            "Pending worktree metadata must describe a dirty worktree.",
+            details={"expected": "dirty", "actual": worktree_state},
+        )
+
+    current_patch_hash = sha256_text(patch_path.read_text(encoding="utf-8", errors="replace"))
+    if current_patch_hash != patch_hash:
+        raise WorktreeSafetyError(
+            "worktree_patch_hash_mismatch",
+            "Pending worktree patch hash does not match the exported patch.",
+            details={"expected": patch_hash, "actual": current_patch_hash},
+        )
+
+    check_rc, check_out = run_cmd(
+        ["git", "apply", "--check", "--binary", "--whitespace=nowarn", str(patch_path)],
+        cwd=source_repo,
+        timeout_sec=120,
+    )
+    if check_rc != 0:
+        raise WorktreeSafetyError(
+            "worktree_patch_check_failed",
+            "Worktree patch did not pass git apply --check preflight.",
+            details={
+                "path": patch_path.as_posix(),
+                "source_repo": source_repo.as_posix(),
+                "run_dir": run_dir.as_posix(),
+                "worktree_dir": worktree_dir.as_posix(),
+                "output": check_out,
+            },
+        )
+
     apply_patch_to_repo(source_repo, patch_path)
     try:
         remove_worktree(source_repo, worktree_dir)

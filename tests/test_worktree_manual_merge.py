@@ -21,6 +21,8 @@ from agent_runner.gitops import (
     discard_pending_worktree_merge,
     export_worktree_patch,
     remove_worktree,
+    WorktreeSafetyError,
+    sha256_text,
 )
 from agent_runner.utils import run_cmd
 
@@ -34,6 +36,7 @@ class WorktreeManualMergeTests(unittest.TestCase):
         self.repo = self.fixture_root / "repo"
         self.worktree = self.fixture_root / "worktree"
         self.patch_path = self.fixture_root / "worktree.patch"
+        self.pending_path = self.fixture_root / WORKTREE_MERGE_PENDING
         self.addCleanup(lambda: shutil.rmtree(self.fixture_root, ignore_errors=True))
 
     def _git(self, *args: str, cwd: Path | None = None) -> str:
@@ -41,17 +44,67 @@ class WorktreeManualMergeTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         return out
 
-    def test_export_worktree_patch_includes_committed_worktree_changes(self) -> None:
-        self.repo.mkdir()
+    def _init_repo(self, *, source_text: str = "base\n") -> str:
+        self.repo.mkdir(parents=True, exist_ok=True)
         self._git("init")
         self._git("config", "user.email", "agentcli@example.invalid")
         self._git("config", "user.name", "AgentCLI Test")
-        (self.repo / "README.md").write_text("base\n", encoding="utf-8")
+        (self.repo / "README.md").write_text(source_text, encoding="utf-8")
         self._git("add", "README.md")
         self._git("commit", "-m", "base")
-        base = self._git("rev-parse", "HEAD").strip()
+        return self._git("rev-parse", "HEAD").strip()
 
-        create_worktree(self.repo, self.worktree)
+    def _source_branch(self) -> str:
+        return self._git("rev-parse", "--abbrev-ref", "HEAD").strip()
+
+    def _write_pending_payload(
+        self,
+        *,
+        patch_text: str,
+        base_ref: str,
+        expected_head: str,
+        branch: str,
+        source_repo_state: str = "clean",
+        worktree_state: str = "dirty",
+        run_id: str | None = None,
+        head_ref: str | None = None,
+    ) -> dict[str, object]:
+        self.patch_path.write_text(patch_text, encoding="utf-8")
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "status": "pending",
+            "created_at": "2026-04-26T12:02:00",
+            "run_id": run_id or self.fixture_root.name,
+            "run_dir": self.fixture_root.resolve().as_posix(),
+            "source_repo": self.repo.resolve().as_posix(),
+            "source_repo_root": self.repo.resolve().as_posix(),
+            "branch": branch,
+            "expected_head": expected_head,
+            "source_repo_state": source_repo_state,
+            "worktree_state": worktree_state,
+            "worktree_dir": self.worktree.resolve().as_posix(),
+            "patch_path": self.patch_path.resolve().as_posix(),
+            "patch_hash": sha256_text(patch_text),
+            "base_ref": base_ref,
+            "head_ref": head_ref or expected_head,
+            "last_rc": 0,
+        }
+        payload["sourceRepoRoot"] = payload["source_repo_root"]
+        payload["sourceRepoState"] = payload["source_repo_state"]
+        payload["worktreeState"] = payload["worktree_state"]
+        payload["patchHash"] = payload["patch_hash"]
+        payload["runId"] = payload["run_id"]
+        payload["runDir"] = payload["run_dir"]
+        self.pending_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return payload
+
+    def _load_pending(self) -> dict[str, object]:
+        return json.loads(self.pending_path.read_text(encoding="utf-8"))
+
+    def test_export_worktree_patch_includes_committed_worktree_changes(self) -> None:
+        base = self._init_repo()
+
+        create_worktree(self.repo, self.worktree, run_dir=self.fixture_root)
         (self.worktree / "feature.txt").write_text("from worktree\n", encoding="utf-8")
         self._git("add", "feature.txt", cwd=self.worktree)
         self._git("commit", "-m", "feature", cwd=self.worktree)
@@ -64,16 +117,11 @@ class WorktreeManualMergeTests(unittest.TestCase):
         remove_worktree(self.repo, self.worktree)
 
     def test_apply_pending_worktree_merge_keeps_patch_applied_when_cleanup_fails(self) -> None:
-        self.repo.mkdir()
-        self._git("init")
-        self._git("config", "user.email", "agentcli@example.invalid")
-        self._git("config", "user.name", "AgentCLI Test")
-        (self.repo / "README.md").write_text("base\n", encoding="utf-8")
-        self._git("add", "README.md")
-        self._git("commit", "-m", "base")
+        base_ref = self._init_repo()
+        branch = self._source_branch()
 
-        self.patch_path.write_text(
-            """diff --git a/feature.txt b/feature.txt
+        payload = self._write_pending_payload(
+            patch_text="""diff --git a/feature.txt b/feature.txt
 new file mode 100644
 index 0000000..7c890e8
 --- /dev/null
@@ -81,70 +129,146 @@ index 0000000..7c890e8
 @@ -0,0 +1 @@
 +from patch
 """,
-            encoding="utf-8",
+            base_ref=base_ref,
+            expected_head=base_ref,
+            branch=branch,
         )
         self.worktree.mkdir()
-        pending = self.fixture_root / WORKTREE_MERGE_PENDING
-        pending.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "status": "pending",
-                    "source_repo": str(self.repo),
-                    "run_dir": str(self.fixture_root),
-                    "worktree_dir": str(self.worktree),
-                    "patch_path": str(self.patch_path),
-                    "base_ref": "base",
-                    "head_ref": "head",
-                    "last_rc": 0,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
 
         with patch("agent_runner.gitops.remove_worktree", side_effect=RuntimeError("locked worktree")):
-            result = apply_pending_worktree_merge(pending)
+            result = apply_pending_worktree_merge(self.pending_path)
 
         self.assertEqual("applied_cleanup_failed", result["status"])
         self.assertIn("locked worktree", str(result["cleanup_error"]))
         self.assertEqual("from patch\n", (self.repo / "feature.txt").read_text(encoding="utf-8"))
-        self.assertFalse(pending.exists())
+        self.assertFalse(self.pending_path.exists())
         self.assertTrue((self.fixture_root / "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json").exists())
 
     def test_discard_pending_worktree_merge_records_cleanup_failure_without_raising(self) -> None:
-        self.repo.mkdir()
+        self._init_repo()
         self.worktree.mkdir()
-        pending = self.fixture_root / WORKTREE_MERGE_PENDING
-        pending.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "status": "pending",
-                    "source_repo": str(self.repo),
-                    "run_dir": str(self.fixture_root),
-                    "worktree_dir": str(self.worktree),
-                    "patch_path": str(self.patch_path),
-                    "base_ref": "base",
-                    "head_ref": "head",
-                    "last_rc": 0,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
+        self._write_pending_payload(
+            patch_text=(
+                "diff --git a/feature.txt b/feature.txt\n"
+                "--- a/feature.txt\n"
+                "+++ b/feature.txt\n"
+                "@@ -0,0 +1 @@\n"
+                "+from patch\n"
+            ),
+            base_ref=self._git("rev-parse", "HEAD").strip(),
+            expected_head=self._git("rev-parse", "HEAD").strip(),
+            branch=self._source_branch(),
         )
 
         with patch("agent_runner.gitops.remove_worktree", side_effect=RuntimeError("locked worktree")):
-            result = discard_pending_worktree_merge(pending)
+            result = discard_pending_worktree_merge(self.pending_path)
 
         self.assertEqual("discard_cleanup_failed", result["status"])
         self.assertIn("locked worktree", str(result["cleanup_error"]))
-        self.assertFalse(pending.exists())
+        self.assertFalse(self.pending_path.exists())
         self.assertTrue((self.fixture_root / "WORKTREE_MERGE_DISCARD_CLEANUP_FAILED.json").exists())
+
+    def test_apply_pending_worktree_merge_rejects_dirty_source_repo(self) -> None:
+        base_ref = self._init_repo()
+        branch = self._source_branch()
+        self._write_pending_payload(
+            patch_text=(
+                "diff --git a/feature.txt b/feature.txt\n"
+                "--- a/feature.txt\n"
+                "+++ b/feature.txt\n"
+                "@@ -0,0 +1 @@\n"
+                "+from patch\n"
+            ),
+            base_ref=base_ref,
+            expected_head=base_ref,
+            branch=branch,
+        )
+        (self.repo / "README.md").write_text("base\nsource dirtied\n", encoding="utf-8")
+
+        with self.assertRaises(WorktreeSafetyError) as ctx:
+            apply_pending_worktree_merge(self.pending_path)
+
+        self.assertEqual("worktree_source_repo_dirty", ctx.exception.code)
+        self.assertTrue(self.pending_path.exists())
+        self.assertFalse((self.repo / "feature.txt").exists())
+
+    def test_apply_pending_worktree_merge_rejects_head_mismatch(self) -> None:
+        base_ref = self._init_repo()
+        branch = self._source_branch()
+        self._write_pending_payload(
+            patch_text=(
+                "diff --git a/feature.txt b/feature.txt\n"
+                "--- a/feature.txt\n"
+                "+++ b/feature.txt\n"
+                "@@ -0,0 +1 @@\n"
+                "+from patch\n"
+            ),
+            base_ref=base_ref,
+            expected_head=base_ref,
+            branch=branch,
+        )
+        (self.repo / "feature.txt").write_text("source moved\n", encoding="utf-8")
+        self._git("add", "feature.txt")
+        self._git("commit", "-m", "advance")
+
+        with self.assertRaises(WorktreeSafetyError) as ctx:
+            apply_pending_worktree_merge(self.pending_path)
+
+        self.assertEqual("worktree_base_ref_mismatch", ctx.exception.code)
+        self.assertTrue(self.pending_path.exists())
+        self.assertFalse((self.repo / "feature.txt").read_text(encoding="utf-8").startswith("from patch"))
+
+    def test_apply_pending_worktree_merge_rejects_patch_hash_mismatch(self) -> None:
+        base_ref = self._init_repo()
+        branch = self._source_branch()
+        self._write_pending_payload(
+            patch_text=(
+                "diff --git a/feature.txt b/feature.txt\n"
+                "--- a/feature.txt\n"
+                "+++ b/feature.txt\n"
+                "@@ -0,0 +1 @@\n"
+                "+from patch\n"
+            ),
+            base_ref=base_ref,
+            expected_head=base_ref,
+            branch=branch,
+        )
+        pending = self._load_pending()
+        pending["patch_hash"] = "0" * 64
+        pending["patchHash"] = "0" * 64
+        self.pending_path.write_text(json.dumps(pending, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        with self.assertRaises(WorktreeSafetyError) as ctx:
+            apply_pending_worktree_merge(self.pending_path)
+
+        self.assertEqual("worktree_patch_hash_mismatch", ctx.exception.code)
+        self.assertTrue(self.pending_path.exists())
+        self.assertFalse((self.repo / "feature.txt").exists())
+
+    def test_apply_pending_worktree_merge_rejects_git_apply_check_failure(self) -> None:
+        base_ref = self._init_repo()
+        branch = self._source_branch()
+        invalid_patch = (
+            "diff --git a/feature.txt b/feature.txt\n"
+            "--- a/feature.txt\n"
+            "+++ b/feature.txt\n"
+            "@@ -1 +1 @@\n"
+            "-does not match\n"
+            "+still does not match\n"
+        )
+        self._write_pending_payload(
+            patch_text=invalid_patch,
+            base_ref=base_ref,
+            expected_head=base_ref,
+            branch=branch,
+        )
+
+        with self.assertRaises(WorktreeSafetyError) as ctx:
+            apply_pending_worktree_merge(self.pending_path)
+
+        self.assertEqual("worktree_patch_check_failed", ctx.exception.code)
+        self.assertTrue(self.pending_path.exists())
+        self.assertFalse((self.repo / "feature.txt").exists())
 
 
 if __name__ == "__main__":
