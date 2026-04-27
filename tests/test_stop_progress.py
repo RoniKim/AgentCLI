@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import threading
 import time
 import unittest
 import uuid
@@ -63,6 +64,38 @@ class StopProgressTests(unittest.TestCase):
         self.assertIn("requested", phases)
         self.assertIn("stop_file_written", phases)
         self.assertEqual("finalized", read_stop_progress(run_dir)["phase"])
+
+    def test_controller_stop_wait_timeout_is_configurable(self) -> None:
+        repo = _scratch_dir("controller_stop_timeout") / "repo"
+        run_dir = repo / ".AgentCLI" / "agent_runs" / "run"
+        run_dir.mkdir(parents=True)
+        release = threading.Event()
+        controller = RunnerController(
+            repo=repo,
+            base_args=argparse.Namespace(
+                stop_file="STOP",
+                config_path="",
+                run_dir=str(run_dir),
+                stop_wait_timeout_seconds=1,
+            ),
+            runner_mode="thread",
+        )
+        controller.run_dir = run_dir
+        thread = threading.Thread(target=lambda: release.wait(5), daemon=True)
+        controller._runner_thread = thread
+        thread.start()
+
+        try:
+            result = controller.stop(wait=True)
+        finally:
+            release.set()
+            thread.join(timeout=2)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["running"])
+        progress = read_stop_progress(run_dir)
+        self.assertEqual("timeout", progress["phase"])
+        self.assertIn("1s stop wait timeout", progress["message"])
 
 
 if __name__ == "__main__":

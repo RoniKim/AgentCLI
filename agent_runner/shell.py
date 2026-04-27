@@ -608,7 +608,12 @@ class RunnerShell:
             pass
 
         if wait and self._runner_thread:
-            deadline = time.monotonic() + 60
+            try:
+                wait_timeout = int(self.effective().get("stop_wait_timeout_seconds") or 180)
+            except Exception:
+                wait_timeout = 180
+            wait_timeout = max(1, wait_timeout)
+            deadline = time.monotonic() + wait_timeout
             while self._runner_thread.is_alive() and time.monotonic() < deadline:
                 self._print_stop_progress(
                     write_stop_progress(
@@ -628,7 +633,7 @@ class RunnerShell:
                 write_stop_progress(
                     self.run_dir,
                     phase="timeout" if alive else "finalized",
-                    message="Runner is still alive after stop wait timeout." if alive else "Runner stop sequence finished.",
+                    message=f"Runner is still alive after {wait_timeout}s stop wait timeout." if alive else "Runner stop sequence finished.",
                     requested_at_monotonic=requested_at,
                     running=alive,
                     exit_code=self._runner_exit_code,

@@ -279,6 +279,77 @@ async def main_async(args: argparse.Namespace) -> int:
                 return stop_path.exists()
             await asyncio.sleep(min(poll, remaining))
 
+    def record_stop_checkpoint(
+        *,
+        stage: str,
+        cycle: int,
+        step: int = -1,
+        task_id: str = "",
+        attempt: int | None = None,
+        message: str = "",
+    ) -> dict[str, Any]:
+        """Persist a lightweight stop snapshot so manual stops leave usable context."""
+        try:
+            reason = detect_stop_reason([stop_path]) or STOP_REASON_STOP_FILE
+        except Exception:
+            reason = STOP_REASON_STOP_FILE
+        payload: dict[str, Any] = {
+            "ts": now_iso(),
+            "reason": reason,
+            "stage": str(stage or ""),
+            "cycle": int(cycle),
+            "step": int(step),
+            "task_id": str(task_id or ""),
+            "message": str(message or ""),
+            "run_dir": str(run_dir),
+        }
+        if attempt is not None:
+            payload["attempt"] = int(attempt)
+        try:
+            progress_path = run_dir / "progress.txt"
+            if progress_path.exists():
+                payload["progress"] = progress_path.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            pass
+        try:
+            state_path = run_dir / "STATE.json"
+            if state_path.exists():
+                state_obj = load_state(state_path)
+                payload["state_counts"] = {
+                    "done": len(state_obj.get("done", []) or []),
+                    "failed": len(state_obj.get("failed", []) or []),
+                    "warnings": len(state_obj.get("warnings", []) or []),
+                }
+        except Exception:
+            pass
+        try:
+            (run_dir / "STOP_SNAPSHOT.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+                errors="replace",
+            )
+        except Exception:
+            pass
+        try:
+            with (run_dir / "STOP_SNAPSHOT.log").open("a", encoding="utf-8", errors="replace") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            pass
+        try:
+            metrics.event(
+                "stop_checkpoint",
+                cycle=cycle,
+                step=step,
+                stage=stage,
+                task_id=task_id,
+                attempt=attempt if attempt is not None else -1,
+                reason=reason,
+                message=message,
+            )
+        except Exception:
+            pass
+        return payload
+
     # Global PM cache
     from .config import AGENT_WORK_DIR
     pm_cache_dir = repo / AGENT_WORK_DIR / "PM_CACHE"
@@ -482,6 +553,18 @@ async def main_async(args: argparse.Namespace) -> int:
             except Exception as _report_ex:
                 eprint(f"[WARN] Failed to write local shutdown report: {_report_ex}")
 
+            if stop_reason == STOP_REASON_STOP_FILE or stop_path.exists():
+                metrics.event(
+                    "shutdown_report",
+                    cycle=cycle,
+                    step=step,
+                    reason=stop_reason,
+                    ok=True,
+                    mode="local_only",
+                    note="llm_report_skipped_stop_requested",
+                )
+                return
+
             # Try to have PM author a concise report, overwriting the fallback.
             try:
                 prompt = store.render(
@@ -560,9 +643,17 @@ async def main_async(args: argparse.Namespace) -> int:
             effective_timeout = timeout_sec if (timeout_sec and timeout_sec > 0) else 900
 
             while True:
+                if stop_path.exists():
+                    metrics.event("model_call_skipped_stop", stage=label, task_id=task_id)
+                    return CodexExecResult(exit_code=130, error=STOP_REASON_STOP_FILE)
+
                 # Retry loop for transient errors
                 last_result: CodexExecResult | None = None
                 for retry_attempt in range(_MAX_RETRIES + 1):
+                    if stop_path.exists():
+                        metrics.event("model_retry_skipped_stop", stage=label, task_id=task_id, attempt=retry_attempt)
+                        return last_result or CodexExecResult(exit_code=130, error=STOP_REASON_STOP_FILE)
+
                     result = await codex_exec(
                         prompt,
                         instructions=instructions,
@@ -574,6 +665,11 @@ async def main_async(args: argparse.Namespace) -> int:
                         heartbeat_callback=lambda: metrics.event("heartbeat", stage=label, task_id=task_id),
                     )
                     last_result = result
+
+                    if stop_path.exists():
+                        result.error = result.error or STOP_REASON_STOP_FILE
+                        metrics.event("model_call_stopped", stage=label, task_id=task_id, attempt=retry_attempt)
+                        return result
 
                     if result.is_quota_exhausted:
                         raise Exception("quota exhausted - detected in codex exec output")
@@ -591,15 +687,26 @@ async def main_async(args: argparse.Namespace) -> int:
                         wait = _INITIAL_BACKOFF * (2 ** retry_attempt)
                         eprint(f"[RETRY] {label} transient error (attempt {retry_attempt + 1}/{_MAX_RETRIES}): {err_text[:200]}; retrying in {wait:.0f}s")
                         if await sleep_or_stop(wait):
-                            break
+                            result.error = result.error or STOP_REASON_STOP_FILE
+                            metrics.event("model_retry_stopped", stage=label, task_id=task_id, attempt=retry_attempt)
+                            return result
                         continue
                     break  # non-transient error - exit retry loop
 
                 assert last_result is not None
                 result = last_result
 
+                if stop_path.exists():
+                    result.error = result.error or STOP_REASON_STOP_FILE
+                    metrics.event("model_call_stopped", stage=label, task_id=task_id)
+                    return result
+
                 # Continuation on timeout
                 if result.is_timeout and cont_left > 0:
+                    if stop_path.exists():
+                        result.error = result.error or STOP_REASON_STOP_FILE
+                        metrics.event("continuation_skipped_stop", stage=label, task_id=task_id)
+                        return result
                     if budget_exceeded("total_continuations", budget_state["total_continuations"], int(budgets_cfg.get("max_total_continuations_per_run") or 0)):
                         metrics.event("budget_exceeded", cycle=-1, reason="total_continuations")
                         raise BudgetExceeded("total_continuations")
@@ -631,6 +738,14 @@ async def main_async(args: argparse.Namespace) -> int:
             last_raw = ""
             repair_prompt = ""
             for attempt in range(retries + 1):
+                if stop_path.exists():
+                    record_stop_checkpoint(
+                        stage=f"pm_{kind}",
+                        cycle=cycle_idx,
+                        message="Stop requested before PM attempt; skipping further PM work.",
+                    )
+                    return None
+
                 prompt = pm_prompt if attempt == 0 else repair_prompt
                 try:
                     res = await _run_codex_with_continuations(
@@ -651,6 +766,15 @@ async def main_async(args: argparse.Namespace) -> int:
                     output_path.write_text(last_raw + "\n", encoding="utf-8", errors="replace")
                 except Exception:
                     pass
+
+                if stop_path.exists():
+                    metrics.event("pm_stop_requested", cycle=cycle_idx, attempt=attempt, kind=kind)
+                    record_stop_checkpoint(
+                        stage=f"pm_{kind}",
+                        cycle=cycle_idx,
+                        message="Stop requested during PM; raw PM output was preserved.",
+                    )
+                    return None
 
                 parsed, missing, type_errors = parse_pm_output_with_errors(last_raw, kind_hint=kind)
                 if parsed is not None:
@@ -690,6 +814,14 @@ async def main_async(args: argparse.Namespace) -> int:
                     "Previous response (for repair):\n"
                     + last_raw[:8000]
                 )
+
+            if stop_path.exists():
+                record_stop_checkpoint(
+                    stage=f"pm_{kind}",
+                    cycle=cycle_idx,
+                    message="Stop requested after PM attempts; skipping fallback backlog loading.",
+                )
+                return None
 
             if last_raw:
                 describe_parse_failure(f"pm_{kind}", last_raw)
@@ -853,6 +985,14 @@ async def main_async(args: argparse.Namespace) -> int:
                         output_path=pm_output_path,
                     )
                     if pm_out is None:
+                        if stop_path.exists():
+                            record_stop_checkpoint(
+                                stage="pm_bootstrap",
+                                cycle=cycle_idx,
+                                message="Stop requested during PM bootstrap; stopping without PM retry or backlog mutation.",
+                            )
+                            metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=0, reason=STOP_REASON_STOP_FILE)
+                            return False
                         metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=1, error="structured_output_failed")
                         return False
 
@@ -992,6 +1132,20 @@ async def main_async(args: argparse.Namespace) -> int:
                         output_path=pm_output_path,
                     )
                     if pm_out is None:
+                        if stop_path.exists():
+                            record_stop_checkpoint(
+                                stage="pm_incremental" if need_incremental else "pm_refresh",
+                                cycle=cycle_idx,
+                                message="Stop requested during PM; stopping without PM retry or backlog mutation.",
+                            )
+                            metrics.event(
+                                "pm_end",
+                                cycle=cycle_idx,
+                                kind="incremental" if need_incremental else "refresh",
+                                rc=0,
+                                reason=STOP_REASON_STOP_FILE,
+                            )
+                            return False
                         metrics.event(
                             "pm_end",
                             cycle=cycle_idx,
@@ -1230,6 +1384,14 @@ async def main_async(args: argparse.Namespace) -> int:
             done_set = pm_refresh.done_set
             before_done = pm_refresh.before_done
 
+            if stop_path.exists():
+                record_stop_checkpoint(
+                    stage="dev",
+                    cycle=cycle_idx,
+                    message="Stop requested before Dev work; current backlog/state preserved.",
+                )
+                return 0, STOP_REASON_STOP_FILE, 0, (len(done_set) > before_done)
+
             tasks_root = run_dir / "tasks"
             tasks_root.mkdir(parents=True, exist_ok=True)
 
@@ -1294,9 +1456,23 @@ async def main_async(args: argparse.Namespace) -> int:
                         eprint("[BUILD-FIX] Build still broken after fix attempt.")
                         metrics.event("build_fix_end", cycle=cycle_idx, rc=1)
 
+            if stop_path.exists():
+                record_stop_checkpoint(
+                    stage="dev_prebuild",
+                    cycle=cycle_idx,
+                    message="Stop requested during pre-build/build-fix; current artifacts preserved.",
+                )
+                return 0, STOP_REASON_STOP_FILE, 0, (len(done_set) > before_done)
+
             for step in range(int(args.iterations)):
                 if stop_path.exists():
-                    break
+                    record_stop_checkpoint(
+                        stage="dev",
+                        cycle=cycle_idx,
+                        step=step,
+                        message="Stop requested before next task; current progress preserved.",
+                    )
+                    return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
 
                 max_consecutive_failures = int(getattr(args, "max_consecutive_task_failures", 3) or 3)
                 next_task: Optional[TaskItem] = select_next_task_with_dependency_checks(
@@ -1415,9 +1591,64 @@ async def main_async(args: argparse.Namespace) -> int:
                         eprint(f"[STOP] Rollback {fail_reason}: {detail}")
                         return False, fail_reason
 
+                task_stop_recorded = False
+
+                def _record_task_stop(stage: str, attempt_num: int | None = None) -> None:
+                    nonlocal task_stop_recorded
+                    if task_stop_recorded:
+                        return
+                    task_stop_recorded = True
+                    detail = "Stop requested; partial task artifacts and worktree state were preserved."
+                    state.setdefault("warnings", []).append(
+                        {
+                            "task": next_task.id,
+                            "reason": STOP_REASON_STOP_FILE,
+                            "detail": detail,
+                            "cycle": cycle_idx,
+                            "step": step,
+                            "attempt": attempt_num,
+                        }
+                    )
+                    save_state(state_path, state)
+                    task_results.append(
+                        {
+                            "id": next_task.id,
+                            "title": next_task.title,
+                            "status": "stopped",
+                            "reason": STOP_REASON_STOP_FILE,
+                            "duration": time.time() - task_outer_t0,
+                            "attempt": attempt_num if attempt_num is not None else 0,
+                            "max_attempts": max_attempts,
+                        }
+                    )
+                    metrics.event(
+                        "task_stop_requested",
+                        cycle=cycle_idx,
+                        step=step,
+                        task_id=next_task.id,
+                        attempt=attempt_num if attempt_num is not None else -1,
+                        stage=stage,
+                        reason=STOP_REASON_STOP_FILE,
+                    )
+                    logger.stop_event(
+                        f"Stop requested during task {next_task.id}",
+                        task_id=next_task.id,
+                        attempt=attempt_num,
+                        stage=stage,
+                    )
+                    record_stop_checkpoint(
+                        stage=stage,
+                        cycle=cycle_idx,
+                        step=step,
+                        task_id=next_task.id,
+                        attempt=attempt_num,
+                        message=detail,
+                    )
+
                 for attempt in range(max_attempts):
                     if stop_path.exists():
-                        break
+                        _record_task_stop("dev_before_attempt", attempt)
+                        return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
 
                     if attempt > 0 and dev_auto_escalate:
                         if budget_exceeded(
@@ -1571,6 +1802,10 @@ async def main_async(args: argparse.Namespace) -> int:
                     (run_dir / "dev_logs" / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}_a{attempt:02d}.txt").write_text(
                         dev_log + "\n", encoding="utf-8", errors="replace"
                     )
+
+                    if stop_path.exists():
+                        _record_task_stop("dev_attempt", attempt)
+                        return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
 
                     # Quota/credits exhausted: graceful stop with artifacts preserved.
                     dev_quota_exhausted = dev_quota_exhausted or has_quota_text(dev_log)
@@ -1734,6 +1969,9 @@ async def main_async(args: argparse.Namespace) -> int:
                             stop_path=stop_path,
                         )
                         metrics.event("build_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
+                        if stop_path.exists():
+                            _record_task_stop("build_gate", attempt)
+                            return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
                         if ok and tb:
                             # Auto-commit on task branch as incremental checkpoint
                             try:
@@ -1788,6 +2026,9 @@ async def main_async(args: argparse.Namespace) -> int:
                             stop_path=stop_path,
                         )
                         metrics.event("test_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
+                        if stop_path.exists():
+                            _record_task_stop("test_gate", attempt)
+                            return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
                         if not ok:
                             if dev_auto_escalate and (attempt + 1) < max_attempts and "test_failed" in dev_escalate_on:
                                 metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="test_failed")
@@ -1881,6 +2122,10 @@ async def main_async(args: argparse.Namespace) -> int:
                     logger.task_end(task_id=next_task.id, success=True, reason="completed", attempt=attempt)
                     task_completed = True
                     break
+
+                if stop_path.exists():
+                    _record_task_stop("dev_after_attempt", locals().get("attempt") if "attempt" in locals() else None)
+                    return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
 
                 # Merge or abandon task branch
                 if task_completed and tb:
@@ -2523,7 +2768,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 detected_reason = ""
             final_reason = choose_stop_reason([last_reason, detected_reason]) or last_reason
             report_path = run_dir / "SHUTDOWN_REPORT.md"
-            if not report_path.exists():
+            if final_reason == STOP_REASON_STOP_FILE or not report_path.exists():
                 try:
                     await write_shutdown_report(final_reason or "ok", cycle=cycle_idx if "cycle_idx" in locals() else -1, step=-1)
                 except Exception as ex:

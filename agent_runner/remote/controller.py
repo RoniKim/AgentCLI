@@ -74,6 +74,13 @@ class RunnerController:
         except Exception:
             return raw.replace("\\", "/")
 
+    def _stop_wait_timeout_seconds(self) -> int:
+        try:
+            value = int(getattr(self.base_args, "stop_wait_timeout_seconds", 180) or 180)
+        except Exception:
+            value = 180
+        return max(1, value)
+
     def _effective_dict(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         eff: dict[str, Any] = {}
         for key, default_value in DEFAULTS.items():
@@ -305,7 +312,8 @@ class RunnerController:
                 pass
 
             if wait and self._runner_thread and self._runner_thread.is_alive():
-                deadline = time.monotonic() + 60
+                wait_timeout = self._stop_wait_timeout_seconds()
+                deadline = time.monotonic() + wait_timeout
                 while self._runner_thread.is_alive() and time.monotonic() < deadline:
                     self._emit_stop_progress(
                         run_dir,
@@ -363,7 +371,7 @@ class RunnerController:
         if running:
             final_phase = "timeout" if wait else "stop_requested"
             final_message = (
-                "Runner is still alive after stop wait timeout."
+                f"Runner is still alive after {self._stop_wait_timeout_seconds()}s stop wait timeout."
                 if wait
                 else "Stop requested; runner is still shutting down."
             )

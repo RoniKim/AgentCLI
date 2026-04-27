@@ -222,6 +222,7 @@ DEFAULTS: Dict[str, Any] = {
     "dev_timeout_seconds": 900,
     "mcp_timeout_seconds": 120,
     "test_timeout_seconds": 3600,
+    "stop_wait_timeout_seconds": 180,
 
     # PM tuning knobs (referenced by cycle.py)
     "pm_structured_retries": 2,
@@ -561,6 +562,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # PM tuning knobs
     p.add_argument("--pm-timeout-seconds", type=int, default=None)
     p.add_argument("--dev-timeout-seconds", type=int, default=None)
+    p.add_argument("--stop-wait-timeout-seconds", type=int, default=None)
     p.add_argument("--pm-bootstrap-max-turns", type=int, default=None)
     p.add_argument("--pm-incremental-max-turns", type=int, default=None)
     p.add_argument("--pm-refresh-backlog", action=argparse.BooleanOptionalAction, default=None)
