@@ -443,6 +443,7 @@
         restoreBackupPath: 'Restore backup path',
         savedPath: 'Saved path',
         restoredFrom: 'Restored from',
+        trackedPromptRoles: 'tracked prompt roles',
         promptMutationsLocked: 'Prompt mutations are locked',
         promptMutationsDisabled: 'Prompt saves and restores are disabled until runner controls are enabled.',
         chooseBackupRestore: 'Choose a backup to restore or save the current draft after validation passes.',
@@ -948,6 +949,7 @@
         restoreBackupPath: '복원 백업 경로',
         savedPath: '저장된 경로',
         restoredFrom: '복원 원본',
+        trackedPromptRoles: '추적 중인 프롬프트 역할',
         promptMutationsLocked: '프롬프트 변경이 잠겨 있습니다',
         promptMutationsDisabled: '실행기 컨트롤이 활성화될 때까지 프롬프트 저장과 복원은 비활성화됩니다.',
         chooseBackupRestore: '검증이 통과하면 복원할 백업을 선택하거나 현재 초안을 저장하세요.',
@@ -1655,6 +1657,8 @@
   });
   Object.assign(LOCALE_TEXT.ko.goals, {
     readOnlyFallback: '읽기 전용 API를 사용할 수 없을 때는 로컬 폴백 데이터를 표시합니다.',
+    saveGoals: '목표 저장',
+    toggleCheckbox: '줄 {lineNumber} 목표 체크박스 {checkboxState} 전환',
   });
   Object.assign(LOCALE_TEXT.ko.config, {
     groupProject: '프로젝트',

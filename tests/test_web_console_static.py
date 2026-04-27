@@ -1009,6 +1009,21 @@ class WebConsoleStaticTests(unittest.TestCase):
             for marker in markers:
                 self.assertIn(marker, self.app_js)
 
+    def test_korean_editor_locale_strings_cover_config_goals_prompts(self) -> None:
+        expected_strings = [
+            "noConfigChangesSupplied: '전달된 설정 변경이 없습니다.'",
+            "savingConfigChanges: '설정 변경 저장 중...'",
+            "configSavedMessage: '설정이 저장되었습니다.'",
+            "saveGoals: '목표 저장'",
+            "toggleCheckbox: '줄 {lineNumber} 목표 체크박스 {checkboxState} 전환'",
+            "trackedPromptRoles: '추적 중인 프롬프트 역할'",
+            "promptEditorSummary: '명시적인 읽기 경로를 통해 로드됨'",
+            "saveCreatesBackup: '저장은 프롬프트 파일을 업데이트하기 전에 항상 백업을 만듭니다.'",
+        ]
+
+        for token in expected_strings:
+            self.assertIn(token, self.app_js)
+
     def test_primary_runtime_strings_are_locale_driven(self) -> None:
         runtime_js = self.app_js.split("const INITIAL_LOCALE = detectPreferredLocale();", 1)[1]
 
