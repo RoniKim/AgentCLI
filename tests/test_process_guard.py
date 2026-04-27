@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import sys
 import shutil
 from types import SimpleNamespace
@@ -148,6 +150,104 @@ class ProcessGuardTests(unittest.TestCase):
         for image_name in ("node.exe", "codex.exe", "claude.exe"):
             with self.subTest(image_name=image_name):
                 self.assertTrue(_looks_managed(image_name))
+
+    def test_register_pid_records_process_creation_signatures(self) -> None:
+        session_file = self.fixture_root / "session_123.json"
+        self.addCleanup(lambda: process_guard._tracked_pids.discard(123))
+
+        with (
+            patch("agent_runner.process_guard.os.getpid", return_value=999),
+            patch("agent_runner.process_guard._session_file", return_value=session_file),
+            patch("agent_runner.process_guard._pid_create_time_ticks", side_effect=lambda pid: {123: 111, 999: 222}.get(pid)),
+        ):
+            process_guard.register_pid(123)
+
+        payload = json.loads(session_file.read_text(encoding="utf-8"))
+        self.assertEqual(123, payload["child_pid"])
+        self.assertEqual(999, payload["parent_pid"])
+        self.assertEqual(111, payload["child_create_time"])
+        self.assertEqual(222, payload["parent_create_time"])
+
+    def test_cleanup_orphans_kills_signed_python_child_without_name_filter(self) -> None:
+        session_file = self.fixture_root / "session_123.json"
+        session_file.write_text(
+            json.dumps(
+                {
+                    "child_pid": 123,
+                    "parent_pid": 456,
+                    "created_at": time.time(),
+                    "child_create_time": 111,
+                }
+            ),
+            encoding="utf-8",
+        )
+        killed: list[int] = []
+
+        with (
+            patch("agent_runner.process_guard.os.getpid", return_value=999),
+            patch("agent_runner.process_guard._pid_alive", side_effect=lambda pid: int(pid) == 123),
+            patch("agent_runner.process_guard._pid_create_time_ticks", return_value=111),
+            patch("agent_runner.process_guard._is_managed_child_process", side_effect=AssertionError("unsigned fallback should not run")),
+            patch("agent_runner.process_guard.terminate_process_tree", side_effect=lambda pid, include_root=True: killed.append(pid)),
+        ):
+            count = process_guard.cleanup_orphans(self.fixture_root)
+
+        self.assertEqual(1, count)
+        self.assertEqual([123], killed)
+        self.assertFalse(session_file.exists())
+
+    def test_cleanup_orphans_skips_signed_child_when_pid_was_reused(self) -> None:
+        session_file = self.fixture_root / "session_123.json"
+        session_file.write_text(
+            json.dumps(
+                {
+                    "child_pid": 123,
+                    "parent_pid": 456,
+                    "created_at": time.time(),
+                    "child_create_time": 111,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("agent_runner.process_guard.os.getpid", return_value=999),
+            patch("agent_runner.process_guard._pid_alive", side_effect=lambda pid: int(pid) == 123),
+            patch("agent_runner.process_guard._pid_create_time_ticks", return_value=222),
+            patch("agent_runner.process_guard.terminate_process_tree") as terminate_tree,
+        ):
+            count = process_guard.cleanup_orphans(self.fixture_root)
+
+        self.assertEqual(0, count)
+        terminate_tree.assert_not_called()
+        self.assertFalse(session_file.exists())
+
+    def test_start_parent_watchdog_launches_breakaway_helper(self) -> None:
+        old_watchdog = process_guard._watchdog_process
+        self.addCleanup(lambda: setattr(process_guard, "_watchdog_process", old_watchdog))
+        process_guard._watchdog_process = None
+        calls: list[dict[str, object]] = []
+
+        def _fake_popen(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append({"cmd": cmd, **kwargs})
+            return SimpleNamespace(pid=321, poll=lambda: None)
+
+        with (
+            patch.object(process_guard.sys, "platform", "win32"),
+            patch.object(process_guard.sys, "executable", "python.exe"),
+            patch("agent_runner.process_guard.os.getpid", return_value=999),
+            patch.dict(os.environ, {}, clear=True),
+            patch("agent_runner.process_guard.subprocess.Popen", side_effect=_fake_popen),
+        ):
+            process_guard._start_parent_watchdog(self.fixture_root)
+
+        self.assertEqual(1, len(calls))
+        cmd = calls[0]["cmd"]
+        self.assertIsInstance(cmd, list)
+        self.assertIn("--watch-parent", cmd)
+        self.assertIn("999", cmd)
+        flags = int(calls[0]["creationflags"])
+        self.assertTrue(flags & process_guard._CREATE_BREAKAWAY_FROM_JOB)
 
     @unittest.skipUnless(sys.platform == "win32", "Windows process-tree smoke test")
     def test_run_cmd_async_cleans_inherited_stdout_child_process(self) -> None:

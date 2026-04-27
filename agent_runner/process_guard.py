@@ -1,9 +1,10 @@
-"""Process Guard: 4-layer defense against orphan child processes.
+"""Process Guard: layered defense against orphan child processes.
 
 L1 - Windows Job Object (KILL_ON_JOB_CLOSE): OS-level automatic cleanup on parent exit.
 L2 - PID tracking + atexit: Graceful cleanup on normal exit or unhandled exceptions.
 L3 - Enhanced signal handlers: Kill children on SIGINT/SIGTERM/SIGBREAK.
 L4 - Startup orphan cleanup: Detect and kill orphans from previous runs.
+L5 - Parent watchdog: A detached helper cleans tracked children if the parent crashes.
 
 Thread-safety:
     All mutable module state is protected by ``_lock`` (a re-entrant lock) so that
@@ -28,6 +29,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -46,6 +48,7 @@ _tracked_pids: set[int] = set()
 _session_dir: Optional[Path] = None
 _stop_path_func: Optional[Callable[[], Optional[Path]]] = None
 _job_handle: Optional[int] = None
+_watchdog_process: Optional[subprocess.Popen[object]] = None
 
 # Session files older than this (seconds) are unconditionally cleaned up,
 # regardless of PID liveness — guards against PID-recycling false positives.
@@ -57,12 +60,21 @@ _SESSION_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 
 # Win32 constants
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+_JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x0800
 _JobObjectExtendedLimitInformation = 9
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _SYNCHRONIZE = 0x00100000
 _TH32CS_SNAPPROCESS = 0x00000002
 _MAX_PATH = 260
+_INFINITE = 0xFFFFFFFF
+
+# Process creation flags
+_CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_CREATE_NO_WINDOW = 0x08000000
+_DETACHED_PROCESS = 0x00000008
 
 # WaitForSingleObject return values
 _WAIT_OBJECT_0 = 0x00000000
@@ -123,6 +135,13 @@ class _PROCESSENTRY32W(ctypes.Structure):
     ]
 
 
+class _FILETIME(ctypes.Structure):
+    _fields_ = [
+        ("dwLowDateTime", ctypes.c_uint32),
+        ("dwHighDateTime", ctypes.c_uint32),
+    ]
+
+
 def _init_kernel32_types() -> None:
     """Set Win32 API function signatures once (idempotent, call under _lock)."""
     if sys.platform != "win32":
@@ -147,6 +166,14 @@ def _init_kernel32_types() -> None:
     kernel32.TerminateProcess.argtypes = [_HANDLE, ctypes.c_uint]
     kernel32.WaitForSingleObject.restype = ctypes.c_uint32
     kernel32.WaitForSingleObject.argtypes = [_HANDLE, ctypes.c_uint32]
+    kernel32.GetProcessTimes.restype = ctypes.c_int
+    kernel32.GetProcessTimes.argtypes = [
+        _HANDLE,
+        ctypes.POINTER(_FILETIME),
+        ctypes.POINTER(_FILETIME),
+        ctypes.POINTER(_FILETIME),
+        ctypes.POINTER(_FILETIME),
+    ]
     kernel32.CreateToolhelp32Snapshot.restype = _HANDLE
     kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
     kernel32.Process32FirstW.restype = ctypes.c_int
@@ -169,7 +196,9 @@ def _setup_job_object() -> Optional[int]:
             return None
 
         info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        info.BasicLimitInformation.LimitFlags = (
+            _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | _JOB_OBJECT_LIMIT_BREAKAWAY_OK
+        )
 
         ok = kernel32.SetInformationJobObject(
             job,
@@ -242,15 +271,65 @@ def _session_file(pid: int) -> Path:
     return _get_session_dir() / f"session_{pid}.json"
 
 
+def _filetime_to_int(ft: _FILETIME) -> int:
+    return (int(ft.dwHighDateTime) << 32) | int(ft.dwLowDateTime)
+
+
+def _pid_create_time_ticks(pid: int) -> Optional[int]:
+    """Return the Windows process creation FILETIME ticks for PID reuse checks."""
+    if sys.platform != "win32" or pid <= 0:
+        return None
+    try:
+        _init_kernel32_types()
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            return None
+        creation = _FILETIME()
+        exit_time = _FILETIME()
+        kernel = _FILETIME()
+        user = _FILETIME()
+        try:
+            ok = kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            )
+            if not ok:
+                return None
+            return _filetime_to_int(creation)
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
+
+def _pid_signature_matches(pid: int, expected_ticks: object) -> bool:
+    """Validate a PID still refers to the process recorded in a session file."""
+    if expected_ticks in (None, ""):
+        return True
+    try:
+        expected = int(expected_ticks)
+    except Exception:
+        return False
+    actual = _pid_create_time_ticks(pid)
+    return actual is not None and actual == expected
+
+
 def register_pid(pid: int) -> None:
     """Register a child process PID for tracking (thread-safe)."""
     with _lock:
         _tracked_pids.add(pid)
     try:
+        parent_pid = os.getpid()
         data = {
             "child_pid": pid,
-            "parent_pid": os.getpid(),
+            "parent_pid": parent_pid,
             "created_at": time.time(),
+            "child_create_time": _pid_create_time_ticks(pid),
+            "parent_create_time": _pid_create_time_ticks(parent_pid),
         }
         sf = _session_file(pid)
         sf.parent.mkdir(parents=True, exist_ok=True)
@@ -369,9 +448,6 @@ def process_descendant_pids(pid: int) -> list[int]:
     if sys.platform == "win32":
         return _descendant_pids(pid, _windows_child_pid_map())
     return []
-
-
-_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 
 def _pid_alive(pid: int) -> bool:
@@ -636,6 +712,60 @@ def _is_claude_process(pid: int) -> bool:
     return _is_managed_child_process(pid)
 
 
+def _session_allows_child_cleanup(data: dict[str, object], child_pid: int) -> bool:
+    """Return True when a session file safely identifies the current child PID."""
+    expected_child_time = data.get("child_create_time")
+    if expected_child_time not in (None, ""):
+        return _pid_signature_matches(child_pid, expected_child_time)
+    # Backward compatibility for older unsigned session files. Keep conservative
+    # process-name filtering because PID reuse cannot be ruled out.
+    return _is_managed_child_process(child_pid)
+
+
+def _cleanup_session_files_for_parent(session_dir: Path, parent_pid: int) -> int:
+    """Kill signed child sessions for a parent that is known to be gone."""
+    killed = 0
+    my_pid = os.getpid()
+    if not session_dir.exists():
+        return 0
+    for sf in list(session_dir.glob("session_*.json")):
+        try:
+            data = json.loads(sf.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                sf.unlink(missing_ok=True)
+                continue
+            child_pid = data.get("child_pid")
+            recorded_parent_pid = data.get("parent_pid")
+            if child_pid is None or recorded_parent_pid is None:
+                sf.unlink(missing_ok=True)
+                continue
+            try:
+                child_pid_int = int(child_pid)
+                recorded_parent_pid_int = int(recorded_parent_pid)
+            except Exception:
+                sf.unlink(missing_ok=True)
+                continue
+            if recorded_parent_pid_int != int(parent_pid):
+                continue
+            if child_pid_int == my_pid:
+                continue
+            if _pid_alive(child_pid_int) and _session_allows_child_cleanup(data, child_pid_int):
+                logger.warning(
+                    f"[ProcessGuard] L5: Killing child PID {child_pid_int} "
+                    f"after parent {parent_pid} exited"
+                )
+                terminate_process_tree(child_pid_int, include_root=True)
+                killed += 1
+            sf.unlink(missing_ok=True)
+        except Exception as ex:
+            logger.debug(f"[ProcessGuard] L5: Error processing {sf}: {ex}")
+            try:
+                sf.unlink(missing_ok=True)
+            except Exception:
+                pass
+    return killed
+
+
 def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
     """Scan session files and kill orphaned child processes (L4).
 
@@ -681,7 +811,7 @@ def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
 
             if not parent_alive:
                 # Parent is dead — this is a stale session file
-                if child_alive and _is_managed_child_process(child_pid):
+                if child_alive and _session_allows_child_cleanup(data, child_pid):
                     logger.warning(
                         f"[ProcessGuard] L4: Killing orphan PID {child_pid} "
                         f"(parent {parent_pid} dead)"
@@ -705,6 +835,92 @@ def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
     if killed:
         logger.info(f"[ProcessGuard] L4: Cleaned up {killed} orphan process(es)")
     return killed
+
+
+# ---------------------------------------------------------------------------
+# L5 - Parent watchdog
+# ---------------------------------------------------------------------------
+
+def _wait_for_parent_exit(parent_pid: int) -> None:
+    """Block until parent_pid exits, falling back to polling when needed."""
+    if parent_pid <= 0 or parent_pid == os.getpid():
+        return
+    if sys.platform == "win32":
+        try:
+            _init_kernel32_types()
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = kernel32.OpenProcess(_SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, int(parent_pid))
+            if handle:
+                try:
+                    kernel32.WaitForSingleObject(handle, _INFINITE)
+                    return
+                finally:
+                    kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+    while _pid_alive(parent_pid):
+        time.sleep(1.0)
+
+
+def _run_parent_watchdog(parent_pid: int, session_dir: Path) -> int:
+    """Watch a parent process and clean registered children after parent death."""
+    _wait_for_parent_exit(parent_pid)
+    time.sleep(0.25)
+    killed = _cleanup_session_files_for_parent(session_dir, parent_pid)
+    if killed:
+        logger.info(f"[ProcessGuard] L5: Cleaned up {killed} child process(es)")
+    return 0
+
+
+def _watchdog_creationflags(*, allow_breakaway: bool) -> int:
+    flags = _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP | _CREATE_NO_WINDOW
+    if allow_breakaway:
+        flags |= _CREATE_BREAKAWAY_FROM_JOB
+    return flags
+
+
+def _start_parent_watchdog(session_dir: Path) -> None:
+    """Start a detached helper that survives parent crashes where possible."""
+    global _watchdog_process
+    if sys.platform != "win32":
+        return
+    if os.environ.get("AGENTCLI_PROCESS_GUARD_WATCHDOG") == "1":
+        return
+    if _watchdog_process is not None and _watchdog_process.poll() is None:
+        return
+
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--watch-parent",
+        str(os.getpid()),
+        str(session_dir),
+    ]
+    env = dict(os.environ)
+    env["AGENTCLI_PROCESS_GUARD_WATCHDOG"] = "1"
+
+    for allow_breakaway in (True, False):
+        try:
+            _watchdog_process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=_watchdog_creationflags(allow_breakaway=allow_breakaway),
+                env=env,
+            )
+            logger.debug(
+                "[ProcessGuard] L5: Parent watchdog started "
+                f"(pid={_watchdog_process.pid}, breakaway={allow_breakaway})"
+            )
+            return
+        except OSError as ex:
+            logger.debug(f"[ProcessGuard] L5: Watchdog start failed (breakaway={allow_breakaway}): {ex}")
+            continue
+        except Exception as ex:
+            logger.debug(f"[ProcessGuard] L5: Watchdog start failed: {ex}")
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -759,9 +975,30 @@ def init_process_guard(
         except Exception as ex:
             logger.debug(f"[ProcessGuard] L4: Orphan cleanup failed: {ex}")
 
+        # L5: detached watchdog for parent crash/SIGKILL paths.
+        try:
+            _start_parent_watchdog(_session_dir)
+        except Exception as ex:
+            logger.debug(f"[ProcessGuard] L5: Watchdog setup failed: {ex}")
+
         _initialized = True
 
     logger.info(
-        "[ProcessGuard] Initialized (L1=%s, L2=atexit, L3=signals, L4=orphan-scan)",
+        "[ProcessGuard] Initialized (L1=%s, L2=atexit, L3=signals, L4=orphan-scan, L5=watchdog)",
         "JobObject" if _job_handle else "skipped",
     )
+
+
+def _main(argv: list[str]) -> int:
+    if len(argv) == 4 and argv[1] == "--watch-parent":
+        try:
+            parent_pid = int(argv[2])
+            session_dir = Path(argv[3]).expanduser().resolve()
+        except Exception:
+            return 2
+        return _run_parent_watchdog(parent_pid, session_dir)
+    return 2
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through subprocess on Windows
+    raise SystemExit(_main(sys.argv))

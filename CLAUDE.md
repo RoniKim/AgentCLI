@@ -53,7 +53,7 @@ Subsystems:
 | `state.py` | STATE.json / BACKLOG.json management |
 | `gitops.py` | Git operations, checkpoints, worktree isolation, `has_new_commits()` |
 | `gates.py` | Build/test gate execution, `extract_build_warnings()` |
-| `process_guard.py` | 4-layer orphan process cleanup (Windows Job Object) |
+| `process_guard.py` | Layered orphan process cleanup (Windows Job Object + parent watchdog) |
 | `prompts.py` | `PromptStore`, `append_pm_essential_context()`, `append_pm_output_contract()`, template rendering |
 | `structured.py` | JSON parsing, normalization, fence extraction, Pydantic repair |
 | `schemas.py` | Pydantic models (`PMOutputV2`, `TaskItem`, etc.) |
@@ -449,7 +449,7 @@ AgentCLI/
 │   ├── state.py                # STATE.json / BACKLOG.json I/O
 │   ├── gitops.py               # Git operations, checkpoints, has_new_commits()
 │   ├── gates.py                # Build/test gates, extract_build_warnings()
-│   ├── process_guard.py        # 4-layer process cleanup (Windows Job Object)
+│   ├── process_guard.py        # Layered process cleanup (Windows Job Object + parent watchdog)
 │   ├── prompts.py              # PromptStore, append_pm_essential_context(), templates
 │   ├── structured.py           # JSON parsing/repair/fence extraction
 │   ├── schemas.py              # Pydantic models (PMOutputV2, TaskItem)
