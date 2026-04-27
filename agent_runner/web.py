@@ -2281,6 +2281,264 @@ def _runner_control_payload(
     }
 
 
+def _live_run_payload(
+    *,
+    repo: Path,
+    branch: str,
+    latest_run_dir: Path | None,
+    active_run: dict[str, Any],
+    progress: dict[str, Any],
+    stages: list[dict[str, Any]],
+    logs: dict[str, Any],
+    notifications: list[dict[str, Any]],
+    runner_control: dict[str, Any],
+    controller_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    active = active_run if isinstance(active_run, dict) else {}
+    progress_data = progress if isinstance(progress, dict) else {}
+    stage_items = stages if isinstance(stages, list) else []
+    log_data = logs if isinstance(logs, dict) else {}
+    notification_items = notifications if isinstance(notifications, list) else []
+    control = runner_control if isinstance(runner_control, dict) else {}
+    controller_data = controller_status if isinstance(controller_status, dict) else {}
+
+    repo_path = str(active.get("repo") or _path_text(repo)).strip() or _path_text(repo)
+    run_id = _pick_text(active.get("id"), active.get("runId"), progress_data.get("run_id"), "no-run")
+    run_dir = _pick_text(active.get("runDir"), active.get("run_dir"), progress_data.get("latest_run_dir"), "")
+    repo_label = _pick_text(active.get("repoLabel"), repo.name or repo_path.rsplit("/", 1)[-1], repo.name or "agentcli")
+    branch_value = _pick_text(active.get("branch"), branch, progress_data.get("branch"), "HEAD")
+    backend_value = _pick_text(active.get("backend"), progress_data.get("backend"), "codex")
+
+    run_status = _pick_text(active.get("status"), progress_data.get("run_status"), "idle")
+    execution_status = _pick_text(
+        active.get("executionStatus"),
+        active.get("execution_status"),
+        progress_data.get("execution_status"),
+        run_status,
+    )
+    project_status = _pick_text(
+        active.get("projectStatus"),
+        active.get("project_status"),
+        progress_data.get("project_status"),
+        "incomplete",
+    )
+    project_complete = bool(active.get("projectComplete", active.get("project_complete", progress_data.get("project_complete", False))))
+    goals_complete = bool(active.get("goalsComplete", active.get("goals_complete", progress_data.get("goals_complete", False))))
+    backlog_complete = bool(active.get("backlogComplete", active.get("backlog_complete", progress_data.get("backlog_complete", False))))
+    stage_value = _pick_text(active.get("stage"), progress_data.get("current_stage"), controller_data.get("stage"), "idle")
+    stage_index = _coerce_optional_int(_pick_value(active.get("stageIndex"), STAGE_ORDER.get(stage_value.lower(), 0)))
+    if stage_index is None:
+        stage_index = 0
+    iteration_value = _coerce_optional_int(_pick_value(active.get("iteration"), progress_data.get("iterations")))
+    if iteration_value is None:
+        iteration_value = 0
+    max_iterations = _coerce_optional_int(_pick_value(active.get("maxIterations"), progress_data.get("iterations"), 1))
+    if max_iterations is None or max_iterations <= 0:
+        max_iterations = 1
+    progress_value = active.get("progress")
+    if progress_value is None:
+        progress_value = progress_data.get("progress")
+    progress_available = bool(active.get("progressAvailable", active.get("progress_available", progress_data.get("progress_available", False))))
+    attempt_value = _coerce_optional_int(_pick_value(active.get("attempt"), progress_data.get("attempt"), progress_data.get("current_attempt")))
+    worktree_mode = _pick_text(active.get("worktreeMode"), active.get("worktree_mode"), progress_data.get("worktree_mode"), controller_data.get("worktree_mode"), "")
+    final_reason = _pick_text(active.get("finalReason"), active.get("final_reason"), progress_data.get("final_reason"), controller_data.get("final_reason"), "")
+    started_at = _coerce_optional_ms(_pick_value(active.get("startedAt"), active.get("started_at")))
+    if started_at is None:
+        started_at = 0
+    ended_at = _coerce_optional_ms(_pick_value(active.get("endedAt"), active.get("ended_at")))
+    if ended_at is None:
+        ended_at = 0
+    elapsed_sec = _coerce_optional_int(_pick_value(active.get("elapsedSec"), active.get("elapsed_seconds")))
+    if elapsed_sec is None:
+        elapsed_sec = 0
+
+    current_task_id = _pick_text(
+        active.get("task"),
+        progress_data.get("current_task_id"),
+        controller_data.get("current_task_id"),
+        "",
+    )
+    current_task_title = _pick_text(
+        active.get("taskTitle"),
+        progress_data.get("current_task_title"),
+        controller_data.get("current_task_title"),
+        "",
+    )
+    current_task_step = _coerce_optional_int(_pick_value(progress_data.get("step"), controller_data.get("step")))
+    current_task_cycle = _coerce_optional_int(_pick_value(progress_data.get("cycle"), controller_data.get("cycle")))
+
+    log_source_payload = log_data.get("source") if isinstance(log_data.get("source"), dict) else {}
+    log_cursor = _coerce_optional_int(_pick_value(log_data.get("cursor"), log_data.get("nextCursor"), log_data.get("next_cursor")))
+    if log_cursor is None:
+        log_cursor = 0
+    log_state = _pick_text(log_data.get("state"), "loading" if run_status == "running" else "empty")
+    log_entries = log_data.get("entries") if isinstance(log_data.get("entries"), list) else []
+    log_files = log_data.get("files") if isinstance(log_data.get("files"), dict) else {}
+    log_summary = {
+        "source": {
+            "path": _pick_text(log_source_payload.get("path"), ""),
+            "name": _pick_text(log_source_payload.get("name"), ""),
+            "exists": bool(log_source_payload.get("exists")),
+        },
+        "cursor": log_cursor,
+        "nextCursor": log_cursor,
+        "state": log_state,
+        "entries": list(log_entries),
+        "tail": str(log_data.get("tail") or ""),
+        "files": dict(log_files),
+        "ok": bool(log_data.get("ok", True)),
+        "malformedLines": _coerce_optional_int(_pick_value(log_data.get("malformedLines"), log_data.get("malformed_lines"), 0)) or 0,
+    }
+
+    notification_counts: dict[str, int] = {}
+    for item in notification_items:
+        if not isinstance(item, dict):
+            continue
+        kind = _pick_text(item.get("kind"), "")
+        if not kind:
+            continue
+        notification_counts[kind] = notification_counts.get(kind, 0) + 1
+    latest_notification = notification_items[0] if notification_items else None
+    control_status = control.get("status") if isinstance(control.get("status"), dict) else {}
+    control_message = _pick_text(control.get("message"), fallbackSectionMessage("runnerControl"))
+    control_plane_event = _pick_text(control_status.get("last_event"), control.get("last_action"), control.get("last_message"), "")
+    control_plane_snapshot = _pick_text(control.get("last_message"), control.get("last_error"), "")
+    notifications_summary = {
+        "items": list(notification_items),
+        "count": len(notification_items),
+        "kinds": notification_counts,
+        "latest": latest_notification,
+        "controlPlaneStatus": control_message,
+        "controlPlaneEvent": control_plane_event,
+        "controlPlaneSnapshot": control_plane_snapshot,
+    }
+
+    stale_reasons: list[str] = []
+    if latest_run_dir is not None and log_state in {"missing_file", "read_error"}:
+        stale_reasons.append(f"log_{log_state}")
+    if latest_run_dir is not None and not bool(log_summary["source"].get("exists", True)):
+        stale_reasons.append("log_source_missing")
+    control_status_reason = _pick_text(control_status.get("reason"), "")
+    if control_status_reason.startswith("status_error:"):
+        stale_reasons.append("controller_status_error")
+    if bool(control_status.get("running")) and run_status in {"completed", "success", "stopped", "failed"}:
+        stale_reasons.append("controller_run_mismatch")
+    if latest_run_dir is None and (run_id != "no-run" or run_status != "idle" or current_task_id):
+        stale_reasons.append("missing_run_dir")
+
+    live_run = {
+        "identity": {
+            "id": run_id,
+            "runId": run_id,
+            "repo": repo_path,
+            "repoLabel": repo_label,
+            "branch": branch_value,
+            "backend": backend_value,
+            "runDir": run_dir,
+        },
+        "activeRun": active,
+        "progress": progress_data,
+        "status": {
+            "run": run_status,
+            "runStatus": run_status,
+            "execution": execution_status,
+            "executionStatus": execution_status,
+            "project": project_status,
+            "projectStatus": project_status,
+            "projectComplete": project_complete,
+            "goalsComplete": goals_complete,
+            "backlogComplete": backlog_complete,
+            "stage": stage_value,
+            "stageIndex": stage_index,
+            "iteration": iteration_value,
+            "maxIterations": max_iterations,
+            "progress": round(float(progress_value), 3) if progress_value is not None else None,
+            "progressAvailable": progress_available,
+            "finalReason": final_reason,
+        },
+        "currentTask": {
+            "id": current_task_id,
+            "title": current_task_title,
+            "attempt": attempt_value,
+            "worktreeMode": worktree_mode,
+            "step": current_task_step,
+            "cycle": current_task_cycle,
+        },
+        "stages": {
+            "items": list(stage_items),
+            "count": len(stage_items),
+            "currentStage": stage_value,
+            "currentStageIndex": stage_index,
+            "currentTaskId": current_task_id,
+            "currentTaskTitle": current_task_title,
+        },
+        "stageSummaries": list(stage_items),
+        "log": log_summary,
+        "notifications": notifications_summary,
+        "runnerControl": control,
+        "control": control,
+        "process": {
+            "status": control_status,
+            "running": bool(control_status.get("running")),
+            "runnerMode": _pick_text(control_status.get("runner_mode"), control_status.get("runnerMode"), "unknown"),
+            "repo": _pick_text(control_status.get("repo"), repo_path),
+            "configPath": _pick_text(control_status.get("config_path"), control_status.get("configPath"), ""),
+            "runDir": _pick_text(control_status.get("run_dir"), control_status.get("runDir"), run_dir),
+            "uptimeSeconds": _coerce_optional_int(_pick_value(control_status.get("uptime_seconds"), control_status.get("uptimeSeconds"), 0)) or 0,
+            "exitCode": control_status.get("exit_code"),
+            "stopFile": _pick_text(control_status.get("stop_file"), "STOP"),
+            "stopFileExists": bool(control_status.get("stop_file_exists")),
+            "done": _coerce_optional_int(_pick_value(control_status.get("done"), 0)) or 0,
+            "failed": _coerce_optional_int(_pick_value(control_status.get("failed"), 0)) or 0,
+            "warnings": _coerce_optional_int(_pick_value(control_status.get("warnings"), 0)) or 0,
+            "stateCounts": control_status.get("state_counts") if isinstance(control_status.get("state_counts"), dict) else {"done": 0, "failed": 0, "warnings": 0},
+            "reason": _pick_text(control_status.get("reason"), ""),
+            "lastEvent": _pick_text(control_status.get("last_event"), control_status.get("lastEvent"), ""),
+            "stopProgress": normalize_stop_progress_payload(control_status.get("stop_progress")),
+        },
+        "timestamps": {
+            "startedAt": started_at,
+            "endedAt": ended_at,
+            "elapsedSec": elapsed_sec,
+            "logCursor": log_cursor,
+        },
+        "stale": {
+            "value": bool(stale_reasons),
+            "reasons": stale_reasons,
+            "logs": log_state in {"missing_file", "read_error"},
+            "control": bool(control_status_reason.startswith("status_error:") or not bool(control.get("controller_available", True))),
+            "process": bool(control_status.get("running")) and run_status in {"completed", "success", "stopped", "failed"},
+        },
+        "runId": run_id,
+        "runDir": run_dir,
+        "repo": repo_path,
+        "repoLabel": repo_label,
+        "branch": branch_value,
+        "backend": backend_value,
+        "runStatus": run_status,
+        "executionStatus": execution_status,
+        "projectStatus": project_status,
+        "projectComplete": project_complete,
+        "goalsComplete": goals_complete,
+        "backlogComplete": backlog_complete,
+        "stage": stage_value,
+        "stageIndex": stage_index,
+        "iteration": iteration_value,
+        "maxIterations": max_iterations,
+        "progress": round(float(progress_value), 3) if progress_value is not None else None,
+        "progressAvailable": progress_available,
+        "currentTaskId": current_task_id,
+        "currentTaskTitle": current_task_title,
+        "attempt": attempt_value,
+        "worktreeMode": worktree_mode,
+        "finalReason": final_reason,
+        "logSource": log_summary["source"],
+        "logCursor": log_cursor,
+        "logState": log_state,
+    }
+    return live_run
+
+
 def _runner_control_confirmation_value(payload: dict[str, Any] | None) -> str:
     data = payload if isinstance(payload, dict) else {}
     for key in ("confirmation", "confirm", "token", "phrase"):
@@ -5450,6 +5708,49 @@ def build_snapshot(
     notifications = _web_apply_redaction(notifications, active=redaction_active, redactor=_redact_web_notifications_payload)
     history = _web_apply_redaction(history, active=redaction_active, redactor=_redact_web_history_payload)
     runner_control = _web_apply_redaction(runner_control, active=redaction_active, redactor=lambda value: _redact_web_runner_control(value, redact_start_options=True))
+    log_summary_payload: dict[str, Any] = {
+        "source": {
+            "path": "",
+            "name": "",
+            "exists": False,
+        },
+        "cursor": 0,
+        "nextCursor": 0,
+        "state": "empty",
+        "ok": False,
+        "malformedLines": 0,
+    }
+    log_source_path = _resolve_log_tail_source(latest_run_dir)
+    if log_source_path is not None:
+        try:
+            log_tail_source_payload = _build_log_tail_payload(
+                log_source_path,
+                cursor=None,
+                max_lines=1,
+                live=str(progress.get("run_status") or "idle").strip().lower() == "running",
+            )
+            log_summary_payload = {
+                "source": log_tail_source_payload.get("source", {}),
+                "cursor": int(log_tail_source_payload.get("next_cursor") or 0),
+                "nextCursor": int(log_tail_source_payload.get("next_cursor") or 0),
+                "state": str(log_tail_source_payload.get("state") or "empty"),
+                "ok": bool(log_tail_source_payload.get("ok", False)),
+                "malformedLines": int(log_tail_source_payload.get("malformed_lines") or 0),
+            }
+        except Exception:
+            log_summary_payload = {
+                "source": {
+                    "path": log_source_path.as_posix(),
+                    "name": log_source_path.name,
+                    "exists": False,
+                },
+                "cursor": 0,
+                "nextCursor": 0,
+                "state": "read_error",
+                "ok": False,
+                "malformedLines": 0,
+            }
+    log_summary_payload = _web_apply_redaction(log_summary_payload, active=redaction_active, redactor=_redact_web_log_payload)
     if redaction_active:
         progress["redaction"] = _web_redaction_meta("goals", "backlog")
     else:
@@ -5519,6 +5820,28 @@ def build_snapshot(
         runner_control_state,
         runner_control.get("message") or fallbackSectionMessage("runnerControl"),
     )
+    live_run = _live_run_payload(
+        repo=repo_root,
+        branch=branch,
+        latest_run_dir=latest_run_dir,
+        active_run=active_run,
+        progress=progress,
+        stages=stages,
+        logs={
+            "entries": log_entries,
+            "tail": log_tail,
+            "files": log_files,
+            "source": log_summary_payload.get("source", {}),
+            "cursor": log_summary_payload.get("cursor", 0),
+            "nextCursor": log_summary_payload.get("nextCursor", 0),
+            "state": log_summary_payload.get("state", "empty"),
+            "ok": log_summary_payload.get("ok", False),
+            "malformedLines": log_summary_payload.get("malformedLines", 0),
+        },
+        notifications=notifications,
+        runner_control=runner_control,
+        controller_status=controller_status,
+    )
 
     return {
         "ok": True,
@@ -5553,6 +5876,7 @@ def build_snapshot(
         "worktree": worktree,
         "worktree_diagnostics": worktree_diagnostics,
         "runner_control": runner_control,
+        "liveRun": live_run,
         "redaction": {
             "active": redaction_active,
             "placeholder": REDACTED_VALUE,
@@ -5769,6 +6093,7 @@ def create_app(
             "last_action": control.get("last_action", ""),
             "last_message": control.get("last_message", ""),
             "last_error": control.get("last_error", ""),
+            "liveRun": snap.get("liveRun", {}),
         }
 
     def _runner_control_response(
@@ -6724,6 +7049,7 @@ def create_app(
             "goalsComplete": bool(progress.get("goalsComplete", progress.get("goals_complete", False))),
             "backlog_complete": bool(progress.get("backlog_complete", False)),
             "backlogComplete": bool(progress.get("backlogComplete", progress.get("backlog_complete", False))),
+            "liveRun": snap.get("liveRun", {}),
         }
 
     @app.get("/api/runner/status")

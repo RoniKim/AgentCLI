@@ -2234,6 +2234,13 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertNotEqual("success", progress_payload["run_status"])
         self.assertFalse(progress_payload["project_complete"])
         self.assertEqual("incomplete", progress_payload["project_status"])
+        self.assertEqual(status_payload["liveRun"]["identity"]["id"], progress_payload["liveRun"]["identity"]["id"])
+        self.assertEqual(status_payload["liveRun"]["identity"]["id"], runner_status_payload["liveRun"]["identity"]["id"])
+        self.assertEqual(status_payload["liveRun"]["status"]["runStatus"], progress_payload["liveRun"]["status"]["runStatus"])
+        self.assertEqual(status_payload["liveRun"]["status"]["executionStatus"], progress_payload["liveRun"]["status"]["executionStatus"])
+        self.assertEqual(status_payload["liveRun"]["currentTask"]["id"], progress_payload["liveRun"]["currentTask"]["id"])
+        self.assertEqual(status_payload["liveRun"]["log"]["cursor"], progress_payload["liveRun"]["log"]["cursor"])
+        self.assertEqual(status_payload["liveRun"]["runnerControl"]["status"]["running"], runner_status_payload["liveRun"]["runnerControl"]["status"]["running"])
 
         self.assertEqual("completed", runner_status_payload["executionStatus"])
         self.assertEqual("completed", runner_status_payload["run_status"])
@@ -2508,6 +2515,40 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         goals = self.client.get("/api/goals").json()
         for key in ("path", "exists", "mtime", "size", "raw_text", "items", "completion", "completion_level", "summary", "warnings"):
             self.assertIn(key, goals)
+
+    def test_adapter_normalizes_live_run_contract_from_api_snapshot(self) -> None:
+        status_payload = self.client.get("/api/status").json()
+        adapted = _run_adapter_harness(
+            [
+                {
+                    "kind": "call",
+                    "name": "adaptLiveRun",
+                    "args": [
+                        status_payload["liveRun"],
+                        {
+                            "repo": status_payload["repo"],
+                            "progress": status_payload["progress"],
+                            "metrics": status_payload["metrics"],
+                            "config": status_payload["config"],
+                            "branch": status_payload["repo"]["branch"],
+                        },
+                    ],
+                }
+            ]
+        )[0]
+
+        self.assertEqual(status_payload["liveRun"]["identity"]["id"], adapted["identity"]["id"])
+        self.assertEqual(status_payload["liveRun"]["identity"]["runId"], adapted["identity"]["runId"])
+        self.assertEqual(status_payload["liveRun"]["status"]["runStatus"], adapted["status"]["runStatus"])
+        self.assertEqual(status_payload["liveRun"]["status"]["executionStatus"], adapted["status"]["executionStatus"])
+        self.assertEqual(status_payload["liveRun"]["currentTask"]["id"], adapted["currentTask"]["id"])
+        self.assertEqual(status_payload["liveRun"]["currentTask"]["title"], adapted["currentTask"]["title"])
+        self.assertEqual(status_payload["liveRun"]["log"]["cursor"], adapted["log"]["cursor"])
+        self.assertEqual(status_payload["liveRun"]["log"]["state"], adapted["log"]["state"])
+        self.assertEqual(status_payload["liveRun"]["notifications"]["count"], adapted["notifications"]["count"])
+        self.assertEqual(status_payload["liveRun"]["runnerControl"]["status"]["running"], adapted["runnerControl"]["status"]["running"])
+        self.assertEqual(status_payload["liveRun"]["process"]["running"], adapted["process"]["running"])
+        self.assertEqual(len(status_payload["liveRun"]["stageSummaries"]), len(adapted["stageSummaries"]))
         self.assertEqual(3, goals["summary"]["total"])
         self.assertEqual(1, goals["summary"]["done"])
         self.assertEqual(4, goals["items"]["p0"][0]["line_number"])

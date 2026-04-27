@@ -3062,7 +3062,7 @@
       .join(' · ');
   }
 
-  function runnerControlStateInfo(control = state.runnerControl) {
+  function runnerControlStateInfo(control = currentLiveRunRunnerControl()) {
     const current = toObject(control);
     const status = toObject(current.status);
     const statusReason = toText(status.reason, '');
@@ -3075,7 +3075,7 @@
     const stopProgressGuidanceText = redactionAwareText(stopProgress.timeoutGuidance?.summary, '');
     const stopProgressPhaseText = redactionAwareText(stopProgress.currentPhase?.message || stopProgress.message, '');
     const stopProgressPhaseLabelText = redactionAwareText(stopProgress.currentPhase?.phaseLabel || stopProgress.phase, '');
-    const busyAction = runnerControlBusyAction();
+    const busyAction = runnerControlBusyAction(current);
     if (current.busy || state.stopSubmitting) {
       const action = state.stopSubmitting ? (busyAction || current.lastAction || state.stopAction || 'start') : '';
       return {
@@ -3181,7 +3181,7 @@
     return 'runner-control__value--muted';
   }
 
-  function runnerControlDetailRows(control, display) {
+  function runnerControlDetailRows(control = currentLiveRunRunnerControl(), display) {
     const current = toObject(control);
     const status = toObject(current.status);
     const stopProgress = normalizeStopProgress(status.stopProgress);
@@ -5285,6 +5285,191 @@
     };
   }
 
+  function adaptLiveRun(liveRun, context = {}) {
+    const raw = toObject(liveRun);
+    const rawActiveRun = toObject(raw.activeRun || raw.active_run || context.activeRun || context.active_run);
+    const rawProgress = toObject(raw.progress || context.progress);
+    const rawRunnerControl = toObject(raw.runnerControl || raw.runner_control || raw.control || context.runnerControl);
+    const rawIdentity = toObject(raw.identity);
+    const rawStatus = toObject(raw.status);
+    const rawCurrentTask = toObject(raw.currentTask || raw.current_task);
+    const rawProcess = toObject(raw.process || rawRunnerControl.status);
+    const rawTimestamps = toObject(raw.timestamps);
+    const rawStale = toObject(raw.stale);
+    const rawStages = toArray(raw.stageSummaries || toObject(raw.stages).items || raw.stages || context.stages);
+    const rawLog = toObject(raw.log || raw.logs || context.logs);
+    const rawNotifications = toObject(raw.notifications);
+    const rawNotificationItems = toArray(rawNotifications.items || raw.notifications || context.notifications);
+    const normalizedStages = adaptStages(rawStages, { activeRun: rawActiveRun });
+    const normalizedLog = adaptLogs(rawLog);
+    const normalizedNotifications = adaptNotifications(rawNotificationItems);
+    const activeRun = adaptActiveRun(rawActiveRun, {
+      repo: context.repo,
+      progress: rawProgress,
+      metrics: context.metrics,
+      config: context.config,
+      branch: context.branch || '',
+      source: context.source || 'api',
+    });
+    const stageSummaries = normalizedStages.items;
+    const logEntries = normalizedLog.entries;
+    const normalizedLogFiles = normalizedLog.files;
+    const normalizedLogTail = normalizedLog.tail;
+    const normalizedNotificationItems = normalizedNotifications.items;
+    const runnerControl = normalizeRunnerControl(rawRunnerControl);
+    const identity = {
+      id: toText(rawIdentity.id || rawIdentity.runId || activeRun.id, activeRun.id || 'no-run'),
+      runId: toText(rawIdentity.runId || rawIdentity.id || activeRun.id, activeRun.id || 'no-run'),
+      repo: toText(rawIdentity.repo || activeRun.repo, activeRun.repo || ''),
+      repoLabel: toText(rawIdentity.repoLabel || activeRun.repoLabel, activeRun.repoLabel || 'agentcli'),
+      branch: toText(rawIdentity.branch || activeRun.branch, activeRun.branch || 'HEAD'),
+      backend: toText(rawIdentity.backend || activeRun.backend, activeRun.backend || 'codex'),
+      runDir: toText(rawIdentity.runDir || activeRun.runDir, activeRun.runDir || ''),
+    };
+    const status = {
+      run: toText(rawStatus.run || rawStatus.runStatus || activeRun.status, activeRun.status || 'idle'),
+      runStatus: toText(rawStatus.runStatus || rawStatus.run || activeRun.status, activeRun.status || 'idle'),
+      execution: toText(rawStatus.execution || rawStatus.executionStatus || activeRun.executionStatus, activeRun.executionStatus || 'idle'),
+      executionStatus: toText(rawStatus.executionStatus || rawStatus.execution || activeRun.executionStatus, activeRun.executionStatus || 'idle'),
+      project: toText(rawStatus.project || rawStatus.projectStatus || activeRun.projectStatus, activeRun.projectStatus || 'incomplete'),
+      projectStatus: toText(rawStatus.projectStatus || rawStatus.project || activeRun.projectStatus, activeRun.projectStatus || 'incomplete'),
+      projectComplete: Boolean(rawStatus.projectComplete ?? rawStatus.project_complete ?? activeRun.projectComplete),
+      goalsComplete: Boolean(rawStatus.goalsComplete ?? rawStatus.goals_complete ?? activeRun.goalsComplete),
+      backlogComplete: Boolean(rawStatus.backlogComplete ?? rawStatus.backlog_complete ?? activeRun.backlogComplete),
+      stage: toText(rawStatus.stage || activeRun.stage, activeRun.stage || 'idle'),
+      stageIndex: toMaybeNumber(rawStatus.stageIndex ?? activeRun.stageIndex) ?? activeRun.stageIndex,
+      iteration: toMaybeNumber(rawStatus.iteration ?? activeRun.iteration) ?? activeRun.iteration,
+      maxIterations: toMaybeNumber(rawStatus.maxIterations ?? activeRun.maxIterations) ?? activeRun.maxIterations,
+      progress: rawStatus.progress ?? activeRun.progress,
+      progressAvailable: Boolean(rawStatus.progressAvailable ?? rawStatus.progress_available ?? activeRun.progressAvailable),
+      finalReason: toText(rawStatus.finalReason || activeRun.finalReason, activeRun.finalReason || ''),
+    };
+    const currentTask = {
+      id: toText(rawCurrentTask.id || rawCurrentTask.taskId || activeRun.task, activeRun.task || ''),
+      title: toText(rawCurrentTask.title || rawCurrentTask.taskTitle || activeRun.taskTitle, activeRun.taskTitle || ''),
+      attempt: toMaybeNumber(rawCurrentTask.attempt ?? activeRun.attempt),
+      worktreeMode: toText(rawCurrentTask.worktreeMode || rawCurrentTask.worktree_mode || activeRun.worktreeMode, activeRun.worktreeMode || ''),
+      step: toMaybeNumber(rawCurrentTask.step ?? rawProgress.step),
+      cycle: toMaybeNumber(rawCurrentTask.cycle ?? rawProgress.cycle),
+    };
+    const logSource = toObject(rawLog.source);
+    const logCursor = toMaybeNumber(rawLog.cursor ?? rawLog.nextCursor ?? rawLog.next_cursor);
+    const logState = toText(rawLog.state, status.run === 'running' ? 'loading' : 'empty');
+    const logSummary = {
+      source: {
+        path: toText(logSource.path, ''),
+        name: toText(logSource.name, ''),
+        exists: Boolean(logSource.exists),
+      },
+      cursor: logCursor == null ? 0 : logCursor,
+      nextCursor: toMaybeNumber(rawLog.nextCursor ?? rawLog.next_cursor ?? logCursor) ?? (logCursor == null ? 0 : logCursor),
+      state: logState,
+      entries: logEntries,
+      tail: normalizedLogTail,
+      files: normalizedLogFiles,
+      ok: Boolean(rawLog.ok ?? true),
+      malformedLines: toMaybeNumber(rawLog.malformedLines ?? rawLog.malformed_lines) ?? 0,
+    };
+    const notificationCounts = toObject(rawNotifications.kinds);
+    const notificationsSummary = {
+      items: normalizedNotificationItems,
+      count: toMaybeNumber(rawNotifications.count ?? normalizedNotificationItems.length) ?? normalizedNotificationItems.length,
+      kinds: notificationCounts,
+      latest: rawNotifications.latest || normalizedNotificationItems[0] || null,
+      controlPlaneStatus: toText(rawNotifications.controlPlaneStatus || runnerControl.message, runnerControl.message || ''),
+      controlPlaneEvent: toText(rawNotifications.controlPlaneEvent || runnerControl.status?.lastEvent || runnerControl.lastAction || runnerControl.lastMessage, ''),
+      controlPlaneSnapshot: toText(rawNotifications.controlPlaneSnapshot || runnerControl.lastMessage || runnerControl.lastError, ''),
+    };
+    const logSourceMissing = logSummary.source.exists === false;
+    const controlStatusError = Boolean(status.run && status.run !== 'idle' && status.run !== 'loading' && !runnerControl.controllerAvailable);
+    const processMismatch = Boolean(rawProcess.running ?? runnerControl.status?.running) && ['completed', 'success', 'stopped', 'failed'].includes(status.run);
+    const process = {
+      status: rawProcess,
+      running: Boolean(rawProcess.running ?? runnerControl.status?.running),
+      runnerMode: toText(rawProcess.runnerMode || rawProcess.runner_mode, runnerControl.status?.runnerMode || 'unknown'),
+      repo: toText(rawProcess.repo, activeRun.repo || ''),
+      configPath: toText(rawProcess.configPath || rawProcess.config_path, runnerControl.status?.configPath || ''),
+      runDir: toText(rawProcess.runDir || rawProcess.run_dir, activeRun.runDir || ''),
+      uptimeSeconds: toMaybeNumber(rawProcess.uptimeSeconds ?? rawProcess.uptime_seconds) ?? 0,
+      exitCode: rawProcess.exitCode ?? rawProcess.exit_code ?? null,
+      stopFile: toText(rawProcess.stopFile || rawProcess.stop_file, 'STOP'),
+      stopFileExists: Boolean(rawProcess.stopFileExists ?? rawProcess.stop_file_exists),
+      done: toMaybeNumber(rawProcess.done) ?? 0,
+      failed: toMaybeNumber(rawProcess.failed) ?? 0,
+      warnings: toMaybeNumber(rawProcess.warnings) ?? 0,
+      stateCounts: toObject(rawProcess.stateCounts || rawProcess.state_counts),
+      reason: toText(rawProcess.reason, ''),
+      lastEvent: toText(rawProcess.lastEvent || rawProcess.last_event, ''),
+      stopProgress: normalizeStopProgress(rawProcess.stopProgress || rawProcess.stop_progress),
+    };
+    const staleReasons = toArray(rawStale.reasons).map((reason) => toText(reason, '')).filter(Boolean);
+    const derivedStale = {
+      value: Boolean(rawStale.value ?? staleReasons.length || logSourceMissing || controlStatusError || processMismatch),
+      reasons: staleReasons,
+      logs: Boolean(rawStale.logs ?? ['missing_file', 'read_error'].includes(logState)),
+      logSourceMissing,
+      control: Boolean(rawStale.control ?? controlStatusError),
+      controlStatusError,
+      process: Boolean(rawStale.process ?? processMismatch),
+      processMismatch,
+    };
+    const timestamps = {
+      startedAt: toMaybeNumber(rawTimestamps.startedAt ?? rawTimestamps.started_at ?? activeRun.startedAt) ?? 0,
+      endedAt: toMaybeNumber(rawTimestamps.endedAt ?? rawTimestamps.ended_at ?? activeRun.endedAt) ?? 0,
+      elapsedSec: toMaybeNumber(rawTimestamps.elapsedSec ?? rawTimestamps.elapsed_seconds ?? activeRun.elapsedSec) ?? 0,
+      logCursor: toMaybeNumber(rawTimestamps.logCursor ?? rawTimestamps.log_cursor ?? logSummary.cursor) ?? 0,
+    };
+    return {
+      identity,
+      activeRun,
+      progress: rawProgress,
+      status,
+      currentTask,
+      stages: {
+        items: stageSummaries,
+        count: stageSummaries.length,
+        currentStage: status.stage,
+        currentStageIndex: status.stageIndex,
+        currentTaskId: currentTask.id,
+        currentTaskTitle: currentTask.title,
+      },
+      stageSummaries,
+      log: logSummary,
+      notifications: notificationsSummary,
+      runnerControl,
+      control: runnerControl,
+      process,
+      timestamps,
+      stale: derivedStale,
+      runId: identity.runId,
+      runDir: identity.runDir,
+      repo: identity.repo,
+      repoLabel: identity.repoLabel,
+      branch: identity.branch,
+      backend: identity.backend,
+      runStatus: status.run,
+      executionStatus: status.execution,
+      projectStatus: status.project,
+      projectComplete: status.projectComplete,
+      goalsComplete: status.goalsComplete,
+      backlogComplete: status.backlogComplete,
+      stage: status.stage,
+      stageIndex: status.stageIndex,
+      iteration: status.iteration,
+      maxIterations: status.maxIterations,
+      progress: status.progress,
+      progressAvailable: status.progressAvailable,
+      currentTaskId: currentTask.id,
+      currentTaskTitle: currentTask.title,
+      attempt: currentTask.attempt,
+      worktreeMode: currentTask.worktreeMode,
+      finalReason: status.finalReason,
+      logSource: logSummary.source,
+      logCursor: logSummary.cursor,
+      logState: logSummary.state,
+    };
+  }
+
   function normalizeApiSnapshot(snapshot) {
     const raw = toObject(snapshot);
     const repo = toObject(raw.repo);
@@ -5338,6 +5523,18 @@
     const notifications = adaptNotifications(raw.notifications);
     const history = adaptHistory(raw.history);
     const worktree = adaptWorktree(raw.worktree);
+    const liveRun = adaptLiveRun(raw.liveRun || raw.live_run || {}, {
+      activeRun,
+      progress,
+      stages: stages.items,
+      logs: logs,
+      notifications: notifications.items,
+      runnerControl,
+      metrics,
+      config: configValues,
+      branch: repo.branch || '',
+      source: 'api',
+    });
 
     return {
       ok: Boolean(raw.ok),
@@ -5382,6 +5579,7 @@
       notifications: notifications.items,
       worktreeMerge: worktree,
       runnerControl,
+      liveRun,
       redaction: {
         active: Boolean(redaction.active),
         placeholder: toText(redaction.placeholder, REDACTED_VALUE),
@@ -6039,6 +6237,7 @@
         quota_available: false,
       },
       notifications: [],
+      liveRun: {},
       progress: {
         latest_run_dir: null,
         run_status: 'idle',
@@ -6076,6 +6275,15 @@
 
   function createFallbackFixture() {
     const blank = createBlankModel();
+    const fallbackRunnerControl = createRunnerControlModel({
+      source: 'fallback',
+      message: t('runner.controlsDisabledMessage'),
+      controllerAvailable: false,
+      enabled: false,
+      running: false,
+      runStatus: 'idle',
+      runnerMode: 'unknown',
+    });
     return {
       ok: true,
       sourceMode: 'fallback',
@@ -6095,15 +6303,152 @@
         repoLabel: 'AgentCLI',
         branch: 'main',
       },
-      runnerControl: createRunnerControlModel({
-        source: 'fallback',
-        message: t('runner.controlsDisabledMessage'),
-        controllerAvailable: false,
-        enabled: false,
-        running: false,
+      liveRun: {
+        identity: {
+          ...clone(blank.liveRun.identity || {}),
+          id: 'no-run',
+          runId: 'no-run',
+          repo: 'C:/Dev/AgentCLI',
+          repoLabel: 'AgentCLI',
+          branch: 'main',
+          backend: 'codex',
+          runDir: '',
+        },
+        activeRun: {
+          ...clone(blank.activeRun),
+          repo: 'C:/Dev/AgentCLI',
+          repoLabel: 'AgentCLI',
+          branch: 'main',
+        },
+        progress: clone(blank.progress),
+        status: {
+          run: 'idle',
+          runStatus: 'idle',
+          execution: 'idle',
+          executionStatus: 'idle',
+          project: 'incomplete',
+          projectStatus: 'incomplete',
+          projectComplete: false,
+          goalsComplete: false,
+          backlogComplete: false,
+          stage: 'idle',
+          stageIndex: 0,
+          iteration: 0,
+          maxIterations: 1,
+          progress: null,
+          progressAvailable: false,
+          finalReason: '',
+        },
+        currentTask: {
+          id: '',
+          title: '',
+          attempt: null,
+          worktreeMode: '',
+          step: null,
+          cycle: null,
+        },
+        stages: {
+          items: clone(blank.stages),
+          count: clone(blank.stages).length,
+          currentStage: 'idle',
+          currentStageIndex: 0,
+          currentTaskId: '',
+          currentTaskTitle: '',
+        },
+        stageSummaries: clone(blank.stages),
+        log: {
+          source: {
+            path: '',
+            name: '',
+            exists: false,
+          },
+          cursor: 0,
+          nextCursor: 0,
+          state: 'loading',
+          entries: clone(blank.logs),
+          tail: '',
+          files: {},
+          ok: true,
+          malformedLines: 0,
+        },
+        notifications: {
+          items: clone(blank.notifications),
+          count: clone(blank.notifications).length,
+          kinds: {},
+          latest: null,
+          controlPlaneStatus: t('runner.controlsDisabledMessage'),
+          controlPlaneEvent: '',
+          controlPlaneSnapshot: '',
+        },
+        runnerControl: clone(fallbackRunnerControl),
+        control: clone(fallbackRunnerControl),
+        process: {
+          status: clone(fallbackRunnerControl.status),
+          running: false,
+          runnerMode: 'unknown',
+          repo: 'C:/Dev/AgentCLI',
+          configPath: '',
+          runDir: '',
+          uptimeSeconds: 0,
+          exitCode: null,
+          stopFile: 'STOP',
+          stopFileExists: false,
+          done: 0,
+          failed: 0,
+          warnings: 0,
+          stateCounts: { done: 0, failed: 0, warnings: 0 },
+          reason: '',
+          lastEvent: '',
+          stopProgress: {},
+        },
+        timestamps: {
+          startedAt: 0,
+          endedAt: 0,
+          elapsedSec: 0,
+          logCursor: 0,
+        },
+        stale: {
+          value: false,
+          reasons: [],
+          logs: false,
+          logSourceMissing: false,
+          control: false,
+          controlStatusError: false,
+          process: false,
+          processMismatch: false,
+        },
+        runId: 'no-run',
+        runDir: '',
+        repo: 'C:/Dev/AgentCLI',
+        repoLabel: 'AgentCLI',
+        branch: 'main',
+        backend: 'codex',
         runStatus: 'idle',
-        runnerMode: 'unknown',
-      }),
+        executionStatus: 'idle',
+        projectStatus: 'incomplete',
+        projectComplete: false,
+        goalsComplete: false,
+        backlogComplete: false,
+        stage: 'idle',
+        stageIndex: 0,
+        iteration: 0,
+        maxIterations: 1,
+        progress: null,
+        progressAvailable: false,
+        currentTaskId: '',
+        currentTaskTitle: '',
+        attempt: null,
+        worktreeMode: '',
+        finalReason: '',
+        logSource: {
+          path: '',
+          name: '',
+          exists: false,
+        },
+        logCursor: 0,
+        logState: 'loading',
+      },
+      runnerControl: fallbackRunnerControl,
       redaction: {
         active: false,
         placeholder: REDACTED_VALUE,
@@ -6354,6 +6699,7 @@
     adaptGoals,
     adaptConfig,
     adaptConfigContract,
+    adaptLiveRun,
     normalizeRoleSpec,
     normalizeRoleSpecs,
     classifyRoleSpec,
@@ -6521,6 +6867,7 @@
     state.promptsDir = toText(toObject(next.config || {}).prompts_dir || next.promptsDir || '', '');
     state.worktreeMerge = toObject(next.worktreeMerge);
     state.runnerControl = normalizeRunnerControl(next.runnerControl);
+    state.liveRun = toObject(next.liveRun);
     state.history = toArray(next.history);
     state.runs = state.history;
     state.historySummary = toObject(next.historySummary);
@@ -8110,6 +8457,40 @@
     return state.runs.find((run) => run.id === state.historySelection) || state.runs[0];
   }
 
+  function currentLiveRun() {
+    return toObject(state.liveRun);
+  }
+
+  function currentLiveRunRunnerControl(liveRun = currentLiveRun()) {
+    const current = toObject(liveRun);
+    return toObject(current.runnerControl || current.control || state.runnerControl);
+  }
+
+  function currentLiveRunActiveRun(liveRun = currentLiveRun()) {
+    const current = toObject(liveRun);
+    return toObject(current.activeRun || state.activeRun);
+  }
+
+  function currentLiveRunProgress(liveRun = currentLiveRun()) {
+    const current = toObject(liveRun);
+    return toObject(current.progress || state.progress);
+  }
+
+  function currentLiveRunStatus(liveRun = currentLiveRun()) {
+    const current = toObject(liveRun);
+    return toObject(current.status);
+  }
+
+  function currentLiveRunLog(liveRun = currentLiveRun()) {
+    const current = toObject(liveRun);
+    return toObject(current.log);
+  }
+
+  function currentLiveRunNotifications(liveRun = currentLiveRun()) {
+    const current = toObject(liveRun);
+    return toObject(current.notifications);
+  }
+
   function currentBacklogTask() {
     if (!state.backlog.length) {
       return null;
@@ -8969,36 +9350,42 @@
   }
 
   function activeRunStatusClass() {
-    return runStatusClass(state.progress?.run_status || state.activeRun.status, state.progress?.final_reason || state.activeRun.finalReason);
+    const liveRun = currentLiveRun();
+    const liveStatus = currentLiveRunStatus(liveRun);
+    return runStatusClass(
+      liveStatus.run || state.progress?.run_status || state.activeRun.status,
+      liveStatus.finalReason || state.progress?.final_reason || state.activeRun.finalReason,
+    );
   }
 
-  function runnerControlBusyAction() {
+  function runnerControlBusyAction(control = currentLiveRunRunnerControl()) {
+    const current = toObject(control);
     if (state.stopSubmitting) {
       return state.stopAction;
     }
-    if (state.runnerControl.busy) {
-      return state.runnerControl.lastAction || state.stopAction || 'busy';
+    if (current.busy) {
+      return current.lastAction || state.stopAction || 'busy';
     }
     return '';
   }
 
-  function runnerControlActionClass(action, baseClass = 'button--quiet') {
+  function runnerControlActionClass(action, baseClass = 'button--quiet', control = currentLiveRunRunnerControl()) {
     const classes = [baseClass];
-    const busyAction = runnerControlBusyAction();
+    const busyAction = runnerControlBusyAction(control);
     if (busyAction === action) {
       classes.push('button--loading');
-    } else if (!runnerControlActionEnabled(action)) {
+    } else if (!runnerControlActionEnabled(action, control)) {
       classes.push('button--paused');
     }
     return classes.join(' ');
   }
 
-  function runnerControlActionState(action) {
-    const actions = toObject(state.runnerControl.actions);
+  function runnerControlActionState(action, control = currentLiveRunRunnerControl()) {
+    const actions = toObject(toObject(control).actions);
     return toObject(actions[action]);
   }
 
-  function runnerControlActionEnabled(action, control = state.runnerControl) {
+  function runnerControlActionEnabled(action, control = currentLiveRunRunnerControl()) {
     const current = toObject(control);
     const statusReason = toText(current.status?.reason, '');
     const stopProgress = normalizeStopProgress(current.status?.stopProgress);
@@ -9008,17 +9395,17 @@
     if (statusReason.startsWith('status_error:')) {
       return false;
     }
-    const busyAction = runnerControlBusyAction();
+    const busyAction = runnerControlBusyAction(current);
     if (busyAction) {
       return false;
     }
     if (String(action || '').toLowerCase() === 'stop' && stopProgress.phase === 'timeout' && stopProgress.canRetry !== false) {
       return true;
     }
-    return Boolean(runnerControlActionState(action).enabled);
+    return Boolean(runnerControlActionState(action, current).enabled);
   }
 
-  function runnerControlActionDisabledReason(action, control = state.runnerControl) {
+  function runnerControlActionDisabledReason(action, control = currentLiveRunRunnerControl()) {
     const current = toObject(control);
     if (state.stopSubmitting || current.busy) {
       return t('runner.requestInFlight');
@@ -9037,14 +9424,14 @@
     if (String(action || '').toLowerCase() === 'stop' && stopProgress.phase === 'timeout') {
       return redactionAwareText(stopProgress.timeoutGuidance?.summary || stopProgress.message || t('runner.stopTimedOut'), '');
     }
-    const actionState = runnerControlActionState(action);
+    const actionState = runnerControlActionState(action, current);
     return redactionAwareText(actionState.disabledReason || actionState.disabled_reason || current.message, '');
   }
 
-  function runnerControlButtonAttrs(action) {
-    const enabled = runnerControlActionEnabled(action);
-    const reason = runnerControlActionDisabledReason(action);
-    const busy = runnerControlBusyAction() === action || state.runnerControl.busy;
+  function runnerControlButtonAttrs(action, control = currentLiveRunRunnerControl()) {
+    const enabled = runnerControlActionEnabled(action, control);
+    const reason = runnerControlActionDisabledReason(action, control);
+    const busy = runnerControlBusyAction(control) === action || toObject(control).busy;
     const attrs = [];
     if (!enabled) {
       attrs.push('disabled');
@@ -9554,35 +9941,38 @@
   }
 
   function renderRunnerControlsPanel() {
-    const control = state.runnerControl;
+    const liveRun = currentLiveRun();
+    const control = currentLiveRunRunnerControl(liveRun);
+    const liveStatus = currentLiveRunStatus(liveRun);
+    const liveProcess = toObject(liveRun.process);
     const display = runnerControlStateInfo(control);
     const messageTone = display.bannerTone;
-    const busyAction = runnerControlBusyAction();
-    const statusSummaryRunStatus = control.runStatus
-      ? (String(control.runStatus).toLowerCase() === 'running'
+    const busyAction = runnerControlBusyAction(control);
+    const statusSummaryRunStatus = control.runStatus || liveStatus.run || liveProcess.running
+      ? (String(control.runStatus || liveStatus.run || '').toLowerCase() === 'running'
         ? t('runner.running')
-        : String(control.runStatus).toLowerCase() === 'idle'
+        : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'idle'
           ? t('runner.idle')
-          : String(control.runStatus).toLowerCase() === 'loading'
+          : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'loading'
             ? t('common.loading')
-            : String(control.runStatus).toLowerCase() === 'ready'
+            : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'ready'
               ? t('runner.ready')
-              : String(control.runStatus).toLowerCase() === 'stopped'
+              : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'stopped'
                 ? t('runner.stopped')
-                : control.runStatus)
-      : (control.status.running ? t('runner.running') : t('runner.idle'));
+                : control.runStatus || liveStatus.run || (liveProcess.running ? t('runner.running') : t('runner.idle')))
+      : (control.status.running || liveProcess.running ? t('runner.running') : t('runner.idle'));
     const statusSummary = [
       display.label.toLowerCase(),
-      control.status.runnerMode || t('common.unknown'),
+      liveProcess.runnerMode || control.status.runnerMode || t('common.unknown'),
       statusSummaryRunStatus,
     ]
       .filter(Boolean)
       .join(' | ');
     const buttonRow = [
-      button(runnerControlActionLabel('start', busyAction === 'start'), 'runner-start', runnerControlActionClass('start', 'button--primary'), `aria-label="${escapeHTML(t('runner.start'))}" ${runnerControlButtonAttrs('start')}`),
-      button(runnerControlActionLabel('stop', busyAction === 'stop'), 'runner-stop', runnerControlActionClass('stop', 'button--danger'), `aria-label="${escapeHTML(t('runner.stop'))}" ${runnerControlButtonAttrs('stop')}`),
-      button(runnerControlActionLabel('reload', busyAction === 'reload'), 'runner-reload', runnerControlActionClass('reload', 'button--quiet'), `aria-label="${escapeHTML(t('runner.reload'))}" ${runnerControlButtonAttrs('reload')}`),
-      button(runnerControlActionLabel('restart', busyAction === 'restart'), 'runner-restart', runnerControlActionClass('restart', 'button--quiet'), `aria-label="${escapeHTML(t('runner.restart'))}" ${runnerControlButtonAttrs('restart')}`),
+      button(runnerControlActionLabel('start', busyAction === 'start'), 'runner-start', runnerControlActionClass('start', 'button--primary', control), `aria-label="${escapeHTML(t('runner.start'))}" ${runnerControlButtonAttrs('start', control)}`),
+      button(runnerControlActionLabel('stop', busyAction === 'stop'), 'runner-stop', runnerControlActionClass('stop', 'button--danger', control), `aria-label="${escapeHTML(t('runner.stop'))}" ${runnerControlButtonAttrs('stop', control)}`),
+      button(runnerControlActionLabel('reload', busyAction === 'reload'), 'runner-reload', runnerControlActionClass('reload', 'button--quiet', control), `aria-label="${escapeHTML(t('runner.reload'))}" ${runnerControlButtonAttrs('reload', control)}`),
+      button(runnerControlActionLabel('restart', busyAction === 'restart'), 'runner-restart', runnerControlActionClass('restart', 'button--quiet', control), `aria-label="${escapeHTML(t('runner.restart'))}" ${runnerControlButtonAttrs('restart', control)}`),
     ].join('');
     const detailItems = runnerControlDetailRows(control, display);
     const startOptionsChips = runnerControlStartOptionsSummaryChips(control);
@@ -9630,19 +10020,27 @@
   }
 
   function renderDashboard() {
-    const run = state.activeRun;
-    const progress = state.progress || {};
+    const liveRun = currentLiveRun();
+    const run = currentLiveRunActiveRun(liveRun);
+    const progress = currentLiveRunProgress(liveRun);
+    const liveStatus = currentLiveRunStatus(liveRun);
+    const liveIdentity = toObject(liveRun.identity);
+    const liveCurrentTask = toObject(liveRun.currentTask);
+    const liveStages = toObject(liveRun.stages);
+    const liveStageSummaries = toArray(liveRun.stageSummaries || liveStages.items || []);
+    const liveLog = currentLiveRunLog(liveRun);
+    const liveNotifications = currentLiveRunNotifications(liveRun);
     const budgetCap = toMaybeNumber(state.config?.budget?.max_usd);
-    const taskId = progress.current_task_id || run.task || '';
-    const taskTitle = progress.current_task_title || run.taskTitle || '';
-    const attempt = progress.attempt ?? run.attempt;
+    const taskId = liveCurrentTask.id || liveStatus.currentTaskId || progress.current_task_id || run.task || '';
+    const taskTitle = liveCurrentTask.title || liveStatus.currentTaskTitle || progress.current_task_title || run.taskTitle || '';
+    const attempt = liveCurrentTask.attempt ?? run.attempt ?? progress.attempt;
     const attemptText = attempt == null ? t('common.unavailable') : String(attempt);
-    const branchText = progress.branch || run.branch || state.repo.branch || 'HEAD';
-    const worktreeModeText = progress.worktree_mode || run.worktreeMode || '';
-    const runDirText = run.runDir || progress.latest_run_dir || state.latestRunDir || '';
-    const finalReason = progress.final_reason || run.finalReason || '';
-    const executionStatus = progress.execution_status || progress.executionStatus || run.executionStatus || progress.run_status || run.status;
-    const projectStatus = progress.project_status || progress.projectStatus || run.projectStatus || (run.projectComplete ? 'complete' : 'incomplete');
+    const branchText = liveIdentity.branch || progress.branch || run.branch || state.repo.branch || 'HEAD';
+    const worktreeModeText = liveCurrentTask.worktreeMode || progress.worktree_mode || run.worktreeMode || '';
+    const runDirText = liveIdentity.runDir || run.runDir || progress.latest_run_dir || state.latestRunDir || '';
+    const finalReason = liveStatus.finalReason || progress.final_reason || run.finalReason || '';
+    const executionStatus = liveStatus.execution || liveStatus.executionStatus || progress.execution_status || progress.executionStatus || run.executionStatus || progress.run_status || run.status;
+    const projectStatus = liveStatus.project || liveStatus.projectStatus || progress.project_status || progress.projectStatus || run.projectStatus || (run.projectComplete ? 'complete' : 'incomplete');
     const runStatus = executionStatus;
     const runTone = runStatusTone(runStatus, finalReason);
     const runLabel = runStatusLabel(runStatus, finalReason);
@@ -9672,8 +10070,8 @@
     const p0Done = state.goals.p0.filter((goal) => goal.done).length;
     const p0Total = state.goals.p0.length;
     const selectedTask = currentBacklogTask();
-    const latestLogs = state.logs.slice(-8);
-    const recentNotifs = state.notifications.slice(0, 4);
+    const latestLogs = toArray(liveLog.entries || state.logs).slice(-8);
+    const recentNotifs = toArray(liveNotifications.items || state.notifications).slice(0, 4);
     const tokenValueText = tokenTotal != null ? fmtNumberShort(tokenTotal) : 'unavailable';
     const tokenSubText = hasTokenTelemetry
       ? `${t('pipeline.input')} ${metricText(hasTokenTelemetry, tokenIn, fmtNumberShort)} | ${t('pipeline.output')} ${metricText(hasTokenTelemetry, tokenOut, fmtNumberShort)}`
@@ -9701,7 +10099,7 @@
             `
               <div class="pipeline">
                 <div class="pipeline__row">
-                  ${renderLifecycleLane(state.stages)}
+                  ${renderLifecycleLane(liveStageSummaries.length ? liveStageSummaries : state.stages)}
                 </div>
               </div>
             `
@@ -9709,7 +10107,7 @@
 
           ${panel(
             t('dashboard.liveLogs'),
-            `${escapeHTML(state.logs.length)} ${escapeHTML(t('common.lines'))} | tail -f`,
+            `${escapeHTML(latestLogs.length)} ${escapeHTML(t('common.lines'))} | tail -f`,
             `
               ${sectionNotice('logs')}
               <div class="log-feed">
@@ -10799,24 +11197,29 @@
   }
 
   function renderPipeline() {
+    const liveRun = currentLiveRun();
+    const run = currentLiveRunActiveRun(liveRun);
+    const liveStatus = currentLiveRunStatus(liveRun);
+    const liveStageSummaries = toArray(liveRun.stageSummaries || toObject(liveRun.stages).items || []);
+    const stageItems = liveStageSummaries.length ? liveStageSummaries : state.stages;
     const hasTokenTelemetry = Boolean(
-      state.activeRun.tokensAvailable ||
-        state.activeRun.tokens?.available ||
-        state.activeRun.tokens?.in != null ||
-        state.activeRun.tokens?.out != null
+      run.tokensAvailable ||
+        run.tokens?.available ||
+        run.tokens?.in != null ||
+        run.tokens?.out != null
     );
-    const tokenIn = hasTokenTelemetry ? state.activeRun.tokens.in : null;
-    const tokenOut = hasTokenTelemetry ? state.activeRun.tokens.out : null;
+    const tokenIn = hasTokenTelemetry ? run.tokens.in : null;
+    const tokenOut = hasTokenTelemetry ? run.tokens.out : null;
     const tokenTotal = hasTokenTelemetry && tokenIn != null && tokenOut != null ? Number(tokenIn) + Number(tokenOut) : null;
     const tokenInputText = metricText(hasTokenTelemetry, tokenIn, fmtNumberShort);
     const tokenOutputText = metricText(hasTokenTelemetry, tokenOut, fmtNumberShort);
-    const tokenBudgetText = metricText(state.activeRun.budgetAvailable, state.activeRun.budgetUsed, fmtPercent);
+    const tokenBudgetText = metricText(run.budgetAvailable, run.budgetUsed, fmtPercent);
     const tokenSparkline = state.metrics.tokens24h.length
       ? buildSparkline(state.metrics.tokens24h, 320, 44, 'rgba(126,227,138,0.12)', '#7ee38a')
       : `<div class="summary-note">${escapeHTML(t('pipeline.tokenTelemetryUnavailable'))}</div>`;
-    const stageSummary = renderLifecycleLane(state.stages);
-    const outputs = state.stages.length
-      ? state.stages.map((stage) => `
+    const stageSummary = renderLifecycleLane(stageItems);
+    const outputs = stageItems.length
+      ? stageItems.map((stage) => `
         <div class="task-card">
           <div class="task-card__head">
             <span class="task-card__id">${escapeHTML(stage.label)}</span>
@@ -10840,7 +11243,7 @@
         <div class="view-grid">
           ${panel(
             t('pipeline.stageLane'),
-            `${t('pipeline.iter')} ${escapeHTML(`${state.activeRun.iteration}/${state.activeRun.maxIterations}`)} | ${t('pipeline.current')} ${escapeHTML(state.activeRun.stage)}`,
+            `${t('pipeline.iter')} ${escapeHTML(`${run.iteration}/${run.maxIterations}`)} | ${t('pipeline.current')} ${escapeHTML(liveStatus.stage || run.stage)}`,
             `
               ${sectionNotice('stages')}
               <div class="pipeline">
@@ -10853,7 +11256,7 @@
 
           ${panel(
             t('pipeline.currentStageOutput'),
-            escapeHTML(state.activeRun.task || (state.stages.length ? `${state.stages.length} ${t('pipeline.lifecycleRecord')}` : t('pipeline.noLifecycleRecords'))),
+            escapeHTML(run.task || (stageItems.length ? `${stageItems.length} ${t('pipeline.lifecycleRecord')}` : t('pipeline.noLifecycleRecords'))),
             `
               <div class="view-grid view-grid--three">
                 ${outputs.join('')}
@@ -10865,7 +11268,7 @@
         <div class="view-grid">
           ${panel(
             t('pipeline.stageGuardrails'),
-            escapeHTML(state.activeRun.backend),
+            escapeHTML(run.backend),
             `
                 <div class="compact-list">
                   <div class="compact-list__item">
@@ -10878,7 +11281,7 @@
                 </div>
                   <div class="compact-list__item">
                     <span class="compact-list__bullet"></span>
-                    <div class="compact-list__body">${escapeHTML(t('pipeline.devStage'))}: ${escapeHTML(state.activeRun.task || t('common.unavailable'))} | ${escapeHTML(t('dashboard.budget').toLowerCase())} ${escapeHTML(tokenBudgetText)}</div>
+                    <div class="compact-list__body">${escapeHTML(t('pipeline.devStage'))}: ${escapeHTML(run.task || t('common.unavailable'))} | ${escapeHTML(t('dashboard.budget').toLowerCase())} ${escapeHTML(tokenBudgetText)}</div>
                   </div>
                 </div>
               `
@@ -10891,7 +11294,7 @@
               <div class="kpi-grid kpi-grid--three">
                 ${kpiCard(t('pipeline.input'), tokenInputText, hasTokenTelemetry ? t('pipeline.tokensProcessed') : t('pipeline.tokenTelemetryUnavailable'), false, tokenInputText === 'unavailable' ? t('common.unavailable') : '')}
                 ${kpiCard(t('pipeline.output'), tokenOutputText, hasTokenTelemetry ? t('pipeline.tokensGenerated') : t('pipeline.tokenTelemetryUnavailable'), false, tokenOutputText === 'unavailable' ? t('common.unavailable') : '')}
-                ${kpiCard(t('dashboard.budget'), tokenBudgetText, state.activeRun.budgetAvailable ? t('common.enabled') : t('pipeline.budgetTelemetryUnavailable'), false, tokenBudgetText === 'unavailable' ? t('common.unavailable') : '')}
+                ${kpiCard(t('dashboard.budget'), tokenBudgetText, run.budgetAvailable ? t('common.enabled') : t('pipeline.budgetTelemetryUnavailable'), false, tokenBudgetText === 'unavailable' ? t('common.unavailable') : '')}
               </div>
               <div style="margin-top:12px;">${tokenSparkline}</div>
             `
@@ -10903,7 +11306,7 @@
     return viewShell(
       'pipeline',
       t('pipeline.title'),
-      `${t('pipeline.activeTask')} ${escapeHTML(state.activeRun.stage)} | ${escapeHTML(state.activeRun.id)}`,
+      `${t('pipeline.activeTask')} ${escapeHTML(liveStatus.stage || run.stage)} | ${escapeHTML(run.id)}`,
       `
         ${button(t('common.openLogs'), 'nav-logs', 'button--quiet')}
         ${button(t('common.openBacklog'), 'nav-backlog', 'button--quiet')}
@@ -10913,6 +11316,9 @@
   }
 
   function renderLogs() {
+    const liveRun = currentLiveRun();
+    const liveStatus = currentLiveRunStatus(liveRun);
+    const liveLog = currentLiveRunLog(liveRun);
     const redaction = toObject(state.redaction);
     const redactionNote = redaction.active ? `<div class="summary-note">${escapeHTML(t('config.redactedHidden'))}</div>` : '';
     if (state.sourceMode === 'api') {
@@ -10921,12 +11327,17 @@
       const entries = toArray(tail.entries);
       const selected = new Set(toArray(tail.selected).map((value) => String(toMaybeNumber(value, null))).filter(Boolean));
       const banner = describeLogTailState(tail);
-      const sourceName = redactionAwareText(tailSourceName(tail.source?.path || tail.source?.name || ''), t('logs.activeRunLog')) || t('logs.activeRunLog');
+      const liveLogSource = toObject(liveLog.source);
+      const liveLogCursor = toMaybeNumber(liveLog.nextCursor ?? liveLog.cursor ?? tail.nextCursor ?? tail.cursor, 0) ?? 0;
+      const sourceName = redactionAwareText(
+        tailSourceName(tail.source?.path || tail.source?.name || liveLogSource.path || liveLogSource.name || ''),
+        t('logs.activeRunLog'),
+      ) || t('logs.activeRunLog');
       const body = `
         <div class="view-grid">
           ${panel(
             t('logs.liveTail'),
-          `${escapeHTML(t('logs.linesShown', { count: entries.length }))} | ${escapeHTML(t('logs.cursor'))} ${escapeHTML(String(tail.nextCursor || tail.cursor || 0))}`,
+          `${escapeHTML(t('logs.linesShown', { count: entries.length }))} | ${escapeHTML(t('logs.cursor'))} ${escapeHTML(String(liveLogCursor))}`,
           `
               ${renderLogTailBanner(tail)}
               ${redactionNote}
@@ -10954,7 +11365,7 @@
       return viewShell(
         'logs',
         t('logs.title'),
-        `${escapeHTML(sourceName)} | ${escapeHTML(control.stateLabel)} | ${escapeHTML(t('logs.cursor'))} ${escapeHTML(String(tail.nextCursor || tail.cursor || 0))}`,
+        `${escapeHTML(sourceName)} | ${escapeHTML(control.stateLabel)} | ${escapeHTML(t('logs.cursor'))} ${escapeHTML(String(liveLogCursor))}`,
         `
           ${button(control.buttonLabel, 'toggle-logs', control.buttonClass, control.buttonAttrs)}
           ${button(t('common.openDashboard'), 'nav-dashboard', 'button--quiet')}
@@ -10965,6 +11376,8 @@
 
     const filters = ['all', 'info', 'warn', 'err', 'debug'];
     const filtered = state.logs.filter((line) => state.logFilter === 'all' || line.lvl === state.logFilter);
+    const liveRunStatus = liveStatus.run || state.activeRun.status;
+    const liveRunStage = liveStatus.stage || state.activeRun.stage;
     const logsMode =
       state.snapshotStatus === 'loading'
         ? t('common.loading')
@@ -10972,13 +11385,17 @@
           ? t('snapshot.fallback')
           : state.logsPaused
             ? t('logs.liveTailPaused')
-            : t('logs.liveTailActive');
+            : liveRunStatus === 'running'
+              ? t('logs.liveTailActive')
+              : t('logs.liveTailPaused');
     const logsStateLabel =
       state.snapshotStatus === 'loading'
         ? t('common.loading')
         : state.logsPaused
           ? t('logs.liveTailPaused')
-          : t('logs.liveTailActive');
+          : liveRunStatus === 'running'
+            ? t('logs.liveTailActive')
+            : t('logs.liveTailPaused');
     const logsButtonClass =
       state.snapshotStatus === 'loading'
         ? 'button--loading'
@@ -11041,7 +11458,7 @@
                 ${!state.logsPaused ? `
                   <div class="log-row" style="color: var(--accent);">
                     <div class="log-row__time">${escapeHTML(fmtClock(nowMs()))}</div>
-                    <div class="log-row__stage" style="color: var(--accent);">[${escapeHTML(state.activeRun.stage)}]</div>
+                    <div class="log-row__stage" style="color: var(--accent);">[${escapeHTML(liveRunStage)}]</div>
                     <div class="log-row__level">${escapeHTML(t('logs.live'))}</div>
                     <div class="log-row__msg">${escapeHTML(t('logs.waitingForNextEvent'))}</div>
                   </div>
@@ -11909,6 +12326,10 @@
   }
 
   function renderNotifications() {
+    const liveRun = currentLiveRun();
+    const liveNotifications = currentLiveRunNotifications(liveRun);
+    const liveControl = currentLiveRunRunnerControl(liveRun);
+    const notificationItems = toArray(liveNotifications.items || state.notifications);
     const filters = ['all', 'run_start', 'run_stop', 'task_done', 'task_failed', 'quota', 'error', 'stalled'];
     const filterLabels = {
       all: t('notifications.filterAll'),
@@ -11920,21 +12341,21 @@
       error: t('notifications.filterError'),
       stalled: t('notifications.filterStalled'),
     };
-    const filtered = state.notifications.filter((item) => state.notificationFilter === 'all' || item.kind === state.notificationFilter);
+    const filtered = notificationItems.filter((item) => state.notificationFilter === 'all' || item.kind === state.notificationFilter);
 
-    const kindCounts = state.notifications.reduce((acc, item) => {
+    const kindCounts = notificationItems.reduce((acc, item) => {
       acc[item.kind] = (acc[item.kind] || 0) + 1;
       return acc;
     }, {});
 
-    const latestNotification = filtered[0] || state.notifications[0] || null;
+    const latestNotification = filtered[0] || notificationItems[0] || null;
     const observedKinds = Object.keys(kindCounts).sort();
     const configuredEvents = fmtList(state.config?.telegram?.notify_events || []);
     const stalledSeconds = toNumber(state.config?.telegram?.stalled_seconds || 0, 0);
-    const controlPlaneStatus = state.runnerControl.controllerAvailable
-      ? (state.runnerControl.enabled ? (state.runnerControl.busy ? t('runner.working') : t('common.enabled')) : t('common.disabled'))
+    const controlPlaneStatus = liveControl.controllerAvailable
+      ? (liveControl.enabled ? (liveControl.busy ? t('runner.working') : t('common.enabled')) : t('common.disabled'))
       : t('common.unavailable');
-    const controlPlaneEvent = state.runnerControl.status.lastEvent || state.runnerControl.lastAction || state.runnerControl.lastMessage || '';
+    const controlPlaneEvent = liveNotifications.controlPlaneEvent || liveControl.status.lastEvent || liveControl.lastAction || liveControl.lastMessage || '';
     const controlPlaneEventLabel = (() => {
       const normalized = toText(controlPlaneEvent, '').toLowerCase();
       if (!normalized) return t('common.none');
@@ -11954,17 +12375,17 @@
     })();
     const latestNotificationText = redactionAwareText(latestNotification ? latestNotification.text : '', t('notifications.noRecorded'));
     const controlPlaneSnapshot = redactionAwareText(
-      state.runnerControl.lastMessage || state.runnerControl.lastError || t('notifications.runnerControlSnapshot'),
+      liveNotifications.controlPlaneSnapshot || liveControl.lastMessage || liveControl.lastError || t('notifications.runnerControlSnapshot'),
       t('notifications.runnerControlSnapshot'),
     );
-    const emptyMessage = state.notifications.length
+    const emptyMessage = notificationItems.length
       ? t('notifications.noMatchCurrentFilter')
       : state.sectionState.notifications?.status === 'error'
         ? state.sectionState.notifications.message || t('notifications.noRecorded')
         : fallbackSectionMessage('notifications');
     const emptyTitle = state.sectionState.notifications?.status === 'error'
       ? t('notifications.notificationError')
-      : state.notifications.length
+      : notificationItems.length
         ? t('notifications.filteredEmpty')
         : t('notifications.noEventsYet');
 
@@ -11973,7 +12394,7 @@
         <div>
           ${panel(
             t('notifications.eventFeed'),
-            `${escapeHTML(filtered.length)} ${escapeHTML(t('notifications.visibleItems'))} | ${escapeHTML(state.notifications.length)} ${escapeHTML(t('notifications.totalItems'))}`,
+            `${escapeHTML(filtered.length)} ${escapeHTML(t('notifications.visibleItems'))} | ${escapeHTML(notificationItems.length)} ${escapeHTML(t('notifications.totalItems'))}`,
             `
               ${sectionNotice('notifications')}
               <div class="logs-toolbar">
@@ -12049,7 +12470,7 @@
     return viewShell(
       'notifications',
       t('notifications.title'),
-      `${escapeHTML(state.notifications.length)} ${escapeHTML(t('notifications.visibleItems'))} | ${escapeHTML(t('notifications.eventFeed'))}`,
+      `${escapeHTML(notificationItems.length)} ${escapeHTML(t('notifications.visibleItems'))} | ${escapeHTML(t('notifications.eventFeed'))}`,
       `
         ${button(t('common.openDashboard'), 'nav-dashboard', 'button--quiet')}
         ${button(t('common.openWorktree'), 'nav-worktree', 'button--quiet')}
@@ -13463,6 +13884,7 @@
     logTail: clone(defaults.logTail),
     logFiles: clone(defaults.logFiles),
     notifications: clone(defaults.notifications),
+    liveRun: clone(defaults.liveRun),
     configDefault: clone(defaults.configDefault),
     config: clone(defaults.config),
     configMeta: clone(defaults.configMeta),

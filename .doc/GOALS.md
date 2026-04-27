@@ -134,13 +134,13 @@
 - [x] Web console tests are aligned with `goals_completion_level=all` defaults and pass without relying on operator-specific local config.
 - [x] Self-development runs execute at least the fast web/worktree regression suite, not only `compileall`, before marking task branches complete.
 - [x] LAN web serving refuses runner controls without real authentication or an explicit trusted-network gate; confirmation phrases remain UX confirmations, not authentication.
-- [ ] Redaction covers logs, GOALS raw text, task output excerpts, config, prompts, and serialized runner arguments consistently before LAN exposure.
+- [x] Redaction covers logs, GOALS raw text, task output excerpts, config, prompts, and serialized runner arguments consistently before LAN exposure.
 
 ### P0-M. Browser-First Runner Operation
 
 - [x] Start controls expose the same practical run modes operators use in the shell: autopilot, continuous, loop, one-shot, max cycles, profile, backend, and config path.
-- [ ] Start controls validate incompatible run options before launch and show the exact command-equivalent runner arguments that will be used.
-- [ ] Stop controls show phase-by-phase progress from request, stop file write, child termination, runner wait, final artifact collection, timeout, and finalized states.
+- [x] Start controls validate incompatible run options before launch and show the exact command-equivalent runner arguments that will be used.
+- [x] Stop controls show phase-by-phase progress from request, stop file write, child termination, runner wait, final artifact collection, timeout, and finalized states.
 - [ ] Stop timeout state stays visibly actionable in the browser, including whether the runner is still alive, which child PIDs remain tracked, and which files may still be locked.
 - [ ] Browser restart/reload flows preserve intended run options instead of falling back to hidden defaults.
 - [ ] The browser can distinguish "runner process alive", "task backend alive", "tracked children alive", and "artifact writer still flushing" as separate states.
@@ -158,7 +158,7 @@
 
 ### P0-O. Enterprise-Grade Config And Role Management
 
-- [ ] Role editing preserves unknown/plugin stage specs such as `pkg.mod:Class` instead of silently dropping values outside the built-in enum.
+- [x] Role editing preserves unknown/plugin stage specs such as `pkg.mod:Class` instead of silently dropping values outside the built-in enum.
 - [ ] Built-in role choices, defaults, and ordering have a single source of truth shared by CLI, web schema, stage registry, tests, and docs.
 - [ ] The web config editor exposes PM, Security, Dev, QA, reporter, and fallback model settings with labels that match their runtime behavior.
 - [ ] Model selection supports the approved Codex model ladder: PM `gpt-5.5`; Dev fallback `gpt-5.4-mini -> gpt-5.4 -> gpt-5.5`; QA `gpt-5.5`; reporter `gpt-5.4-mini`.
