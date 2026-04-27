@@ -834,6 +834,8 @@ def _is_sensitive_config_key(key: Any) -> bool:
     if not normalized:
         return False
     parts = {part for part in normalized.split("_") if part}
+    if "pairing" in parts and "code" in parts:
+        return True
     return normalized in SENSITIVE_CONFIG_TOKENS or bool(parts & SENSITIVE_CONFIG_TOKENS)
 
 
@@ -847,6 +849,454 @@ def _redact_config(value: Any, *, key: str = "") -> Any:
     if isinstance(value, list):
         return [_redact_config(item) for item in value]
     return value
+
+
+def _web_redaction_active(bind_host: str) -> bool:
+    return not _host_is_loopback(bind_host)
+
+
+def _redact_web_text(value: Any) -> Any:
+    if value in (None, "", False):
+        return value
+    return REDACTED_VALUE
+
+
+def _web_redaction_meta(*fields: str) -> dict[str, Any]:
+    cleaned = [str(field).strip() for field in fields if str(field).strip()]
+    return {
+        "active": True,
+        "placeholder": REDACTED_VALUE,
+        "fields": list(dict.fromkeys(cleaned)),
+        "scope": "lan",
+    }
+
+
+def _web_apply_redaction(payload: Any, *, active: bool, redactor: Any | None = None) -> Any:
+    if not active or redactor is None:
+        return payload
+    try:
+        return redactor(payload)
+    except Exception:
+        return payload
+
+
+def _redact_web_log_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(entry)
+    for key in ("msg", "message", "raw", "text", "reason", "detail", "excerpt", "output", "content", "preview", "path", "trace", "stack"):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+    return redacted
+
+
+def _redact_web_log_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(payload)
+    entries = redacted.get("entries")
+    if isinstance(entries, list):
+        redacted["entries"] = [_redact_web_log_entry(entry) if isinstance(entry, dict) else entry for entry in entries]
+    tail = redacted.get("tail")
+    if tail not in (None, "", False):
+        redacted["tail"] = REDACTED_VALUE
+    files = redacted.get("files")
+    if isinstance(files, dict):
+        files_copy = deepcopy(files)
+        redaction_fields: list[str] = []
+        for key, value in list(files_copy.items()):
+            if value not in (None, "", False):
+                files_copy[key] = REDACTED_VALUE
+                redaction_fields.append(f"files.{str(key).strip()}")
+        redacted["files"] = files_copy
+    else:
+        redaction_fields = []
+    for key in ("source_file", "source_path", "error"):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+    source = redacted.get("source")
+    if isinstance(source, dict):
+        source_copy = deepcopy(source)
+        if source_copy.get("path") not in (None, "", False):
+            source_copy["path"] = REDACTED_VALUE
+        if source_copy.get("name") not in (None, "", False):
+            source_copy["name"] = REDACTED_VALUE
+        redacted["source"] = source_copy
+    redacted["redaction"] = _web_redaction_meta(
+        "entries.msg",
+        "entries.message",
+        "entries.raw",
+        "entries.text",
+        "entries.reason",
+        "entries.detail",
+        "entries.excerpt",
+        "entries.output",
+        "entries.content",
+        "entries.preview",
+        "entries.path",
+        "entries.trace",
+        "entries.stack",
+        "tail",
+        *redaction_fields,
+        "source.path",
+        "source.name",
+        "source_file",
+        "source_path",
+        "error",
+    )
+    return redacted
+
+
+def _redact_web_goal_warning(warning: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(warning)
+    for key in ("line", "raw", "text", "excerpt", "message", "detail"):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+    return redacted
+
+
+def _redact_web_goals_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(payload)
+    if redacted.get("raw_text") not in (None, "", False):
+        redacted["raw_text"] = REDACTED_VALUE
+    if redacted.get("rawText") not in (None, "", False):
+        redacted["rawText"] = REDACTED_VALUE
+    warnings = redacted.get("warnings")
+    if isinstance(warnings, list):
+        redacted["warnings"] = [_redact_web_goal_warning(warning) if isinstance(warning, dict) else warning for warning in warnings]
+    redacted["redaction"] = _web_redaction_meta("raw_text", "rawText", "warnings.raw", "warnings.text", "warnings.excerpt")
+    return redacted
+
+
+def _redact_web_backlog_item(item: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(item)
+    for key in (
+        "prompt",
+        "description",
+        "skills_rationale",
+        "skillsRationale",
+        "recent_output",
+        "recentOutput",
+        "failure_detail",
+        "failureDetail",
+        "output",
+        "output_excerpt",
+        "outputExcerpt",
+        "excerpt",
+        "detail",
+        "trace",
+        "stack",
+    ):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+    failure = redacted.get("failure")
+    if isinstance(failure, dict):
+        failure_copy = deepcopy(failure)
+        for key in ("detail", "message", "output", "excerpt", "trace", "stack"):
+            if failure_copy.get(key) not in (None, "", False):
+                failure_copy[key] = REDACTED_VALUE
+        redacted["failure"] = failure_copy
+    return redacted
+
+
+def _redact_web_backlog_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(payload)
+    items = redacted.get("items")
+    if isinstance(items, list):
+        redacted["items"] = [_redact_web_backlog_item(item) if isinstance(item, dict) else item for item in items]
+    redacted["redaction"] = _web_redaction_meta(
+        "items.recent_output",
+        "items.recentOutput",
+        "items.output",
+        "items.outputExcerpt",
+        "items.excerpt",
+        "items.detail",
+        "items.trace",
+        "items.stack",
+        "items.failure.detail",
+        "items.failure.message",
+        "items.failure.output",
+        "items.failure.excerpt",
+        "items.failure.trace",
+        "items.failure.stack",
+        "items.failureDetail",
+    )
+    return redacted
+
+
+def _redact_web_stage(stage: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(stage)
+    changed = False
+    for key in ("recentOutput", "recent_output"):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+            changed = True
+    if changed:
+        redacted["redaction"] = _web_redaction_meta("recentOutput", "recent_output")
+    return redacted
+
+
+def _redact_web_stages_payload(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_redact_web_stage(stage) if isinstance(stage, dict) else stage for stage in stages]
+
+
+def _redact_web_prompt_item(item: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(item)
+    for key in ("preview", "content"):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+    return redacted
+
+
+def _redact_web_prompts_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(payload)
+    if redacted.get("dir") not in (None, "", False):
+        redacted["dir"] = REDACTED_VALUE
+    items = redacted.get("items")
+    if isinstance(items, list):
+        redacted["items"] = [_redact_web_prompt_item(item) if isinstance(item, dict) else item for item in items]
+    redacted["redaction"] = _web_redaction_meta("dir", "items.preview", "items.content")
+    return redacted
+
+
+def _redact_web_notification_item(item: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(item)
+    for key in ("text", "message", "detail"):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+    redacted["redaction"] = _web_redaction_meta("text", "message", "detail")
+    return redacted
+
+
+def _redact_web_notifications_payload(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_redact_web_notification_item(item) if isinstance(item, dict) else item for item in items]
+
+
+def _redact_web_history_item(item: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(item)
+    redaction_fields: list[str] = []
+    for key in ("lastCycle", "last_cycle"):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+            redaction_fields.append(key)
+    for key in ("runSummary", "run_summary", "lastRunSummary", "last_run_summary"):
+        summary = redacted.get(key)
+        if isinstance(summary, dict):
+            redacted[key] = _redact_web_history_summary(summary)
+            redaction_fields.append(key)
+    if redaction_fields:
+        redacted["redaction"] = _web_redaction_meta(*redaction_fields)
+    return redacted
+
+
+def _redact_web_history_summary(summary: Any) -> Any:
+    def _walk(value: Any) -> Any:
+        if isinstance(value, dict):
+            redacted_value: dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                if key_text in {
+                    "path",
+                    "config_path",
+                    "configPath",
+                    "defaults_path",
+                    "defaultsPath",
+                    "recentOutput",
+                    "recent_output",
+                    "output",
+                    "outputExcerpt",
+                    "output_excerpt",
+                    "excerpt",
+                    "raw_text",
+                    "rawText",
+                    "content",
+                    "text",
+                }:
+                    redacted_value[key] = REDACTED_VALUE if item not in (None, "", False) else item
+                elif key_text in {"start_options", "startOptions"} and isinstance(item, dict):
+                    redacted_value[key] = _redact_web_runner_start_options(item)
+                else:
+                    redacted_value[key] = _walk(item)
+            return redacted_value
+        if isinstance(value, list):
+            return [_walk(item) for item in value]
+        return value
+
+    return _walk(deepcopy(summary))
+
+
+def _redact_web_history_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(payload)
+    items = redacted.get("items")
+    if isinstance(items, list):
+        redacted["items"] = [_redact_web_history_item(item) if isinstance(item, dict) else item for item in items]
+    redacted["redaction"] = _web_redaction_meta(
+        "items.lastCycle",
+        "items.last_cycle",
+        "items.runSummary",
+        "items.run_summary",
+        "items.lastRunSummary",
+        "items.last_run_summary",
+    )
+    return redacted
+
+
+def _redact_web_runner_start_options(start_options: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(start_options)
+    redaction = dict(redacted.get("redaction") or {})
+    redaction["active"] = True
+    redaction["placeholder"] = REDACTED_VALUE
+    paths_value = redaction.get("paths")
+    redaction_paths = []
+    if isinstance(paths_value, list):
+        redaction_paths = list(dict.fromkeys([str(path) for path in paths_value if str(path).strip()]))
+    for path in ("path", "defaults_path", "values.config_path", "defaults.config_path"):
+        if path not in redaction_paths:
+            redaction_paths.append(path)
+    redaction["paths"] = redaction_paths
+    redacted["redaction"] = redaction
+    redacted["redacted"] = True
+    for key in ("path", "defaults_path"):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+    for key in ("values", "defaults"):
+        section = redacted.get(key)
+        if isinstance(section, dict):
+            section_copy = deepcopy(section)
+            if section_copy.get("config_path") not in (None, "", False):
+                section_copy["config_path"] = REDACTED_VALUE
+            redacted[key] = section_copy
+    return redacted
+
+
+def _redact_web_runner_status_payload(status: dict[str, Any], *, redact_start_options: bool = False) -> dict[str, Any]:
+    redacted = deepcopy(status)
+    redaction_fields: list[str] = []
+    for key in ("config_path", "configPath"):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+            redaction_fields.append(key)
+    start_options = redacted.get("start_options")
+    if redact_start_options and isinstance(start_options, dict):
+        redacted_start_options = _redact_web_runner_start_options(start_options)
+        redacted["start_options"] = redacted_start_options
+        redacted["startOptions"] = redacted_start_options
+        redaction_fields.extend(
+            [
+                "start_options.path",
+                "start_options.defaults_path",
+                "start_options.values.config_path",
+                "start_options.defaults.config_path",
+            ]
+        )
+    if redaction_fields:
+        redacted["redaction"] = _web_redaction_meta(*redaction_fields)
+    return redacted
+
+
+def _redact_web_runner_control(control: dict[str, Any], *, redact_start_options: bool = False) -> dict[str, Any]:
+    redacted = deepcopy(control)
+    redaction_fields: list[str] = []
+    status = redacted.get("status")
+    if isinstance(status, dict):
+        status_copy = _redact_web_runner_status_payload(status, redact_start_options=redact_start_options)
+        redacted["status"] = status_copy
+        for key in ("config_path", "configPath"):
+            if status.get(key) not in (None, "", False):
+                redaction_fields.append(f"status.{key}")
+        if redact_start_options and isinstance(status.get("start_options"), dict):
+            redaction_fields.extend(
+                [
+                    "status.start_options.path",
+                    "status.start_options.defaults_path",
+                    "status.start_options.values.config_path",
+                    "status.start_options.defaults.config_path",
+                ]
+            )
+    start_options = redacted.get("start_options")
+    if redact_start_options and isinstance(start_options, dict):
+        redacted_start_options = _redact_web_runner_start_options(start_options)
+        redacted["start_options"] = redacted_start_options
+        redacted["startOptions"] = redacted_start_options
+        redaction_fields.extend(
+            [
+                "start_options.path",
+                "start_options.defaults_path",
+                "start_options.values.config_path",
+                "start_options.defaults.config_path",
+            ]
+        )
+    if redaction_fields:
+        redacted["redaction"] = _web_redaction_meta(*redaction_fields)
+    return redacted
+
+
+def _redact_web_runner_result(result: dict[str, Any]) -> dict[str, Any]:
+    def _walk(value: Any) -> Any:
+        if isinstance(value, dict):
+            redacted_value: dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                if key_text in {"config_path", "configPath"}:
+                    redacted_value[key] = REDACTED_VALUE if item not in (None, "", False) else item
+                elif key_text in {"repo", "repoPath", "run_dir", "runDir", "worktree_dir", "worktreeDir"}:
+                    redacted_value[key] = _path_text(item)
+                elif key_text in {"start_options", "startOptions"} and isinstance(item, dict):
+                    redacted_value[key] = _redact_web_runner_start_options(item)
+                else:
+                    redacted_value[key] = _walk(item)
+            return redacted_value
+        if isinstance(value, list):
+            return [_walk(item) for item in value]
+        return value
+
+    return _walk(deepcopy(result))
+
+
+def _redact_web_config_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(payload)
+    redaction_fields: list[str] = []
+    for key in ("path", "resolved_prompts_dir"):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+            redaction_fields.append(key)
+    meta = redacted.get("meta")
+    if isinstance(meta, dict):
+        meta_copy = deepcopy(meta)
+        for key in ("path", "resolved_prompts_dir"):
+            if meta_copy.get(key) not in (None, "", False):
+                meta_copy[key] = REDACTED_VALUE
+                redaction_fields.append(f"meta.{key}")
+        redacted["meta"] = meta_copy
+    if redaction_fields:
+        redacted["redaction"] = _web_redaction_meta(*redaction_fields)
+    return redacted
+
+
+def _redact_web_config_contract(payload: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(payload)
+    redaction_fields: list[str] = []
+    for key in ("path", "resolved_prompts_dir"):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+            redaction_fields.append(key)
+    meta = redacted.get("meta")
+    if isinstance(meta, dict):
+        meta_copy = deepcopy(meta)
+        for key in ("path", "resolved_prompts_dir"):
+            if meta_copy.get(key) not in (None, "", False):
+                meta_copy[key] = REDACTED_VALUE
+                redaction_fields.append(f"meta.{key}")
+        redacted["meta"] = meta_copy
+    if redaction_fields:
+        redaction = dict(redacted.get("redaction") or {})
+        redaction["active"] = True
+        redaction["placeholder"] = REDACTED_VALUE
+        redaction["scope"] = "lan"
+        redaction_fields_existing: list[str] = []
+        for field in list(redaction.get("fields") or []):
+            field_text = str(field).strip()
+            if field_text:
+                redaction_fields_existing.append(field_text)
+        redaction["fields"] = list(dict.fromkeys(redaction_fields_existing + redaction_fields))
+        redacted["redaction"] = redaction
+    return redacted
 
 
 CONFIG_CONTRACT_GROUPS: list[dict[str, Any]] = [
@@ -1492,6 +1942,7 @@ def _runner_control_status_payload(
     current_run_dir: str = "",
     cfg: dict[str, Any] | None = None,
     cfg_path: Path | str | None = None,
+    redact_sensitive: bool = False,
 ) -> dict[str, Any]:
     base_args = getattr(controller, "base_args", None)
     fallback_config_path = _path_text(config_path or getattr(base_args, "config_path", getattr(base_args, "config", "")) or "")
@@ -1500,13 +1951,17 @@ def _runner_control_status_payload(
         repo=repo,
         cfg=cfg,
         cfg_path=cfg_path,
+        redact_paths=redact_sensitive,
     )
     if controller is None:
+        config_path_value = fallback_config_path
+        if redact_sensitive and config_path_value:
+            config_path_value = REDACTED_VALUE
         return {
             "running": False,
             "runner_mode": "unknown",
             "repo": _path_text(repo),
-            "config_path": fallback_config_path,
+            "config_path": config_path_value,
             "run_dir": _path_text(current_run_dir),
             "uptime_seconds": 0,
             "exit_code": None,
@@ -1524,13 +1979,19 @@ def _runner_control_status_payload(
         }
 
     try:
-        status = controller.status()
+        try:
+            status = controller.status(redact_paths=redact_sensitive)
+        except TypeError:
+            status = controller.status()
     except Exception as ex:
+        config_path_value = fallback_config_path
+        if redact_sensitive and config_path_value:
+            config_path_value = REDACTED_VALUE
         return {
             "running": False,
             "runner_mode": "unknown",
             "repo": _path_text(repo),
-            "config_path": fallback_config_path,
+            "config_path": config_path_value,
             "run_dir": _path_text(current_run_dir),
             "uptime_seconds": 0,
             "exit_code": None,
@@ -1540,12 +2001,17 @@ def _runner_control_status_payload(
             "failed": 0,
             "warnings": 0,
             "state_counts": {"done": 0, "failed": 0, "warnings": 0},
-            "reason": f"status_error: {ex}",
+            "reason": REDACTED_VALUE if redact_sensitive else f"status_error: {ex}",
             "last_event": "",
             "stop_progress": {},
             "start_options": start_options_contract,
             "startOptions": start_options_contract,
         }
+
+    if not isinstance(status, dict):
+        status = {}
+    if redact_sensitive and isinstance(status, dict):
+        status = _redact_web_runner_status_payload(status, redact_start_options=True)
 
     stop_progress = status.get("stop_progress")
     if not isinstance(stop_progress, dict):
@@ -1561,7 +2027,7 @@ def _runner_control_status_payload(
         "running": bool(status.get("running")),
         "runner_mode": str(status.get("runner_mode") or "thread").strip() or "thread",
         "repo": _path_text(status.get("repo") or repo),
-        "config_path": _path_text(status.get("config_path") or status.get("configPath") or fallback_config_path),
+        "config_path": REDACTED_VALUE if redact_sensitive and _path_text(status.get("config_path") or status.get("configPath") or fallback_config_path) else _path_text(status.get("config_path") or status.get("configPath") or fallback_config_path),
         "run_dir": _path_text(status.get("run_dir") or current_run_dir or ""),
         "uptime_seconds": int(status.get("uptime_seconds") or 0),
         "exit_code": status.get("exit_code"),
@@ -1690,6 +2156,7 @@ def _runner_control_payload(
     busy: bool = False,
     cfg: dict[str, Any] | None = None,
     cfg_path: Path | str | None = None,
+    redact_sensitive: bool = False,
 ) -> dict[str, Any]:
     status_payload = _runner_control_status_payload(
         controller,
@@ -1698,6 +2165,7 @@ def _runner_control_payload(
         current_run_dir=current_run_dir,
         cfg=cfg,
         cfg_path=cfg_path,
+        redact_sensitive=redact_sensitive,
     )
     controller_available = controller is not None
     actions = _runner_control_actions(enabled, status_payload, controller_available=controller_available, busy=busy)
@@ -1709,10 +2177,13 @@ def _runner_control_payload(
         disabled_reason=disabled_reason,
     )
     status_reason = str(status_payload.get("reason") or "").strip()
+    message_sensitive = False
     if last_error:
         message = last_error
+        message_sensitive = True
     elif status_reason.startswith("status_error:"):
         message = status_reason
+        message_sensitive = True
     elif busy:
         message = _runner_control_message(
             enabled=enabled,
@@ -1725,6 +2196,8 @@ def _runner_control_payload(
         message = last_message
     elif not enabled and disabled_reason:
         message = disabled_reason
+    if redact_sensitive and message_sensitive:
+        message = REDACTED_VALUE
     start_options = status_payload.get("start_options")
     if not isinstance(start_options, dict) or not start_options:
         start_options = status_payload.get("startOptions")
@@ -1734,6 +2207,7 @@ def _runner_control_payload(
             repo=repo,
             cfg=cfg,
             cfg_path=cfg_path,
+            redact_paths=redact_sensitive,
         )
     return {
         "enabled": bool(enabled),
@@ -1817,12 +2291,18 @@ def _runner_control_start_options_contract(
     repo: Path,
     cfg: dict[str, Any] | None = None,
     cfg_path: Path | str | None = None,
+    redact_paths: bool = False,
 ) -> dict[str, Any]:
     if controller is not None:
         contract_fn = getattr(controller, "start_options_contract", None)
         if callable(contract_fn):
             try:
-                contract = contract_fn()
+                contract = contract_fn(redact_paths=redact_paths)
+            except TypeError:
+                try:
+                    contract = contract_fn()
+                except Exception:
+                    contract = None
             except Exception:
                 contract = None
             if isinstance(contract, dict) and contract:
@@ -1832,9 +2312,9 @@ def _runner_control_start_options_contract(
         resolved_cfg_path = Path(str(cfg_path).strip()) if cfg_path is not None and str(cfg_path).strip() else default_config_path(repo)
         base_args = _build_runner_base_args(repo, cfg or {}, resolved_cfg_path)
     try:
-        return build_runner_start_options_contract(repo, base_args)
+        return build_runner_start_options_contract(repo, base_args, redact_paths=redact_paths)
     except Exception:
-        return build_runner_start_options_contract(repo, argparse.Namespace())
+        return build_runner_start_options_contract(repo, argparse.Namespace(), redact_paths=redact_paths)
 
 
 def _build_runner_base_args(repo: Path, cfg: dict[str, Any], cfg_path: Path) -> argparse.Namespace:
@@ -4765,6 +5245,7 @@ def build_snapshot(
         resolved_disabled_reason = runner_controls_disabled_reason or (
             "" if control_enabled else "Runner controls are disabled until the server is started with AGENTCLI_WEB_RUNNER_CONTROLS=1 or --enable-runner-controls."
         )
+    redaction_active = _web_redaction_active(bind_host)
     config_contract = _build_config_contract(
         repo_root,
         cfg,
@@ -4850,6 +5331,12 @@ def build_snapshot(
     )
     worktree = _build_worktree_payload(repo_root, latest_run_dir, branch=branch)
     worktree_diagnostics = scan_worktree_diagnostics(repo_root)
+    log_tail = _tail_text((latest_run_dir / "cycle_summary.log") if latest_run_dir else Path(""), 80)
+    log_files = {
+        "cycle_summary": (latest_run_dir / "cycle_summary.log").as_posix() if latest_run_dir else "",
+        "run_log": (latest_run_dir / "logs" / "run.log").as_posix() if latest_run_dir else "",
+        "metrics": (latest_run_dir / "metrics.jsonl").as_posix() if latest_run_dir else "",
+    }
     runner_control = _runner_control_payload(
         controller,
         repo=repo_root,
@@ -4870,7 +5357,50 @@ def build_snapshot(
         busy=bool(runner_control_busy),
         cfg=cfg,
         cfg_path=cfg_path,
+        redact_sensitive=redaction_active,
     )
+    goals = _web_apply_redaction(goals, active=redaction_active, redactor=_redact_web_goals_payload)
+    backlog = _web_apply_redaction(backlog, active=redaction_active, redactor=_redact_web_backlog_payload)
+    progress = dict(progress)
+    progress["goals"] = goals
+    progress["backlog"] = backlog
+    log_payload = _web_apply_redaction(
+        {"entries": log_entries, "tail": log_tail, "files": log_files},
+        active=redaction_active,
+        redactor=_redact_web_log_payload,
+    )
+    logs_redaction = log_payload.get("redaction") if isinstance(log_payload, dict) else {}
+    log_entries = list(log_payload.get("entries") or []) if isinstance(log_payload, dict) else list(log_entries)
+    log_tail = str(log_payload.get("tail") or "") if isinstance(log_payload, dict) else log_tail
+    log_files = dict(log_payload.get("files") or log_files) if isinstance(log_payload, dict) else log_files
+    stages = _web_apply_redaction(stages, active=redaction_active, redactor=_redact_web_stages_payload)
+    config_payload = _web_apply_redaction(
+        {
+            "path": cfg_path.as_posix(),
+            "source": cfg_source,
+            "data": _redact_config(cfg),
+            "resolved_prompts_dir": prompts_dir.as_posix(),
+            "meta": {
+                "path": cfg_path.as_posix(),
+                "source": cfg_source,
+                "resolved_prompts_dir": prompts_dir.as_posix(),
+            },
+        },
+        active=redaction_active,
+        redactor=_redact_web_config_payload,
+    )
+    config_contract = _web_apply_redaction(config_contract, active=redaction_active, redactor=_redact_web_config_contract)
+    prompt_payload = _web_apply_redaction({"dir": prompts_dir.as_posix(), "items": prompt_items}, active=redaction_active, redactor=_redact_web_prompts_payload)
+    prompts_redaction = prompt_payload.get("redaction") if isinstance(prompt_payload, dict) else {}
+    prompt_items = list(prompt_payload.get("items") or []) if isinstance(prompt_payload, dict) else list(prompt_items)
+    notifications = _web_apply_redaction(notifications, active=redaction_active, redactor=_redact_web_notifications_payload)
+    history = _web_apply_redaction(history, active=redaction_active, redactor=_redact_web_history_payload)
+    runner_control = _web_apply_redaction(runner_control, active=redaction_active, redactor=lambda value: _redact_web_runner_control(value, redact_start_options=True))
+    if redaction_active:
+        progress["redaction"] = _web_redaction_meta("goals", "backlog")
+    else:
+        logs_redaction = {}
+        prompts_redaction = {}
     active_run_empty = active_run["status"] == "idle" and not active_run.get("task") and not active_run.get("startedAt")
     runner_control_status = runner_control.get("status") if isinstance(runner_control.get("status"), dict) else {}
     runner_control_status_reason = str(runner_control_status.get("reason") or "").strip()
@@ -4951,24 +5481,17 @@ def build_snapshot(
         "goals": goals,
         "logs": {
             "entries": log_entries,
-            "tail": _tail_text((latest_run_dir / "cycle_summary.log") if latest_run_dir else Path(""), 80),
-            "files": {
-                "cycle_summary": (latest_run_dir / "cycle_summary.log").as_posix() if latest_run_dir else "",
-                "run_log": (latest_run_dir / "logs" / "run.log").as_posix() if latest_run_dir else "",
-                "metrics": (latest_run_dir / "metrics.jsonl").as_posix() if latest_run_dir else "",
-            },
+            "tail": log_tail,
+            "files": log_files,
+            "redaction": logs_redaction,
         },
-        "config": {
-            "path": cfg_path.as_posix(),
-            "source": cfg_source,
-            "data": _redact_config(cfg),
-            "resolved_prompts_dir": prompts_dir.as_posix(),
-        },
+        "config": config_payload,
         "config_contract": config_contract,
         "prompts": {
-            "dir": prompts_dir.as_posix(),
+            "dir": prompt_payload.get("dir", prompts_dir.as_posix()) if isinstance(prompt_payload, dict) else prompts_dir.as_posix(),
             "exists": prompts_dir.exists(),
             "items": prompt_items,
+            "redaction": prompts_redaction,
         },
         "history": history,
         "metrics": metrics,
@@ -4976,6 +5499,11 @@ def build_snapshot(
         "worktree": worktree,
         "worktree_diagnostics": worktree_diagnostics,
         "runner_control": runner_control,
+        "redaction": {
+            "active": redaction_active,
+            "placeholder": REDACTED_VALUE,
+            "scope": "lan" if redaction_active else "local",
+        },
         "progress": {
             "latest_run_dir": latest_run_dir.as_posix() if latest_run_dir else None,
             "run_status": progress.get("run_status"),
@@ -5128,6 +5656,7 @@ def create_app(
     app.state.runner_controls_source = controls_source
     app.state.runner_controls_disabled_reason = controls_disabled_reason
     app.state.runner_control_lock = control_lock
+    web_redaction_active = _web_redaction_active(bind_host)
 
     def _snapshot(*, busy_override: bool | None = None) -> dict[str, Any]:
         return build_snapshot(
@@ -5151,7 +5680,8 @@ def create_app(
 
     def _goals() -> dict[str, Any]:
         completion_level = resolve_goals_completion_level(cfg.get("goals_completion_level"))
-        return _build_goals_payload(repo_root, completion_level=completion_level)
+        payload = _build_goals_payload(repo_root, completion_level=completion_level)
+        return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_goals_payload)
 
     def _runner_control_snapshot() -> dict[str, Any]:
         snap = _snapshot()
@@ -5198,13 +5728,34 @@ def create_app(
         details: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
         busy_override: bool | None = None,
+        redact_sensitive: bool | None = None,
     ) -> Any:
+        if redact_sensitive is None:
+            redact_sensitive = web_redaction_active
         snapshot = _snapshot(busy_override=busy_override)
-        payload = {
+        safe_message = message
+
+        def _redact_nested(value: Any) -> Any:
+            if isinstance(value, dict):
+                redacted_value: dict[str, Any] = {}
+                for key, item in value.items():
+                    key_text = str(key)
+                    if key_text in {"config_path", "configPath"}:
+                        redacted_value[key] = REDACTED_VALUE if item not in (None, "", False) else item
+                    elif key_text in {"start_options", "startOptions"} and isinstance(item, dict):
+                        redacted_value[key] = _redact_web_runner_start_options(item)
+                    else:
+                        redacted_value[key] = _redact_nested(item)
+                return redacted_value
+            if isinstance(value, list):
+                return [_redact_nested(item) for item in value]
+            return value
+
+        payload: dict[str, Any] = {
             "ok": ok,
             "action": action,
             "status": status,
-            "message": message,
+            "message": safe_message,
             "runner_control": snapshot.get("runner_control", {}),
             "snapshot": snapshot,
             "repo": snapshot.get("repo", {}),
@@ -5214,12 +5765,17 @@ def create_app(
         if error_code:
             payload["error"] = {
                 "code": error_code,
-                "message": message,
+                "message": safe_message,
             }
-            if details:
-                payload["error"]["details"] = details
+        if not ok and details is not None:
+            if "error" not in payload:
+                payload["error"] = {
+                    "code": error_code or "runner_control_error",
+                    "message": safe_message,
+                }
+            payload["error"]["details"] = _redact_nested(details) if redact_sensitive else details
         if result is not None:
-            payload["result"] = result
+            payload["result"] = _redact_nested(result) if redact_sensitive and not ok else (_redact_web_runner_result(result) if redact_sensitive and isinstance(result, dict) else result)
         return JSONResponse(status_code=status_code, content=payload)
 
     def _runner_control_disabled(action: str) -> Any:
@@ -6165,7 +6721,7 @@ def create_app(
             if source_path is None:
                 source_path = (latest_run_dir / "metrics.jsonl") if latest_run_dir is not None else None
             if source_path is None:
-                return {
+                payload = {
                     "ok": False,
                     "state": "missing_file",
                     "entries": [],
@@ -6179,8 +6735,9 @@ def create_app(
                     },
                     "malformed_lines": 0,
                 }
+                return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_log_payload)
             live = bool(controller_status.get("running"))
-            return _build_log_tail_payload(
+            payload = _build_log_tail_payload(
                 source_path,
                 cursor=cursor,
                 max_lines=max_lines,
@@ -6190,6 +6747,7 @@ def create_app(
                 search=search,
                 live=live,
             )
+            return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_log_payload)
         except Exception as ex:
             source_text = ""
             try:
@@ -6200,7 +6758,7 @@ def create_app(
                     source_text = source_path.as_posix()
             except Exception:
                 source_text = ""
-            return {
+            payload = {
                 "ok": False,
                 "state": "read_error",
                 "entries": [],
@@ -6215,6 +6773,7 @@ def create_app(
                 "error": str(ex).strip() or ex.__class__.__name__,
                 "malformed_lines": 0,
             }
+            return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_log_payload)
 
     @app.get("/api/config")
     def api_config() -> dict[str, Any]:

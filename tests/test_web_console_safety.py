@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 import uuid
 
@@ -47,6 +48,19 @@ def _write_config(path: Path, repo: Path, **overrides: object) -> None:
 
 
 GOALS_SAVE_CONFIRMATION_PHRASE = "DELETE OR DOWNGRADE UNMET P0 GOALS"
+
+
+def _runner_base_args(config_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(config_path=config_path.as_posix(), config=config_path.as_posix())
+
+
+def _entry_text(entry: object) -> str:
+    if isinstance(entry, dict):
+        for key in ("msg", "message", "raw", "text", "reason"):
+            value = entry.get(key)
+            if value not in (None, "", False):
+                return str(value)
+    return ""
 
 
 class FakeRunnerController:
@@ -412,6 +426,224 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertFalse(body["runner_control"]["enabled"])
         self.assertFalse(app.state.runner_controller.start_calls)
 
+    def test_lan_snapshot_redacts_sensitive_surfaces(self) -> None:
+        prompts_dir = self.home / "prompts" / "agentcli"
+        _write(
+            prompts_dir / "pm_instructions.md",
+            "# LAN fixture\n\nProfile: {profile}\nRepo: {repo}\nSECRET: super-secret\n",
+        )
+        _write(
+            self.run_dir / "BACKLOG.json",
+            json.dumps(
+                {
+                    "generated_at": "2026-04-26T12:00:00",
+                    "tasks": [
+                        {
+                            "id": "T-LAN-1",
+                            "title": "Redaction boundary",
+                            "prompt": "Implement the LAN redaction boundary.",
+                            "description": "Task description with an excerpt that must stay hidden.",
+                            "files": ["agent_runner/web.py"],
+                            "done_when": "Status snapshot stays redacted.",
+                            "skills": [],
+                            "skills_rationale": "This explains why the excerpt exists.",
+                            "depends_on": [],
+                            "status": "failed",
+                            "recent_output": "Task output excerpt should not be exposed.",
+                            "failure_detail": "token=abc123 from task output",
+                            "failure": {
+                                "reason": "build_failed",
+                                "detail": "Traceback with secret token",
+                                "message": "Task failed with a secret token",
+                            },
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        _write(
+            self.run_dir / "STATE.json",
+            json.dumps(
+                {
+                    "done": [],
+                    "failed": [
+                        {
+                            "task_id": "T-LAN-1",
+                            "reason": "build_failed",
+                            "detail": "state failure token=abc123",
+                            "attempt": 2,
+                            "cycle": 3,
+                            "step": 4,
+                            "rc": 1,
+                        }
+                    ],
+                    "warnings": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        task_output_dir = self.run_dir / "tasks" / "c003_s004_T-LAN-1" / "attempt_02"
+        _write(task_output_dir / "build.txt", "Task build output with secret token=abc123\nSecond line\n")
+        _write(
+            self.run_dir / "metrics.jsonl",
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "ts": "2026-04-26T12:00:00",
+                            "seq": 1,
+                            "level": "info",
+                            "event": "task_failed",
+                            "stage": "Dev",
+                            "task_id": "T-LAN-1",
+                            "taskTitle": "Redaction boundary",
+                            "message": "logs token=abc123",
+                            "reason": "build_failed",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "",
+                ]
+            ),
+        )
+        _write(self.run_dir / "cycle_summary.log", "2026-04-26 12:00:00 [INFO] cycle summary token=abc123\n")
+        controller = FakeRunnerController(repo=self.repo, base_args=_runner_base_args(self.config_path))
+        client, _ = _create_client(
+            self.repo,
+            enable_runner_controls=False,
+            config_path=self.config_path,
+            host="0.0.0.0",
+            runner_controller=controller,
+        )
+
+        status = client.get("/api/status")
+        self.assertEqual(200, status.status_code)
+        status_payload = status.json()
+        self.assertTrue(status_payload["redaction"]["active"])
+        self.assertEqual("lan", status_payload["redaction"]["scope"])
+        self.assertEqual(self.repo.name, status_payload["repo"]["name"])
+        self.assertEqual("[redacted]", status_payload["logs"]["tail"])
+        self.assertEqual("[redacted]", status_payload["logs"]["files"]["cycle_summary"])
+        self.assertEqual("[redacted]", status_payload["logs"]["files"]["run_log"])
+        self.assertEqual("[redacted]", status_payload["logs"]["files"]["metrics"])
+        self.assertIn("files.cycle_summary", status_payload["logs"]["redaction"]["fields"])
+        self.assertEqual("[redacted]", status_payload["goals"]["raw_text"])
+        self.assertEqual("[redacted]", status_payload["config"]["path"])
+        self.assertEqual("[redacted]", status_payload["config"]["resolved_prompts_dir"])
+        self.assertEqual("[redacted]", status_payload["config"]["data"]["telegram"]["bot_token"])
+        self.assertEqual("[redacted]", status_payload["config"]["data"]["telegram"]["pairing_code"])
+        self.assertEqual("personal", status_payload["config"]["data"]["profile"])
+        self.assertEqual("[redacted]", status_payload["config_contract"]["values"]["telegram"]["bot_token"])
+        status_prompt = next(item for item in status_payload["prompts"]["items"] if item["file"] == "pm_instructions.md")
+        self.assertEqual("[redacted]", status_prompt["preview"])
+        self.assertEqual("[redacted]", status_payload["runner_control"]["status"]["config_path"])
+        self.assertEqual("[redacted]", status_payload["runner_control"]["startOptions"]["path"])
+        self.assertEqual("[redacted]", status_payload["runner_control"]["startOptions"]["defaults_path"])
+        self.assertEqual("[redacted]", status_payload["runner_control"]["startOptions"]["values"]["config_path"])
+        self.assertEqual("[redacted]", status_payload["runner_control"]["startOptions"]["defaults"]["config_path"])
+
+        progress = client.get("/api/progress")
+        self.assertEqual(200, progress.status_code)
+        progress_payload = progress.json()
+        self.assertEqual("[redacted]", progress_payload["logs"]["tail"])
+        self.assertEqual("[redacted]", progress_payload["logs"]["files"]["cycle_summary"])
+        self.assertEqual("[redacted]", progress_payload["logs"]["files"]["run_log"])
+        self.assertEqual("[redacted]", progress_payload["logs"]["files"]["metrics"])
+        self.assertEqual("[redacted]", progress_payload["goals"]["raw_text"])
+        self.assertEqual("[redacted]", progress_payload["config"]["path"])
+        progress_prompt = next(item for item in progress_payload["prompts"]["items"] if item["file"] == "pm_instructions.md")
+        self.assertEqual("[redacted]", progress_prompt["preview"])
+        self.assertEqual("[redacted]", progress_payload["runner_control"]["status"]["config_path"])
+        backlog_item = progress_payload["backlog"]["items"][0]
+        self.assertEqual("Redaction boundary", backlog_item["title"])
+        self.assertEqual("[redacted]", backlog_item.get("prompt"))
+        self.assertIsNone(backlog_item.get("description"))
+        self.assertEqual("[redacted]", backlog_item.get("skills_rationale"))
+        self.assertEqual("[redacted]", backlog_item.get("recent_output", backlog_item.get("recentOutput")))
+        self.assertEqual("[redacted]", backlog_item.get("failure_detail", backlog_item.get("failureDetail")))
+        self.assertEqual("[redacted]", backlog_item["failure"]["detail"])
+        self.assertNotIn("message", backlog_item["failure"])
+
+        logs_payload = client.get("/api/logs").json()
+        self.assertEqual("[redacted]", logs_payload["tail"])
+        self.assertEqual("[redacted]", logs_payload["files"]["cycle_summary"])
+        self.assertEqual("[redacted]", logs_payload["files"]["run_log"])
+        self.assertEqual("[redacted]", logs_payload["files"]["metrics"])
+        self.assertGreater(len(logs_payload["entries"]), 0)
+        self.assertEqual("[redacted]", _entry_text(logs_payload["entries"][0]))
+        logs_tail = client.get("/api/logs/tail").json()
+        self.assertNotIn("tail", logs_tail)
+        self.assertEqual("[redacted]", logs_tail["source"]["path"])
+        self.assertGreater(len(logs_tail["entries"]), 0)
+        self.assertEqual("[redacted]", _entry_text(logs_tail["entries"][0]))
+
+        goals_payload = client.get("/api/goals").json()
+        self.assertEqual("[redacted]", goals_payload["raw_text"])
+        self.assertTrue(goals_payload["summary"]["has_goals"])
+        self.assertGreaterEqual(goals_payload["summary"]["total"], 1)
+
+        config_payload = client.get("/api/config").json()
+        self.assertEqual("[redacted]", config_payload["path"])
+        self.assertEqual("[redacted]", config_payload["meta"]["path"])
+        self.assertEqual("[redacted]", config_payload["meta"]["resolved_prompts_dir"])
+        self.assertEqual("[redacted]", config_payload["values"]["telegram"]["bot_token"])
+        self.assertEqual("personal", config_payload["values"]["profile"])
+
+        prompts_payload = client.get("/api/prompts").json()
+        prompt_item = next(item for item in prompts_payload["items"] if item["file"] == "pm_instructions.md")
+        self.assertEqual("[redacted]", prompt_item["preview"])
+        self.assertNotIn("content", prompt_item)
+        self.assertEqual("[redacted]", prompts_payload["dir"])
+
+        prompt_read = client.get("/api/prompts/read", params={"id": "pm_instructions", "file": "pm_instructions.md"})
+        self.assertEqual(200, prompt_read.status_code)
+        prompt_read_payload = prompt_read.json()
+        self.assertIn("SECRET: super-secret", prompt_read_payload["content"])
+        self.assertIn("{repo}", prompt_read_payload["content"])
+
+        runner_status = client.get("/api/runner/status").json()
+        self.assertEqual("[redacted]", runner_status["status"]["config_path"])
+        self.assertEqual("[redacted]", runner_status["runner_control"]["startOptions"]["path"])
+        self.assertEqual("[redacted]", runner_status["runner_control"]["startOptions"]["values"]["config_path"])
+        self.assertFalse(runner_status["enabled"])
+
+    def test_lan_runner_control_responses_redact_runner_args(self) -> None:
+        controller = FakeRunnerController(repo=self.repo, base_args=_runner_base_args(self.config_path))
+        client, _ = _create_client(
+            self.repo,
+            enable_runner_controls=True,
+            config_path=self.config_path,
+            host="0.0.0.0",
+            trusted_network=True,
+            runner_controller=controller,
+        )
+
+        response = client.post("/api/runner/start", json={"phrase": "START RUNNER"})
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual("started", payload["status"])
+        self.assertTrue(payload["runner_control"]["enabled"])
+        self.assertEqual("[redacted]", payload["runner_control"]["status"]["config_path"])
+        self.assertEqual("[redacted]", payload["runner_control"]["startOptions"]["path"])
+        self.assertEqual("[redacted]", payload["runner_control"]["startOptions"]["values"]["config_path"])
+        self.assertEqual("[redacted]", payload["result"]["config_path"])
+        self.assertEqual(self.repo.as_posix(), payload["result"]["repo"])
+        self.assertEqual("[redacted]", payload["snapshot"]["logs"]["files"]["cycle_summary"])
+        self.assertEqual("[redacted]", payload["snapshot"]["runner_control"]["status"]["config_path"])
+        self.assertTrue(payload["snapshot"]["redaction"]["active"])
+        self.assertEqual("lan", payload["snapshot"]["redaction"]["scope"])
+
+        runner_status = client.get("/api/runner/status").json()
+        self.assertEqual("[redacted]", runner_status["status"]["config_path"])
+        self.assertEqual("[redacted]", runner_status["runner_control"]["startOptions"]["path"])
+        self.assertEqual("[redacted]", runner_status["runner_control"]["startOptions"]["values"]["config_path"])
+
     def test_web_app_initializes_process_guard_and_shutdown_stops_runner(self) -> None:
         from fastapi.testclient import TestClient
         import agent_runner.web as web_module
@@ -672,7 +904,7 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertTrue(trusted_status["enabled"])
         self.assertEqual("cli;cli:--trusted-network", trusted_status["source"])
         self.assertTrue(trusted_status["runner_control"]["actions"]["start"]["enabled"])
-        self.assertEqual(self.config_path.as_posix(), trusted_status["runner_control"]["status"]["config_path"])
+        self.assertEqual("[redacted]", trusted_status["runner_control"]["status"]["config_path"])
 
         trusted_response = trusted_client.post("/api/runner/start", json={"confirmation": "START RUNNER"})
         self.assertEqual(200, trusted_response.status_code)

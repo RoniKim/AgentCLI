@@ -12,6 +12,8 @@ Verified on 2026-04-26 with a local server and Playwright:
 - Read-only endpoints exist for health, status, progress, config, prompts, logs, history, and worktree review state.
 - Read-only worktree diagnostics now scan `.AgentCLI/agent_runs`, the central pending marker, patch paths, cleanup-failed artifacts, and generated worktree directories without deleting anything by default.
 - Additional read-only contracts now cover Goals metadata and backend log tailing.
+- LAN or external binds now redact logs, log file metadata, GOALS raw text, backlog/task excerpts, config snapshots, prompt previews/content, and serialized runner arguments before the browser sees them, while the browser renders hidden/unavailable copy for those fields.
+- The explicit prompt-read path stays available for the editor flow after a user selects a prompt; the inventory view remains redacted and the raw-content path is only used by that explicit editor request.
 - The UI has first-pass routes for Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, and Worktree Review.
 - The shell now exposes `/worktree` for the same diagnostics summary.
 - Checked-in Playwright smoke coverage now exercises Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, EN/KO Dashboard and Config locale switching, and a mobile-width viewport.

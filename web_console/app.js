@@ -22,6 +22,7 @@
     merge: 'worktree.confirmMergePhrase',
     discard: 'worktree.confirmDiscardPhrase',
   };
+  const REDACTED_VALUE = '[redacted]';
   // Keep the template-form text in source for static coverage:
   // Type ${worktreeActionConfirmationPhrase('merge')} exactly to apply
   // Type ${worktreeActionConfirmationPhrase('discard')} exactly to discard
@@ -2511,6 +2512,7 @@
 
   function normalizeRunnerControlStartOptionsContract(contract) {
     const raw = toObject(contract);
+    const redaction = toObject(raw.redaction);
     return {
       path: toText(raw.path, ''),
       defaultsPath: toText(raw.defaults_path || raw.defaultsPath, ''),
@@ -2518,6 +2520,13 @@
       defaults: toObject(raw.defaults),
       schema: toObject(raw.schema),
       choices: toObject(raw.choices),
+      redaction: {
+        active: Boolean(redaction.active),
+        placeholder: toText(redaction.placeholder, REDACTED_VALUE),
+        paths: toArray(redaction.paths),
+        tokens: toArray(redaction.tokens),
+        scope: toText(redaction.scope, ''),
+      },
     };
   }
 
@@ -2530,6 +2539,7 @@
     const source = toObject(raw);
     const base = toObject(fallback);
     const status = toObject(toObject(control).status);
+    const contract = runnerControlStartOptionsContract(control);
     const fallbackConfigPath = toText(
       source.config_path ||
         source.configPath ||
@@ -2575,6 +2585,7 @@
         'codex'
       ),
       config_path: fallbackConfigPath,
+      redaction: clone(toObject(contract.redaction)),
     };
   }
 
@@ -2607,6 +2618,9 @@
       const text = toText(value, '');
       return text || t('common.none');
     }
+    if (normalizedPath === 'config_path') {
+      return redactionAwareText(value, t('common.none'));
+    }
     const text = toText(value, '');
     return text || t('common.none');
   }
@@ -2616,9 +2630,11 @@
     const runMode = normalizeRunnerControlStartMode(current.run_mode || current.runMode || current.mode);
     const profile = toText(current.profile, 'personal').trim().toLowerCase() || 'personal';
     const executionBackend = toText(current.execution_backend || current.executionBackend || current.backend, 'codex').trim().toLowerCase() || 'codex';
-    const configPath = toText(current.config_path || current.configPath || current.config, '');
+    const redaction = toObject(current.redaction);
+    const configPath = toText(current.config_path || current.configPath || current.config, '').trim();
+    const configPathPlaceholder = toText(redaction.placeholder, REDACTED_VALUE).trim() || REDACTED_VALUE;
     const loopMaxCycles = toText(current.loop_max_cycles ?? current.loopMaxCycles ?? current.max_cycles ?? current.maxCycles ?? '', '');
-    return {
+    const payload = {
       autopilot: Boolean(current.autopilot),
       run_mode: runMode,
       continuous: runMode === 'continuous' || runMode === 'loop',
@@ -2627,8 +2643,11 @@
       loop_max_cycles: loopMaxCycles,
       profile,
       execution_backend: executionBackend,
-      config_path: configPath,
     };
+    if (configPath && configPath !== REDACTED_VALUE && configPath !== configPathPlaceholder) {
+      payload.config_path = configPath;
+    }
+    return payload;
   }
 
   function runnerControlStartOptionsState() {
@@ -2700,7 +2719,12 @@
     const current = toObject(control);
     const status = toObject(current.status);
     const statusReason = toText(status.reason, '');
+    const statusReasonText = redactionAwareText(statusReason, '');
+    const currentMessageText = redactionAwareText(current.message, t('runner.working'));
+    const lastMessageText = redactionAwareText(current.lastMessage, '');
+    const lastErrorText = redactionAwareText(current.lastError, '');
     const stopProgress = normalizeStopProgress(status.stopProgress);
+    const stopProgressMessageText = redactionAwareText(stopProgress.message, '');
     const busyAction = runnerControlBusyAction();
     if (current.busy || state.stopSubmitting) {
       const action = state.stopSubmitting ? (busyAction || current.lastAction || state.stopAction || 'start') : '';
@@ -2709,7 +2733,7 @@
         bannerTone: 'info',
         label: state.stopSubmitting ? runnerControlActionLabel(action, true) : t('runner.working'),
         title: t('runner.actionInFlight'),
-        copy: current.message || t('runner.working'),
+        copy: currentMessageText || t('runner.working'),
       };
     }
     if (current.lastError || statusReason.startsWith('status_error:')) {
@@ -2718,7 +2742,7 @@
         bannerTone: 'err',
         label: t('common.failed'),
         title: t('runner.backendError'),
-        copy: current.lastError || statusReason || current.message || t('runner.backendError'),
+        copy: lastErrorText || statusReasonText || currentMessageText || t('runner.backendError'),
       };
     }
     if (!current.controllerAvailable) {
@@ -2727,7 +2751,7 @@
         bannerTone: 'warn',
         label: t('runner.unavailable'),
         title: t('runner.controllerUnavailable'),
-        copy: current.message || t('runner.controllerUnavailable'),
+        copy: currentMessageText || t('runner.controllerUnavailable'),
       };
     }
     if (!current.enabled) {
@@ -2736,7 +2760,7 @@
         bannerTone: 'warn',
         label: t('runner.controlsDisabled'),
         title: t('runner.controlsDisabled'),
-        copy: current.message || t('runner.controlsDisabled'),
+        copy: currentMessageText || t('runner.controlsDisabled'),
       };
     }
     if (stopProgress.active) {
@@ -2745,7 +2769,7 @@
         bannerTone: 'info',
         label: t('runner.stopping'),
         title: t('runner.stopProgress'),
-        copy: stopProgress.message || stopProgress.phase,
+        copy: stopProgressMessageText || stopProgress.phase,
       };
     }
     if (current.lastMessage) {
@@ -2754,7 +2778,7 @@
         bannerTone: 'success',
         label: runnerControlCompletionLabel(current.lastAction),
         title: t('runner.actionComplete'),
-        copy: current.message || current.lastMessage,
+        copy: currentMessageText || lastMessageText,
       };
     }
     if (status.running) {
@@ -2763,7 +2787,7 @@
         bannerTone: 'info',
         label: t('runner.running'),
         title: t('runner.running'),
-        copy: current.message || t('runner.running'),
+        copy: currentMessageText || t('runner.running'),
       };
     }
     return {
@@ -2771,7 +2795,7 @@
       bannerTone: 'idle',
       label: t('runner.ready'),
       title: t('runner.ready'),
-      copy: current.message || t('runner.ready'),
+      copy: currentMessageText || t('runner.ready'),
     };
   }
 
@@ -2793,6 +2817,7 @@
     const current = toObject(control);
     const status = toObject(current.status);
     const stopProgress = normalizeStopProgress(status.stopProgress);
+    const statusConfigPath = redactionAwareText(status.configPath, t('common.unknown'));
     const sourceValue = current.source && current.source !== 'default' ? current.source : t('common.unknown');
     const runStatusValue = current.runStatus
       ? (String(current.runStatus).toLowerCase() === 'running'
@@ -2821,7 +2846,7 @@
     const rows = [
       { label: t('runner.source'), value: sourceValue, className: 'runner-control__value--muted' },
       { label: t('runner.selectedRepo'), value: status.repo || t('common.unknown'), className: 'runner-control__value--muted' },
-      { label: t('runner.selectedConfig'), value: status.configPath || t('common.unknown'), className: 'runner-control__value--muted' },
+      { label: t('runner.selectedConfig'), value: statusConfigPath, className: 'runner-control__value--muted' },
       {
         label: t('runner.controller'),
         value: current.controllerAvailable ? t('runner.available') : t('runner.unavailable'),
@@ -2850,12 +2875,12 @@
       },
       {
         label: t('runner.lastMessage'),
-        value: current.lastMessage || t('common.none'),
+        value: redactionAwareText(current.lastMessage, t('common.none')),
         className: current.lastMessage ? 'runner-control__value--accent' : 'runner-control__value--muted',
       },
       {
         label: t('runner.lastError'),
-        value: current.lastError || t('common.none'),
+        value: redactionAwareText(current.lastError, t('common.none')),
         className: current.lastError ? 'runner-control__value--err' : 'runner-control__value--muted',
       },
     );
@@ -3433,6 +3458,10 @@
     if (!raw.exists) {
       return t('goals.missing');
     }
+    const redaction = toObject(raw.redaction || state.redaction);
+    if (redaction.active) {
+      return t('config.redactedHidden');
+    }
     const rawText = toText(raw.raw_text || raw.rawText, '').trim();
     if (!rawText) {
       return t('goals.empty');
@@ -3446,6 +3475,16 @@
       return t('goals.noGoals');
     }
     return t('dashboard.goalsSnapshotReady');
+  }
+
+  function redactionAwareText(value, fallback = '', redaction = state.redaction) {
+    const meta = toObject(redaction);
+    const placeholder = toText(meta.placeholder, REDACTED_VALUE);
+    const text = toText(value, '');
+    if (meta.active && text === placeholder) {
+      return t('config.redactedHidden');
+    }
+    return text || fallback;
   }
 
   function goalBucketLabel(bucket) {
@@ -4259,6 +4298,7 @@
 
   function adaptGoals(goals, context = {}) {
     const raw = toObject(goals);
+    const redaction = toObject(raw.redaction);
     const warnings = toArray(raw.warnings).map(normalizeGoalWarning);
     const items = normalizeGoalBuckets(raw);
     const completion = toObject(raw.completion);
@@ -4292,6 +4332,13 @@
       completion_level: toText(raw.completion_level || raw.completionLevel, ''),
       items,
       warnings,
+      redaction: {
+        active: Boolean(redaction.active),
+        placeholder: toText(redaction.placeholder, REDACTED_VALUE),
+        paths: toArray(redaction.paths),
+        tokens: toArray(redaction.tokens),
+        scope: toText(redaction.scope, ''),
+      },
       state: buildSectionState(
         'goals',
         !toText(raw.raw_text || raw.rawText, '').trim() ? 'empty' : (!valid ? 'partial' : (total ? 'ready' : 'empty')),
@@ -4355,10 +4402,19 @@
   function adaptLogs(logs, context = {}) {
     const raw = toObject(logs);
     const items = toArray(raw.entries).map(normalizeLogEntry).slice(-MAX_LOG_ROWS);
+    const redaction = toObject(raw.redaction);
+    const files = {};
+    for (const [key, value] of Object.entries(toObject(raw.files))) {
+      const text = toText(value, '').trim();
+      if (!text) {
+        continue;
+      }
+      files[key] = redaction.active ? REDACTED_VALUE : text;
+    }
     return {
       entries: items,
       tail: toText(raw.tail, ''),
-      files: toObject(raw.files),
+      files,
       state: buildSectionState('logs', items.length ? 'ready' : 'empty', items.length ? '' : fallbackSectionMessage('logs')),
     };
   }
@@ -4436,6 +4492,7 @@
     const raw = toObject(snapshot);
     const repo = toObject(raw.repo);
     const progress = toObject(raw.progress);
+    const redaction = toObject(raw.redaction);
     const config = adaptConfig(raw.config, { progress, repo });
     const configContract = adaptConfigContract(raw.config_contract || raw.configContract || raw.config, {
       progress,
@@ -4528,6 +4585,11 @@
       notifications: notifications.items,
       worktreeMerge: worktree,
       runnerControl,
+      redaction: {
+        active: Boolean(redaction.active),
+        placeholder: toText(redaction.placeholder, REDACTED_VALUE),
+        scope: toText(redaction.scope, ''),
+      },
       progress,
       sectionState: {
         activeRun: buildSectionState('activeRun', activeRun.status === 'idle' && !activeRun.task && !activeRun.startedAt ? 'empty' : 'ready', activeRun.status === 'idle' && !activeRun.task && !activeRun.startedAt ? fallbackSectionMessage('activeRun') : ''),
@@ -4541,7 +4603,7 @@
         metrics: metrics.state,
         history: history.state,
         worktree: worktree.state,
-        runnerControl: buildSectionState('runnerControl', runnerControl.controllerAvailable ? (runnerControl.enabled ? 'ready' : 'disabled') : 'error', runnerControl.message || fallbackSectionMessage('runnerControl')),
+        runnerControl: buildSectionState('runnerControl', runnerControl.controllerAvailable ? (runnerControl.enabled ? 'ready' : 'disabled') : 'error', redactionAwareText(runnerControl.message, fallbackSectionMessage('runnerControl'))),
       },
     };
   }
@@ -5074,6 +5136,11 @@
         runStatus: 'loading',
         runnerMode: 'unknown',
       }),
+      redaction: {
+        active: false,
+        placeholder: REDACTED_VALUE,
+        scope: 'local',
+      },
       goals: { p0: [], p1: [] },
       goalsSnapshot: {
         path: '',
@@ -5240,6 +5307,11 @@
         runStatus: 'idle',
         runnerMode: 'unknown',
       }),
+      redaction: {
+        active: false,
+        placeholder: REDACTED_VALUE,
+        scope: 'local',
+      },
       stages: clone(blank.stages),
       backlog: clone(blank.backlog),
       backlogCounts: clone(blank.backlogCounts),
@@ -6030,7 +6102,7 @@
     const startedText = stage.startedAt ? `${t('pipeline.started')} ${fmtClock(stage.startedAt)}` : t('pipeline.startedUnavailable');
     const endedText = stage.endedAt ? `${t('pipeline.ended')} ${fmtClock(stage.endedAt)}` : status === 'running' ? t('pipeline.inProgress') : t('pipeline.endedUnavailable');
     const durationText = stage.durationSec != null ? fmtDuration(stage.durationSec) : '--';
-    const recentOutput = compactText(stage.recentOutput, 180) || t('pipeline.recentOutputUnavailable');
+    const recentOutput = compactText(redactionAwareText(stage.recentOutput), 180) || t('pipeline.recentOutputUnavailable');
     return `
       <div class="${cardClass}">
         <div class="stage-card__head">
@@ -6060,8 +6132,8 @@
     const dependencyText = task.dependsOn && task.dependsOn.length ? t('backlog.dependsOn', { items: task.dependsOn.join(', ') }) : t('backlog.dependenciesUnavailable');
     const fileScopeText = task.fileScope || (task.files && task.files.length ? task.files.join(', ') : t('backlog.fileScopeUnavailable'));
     const failureReason = toText(task.failureReason || toObject(task.failure).reason, '');
-    const failureDetail = toText(task.failureDetail || toObject(task.failure).detail, '');
-    const recentOutput = compactText(task.recentOutput, 180) || t('backlog.recentOutputUnavailable');
+    const failureDetail = redactionAwareText(task.failureDetail || toObject(task.failure).detail);
+    const recentOutput = compactText(redactionAwareText(task.recentOutput), 180) || t('backlog.recentOutputUnavailable');
     return `
       <button type="button" class="task-card" data-backlog-select="${escapeHTML(task.id)}" aria-pressed="${isSelected ? 'true' : 'false'}">
         <div class="task-card__head">
@@ -6183,7 +6255,7 @@
           <div class="notification-feed__timestamp">${escapeHTML(fmtClock(item.t))}</div>
           <div class="notification-feed__relative">${escapeHTML(fmtRelative(item.t))}</div>
         </div>
-        <div class="notification-feed__msg">${escapeHTML(item.text)}</div>
+        <div class="notification-feed__msg">${escapeHTML(redactionAwareText(item.text, t('notifications.noRecorded')))}</div>
         <div class="notification-feed__run">${escapeHTML(item.run)}</div>
       </div>
     `;
@@ -6223,6 +6295,7 @@
   function renderPromptCard(prompt) {
     const active = state.promptSelection === prompt.id;
     const disabled = promptMutationInFlight();
+    const previewText = redactionAwareText(prompt.preview, t('common.unavailable'));
     return `
       <button type="button" class="prompt-card ${active ? 'prompt-card--active' : ''}" data-prompt-select="${escapeHTML(prompt.id)}" ${disabled ? 'disabled aria-disabled="true"' : ''}>
         <div class="prompt-card__head">
@@ -6236,7 +6309,7 @@
           <span>${escapeHTML(prompt.updated)}</span>
         </div>
         <div class="prompt-card__path">${escapeHTML(prompt.path || prompt.file)}</div>
-        <div class="prompt-card__preview">${escapeHTML(prompt.preview || '[redacted]')}</div>
+        <div class="prompt-card__preview">${escapeHTML(previewText)}</div>
         <div class="summary-note prompt-card__summary">${escapeHTML(prompt.summary)}</div>
       </button>
     `;
@@ -6250,7 +6323,7 @@
       if (value == null || value === '' || (Array.isArray(value) && value.length === 0)) {
         return '--';
       }
-      return REDACTED_VALUE;
+      return t('config.redactedHidden');
     }
     if (schema.kind === 'bool') return value === true ? t('common.enabled') : t('common.disabled');
     if (schema.kind === 'enum') return value == null || value === '' ? '--' : String(value);
@@ -6366,7 +6439,7 @@
       return t('config.saveInProgress');
     }
     if (!configSaveEnabled()) {
-      return state.runnerControl?.message || t('config.savesDisabledUntilRunnerEnabled');
+      return redactionAwareText(state.runnerControl?.message, t('config.savesDisabledUntilRunnerEnabled'));
     }
     if (!diffs.length) {
       return t('config.noConfigChanges');
@@ -6788,7 +6861,7 @@
     if (editor.error) {
       return `
         <span class="badge badge--err">${escapeHTML(t('common.failed'))}</span>
-        <span class="muted">${escapeHTML(editor.error)}</span>
+        <span class="muted">${escapeHTML(redactionAwareText(editor.error, t('prompts.promptReadFailed')))}</span>
       `;
     }
     const dirty = promptEditorIsDirty(editor);
@@ -6845,7 +6918,7 @@
       return `
         <div class="section-banner section-banner--err">
           <div class="section-banner__title">${escapeHTML(t('common.failed'))}</div>
-          <div class="section-banner__copy">${escapeHTML(editor.error)}</div>
+          <div class="section-banner__copy">${escapeHTML(redactionAwareText(editor.error, t('common.failed')))}</div>
         </div>
       `;
     }
@@ -6874,7 +6947,7 @@
       return `
         <div class="section-banner section-banner--info">
           <div class="section-banner__title">${saveState.status === 'success' ? t('prompts.promptSaved') : t('prompts.promptRestored')}</div>
-          <div class="section-banner__copy">${escapeHTML(activeState.message || t('prompts.promptMutationCompleted'))}</div>
+          <div class="section-banner__copy">${escapeHTML(redactionAwareText(activeState.message, t('prompts.promptMutationCompleted')))}</div>
         </div>
       `;
     }
@@ -6882,7 +6955,7 @@
       return `
         <div class="section-banner section-banner--warn">
           <div class="section-banner__title">${escapeHTML(t('prompts.promptMutationsLocked'))}</div>
-          <div class="section-banner__copy">${escapeHTML(state.runnerControl?.message || t('prompts.promptMutationsDisabled'))}</div>
+          <div class="section-banner__copy">${escapeHTML(redactionAwareText(state.runnerControl?.message, t('prompts.promptMutationsDisabled')))}</div>
         </div>
       `;
     }
@@ -7129,11 +7202,11 @@
       : restoreState.status === 'restoring'
         ? restoreState.message || t('prompts.chooseBackupRestore')
         : saveState.status === 'error' || restoreState.status === 'error'
-          ? activeState?.message || t('prompts.promptMutationFailed')
-          : saveState.status === 'success' || restoreState.status === 'success'
+          ? redactionAwareText(activeState?.message || t('prompts.promptMutationFailed'), t('prompts.promptMutationFailed'))
+        : saveState.status === 'success' || restoreState.status === 'success'
             ? activeState?.message || t('prompts.promptMutationCompleted')
             : !mutationEnabled
-              ? state.runnerControl?.message || t('prompts.promptMutationsDisabled')
+              ? redactionAwareText(state.runnerControl?.message, t('prompts.promptMutationsDisabled'))
               : t('prompts.chooseBackupRestore');
     const errorCode = activeState && activeState.errorCode ? `<div class="prompt-mutation-state__code">${escapeHTML(activeState.errorCode)}</div>` : '';
     const backupOptions = backups.length
@@ -7553,7 +7626,7 @@
       return t('prompts.saving');
     }
     if (!promptMutationEnabled()) {
-      return state.runnerControl?.message || t('prompts.promptMutationsDisabled');
+      return redactionAwareText(state.runnerControl?.message, t('prompts.promptMutationsDisabled'));
     }
     if (!editor.promptId) {
       return t('prompts.selectPrompt');
@@ -7585,7 +7658,7 @@
       return t('prompts.restoring');
     }
     if (!promptMutationEnabled()) {
-      return state.runnerControl?.message || t('prompts.promptMutationsDisabled');
+      return redactionAwareText(state.runnerControl?.message, t('prompts.promptMutationsDisabled'));
     }
     if (!editor.promptId) {
       return t('prompts.selectPrompt');
@@ -8114,16 +8187,16 @@
     }
     const statusReason = toText(state.runnerControl.status?.reason, '');
     if (statusReason.startsWith('status_error:')) {
-      return state.runnerControl.lastError || statusReason || t('runner.backendError');
+      return redactionAwareText(state.runnerControl.lastError, '') || redactionAwareText(statusReason, '') || t('runner.backendError');
     }
     if (!state.runnerControl.enabled) {
-      return state.runnerControl.message || t('runner.controlsDisabledMessage');
+      return redactionAwareText(state.runnerControl.message, t('runner.controlsDisabledMessage'));
     }
     if (!state.runnerControl.controllerAvailable) {
-      return state.runnerControl.message || t('runner.controllerUnavailableMessage');
+      return redactionAwareText(state.runnerControl.message, t('runner.controllerUnavailableMessage'));
     }
     const actionState = runnerControlActionState(action);
-    return toText(actionState.disabledReason || actionState.disabled_reason || state.runnerControl.message, '');
+    return redactionAwareText(actionState.disabledReason || actionState.disabled_reason || state.runnerControl.message, '');
   }
 
   function runnerControlButtonAttrs(action) {
@@ -8890,7 +8963,7 @@
                   <div class="compact-list__item">
                     <span class="compact-list__bullet" style="background:${kindColor(item.kind)}"></span>
                     <div>
-                      <div class="compact-list__body">${escapeHTML(item.text)}</div>
+                      <div class="compact-list__body">${escapeHTML(redactionAwareText(item.text, t('notifications.noRecorded')))}</div>
                       <div class="compact-list__meta">${escapeHTML(item.kind)} | ${escapeHTML(fmtRelative(item.t))}</div>
                     </div>
                   </div>
@@ -8946,7 +9019,7 @@
         <div class="log-row__time">${escapeHTML(line.t)}</div>
         <div class="log-row__stage" style="color:${stageColor}">[${escapeHTML(line.stage)}]</div>
         <div class="log-row__level">${escapeHTML(line.lvl)}</div>
-        <div class="log-row__msg">${escapeHTML(line.msg)}</div>
+        <div class="log-row__msg">${escapeHTML(redactionAwareText(line.msg, t('common.unavailable')))}</div>
       </div>
     `;
   }
@@ -9090,7 +9163,7 @@
     const time = toText(entry.t || entry.ts, '');
     const stage = toText(entry.stage, 'boot');
     const level = toText(entry.lvl || entry.level, 'info');
-    const message = toText(entry.msg || entry.message || entry.raw, '');
+    const message = redactionAwareText(entry.msg || entry.message || entry.raw, '');
     return `${prefix}${time || '--'} [${stage}] ${level} ${message}`.trim();
   }
 
@@ -9111,7 +9184,7 @@
     const model = toObject(tail);
     const filters = normalizeLogTailFilters(model.filters);
     const source = toObject(model.source);
-    const sourceName = tailSourceName(source.path || source.name || '');
+    const sourceName = redactionAwareText(tailSourceName(source.path || source.name || ''), t('logs.activeRunLog'));
     const runLabel = toText(context.runId || context.latestRunDir || model.runDir || 'agentcli', 'agentcli')
       .replace(/[^a-z0-9._-]+/gi, '_')
       .replace(/^_+|_+$/g, '') || 'agentcli';
@@ -9128,7 +9201,7 @@
     if (filters.search) {
       filterParts.push(`search=${filters.search}`);
     }
-    const sourceLabel = source.path || sourceName || t('common.unknown');
+    const sourceLabel = redactionAwareText(source.path || sourceName || t('common.unknown'), t('logs.activeRunLog'));
     const lines = [
       `# ${t('logs.exportHeader')}`,
       `# ${t('logs.exportSource')}: ${sourceLabel}`,
@@ -9154,7 +9227,7 @@
     const status = toText(model.status, 'loading');
     const entries = toArray(model.entries);
     const source = toObject(model.source);
-    const sourceName = tailSourceName(source.path || source.name || '') || t('logs.activeRunLog');
+    const sourceName = redactionAwareText(tailSourceName(source.path || source.name || ''), t('logs.activeRunLog')) || t('logs.activeRunLog');
     const malformedLines = toNumber(model.malformedLines, 0);
     if (paused) {
       const cursor = toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0;
@@ -9179,7 +9252,7 @@
       return {
         tone: 'err',
         title: t('logs.logReadError'),
-        copy: toText(model.error, `${sourceName} ${t('logs.logReadError').toLowerCase()}.`),
+        copy: redactionAwareText(model.error, `${sourceName} ${t('logs.logReadError').toLowerCase()}.`),
         badge: 'read_error',
         state: 'read_error',
       };
@@ -9402,11 +9475,18 @@
     const values = toObject(current);
     const defaultValues = toObject(defaults);
     const schema = toObject(contract.schema);
+    const redaction = toObject(contract.redaction);
     const disabled = !actionEnabled || state.stopSubmitting;
     const selectedRunMode = normalizeRunnerControlStartMode(values.run_mode);
     const runModeOptions = toArray(schema.run_mode?.options || contract.choices?.run_mode || ['one-shot', 'continuous', 'loop']);
     const profileOptions = toArray(schema.profile?.options || contract.choices?.profile || ['personal', 'enterprise']);
     const backendOptions = toArray(schema.execution_backend?.options || contract.choices?.execution_backend || ['codex', 'claudecode']);
+    const configPathRaw = toText(values.config_path, '');
+    const redactedConfigPath = configPathRaw === REDACTED_VALUE || configPathRaw === toText(redaction.placeholder, REDACTED_VALUE);
+    const configPathValue = redactedConfigPath ? '' : configPathRaw;
+    const configPathPlaceholder = redactedConfigPath
+      ? t('common.unavailable')
+      : (contract.path || contract.defaultsPath || t('runner.configPath'));
     const runModeButtons = runModeOptions
       .map((option) => `
         <button
@@ -9428,6 +9508,9 @@
         ${escapeHTML(runnerControlStartOptionDisplayValue('autopilot', values.autopilot))}
       </button>
     `;
+    const redactionNote = (redactedConfigPath || Boolean(redaction.active))
+      ? `<div class="summary-note" style="margin-top:4px;">${escapeHTML(t('config.redactedHidden'))}</div>`
+      : '';
     const maxCyclesControl = `
       <input
         type="number"
@@ -9457,8 +9540,8 @@
       <input
         type="text"
         class="field-control"
-        value="${escapeHTML(toText(values.config_path, ''))}"
-        placeholder="${escapeHTML(contract.path || contract.defaultsPath || t('runner.configPath'))}"
+        value="${escapeHTML(configPathValue)}"
+        placeholder="${escapeHTML(configPathPlaceholder)}"
         autocomplete="off"
         spellcheck="false"
         data-runner-option-field="config_path"
@@ -9529,6 +9612,7 @@
           <div>
             <div class="runner-control__options-title">${escapeHTML(t('runner.startOptions'))}</div>
             <div class="summary-note">${escapeHTML(t('runner.startOptionsSummary'))}</div>
+            ${redactionNote}
           </div>
         </div>
         <div class="runner-control__chips">
@@ -9876,7 +9960,7 @@
             ${stage.model ? chip(stage.model, 'chip--info') : ''}
           </div>
           <div class="summary-note" style="margin-top:8px;">${escapeHTML(stage.startedAt ? `${t('pipeline.started')} ${fmtClock(stage.startedAt)}` : t('pipeline.startedUnavailable'))} | ${escapeHTML(stage.endedAt ? `${t('pipeline.ended')} ${fmtClock(stage.endedAt)}` : normalizeStageStatus(stage.status, 'pending') === 'running' ? t('pipeline.inProgress') : t('pipeline.endedUnavailable'))}</div>
-          <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(stage.recentOutput, 220) || t('pipeline.recentOutputUnavailable'))}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(redactionAwareText(stage.recentOutput, ''), 220) || t('pipeline.recentOutputUnavailable'))}</div>
         </div>
       `).join('')
       : [`<div class="summary-note">${escapeHTML(t('pipeline.noLifecycleRecords'))}</div>`];
@@ -9959,20 +10043,23 @@
   }
 
   function renderLogs() {
+    const redaction = toObject(state.redaction);
+    const redactionNote = redaction.active ? `<div class="summary-note">${escapeHTML(t('config.redactedHidden'))}</div>` : '';
     if (state.sourceMode === 'api') {
       const tail = ensureLogTailState();
       const control = describeLogTailControl(tail);
       const entries = toArray(tail.entries);
       const selected = new Set(toArray(tail.selected).map((value) => String(toMaybeNumber(value, null))).filter(Boolean));
       const banner = describeLogTailState(tail);
-      const sourceName = tailSourceName(tail.source?.path || tail.source?.name || '') || t('logs.activeRunLog');
+      const sourceName = redactionAwareText(tailSourceName(tail.source?.path || tail.source?.name || ''), t('logs.activeRunLog')) || t('logs.activeRunLog');
       const body = `
         <div class="view-grid">
           ${panel(
             t('logs.liveTail'),
-            `${escapeHTML(t('logs.linesShown', { count: entries.length }))} | ${escapeHTML(t('logs.cursor'))} ${escapeHTML(String(tail.nextCursor || tail.cursor || 0))}`,
-            `
+          `${escapeHTML(t('logs.linesShown', { count: entries.length }))} | ${escapeHTML(t('logs.cursor'))} ${escapeHTML(String(tail.nextCursor || tail.cursor || 0))}`,
+          `
               ${renderLogTailBanner(tail)}
+              ${redactionNote}
               ${renderLogTailFilters(tail)}
             `
           )}
@@ -10054,6 +10141,7 @@
           logsMode,
           `
             ${sectionNotice('logs')}
+            ${redactionNote}
             <div class="logs-toolbar">
               <div class="filters">
                 ${filters
@@ -10108,6 +10196,7 @@
   }
 
   function renderBacklog() {
+    const redaction = toObject(state.redaction);
     const buckets = [
       { key: 'pending', label: t('backlog.pending') },
       { key: 'in_progress', label: t('backlog.inProgress') },
@@ -10156,8 +10245,8 @@
           <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.attempt != null ? t('backlog.attemptText', { attempt: selected.attempt }) : t('backlog.attemptUnavailable'))}</div>
           <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.cycle != null ? t('backlog.cycleText', { cycle: selected.cycle }) : t('backlog.cycleUnavailable'))}</div>
           <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.step != null ? t('backlog.stepText', { step: selected.step }) : t('backlog.stepUnavailable'))}</div>
-          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.failureReason ? t('backlog.failureText', { reason: `${selected.failureReason}${selected.failureDetail ? ` | ${compactText(selected.failureDetail, 120)}` : ''}` }) : t('backlog.failureUnavailable'))}</div>
-          <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(selected.recentOutput, 220) || t('backlog.recentOutputUnavailable'))}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.failureReason ? t('backlog.failureText', { reason: `${selected.failureReason}${redactionAwareText(selected.failureDetail || toObject(selected.failure).detail, '', redaction) ? ` | ${compactText(redactionAwareText(selected.failureDetail || toObject(selected.failure).detail, '', redaction), 120)}` : ''}` }) : t('backlog.failureUnavailable'))}</div>
+          <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(redactionAwareText(selected.recentOutput, '', redaction), 220) || t('backlog.recentOutputUnavailable'))}</div>
         </div>
       `
       : state.backlog.length ? `<div class="summary-note">${escapeHTML(t('dashboard.noTaskSelected'))}</div>` : `<div class="summary-note">${escapeHTML(t('backlog.noArtifacts'))}</div>`;
@@ -10211,6 +10300,8 @@
     const goalFileSize = goalSnapshot.size;
     const goalFileMtime = goalSnapshot.mtime;
     const goalRawText = toText(goalSnapshot.raw_text || goalSnapshot.rawText, '');
+    const goalRedaction = toObject(goalSnapshot.redaction || state.redaction);
+    const goalRawTextPreview = redactionAwareText(goalRawText, t('common.empty'), goalRedaction);
     const total = state.goals.p0.length + state.goals.p1.length;
     const done = state.goals.p0.filter((goal) => goal.done).length + state.goals.p1.filter((goal) => goal.done).length;
     const goalDraft = buildGoalDraftSummary(goalSnapshot.items, state.goals);
@@ -10276,7 +10367,8 @@
             </div>
             <div class="summary-note" style="margin-top:10px;">${escapeHTML(t('common.source'))}: ${escapeHTML(goalsSource)}</div>
             <div class="summary-note" style="margin-top:10px;">${escapeHTML(t('goals.rawTextPreview'))}</div>
-            <div class="summary-note" style="margin-top:4px; white-space:pre-wrap; max-height:180px; overflow:auto;">${escapeHTML(goalRawText.trim() || t('common.empty'))}</div>
+            ${goalRedaction.active ? `<div class="summary-note" style="margin-top:4px;">${escapeHTML(t('config.redactedHidden'))}</div>` : ''}
+            <div class="summary-note" style="margin-top:4px; white-space:pre-wrap; max-height:180px; overflow:auto;">${escapeHTML(goalRawTextPreview.trim() || t('common.empty'))}</div>
             <div class="summary-note" style="margin-top:10px;">${escapeHTML(t('goals.parserWarnings'))}</div>
             ${goalWarnings.length ? `
               <div class="compact-list" style="margin-top:6px;">
@@ -10443,7 +10535,7 @@
         class="field-control ${schema.redacted ? 'field-control--secret' : ''}"
         type="${inputType}"
         value="${escapeHTML(value)}"
-        placeholder="${schema.redacted ? escapeHTML(REDACTED_VALUE) : ''}"
+        placeholder="${schema.redacted ? escapeHTML(t('common.unavailable')) : ''}"
         autocomplete="off"
         data-config-field="${escapeHTML(path)}"
         ${disabled ? 'disabled' : ''}
@@ -10464,6 +10556,7 @@
     const saveLocked = configSaveInFlight();
     const saveDisabledReason = configSaveDisabledReason(diffs, invalidDiffs);
     const saveBannerHTML = renderConfigSaveBanner(diffs, invalidDiffs);
+    const configRedaction = toObject(state.redaction);
     // restart required
     const saveButtonAttrs = saveDisabledReason ? `disabled title="${escapeHTML(saveDisabledReason)}"` : '';
     const saveButtonLabel = saveLocked ? t('config.saving') : t('config.saveChanges');
@@ -10567,6 +10660,7 @@
           </div>
         </div>
         <div class="config-detail__body">
+          ${configRedaction.active ? `<div class="summary-note">${escapeHTML(t('config.redactedHidden'))}</div>` : ''}
           ${saveBannerHTML}
           ${invalidDiffs.length ? `
             <div class="modal-banner section-banner section-banner--err">
@@ -10618,7 +10712,7 @@
           ${selectedPath === 'prompts_dir' && state.configContract?.resolved_prompts_dir ? `
             <div>
               <div class="detail-label">${escapeHTML(t('config.resolvedPromptsPath'))}</div>
-              <div class="detail-copy">${escapeHTML(state.configContract.resolved_prompts_dir)}</div>
+              <div class="detail-copy">${escapeHTML(redactionAwareText(state.configContract.resolved_prompts_dir, t('common.unknown'), configRedaction))}</div>
             </div>
           ` : ''}
           ${selectedSchema && selectedSchema.redacted ? `
@@ -10667,11 +10761,11 @@
       source: '',
       updated: 'empty',
       summary: '',
-      preview: '[redacted]',
+      preview: '',
       path: '',
     };
     const copyPromptSummaryAttrs = selectedPrompt ? '' : 'disabled aria-disabled="true"';
-    const promptsDir = state.configMeta?.resolved_prompts_dir || state.promptsDir || state.config.prompts_dir || 'prompts';
+    const promptsDir = redactionAwareText(state.configMeta?.resolved_prompts_dir || state.promptsDir || state.config.prompts_dir || 'prompts', t('prompts.unresolvedPath'));
     const editor = promptEditorData();
     const overrides = state.prompts.filter((prompt) => prompt.mode === 'override').length;
     const editorDirty = promptEditorIsDirty(editor);
@@ -10682,7 +10776,7 @@
     const editorMode = editor.promptMode || selected.mode;
     const editorPath = editor.promptPath || selected.path || '';
     const editorUpdated = editor.promptUpdated || selected.updated || '';
-    const editorPreview = editor.promptPreview || selected.preview || REDACTED_VALUE;
+    const editorPreview = redactionAwareText(editor.promptPreview || selected.preview, t('common.unavailable'));
     const editorDisabled = editor.loading || promptMutationInFlight(editor) || !editor.promptId || Boolean(editor.error);
     // Inventory previews stay redacted by default. Saving creates a backup before atomically updating the prompt file, and restore uses the selected backup.
 
@@ -10776,7 +10870,7 @@
             </div>
             <div class="prompt-preview__body">
               <div class="detail-label">${escapeHTML(t('common.preview'))}</div>
-              <pre class="prompt-preview__text">${escapeHTML(editorPreview || REDACTED_VALUE)}</pre>
+              <pre class="prompt-preview__text">${escapeHTML(editorPreview)}</pre>
             </div>
           </div>
 
@@ -10980,6 +11074,11 @@
       const notificationLabel = notificationKindLabel(normalized);
       return notificationLabel === t('common.unknown') ? t('common.unknown') : notificationLabel;
     })();
+    const latestNotificationText = redactionAwareText(latestNotification ? latestNotification.text : '', t('notifications.noRecorded'));
+    const controlPlaneSnapshot = redactionAwareText(
+      state.runnerControl.lastMessage || state.runnerControl.lastError || t('notifications.runnerControlSnapshot'),
+      t('notifications.runnerControlSnapshot'),
+    );
     const emptyMessage = state.notifications.length
       ? t('notifications.noMatchCurrentFilter')
       : state.sectionState.notifications?.status === 'error'
@@ -11034,8 +11133,8 @@
             `
               <div class="compact-list">
                 ${compactFactItem(t('notifications.observedKinds'), observedKinds.length ? observedKinds.map((kind) => notificationKindLabel(kind)).join(', ') : t('common.none'), t('notifications.observedKindsNote'))}
-                ${compactFactItem(t('notifications.newestEvent'), latestNotification ? `${notificationKindLabel(latestNotification.kind)} | ${fmtDateTime(latestNotification.t)}` : t('common.none'), latestNotification ? latestNotification.text : t('notifications.noRecorded'))}
-                ${compactFactItem(t('notifications.controlPlaneLastEvent'), controlPlaneEventLabel, state.runnerControl.lastMessage || state.runnerControl.lastError || t('notifications.runnerControlSnapshot'))}
+                ${compactFactItem(t('notifications.newestEvent'), latestNotification ? `${notificationKindLabel(latestNotification.kind)} | ${fmtDateTime(latestNotification.t)}` : t('common.none'), latestNotificationText)}
+                ${compactFactItem(t('notifications.controlPlaneLastEvent'), controlPlaneEventLabel, controlPlaneSnapshot)}
               </div>
             `
           )}
@@ -11472,7 +11571,7 @@
                     <div class="phone-item__body">
                       <div class="phone-item__title">${escapeHTML(stage.label)} | <span class="muted">${escapeHTML(stage.taskTitle || stage.title || t('pipeline.lifecycleRecord'))}</span></div>
                       <div class="phone-item__meta">${escapeHTML([lifecycleStageStatusLabel(stage.status), stage.taskId || t('mobile.taskUnavailable'), stage.attempt != null ? t('backlog.attemptText', { attempt: stage.attempt }) : t('backlog.attemptUnavailable'), stage.cycle != null ? t('backlog.cycleText', { cycle: stage.cycle }) : t('backlog.cycleUnavailable')].join(' | '))}</div>
-                      <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(stage.recentOutput, 120) || t('pipeline.recentOutputUnavailable'))}</div>
+                      <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(redactionAwareText(stage.recentOutput, ''), 120) || t('pipeline.recentOutputUnavailable'))}</div>
                     </div>
                   </div>
                 `).join('') : `<div class="summary-note">${escapeHTML(t('pipeline.noLifecycleRecords'))}</div>`}
@@ -11485,7 +11584,7 @@
                   <div class="phone-item">
                     <span class="dot" style="background:${kindColor(item.kind)}; margin-top:5px;"></span>
                     <div class="phone-item__body">
-                      <div class="phone-item__title">${escapeHTML(item.text)}</div>
+                      <div class="phone-item__title">${escapeHTML(redactionAwareText(item.text, t('notifications.noRecorded')))}</div>
                       <div class="phone-item__meta">${escapeHTML(item.kind)} | ${escapeHTML(fmtRelative(item.t))}</div>
                     </div>
                   </div>
@@ -11739,13 +11838,14 @@
       .join('');
     const startOptionsHTML = startAction ? renderRunnerControlStartOptionsSection(control, actionEnabled) : '';
     const bannerTitle = state.stopSubmitting ? t('runner.actionInFlight') : state.stopError ? t('runner.actionFailed') : !actionEnabled ? t('runner.actionDisabled') : t('runner.confirmationRequired');
+    const stopErrorText = redactionAwareText(state.stopError, t('runner.controlFailed'));
     const bannerMessage = state.stopSubmitting
-      ? control.message || t('runner.refreshingStatus')
+      ? redactionAwareText(control.message, t('runner.refreshingStatus'))
       : state.stopError
-        ? state.stopError
+        ? stopErrorText
         : !actionEnabled
           ? runnerControlActionDisabledReason(action)
-          : control.message || actionSummary;
+          : redactionAwareText(control.message, actionSummary);
     overlayRoot().innerHTML = `
       <div class="overlay overlay--tight" data-overlay="stop">
         <div class="overlay__panel overlay__panel--modal">
@@ -12781,7 +12881,10 @@
       if (statusReason.startsWith('status_error:') || state.runnerControl.lastError) {
         return {
           ok: false,
-          message: state.runnerControl.lastError || statusReason || t('runner.controllerReportedError'),
+          message:
+            redactionAwareText(state.runnerControl.lastError, '') ||
+            redactionAwareText(statusReason, '') ||
+            t('runner.controllerReportedError'),
         };
       }
       if (Boolean(status.running) === Boolean(expectedRunning)) {
@@ -12802,7 +12905,10 @@
     if (statusReason.startsWith('status_error:') || state.runnerControl.lastError) {
       return {
         ok: false,
-        message: state.runnerControl.lastError || statusReason || t('runner.controllerReportedError'),
+        message:
+          redactionAwareText(state.runnerControl.lastError, '') ||
+          redactionAwareText(statusReason, '') ||
+          t('runner.controllerReportedError'),
       };
     }
     if (Boolean(status.running) === Boolean(expectedRunning)) {
@@ -12894,7 +13000,7 @@
     } catch (error) {
       const message = toText(error?.message || error, t('runner.controlFailed'));
       state.stopSubmitting = false;
-      state.stopError = message;
+      state.stopError = redactionAwareText(message, t('runner.controlFailed'));
       const snapshot = toObject(error?.snapshot);
       if (Object.keys(snapshot).length) {
         applyServerSnapshot(snapshot);
@@ -13099,7 +13205,7 @@
       return t('config.saveInProgress');
     }
     if (!goalSaveEnabled()) {
-      return state.runnerControl?.message || t('config.savesDisabledUntilRunnerEnabled');
+      return redactionAwareText(state.runnerControl?.message, t('config.savesDisabledUntilRunnerEnabled'));
     }
     if (!goalDraft.dirty) {
       return t('goals.noLocalChanges');
@@ -13169,7 +13275,7 @@
         : saveState.status === 'error'
           ? saveState.message || t('goals.saveFailed')
           : !goalSaveEnabled()
-            ? state.runnerControl?.message || t('config.savesDisabledUntilRunnerEnabled')
+            ? redactionAwareText(state.runnerControl?.message, t('config.savesDisabledUntilRunnerEnabled'))
             : !goalDraft.dirty
               ? t('goals.draftStaysLocal')
               : requiresConfirmation && !confirmationMatches

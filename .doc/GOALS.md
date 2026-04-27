@@ -128,17 +128,17 @@
 - [x] A worktree doctor/list/prune command or API can report orphaned worktrees, stale pending markers, missing patches, and cleanup-failed artifacts without mutating source files by default.
 - [ ] Shell, web, and remote-controller starts create a new `run_dir` by default; latest run reuse requires explicit resume or `--run-dir` intent.
 - [ ] `STATE.json` done/failed counts are scoped to the current backlog generation so stale task ids from previous backlogs cannot inflate progress or history.
-- [ ] Web snapshots separate execution status from project completion status, so `rc=0`/`reason=ok` does not appear as project success while required goals or backlog items remain incomplete.
-- [ ] Goals parsing treats missing or malformed required priority sections as invalid/incomplete instead of silently completing P0/P1 modes.
-- [ ] Goals auto-refresh and completion checks use the same configured `goals_completion_level` in shell, runner, web, and tests.
+- [x] Web snapshots separate execution status from project completion status, so `rc=0`/`reason=ok` does not appear as project success while required goals or backlog items remain incomplete.
+- [x] Goals parsing treats missing or malformed required priority sections as invalid/incomplete instead of silently completing P0/P1 modes.
+- [x] Goals auto-refresh and completion checks use the same configured `goals_completion_level` in shell, runner, web, and tests.
 - [x] Web console tests are aligned with `goals_completion_level=all` defaults and pass without relying on operator-specific local config.
-- [ ] Self-development runs execute at least the fast web/worktree regression suite, not only `compileall`, before marking task branches complete.
+- [x] Self-development runs execute at least the fast web/worktree regression suite, not only `compileall`, before marking task branches complete.
 - [x] LAN web serving refuses runner controls without real authentication or an explicit trusted-network gate; confirmation phrases remain UX confirmations, not authentication.
 - [ ] Redaction covers logs, GOALS raw text, task output excerpts, config, prompts, and serialized runner arguments consistently before LAN exposure.
 
 ### P0-M. Browser-First Runner Operation
 
-- [ ] Start controls expose the same practical run modes operators use in the shell: autopilot, continuous, loop, one-shot, max cycles, profile, backend, and config path.
+- [x] Start controls expose the same practical run modes operators use in the shell: autopilot, continuous, loop, one-shot, max cycles, profile, backend, and config path.
 - [ ] Start controls validate incompatible run options before launch and show the exact command-equivalent runner arguments that will be used.
 - [ ] Stop controls show phase-by-phase progress from request, stop file write, child termination, runner wait, final artifact collection, timeout, and finalized states.
 - [ ] Stop timeout state stays visibly actionable in the browser, including whether the runner is still alive, which child PIDs remain tracked, and which files may still be locked.

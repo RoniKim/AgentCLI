@@ -28,6 +28,7 @@ RUNNER_START_BACKEND_CHOICES = ("codex", "claudecode")
 RUNNER_START_BOOL_CHOICES = (True, False)
 RUNNER_START_TRUTHY = {"1", "true", "yes", "on", "enabled"}
 RUNNER_START_FALSY = {"0", "false", "no", "off", "disabled"}
+REDACTED_VALUE = "[redacted]"
 
 
 def _runner_start_path_text(value: Path | str | None) -> str:
@@ -98,7 +99,12 @@ def _runner_start_backend(value: Any, default: str = "codex") -> str:
     return default if default in RUNNER_START_BACKEND_CHOICES else "codex"
 
 
-def build_runner_start_options_contract(repo: Path, base_args: argparse.Namespace | None = None) -> dict[str, Any]:
+def build_runner_start_options_contract(
+    repo: Path,
+    base_args: argparse.Namespace | None = None,
+    *,
+    redact_paths: bool = False,
+) -> dict[str, Any]:
     repo_root = repo.expanduser().resolve()
     args = base_args or argparse.Namespace()
     default_cfg_path = default_config_path(repo_root)
@@ -112,6 +118,8 @@ def build_runner_start_options_contract(repo: Path, base_args: argparse.Namespac
         getattr(args, "config_path", getattr(args, "config", "")) or default_cfg_path
     )
     default_config_path_text = _runner_start_path_text(default_cfg_path)
+    public_current_config_path = REDACTED_VALUE if redact_paths and current_config_path else current_config_path
+    public_default_config_path_text = REDACTED_VALUE if redact_paths and default_config_path_text else default_config_path_text
 
     values = {
         "autopilot": bool(getattr(args, "autopilot", DEFAULTS.get("autopilot", False))),
@@ -125,7 +133,7 @@ def build_runner_start_options_contract(repo: Path, base_args: argparse.Namespac
             getattr(args, "execution_backend", DEFAULTS.get("execution_backend", "codex")),
             str(DEFAULTS.get("execution_backend", "codex") or "codex"),
         ),
-        "config_path": current_config_path,
+        "config_path": public_current_config_path,
     }
     defaults = {
         "autopilot": bool(DEFAULTS.get("autopilot", False)),
@@ -136,7 +144,7 @@ def build_runner_start_options_contract(repo: Path, base_args: argparse.Namespac
         "loop_max_cycles": max(0, int(_runner_start_int(DEFAULTS.get("loop_max_cycles", 0)) or 0)),
         "profile": _runner_start_profile(DEFAULTS.get("profile", "personal"), "personal"),
         "execution_backend": _runner_start_backend(DEFAULTS.get("execution_backend", "codex"), "codex"),
-        "config_path": default_config_path_text,
+        "config_path": public_default_config_path_text,
     }
     schema = {
         "autopilot": {
@@ -233,6 +241,15 @@ def build_runner_start_options_contract(repo: Path, base_args: argparse.Namespac
             "continuous": list(RUNNER_START_BOOL_CHOICES),
             "loop": list(RUNNER_START_BOOL_CHOICES),
             "one_shot": list(RUNNER_START_BOOL_CHOICES),
+        },
+        "redaction": {
+            "active": bool(redact_paths),
+            "placeholder": REDACTED_VALUE,
+            "paths": (
+                ["path", "defaults_path", "values.config_path", "defaults.config_path"]
+                if redact_paths
+                else []
+            ),
         },
     }
 
@@ -461,8 +478,8 @@ class RunnerController:
             except Exception:
                 pass
 
-    def start_options_contract(self) -> dict[str, Any]:
-        return build_runner_start_options_contract(self.repo, self.base_args)
+    def start_options_contract(self, *, redact_paths: bool = False) -> dict[str, Any]:
+        return build_runner_start_options_contract(self.repo, self.base_args, redact_paths=redact_paths)
 
     def _stop_file_name(self) -> str:
         raw = str(getattr(self.base_args, "stop_file", "STOP") or "STOP").strip()
@@ -1056,11 +1073,11 @@ class RunnerController:
             return ""
         return "\n".join(dq).strip()
 
-    def status(self) -> dict[str, Any]:
+    def status(self, *, redact_paths: bool = False) -> dict[str, Any]:
         running = self._runner_is_alive()
         run_dir = self.run_dir or find_latest_run_dir(self.repo)
         config_path = self._config_path_name()
-        start_options = self.start_options_contract()
+        start_options = self.start_options_contract(redact_paths=redact_paths)
         if run_dir is not None:
             self.run_dir = run_dir
 

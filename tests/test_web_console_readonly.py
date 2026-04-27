@@ -1317,6 +1317,42 @@ def _run_log_tail_session_harness(steps, fetch_responses=None):
     return json.loads(completed.stdout)
 
 
+class WebConsoleRedactionHelperTests(unittest.TestCase):
+    def test_redact_web_log_payload_redacts_files_metadata(self) -> None:
+        from agent_runner.web import _redact_web_log_payload
+
+        payload = {
+            "entries": [
+                {
+                    "msg": "Task build output with secret token=abc123",
+                    "raw": "Task build output with secret token=abc123",
+                }
+            ],
+            "tail": "cycle summary token=abc123",
+            "files": {
+                "cycle_summary": "D:/runs/latest/cycle_summary.log",
+                "run_log": "D:/runs/latest/logs/run.log",
+                "metrics": "D:/runs/latest/metrics.jsonl",
+            },
+            "source": {
+                "path": "D:/runs/latest/metrics.jsonl",
+                "name": "metrics.jsonl",
+                "exists": True,
+            },
+        }
+
+        redacted = _redact_web_log_payload(payload)
+        self.assertEqual("[redacted]", redacted["entries"][0]["msg"])
+        self.assertEqual("[redacted]", redacted["entries"][0]["raw"])
+        self.assertEqual("[redacted]", redacted["tail"])
+        self.assertEqual("[redacted]", redacted["files"]["cycle_summary"])
+        self.assertEqual("[redacted]", redacted["files"]["run_log"])
+        self.assertEqual("[redacted]", redacted["files"]["metrics"])
+        self.assertEqual("[redacted]", redacted["source"]["path"])
+        self.assertEqual("metrics.jsonl", redacted["source"]["name"])
+        self.assertIn("files.cycle_summary", redacted["redaction"]["fields"])
+
+
 class WebConsoleReadonlyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
