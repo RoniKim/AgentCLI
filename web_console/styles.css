@@ -2285,10 +2285,12 @@ a {
 }
 
 .history-table__status {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  white-space: nowrap;
+  gap: 6px 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  white-space: normal;
 }
 
 .history-table__id {
@@ -2951,6 +2953,13 @@ a {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px 12px;
+}
+
+.runner-control__chips,
+.history-details__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .runner-control__detail {

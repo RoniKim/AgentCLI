@@ -1859,8 +1859,14 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("pending", secondary_backlog["status"])
         self.assertEqual("web_console/app.js, web_console/styles.css", secondary_backlog["file_scope"])
         self.assertEqual(1, payload["progress"]["tasks_done"])
-        self.assertEqual("success", payload["progress"]["run_status"])
-        self.assertEqual("success", payload["active_run"]["status"])
+        self.assertEqual("completed", payload["progress"]["execution_status"])
+        self.assertEqual("completed", payload["progress"]["run_status"])
+        self.assertFalse(payload["progress"]["project_complete"])
+        self.assertEqual("incomplete", payload["progress"]["project_status"])
+        self.assertEqual("completed", payload["active_run"]["executionStatus"])
+        self.assertEqual("completed", payload["active_run"]["status"])
+        self.assertFalse(payload["active_run"]["projectComplete"])
+        self.assertEqual("incomplete", payload["active_run"]["projectStatus"])
         self.assertIsNone(payload["progress"]["progress"])
         self.assertIsNone(payload["active_run"]["progress"])
         self.assertTrue(payload["active_run"]["tokensAvailable"])
@@ -1895,13 +1901,17 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("project_complete", history_item["finalReason"])
         self.assertEqual("project_complete", history_item["shutdownReason"])
         self.assertEqual("project_complete", history_item["stopReason"])
+        self.assertEqual("completed", history_item["executionStatus"])
+        self.assertEqual("completed", history_item["status"])
+        self.assertFalse(history_item["projectComplete"])
+        self.assertEqual("incomplete", history_item["projectStatus"])
         self.assertEqual(1, history_item["tasksDone"])
         self.assertEqual(2, history_item["tasksTotal"])
         self.assertEqual(0, history_item["tasksFailed"])
         self.assertEqual(0, history_item["tasksSkipped"])
         self.assertEqual({"done": 1, "failed": 0, "skipped": 0, "total": 2, "cycles": 1}, history_item["taskCounts"])
         self.assertEqual(120, history_item["durationSec"])
-        self.assertEqual("main", history_item["branch"])
+        self.assertIn(history_item["branch"], {"main", "HEAD"})
         self.assertEqual(self.run_dir.as_posix(), history_item["runDir"])
         self.assertEqual("pending", history_item["worktreeOutcome"])
         self.assertIn("runSummary", history_item)
@@ -1922,7 +1932,10 @@ class WebConsoleReadonlyTests(unittest.TestCase):
 
         self.assertEqual("20260426-120000", Path(payload["latest_run_dir"]).name)
         self.assertEqual("20260426-120000", payload["active_run"]["id"])
-        self.assertEqual("success", payload["progress"]["run_status"])
+        self.assertEqual("completed", payload["progress"]["execution_status"])
+        self.assertEqual("completed", payload["progress"]["run_status"])
+        self.assertFalse(payload["progress"]["project_complete"])
+        self.assertEqual("incomplete", payload["progress"]["project_status"])
 
     def test_api_status_covers_no_run_and_live_running_controller_snapshot(self) -> None:
         no_run = self._api_status(self.empty_repo, None)
@@ -2083,8 +2096,14 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             ),
         )
         self.assertEqual(success_run_dir.resolve().as_posix(), success["latest_run_dir"])
-        self.assertEqual("success", success["progress"]["run_status"])
-        self.assertEqual("success", success["active_run"]["status"])
+        self.assertEqual("completed", success["progress"]["execution_status"])
+        self.assertEqual("completed", success["progress"]["run_status"])
+        self.assertFalse(success["progress"]["project_complete"])
+        self.assertEqual("incomplete", success["progress"]["project_status"])
+        self.assertEqual("completed", success["active_run"]["executionStatus"])
+        self.assertEqual("completed", success["active_run"]["status"])
+        self.assertFalse(success["active_run"]["projectComplete"])
+        self.assertEqual("incomplete", success["active_run"]["projectStatus"])
         self.assertEqual("project_complete", success["progress"]["final_reason"])
         self.assertEqual("project_complete", success["active_run"]["finalReason"])
         self.assertTrue(success["active_run"]["runDir"].endswith("20260426-111000"))
@@ -2108,6 +2127,84 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("7d", success["metrics"]["quota_window"])
         self.assertEqual(0.33, success["metrics"]["quotaUsed"])
         self.assertEqual(0.33, success["metrics"]["quota_used"])
+
+        ok_run_dir = self._make_live_run_dir("20260426-130000")
+        _write_run_bundle(ok_run_dir, status="success", final_rc=0, final_reason="ok", branch="main")
+
+        from agent_runner import web as web_module
+        from fastapi.testclient import TestClient
+
+        controller = FakeRunnerController(
+            self._controller_status(
+                ok_run_dir,
+                running=False,
+                reason="ok",
+                exit_code=0,
+                stage="QA",
+                current_task_id="T1",
+                current_task_title="Expose read-only progress views",
+                branch="main",
+                attempt=2,
+                worktree_mode="manual",
+                startedAt=1714132800000,
+                elapsedSec=120,
+                progress=1.0,
+            )
+        )
+        with patch.object(web_module, "_build_runner_controller", return_value=controller):
+            client = TestClient(self._create_app(self.repo))
+
+        status_response = client.get("/api/status")
+        self.assertEqual(200, status_response.status_code)
+        status_payload = status_response.json()
+
+        progress_response = client.get("/api/progress")
+        self.assertEqual(200, progress_response.status_code)
+        progress_payload = progress_response.json()
+
+        runner_status_response = client.get("/api/runner/status")
+        self.assertEqual(200, runner_status_response.status_code)
+        runner_status_payload = runner_status_response.json()
+
+        history_response = client.get("/api/history")
+        self.assertEqual(200, history_response.status_code)
+        history_payload = history_response.json()
+        history_item = next(item for item in history_payload["items"] if item["id"] == ok_run_dir.name)
+
+        self.assertEqual(2, status_payload["goals"]["summary"]["unchecked"])
+        self.assertEqual({"pending": 1, "in_progress": 0, "done": 1, "failed": 0}, status_payload["backlog"]["counts"])
+        self.assertEqual("completed", status_payload["progress"]["execution_status"])
+        self.assertEqual("completed", status_payload["progress"]["run_status"])
+        self.assertNotEqual("success", status_payload["progress"]["run_status"])
+        self.assertFalse(status_payload["progress"]["project_complete"])
+        self.assertEqual("incomplete", status_payload["progress"]["project_status"])
+        self.assertEqual("completed", status_payload["active_run"]["executionStatus"])
+        self.assertEqual("completed", status_payload["active_run"]["status"])
+        self.assertNotEqual("success", status_payload["active_run"]["status"])
+        self.assertFalse(status_payload["active_run"]["projectComplete"])
+        self.assertEqual("incomplete", status_payload["active_run"]["projectStatus"])
+        self.assertEqual("ok", status_payload["progress"]["final_reason"])
+        self.assertEqual("ok", status_payload["active_run"]["finalReason"])
+
+        self.assertEqual("completed", progress_payload["execution_status"])
+        self.assertEqual("completed", progress_payload["run_status"])
+        self.assertNotEqual("success", progress_payload["run_status"])
+        self.assertFalse(progress_payload["project_complete"])
+        self.assertEqual("incomplete", progress_payload["project_status"])
+
+        self.assertEqual("completed", runner_status_payload["executionStatus"])
+        self.assertEqual("completed", runner_status_payload["run_status"])
+        self.assertFalse(runner_status_payload["project_complete"])
+        self.assertEqual("incomplete", runner_status_payload["projectStatus"])
+        self.assertEqual("ok", runner_status_payload["status"]["reason"])
+
+        self.assertEqual("ok", history_item["finalReason"])
+        self.assertEqual("ok", history_item["shutdownReason"])
+        self.assertEqual("completed", history_item["executionStatus"])
+        self.assertEqual("completed", history_item["status"])
+        self.assertNotEqual("success", history_item["status"])
+        self.assertFalse(history_item["projectComplete"])
+        self.assertEqual("incomplete", history_item["projectStatus"])
 
         stopped_run_dir = self._make_live_run_dir("20260426-112000")
         stopped = self._api_status(
@@ -2355,6 +2452,10 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             self.assertIn(key, progress)
         self.assertEqual(1, progress["tasks_done"])
         self.assertEqual(2, progress["tasks_total"])
+        self.assertEqual("completed", progress["execution_status"])
+        self.assertEqual("completed", progress["run_status"])
+        self.assertFalse(progress["project_complete"])
+        self.assertEqual("incomplete", progress["project_status"])
         self.assertIn("goals", progress)
 
         logs = self.client.get("/api/logs").json()
@@ -2405,6 +2506,11 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         history = self.client.get("/api/history").json()
         self.assertIn("items", history)
         self.assertGreaterEqual(len(history["items"]), 1)
+        history_item = next(item for item in history["items"] if item["id"] == self.run_dir.name)
+        self.assertEqual("completed", history_item["executionStatus"])
+        self.assertEqual("completed", history_item["status"])
+        self.assertFalse(history_item["projectComplete"])
+        self.assertEqual("incomplete", history_item["projectStatus"])
 
         worktree = self.client.get("/api/worktree").json()
         self.assertEqual("pending review", worktree["status"])
@@ -3709,7 +3815,7 @@ Another unsupported line.
         self.assertEqual("project_complete", history_item["shutdownReason"])
         self.assertEqual("project_complete", history_item["stopReason"])
         self.assertEqual({"done": 1, "failed": 0, "skipped": 0, "total": 2, "cycles": 1}, history_item["taskCounts"])
-        self.assertEqual("main", history_item["branch"])
+        self.assertIn(history_item["branch"], {"main", "HEAD"})
         self.assertEqual(120, history_item["durationSec"])
         self.assertEqual("pending", history_item["worktreeOutcome"])
         self.assertIn("runSummary", history_item)

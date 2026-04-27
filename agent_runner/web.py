@@ -624,10 +624,10 @@ def _safe_jsonl(path: Path, *, max_items: int = 400) -> list[dict[str, Any]]:
     return list(rows)
 
 
-RUN_STATUS_ALIASES = {
-    "complete": "success",
-    "completed": "success",
-    "done": "success",
+EXECUTION_STATUS_ALIASES = {
+    "complete": "completed",
+    "completed": "completed",
+    "done": "completed",
     "finished": "stopped",
     "halted": "stopped",
     "stopping": "stopped",
@@ -637,10 +637,11 @@ RUN_STATUS_ALIASES = {
     "canceled": "stopped",
     "aborted": "stopped",
     "error": "failed",
-    "ok": "success",
-    "prepared_only": "success",
+    "ok": "completed",
+    "prepared_only": "completed",
+    "success": "completed",
 }
-RUN_STATUS_VALUES = {"idle", "running", "stopped", "failed", "success"}
+EXECUTION_STATUS_VALUES = {"idle", "running", "stopped", "failed", "completed"}
 
 
 def _coerce_optional_int(value: Any) -> int | None:
@@ -744,7 +745,7 @@ def _pick_value(*values: Any) -> Any:
     return None
 
 
-def _normalize_run_status(
+def _normalize_execution_status(
     raw_status: Any,
     *,
     running: bool = False,
@@ -754,8 +755,8 @@ def _normalize_run_status(
     has_run_dir: bool = False,
 ) -> str:
     status = _pick_text(raw_status).lower()
-    status = RUN_STATUS_ALIASES.get(status, status)
-    if status in RUN_STATUS_VALUES:
+    status = EXECUTION_STATUS_ALIASES.get(status, status)
+    if status in EXECUTION_STATUS_VALUES:
         return status
     if status == "no-run":
         return "idle"
@@ -763,21 +764,65 @@ def _normalize_run_status(
         return "running"
 
     reason = _pick_text(final_reason).lower()
-    if reason in {"project_complete", "all_tasks_done", "completed", "success"}:
-        return "success"
+    if reason in {"project_complete", "all_tasks_done", "completed", "success", "ok", "done"}:
+        return "completed"
     if reason in {"stop_file", "stop_requested", "stopped", "user_stop", "manual_stop"} or stop_file_exists:
         return "stopped"
 
     rc = _coerce_optional_int(exit_code)
     if rc is not None:
-        if rc == 0 and reason in {"", "ok", "prepared_only"} and has_run_dir:
-            return "success"
+        if rc == 0 and reason in {"", "ok", "prepared_only", "completed", "success", "project_complete", "all_tasks_done", "done"} and has_run_dir:
+            return "completed"
         if rc != 0:
             return "failed"
 
     if reason in {"failed", "error", "exception", "abandoned", "abandon_failed", "build_failed", "test_failed", "policy_violation", "exhausted_attempts"}:
         return "failed"
     return "running" if has_run_dir else "idle"
+
+
+def _normalize_run_status(
+    raw_status: Any,
+    *,
+    running: bool = False,
+    exit_code: Any = None,
+    final_reason: str = "",
+    stop_file_exists: bool = False,
+    has_run_dir: bool = False,
+    project_complete: bool = False,
+) -> str:
+    execution_status = _normalize_execution_status(
+        raw_status,
+        running=running,
+        exit_code=exit_code,
+        final_reason=final_reason,
+        stop_file_exists=stop_file_exists,
+        has_run_dir=has_run_dir,
+    )
+    if project_complete and execution_status == "completed":
+        return "success"
+    return execution_status
+
+
+def _project_completion_status(
+    goals: dict[str, Any],
+    *,
+    tasks_total: int = 0,
+    tasks_done: int = 0,
+    tasks_failed: int = 0,
+) -> dict[str, Any]:
+    completion = goals.get("completion") if isinstance(goals.get("completion"), dict) else {}
+    goals_complete = bool(completion.get("project_complete"))
+    has_goals = bool(completion.get("has_goals"))
+    backlog_complete = tasks_total == 0 or (tasks_done >= tasks_total and tasks_failed == 0)
+    project_complete = bool(goals_complete and backlog_complete)
+    return {
+        "has_goals": has_goals,
+        "goals_complete": goals_complete,
+        "backlog_complete": backlog_complete,
+        "project_complete": project_complete,
+        "project_status": "complete" if project_complete else "incomplete",
+    }
 
 
 def _is_sensitive_config_key(key: Any) -> bool:
@@ -1616,6 +1661,11 @@ def _runner_control_payload(
     last_message: str = "",
     last_error: str = "",
     run_status: str = "",
+    execution_status: str = "",
+    project_complete: bool = False,
+    project_status: str = "",
+    goals_complete: bool = False,
+    backlog_complete: bool = False,
     busy: bool = False,
 ) -> dict[str, Any]:
     status_payload = _runner_control_status_payload(
@@ -1657,6 +1707,11 @@ def _runner_control_payload(
         "message": message,
         "status": status_payload,
         "run_status": str(run_status or "").strip(),
+        "execution_status": str(execution_status or "").strip(),
+        "project_complete": bool(project_complete),
+        "project_status": str(project_status or ("complete" if project_complete else "incomplete")).strip() or ("complete" if project_complete else "incomplete"),
+        "goals_complete": bool(goals_complete),
+        "backlog_complete": bool(backlog_complete),
         "actions": actions,
         "confirmation": dict(RUNNER_CONTROL_CONFIRMATIONS),
         "last_action": last_action,
@@ -3449,11 +3504,26 @@ def _active_run_payload(
         tasks_total = len(backlog)
     tasks_done = int(progress.get("tasks_done") or 0)
     tasks_failed = int(progress.get("tasks_failed") or 0)
+    progress_goals = progress.get("goals") if isinstance(progress.get("goals"), dict) else {}
+    project_completion = _project_completion_status(
+        progress_goals,
+        tasks_total=tasks_total,
+        tasks_done=tasks_done,
+        tasks_failed=tasks_failed,
+    )
     progress_available = bool(progress.get("progress_available"))
     progress_value = _coerce_optional_float(_pick_value(progress.get("progress"), progress.get("progress_value"), progress.get("progressValue")))
     if not progress_available:
         progress_value = None
 
+    execution_status = _normalize_execution_status(
+        controller_data.get("run_status") or controller_data.get("status") or progress.get("run_status") or progress.get("status"),
+        running=bool(controller_data.get("running")),
+        exit_code=controller_data.get("exit_code"),
+        final_reason=final_reason_text,
+        stop_file_exists=bool(controller_data.get("stop_file_exists") or (run_dir_exists and (run_dir / "STOP").exists())),
+        has_run_dir=bool(run_dir),
+    )
     run_status = _normalize_run_status(
         controller_data.get("run_status") or controller_data.get("status") or progress.get("run_status") or progress.get("status"),
         running=bool(controller_data.get("running")),
@@ -3461,6 +3531,7 @@ def _active_run_payload(
         final_reason=final_reason_text,
         stop_file_exists=bool(controller_data.get("stop_file_exists") or (run_dir_exists and (run_dir / "STOP").exists())),
         has_run_dir=bool(run_dir),
+        project_complete=project_completion["project_complete"],
     )
 
     last_event_stage = _pick_text(controller_data.get("stage"), controller_data.get("current_stage"), metrics.get("last_stage"), progress.get("last_stage"))
@@ -3549,6 +3620,16 @@ def _active_run_payload(
         "finalReason": final_reason_text,
         "progressAvailable": progress_available,
         "progress": round(progress_value, 3) if progress_value is not None else None,
+        "executionStatus": execution_status,
+        "execution_status": execution_status,
+        "goalsComplete": project_completion["goals_complete"],
+        "goals_complete": project_completion["goals_complete"],
+        "backlogComplete": project_completion["backlog_complete"],
+        "backlog_complete": project_completion["backlog_complete"],
+        "projectComplete": project_completion["project_complete"],
+        "project_complete": project_completion["project_complete"],
+        "projectStatus": project_completion["project_status"],
+        "project_status": project_completion["project_status"],
         "budgetAvailable": budget_available,
         "budgetUsed": round(budget_used, 3) if budget_used is not None else None,
         "tokensAvailable": tokens_available,
@@ -3936,6 +4017,7 @@ def _history_item(
     backlog = _load_tasks(run_dir)
     backlog_task_ids = load_backlog_task_ids(run_dir / "BACKLOG.json")
     state_counts = count_state_task_ids(state, backlog_task_ids)
+    goals = _build_goals_payload(repo, completion_level="all")
     run_summary = _safe_json(run_dir / "run_summary.json", {})
     last_summary = _safe_json(run_dir / "last_run_summary.json", {})
 
@@ -3958,6 +4040,12 @@ def _history_item(
         tasks_skipped = 0
 
     cycle_count = len(run_summary.get("cycles") or [])
+    project_completion = _project_completion_status(
+        goals,
+        tasks_total=tasks_total,
+        tasks_done=tasks_done,
+        tasks_failed=tasks_failed,
+    )
 
     rc = _coerce_optional_int(final.get("rc"))
     if rc is None:
@@ -3967,6 +4055,14 @@ def _history_item(
         shutdown_reason = "stop_file"
     if not final_reason and stop_exists:
         final_reason = shutdown_reason
+    execution_status = _normalize_execution_status(
+        "",
+        running=False,
+        exit_code=rc,
+        final_reason=shutdown_reason,
+        stop_file_exists=stop_exists,
+        has_run_dir=True,
+    )
     status = _normalize_run_status(
         "",
         running=False,
@@ -3974,6 +4070,7 @@ def _history_item(
         final_reason=shutdown_reason,
         stop_file_exists=stop_exists,
         has_run_dir=True,
+        project_complete=project_completion["project_complete"],
     )
 
     started_at = _epoch_ms(run_dir.stat().st_ctime)
@@ -4000,6 +4097,16 @@ def _history_item(
         "startedAt": started_at,
         "endedAt": ended_at,
         "status": status,
+        "executionStatus": execution_status,
+        "execution_status": execution_status,
+        "projectComplete": project_completion["project_complete"],
+        "project_complete": project_completion["project_complete"],
+        "projectStatus": project_completion["project_status"],
+        "project_status": project_completion["project_status"],
+        "goalsComplete": project_completion["goals_complete"],
+        "goals_complete": project_completion["goals_complete"],
+        "backlogComplete": project_completion["backlog_complete"],
+        "backlog_complete": project_completion["backlog_complete"],
         "tasksDone": tasks_done,
         "tasksTotal": tasks_total,
         "tasksFailed": tasks_failed,
@@ -4085,8 +4192,15 @@ def _latest_observable_run_dir(repo: Path) -> Path | None:
 def _controller_run_dir_is_current_or_terminal(controller_data: dict[str, Any]) -> bool:
     if bool(controller_data.get("running")):
         return True
-    status = RUN_STATUS_ALIASES.get(_pick_text(controller_data.get("run_status"), controller_data.get("status")).lower(), "")
-    if status in {"success", "stopped", "failed"}:
+    status = _normalize_execution_status(
+        _pick_text(controller_data.get("run_status"), controller_data.get("status")),
+        running=bool(controller_data.get("running")),
+        exit_code=controller_data.get("exit_code"),
+        final_reason=_pick_text(controller_data.get("final_reason"), controller_data.get("reason")),
+        stop_file_exists=bool(controller_data.get("stop_file_exists")),
+        has_run_dir=bool(controller_data.get("run_dir")),
+    )
+    if status in {"completed", "stopped", "failed"}:
         return True
     reason = _pick_text(controller_data.get("final_reason"), controller_data.get("reason")).lower()
     terminal_reasons = {
@@ -4243,6 +4357,12 @@ def _build_progress_payload(
     tasks_total = len(backlog_items)
     tasks_done = state_counts["done"]
     tasks_failed = state_counts["failed"]
+    project_completion = _project_completion_status(
+        goals,
+        tasks_total=tasks_total,
+        tasks_done=tasks_done,
+        tasks_failed=tasks_failed,
+    )
     run_summary = _safe_json(run_dir / "run_summary.json", {}) if run_dir else {}
     last_run_summary = _safe_json(run_dir / "last_run_summary.json", {}) if run_dir else {}
     final = run_summary.get("final") if isinstance(run_summary.get("final"), dict) else {}
@@ -4258,6 +4378,19 @@ def _build_progress_payload(
     if final_rc is None:
         final_rc = _coerce_optional_int(last_run_summary.get("rc") if isinstance(last_run_summary, dict) else None)
     stop_file_exists = bool(run_dir and (run_dir / "STOP").exists())
+    execution_status = _normalize_execution_status(
+        _pick_text(
+            controller_data.get("run_status"),
+            controller_data.get("status"),
+            final.get("status") if isinstance(final, dict) else "",
+            last_run_summary.get("status"),
+        ),
+        running=bool(controller_data.get("running")),
+        exit_code=final_rc,
+        final_reason=final_reason,
+        stop_file_exists=stop_file_exists,
+        has_run_dir=bool(run_dir),
+    )
     run_status = _normalize_run_status(
         _pick_text(
             controller_data.get("run_status"),
@@ -4270,6 +4403,7 @@ def _build_progress_payload(
         final_reason=final_reason,
         stop_file_exists=stop_file_exists,
         has_run_dir=bool(run_dir),
+        project_complete=project_completion["project_complete"],
     )
     current_task = _pick_text(
         controller_data.get("current_task_id"),
@@ -4315,6 +4449,16 @@ def _build_progress_payload(
         "state_counts": state_counts,
         "progress": round(progress_value, 3) if progress_value is not None else None,
         "progress_available": progress_available,
+        "execution_status": execution_status,
+        "executionStatus": execution_status,
+        "project_complete": project_completion["project_complete"],
+        "projectComplete": project_completion["project_complete"],
+        "project_status": project_completion["project_status"],
+        "projectStatus": project_completion["project_status"],
+        "goals_complete": project_completion["goals_complete"],
+        "goalsComplete": project_completion["goals_complete"],
+        "backlog_complete": project_completion["backlog_complete"],
+        "backlogComplete": project_completion["backlog_complete"],
         "current_task_id": current_task,
         "current_task_title": current_task_title,
         "attempt": attempt,
@@ -4573,6 +4717,11 @@ def build_snapshot(
         metrics["quotaWindow"] = quota_window
         metrics["quota_used"] = quota_used
         metrics["quotaUsed"] = quota_used
+    state_counts = progress.get("state_counts") if isinstance(progress.get("state_counts"), dict) else {
+        "done": 0,
+        "failed": 0,
+        "warnings": 0,
+    }
     stages = _stage_payload(repo_root, active_run, progress, cfg, run_dir=latest_run_dir, run_summary=run_summary, last_run_summary=last_run_summary, controller_status=controller_status, events=logs_events)
     history = _history_payload(repo_root, _run_dirs(repo_root), branch=branch)
     notifications = _build_notifications(
@@ -4599,6 +4748,11 @@ def build_snapshot(
         last_message=runner_control_last_message,
         last_error=runner_control_last_error,
         run_status=str(progress.get("run_status") or "idle"),
+        execution_status=str(progress.get("execution_status") or progress.get("executionStatus") or ""),
+        project_complete=bool(progress.get("project_complete", False)),
+        project_status=str(progress.get("project_status") or progress.get("projectStatus") or ""),
+        goals_complete=bool(progress.get("goals_complete", False)),
+        backlog_complete=bool(progress.get("backlog_complete", False)),
         busy=bool(runner_control_busy),
     )
     active_run_empty = active_run["status"] == "idle" and not active_run.get("task") and not active_run.get("startedAt")
@@ -4712,18 +4866,40 @@ def build_snapshot(
             "tasks_done": progress.get("tasks_done", 0),
             "tasks_total": progress.get("tasks_total", 0),
             "tasks_failed": progress.get("tasks_failed", 0),
+            "state_counts": state_counts,
+            "stateCounts": state_counts,
             "progress": progress.get("progress"),
             "progress_available": progress.get("progress_available", False),
             "current_task_id": progress.get("current_task_id", ""),
             "current_task_title": progress.get("current_task_title", ""),
             "attempt": progress.get("attempt"),
             "worktree_mode": progress.get("worktree_mode", ""),
+            "execution_status": progress.get("execution_status", ""),
+            "executionStatus": progress.get("executionStatus", progress.get("execution_status", "")),
+            "project_complete": bool(progress.get("project_complete", False)),
+            "projectComplete": bool(progress.get("projectComplete", progress.get("project_complete", False))),
+            "project_status": progress.get("project_status", ""),
+            "projectStatus": progress.get("projectStatus", progress.get("project_status", "")),
+            "goals_complete": bool(progress.get("goals_complete", False)),
+            "goalsComplete": bool(progress.get("goalsComplete", progress.get("goals_complete", False))),
+            "backlog_complete": bool(progress.get("backlog_complete", False)),
+            "backlogComplete": bool(progress.get("backlogComplete", progress.get("backlog_complete", False))),
             "goals": progress.get("goals", {}),
             "backlog": backlog,
             "final_reason": progress.get("final_reason", ""),
             "final_rc": progress.get("final_rc"),
             "state": state,
         },
+        "execution_status": progress.get("execution_status", ""),
+        "executionStatus": progress.get("executionStatus", progress.get("execution_status", "")),
+        "project_complete": bool(progress.get("project_complete", False)),
+        "projectComplete": bool(progress.get("projectComplete", progress.get("project_complete", False))),
+        "project_status": progress.get("project_status", ""),
+        "projectStatus": progress.get("projectStatus", progress.get("project_status", "")),
+        "goals_complete": bool(progress.get("goals_complete", False)),
+        "goalsComplete": bool(progress.get("goalsComplete", progress.get("goals_complete", False))),
+        "backlog_complete": bool(progress.get("backlog_complete", False)),
+        "backlogComplete": bool(progress.get("backlogComplete", progress.get("backlog_complete", False))),
         "sectionState": {
             "activeRun": active_run_section_state,
             "stages": stages_section_state,
@@ -4864,17 +5040,28 @@ def create_app(
     def _runner_control_snapshot() -> dict[str, Any]:
         snap = _snapshot()
         control = snap.get("runner_control", {})
+        progress = snap.get("progress", {}) if isinstance(snap.get("progress"), dict) else {}
         return {
             "ok": bool(snap.get("ok", False)),
             "repo": snap.get("repo", {}),
             "latest_run_dir": snap.get("latest_run_dir"),
-            "progress": snap.get("progress", {}),
+            "progress": progress,
             "runner_control": control,
             "source": control.get("source", ""),
             "enabled": bool(control.get("enabled")),
             "controller_available": bool(control.get("controller_available")),
             "busy": bool(control.get("busy")),
             "run_status": control.get("run_status", ""),
+            "execution_status": control.get("execution_status", progress.get("execution_status", "")),
+            "executionStatus": control.get("execution_status", progress.get("executionStatus", progress.get("execution_status", ""))),
+            "project_complete": bool(control.get("project_complete", progress.get("project_complete", False))),
+            "projectComplete": bool(control.get("project_complete", progress.get("projectComplete", progress.get("project_complete", False)))),
+            "project_status": control.get("project_status", progress.get("project_status", "")),
+            "projectStatus": control.get("project_status", progress.get("projectStatus", progress.get("project_status", ""))),
+            "goals_complete": bool(control.get("goals_complete", progress.get("goals_complete", False))),
+            "goalsComplete": bool(control.get("goals_complete", progress.get("goalsComplete", progress.get("goals_complete", False)))),
+            "backlog_complete": bool(control.get("backlog_complete", progress.get("backlog_complete", False))),
+            "backlogComplete": bool(control.get("backlog_complete", progress.get("backlogComplete", progress.get("backlog_complete", False)))),
             "status": control.get("status", {}),
             "message": control.get("message", ""),
             "actions": control.get("actions", {}),
@@ -5763,6 +5950,16 @@ def create_app(
             "run_status": progress.get("run_status", "idle"),
             "final_reason": progress.get("final_reason", ""),
             "state": progress.get("state", {}),
+            "execution_status": progress.get("execution_status", ""),
+            "executionStatus": progress.get("executionStatus", progress.get("execution_status", "")),
+            "project_complete": bool(progress.get("project_complete", False)),
+            "projectComplete": bool(progress.get("projectComplete", progress.get("project_complete", False))),
+            "project_status": progress.get("project_status", ""),
+            "projectStatus": progress.get("projectStatus", progress.get("project_status", "")),
+            "goals_complete": bool(progress.get("goals_complete", False)),
+            "goalsComplete": bool(progress.get("goalsComplete", progress.get("goals_complete", False))),
+            "backlog_complete": bool(progress.get("backlog_complete", False)),
+            "backlogComplete": bool(progress.get("backlogComplete", progress.get("backlog_complete", False))),
         }
 
     @app.get("/api/runner/status")

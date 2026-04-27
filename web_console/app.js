@@ -2282,14 +2282,65 @@
 
   function runStatusTone(status, finalReason = '') {
     const normalized = String(status || 'idle').toLowerCase();
-    if (normalized === 'success' || normalized === 'completed' || normalized === 'complete' || normalized === 'done') {
-      return finalReason ? 'completed' : 'success';
-    }
+    if (normalized === 'success') return 'success';
+    if (normalized === 'completed' || normalized === 'complete' || normalized === 'done') return 'completed';
     if (normalized === 'running') return 'running';
     if (normalized === 'stopping' || normalized === 'stopped') return 'stopped';
     if (normalized === 'failed' || normalized === 'error') return 'failed';
     if (normalized === 'idle') return 'idle';
     return 'idle';
+  }
+
+  function executionStatusLabel(status) {
+    const normalized = String(status || 'idle').toLowerCase();
+    if (normalized === 'success' || normalized === 'completed' || normalized === 'complete' || normalized === 'done') return t('common.complete');
+    if (normalized === 'running') return t('runner.running');
+    if (normalized === 'stopping') return t('runner.stopping');
+    if (normalized === 'stopped') return t('runner.stopped');
+    if (normalized === 'failed' || normalized === 'error') return t('common.failed');
+    if (normalized === 'idle') return t('runner.idle');
+    return t('common.unknown');
+  }
+
+  function executionStatusTone(status) {
+    const normalized = String(status || 'idle').toLowerCase();
+    if (normalized === 'running') return 'running';
+    if (normalized === 'stopping' || normalized === 'stopped') return 'stopped';
+    if (normalized === 'failed' || normalized === 'error') return 'failed';
+    if (normalized === 'success' || normalized === 'completed' || normalized === 'complete' || normalized === 'done') return 'completed';
+    if (normalized === 'idle') return 'idle';
+    return 'idle';
+  }
+
+  function normalizeProjectStatus(status) {
+    const normalized = String(status ?? '').trim().toLowerCase();
+    if (['complete', 'completed', 'success', 'done', 'true', '1'].includes(normalized)) {
+      return 'complete';
+    }
+    if (['incomplete', 'partial', 'pending', 'false', '0', 'none', 'unknown'].includes(normalized)) {
+      return 'incomplete';
+    }
+    return normalized === 'complete' ? 'complete' : normalized === 'incomplete' ? 'incomplete' : (status ? 'complete' : 'incomplete');
+  }
+
+  function projectStatusLabel(status) {
+    return normalizeProjectStatus(status) === 'complete' ? t('common.complete') : t('common.incomplete');
+  }
+
+  function projectStatusTone(status) {
+    return normalizeProjectStatus(status) === 'complete' ? 'success' : 'warn';
+  }
+
+  function projectStatusClass(status) {
+    return `status-chip status-chip--${projectStatusTone(status)}`;
+  }
+
+  function projectBannerClass(status) {
+    return normalizeProjectStatus(status) === 'complete' ? 'modal-banner section-banner section-banner--success' : 'modal-banner section-banner section-banner--warn';
+  }
+
+  function executionStatusClass(status) {
+    return `status-chip status-chip--${executionStatusTone(status)}`;
   }
 
   const RUN_STATUS_CLASS_NAMES = {
@@ -2786,21 +2837,102 @@
     };
   }
 
-  function normalizeRunStatus(rawStatus, hasRunData) {
+  function normalizeExecutionStatus(rawStatus, hasRunData, options = {}) {
     const status = toText(rawStatus, 'idle').toLowerCase();
+    const running = Boolean(options.running);
+    const exitCode = options.exitCode;
+    const finalReason = toText(options.finalReason, '').toLowerCase();
+    const stopFileExists = Boolean(options.stopFileExists);
     if (!hasRunData || status === 'no-run') {
       return 'idle';
     }
-    if (status === 'completed' || status === 'complete' || status === 'done' || status === 'success') {
-      return 'success';
+    if (status === 'running') {
+      return 'running';
     }
-    if (status === 'finished' || status === 'stopping' || status === 'stop_requested') {
+    if (status === 'completed' || status === 'complete' || status === 'done' || status === 'success' || status === 'ok' || status === 'prepared_only') {
+      return 'completed';
+    }
+    if (status === 'finished' || status === 'halted' || status === 'stopping' || status === 'stop_requested' || status === 'stopped' || status === 'cancelled' || status === 'canceled' || status === 'aborted') {
       return 'stopped';
     }
     if (status === 'error') {
       return 'failed';
     }
-    return status || 'idle';
+    if (running) {
+      return 'running';
+    }
+    if (['project_complete', 'all_tasks_done', 'completed', 'success', 'ok', 'done', 'prepared_only'].includes(finalReason)) {
+      return 'completed';
+    }
+    if (['stop_file', 'stop_requested', 'stopped', 'user_stop', 'manual_stop'].includes(finalReason) || stopFileExists) {
+      return 'stopped';
+    }
+    const rc = toMaybeNumber(exitCode);
+    if (rc != null) {
+      if (rc === 0 && ['','ok','prepared_only','completed','success','project_complete','all_tasks_done','done'].includes(finalReason)) {
+        return 'completed';
+      }
+      if (rc !== 0) {
+        return 'failed';
+      }
+    }
+    if (['failed', 'error', 'exception', 'abandoned', 'abandon_failed', 'build_failed', 'test_failed', 'policy_violation', 'exhausted_attempts'].includes(finalReason)) {
+      return 'failed';
+    }
+    return hasRunData ? 'running' : 'idle';
+  }
+
+  function normalizeRunStatus(rawStatus, hasRunData, projectComplete = false, options = {}) {
+    const executionStatus = normalizeExecutionStatus(rawStatus, hasRunData, options);
+    if (projectComplete && executionStatus === 'completed') {
+      return 'success';
+    }
+    return executionStatus;
+  }
+
+  function projectCompletionState(progress = {}, goals = {}, backlog = {}, activeRun = {}) {
+    const progressData = toObject(progress);
+    const goalsData = toObject(goals);
+    const backlogData = toObject(backlog);
+    const activeData = toObject(activeRun);
+    const goalsCompletion = toObject(goalsData.completion || progressData.goalsCompletion || progressData.goals_completion || activeData.goalsCompletion || activeData.goals_completion);
+    const backlogCounts = toObject(backlogData.counts || progressData.backlog?.counts || activeData.backlog?.counts);
+    const backlogItems = toArray(backlogData.items || progressData.backlog?.items || activeData.backlog?.items);
+    const goalsComplete = Boolean(
+      progressData.goals_complete ??
+        progressData.goalsComplete ??
+        activeData.goals_complete ??
+        activeData.goalsComplete ??
+        goalsCompletion.project_complete
+    );
+    const backlogComplete = Boolean(
+      progressData.backlog_complete ??
+        progressData.backlogComplete ??
+        activeData.backlog_complete ??
+        activeData.backlogComplete ??
+        (backlogItems.length === 0
+          ? true
+          : (
+            toNumber(backlogCounts.done || 0, 0) >= backlogItems.length &&
+            toNumber(backlogCounts.failed || 0, 0) === 0 &&
+            toNumber(backlogCounts.pending || 0, 0) === 0 &&
+            toNumber(backlogCounts.in_progress || 0, 0) === 0
+          ))
+    );
+    const projectComplete = Boolean(
+      progressData.project_complete ??
+        progressData.projectComplete ??
+        activeData.project_complete ??
+        activeData.projectComplete ??
+        (goalsComplete && backlogComplete)
+    );
+    return {
+      hasGoals: Boolean(goalsCompletion.has_goals ?? goalsData.summary?.has_goals ?? progressData.goals?.completion?.has_goals),
+      goalsComplete,
+      backlogComplete,
+      projectComplete,
+      projectStatus: projectComplete ? 'complete' : 'incomplete',
+    };
   }
 
   function normalizeStageStatus(rawStatus, fallback = 'pending') {
@@ -3412,6 +3544,16 @@
       startedAt: toNumber(raw.startedAt || raw.started_at || 0, 0),
       endedAt: toNumber(raw.endedAt || raw.ended_at || 0, 0),
       status: toText(raw.status, 'idle'),
+      executionStatus: toText(raw.executionStatus || raw.execution_status || '', ''),
+      execution_status: toText(raw.execution_status || raw.executionStatus || '', ''),
+      projectComplete: Boolean(raw.projectComplete ?? raw.project_complete ?? false),
+      project_complete: Boolean(raw.project_complete ?? raw.projectComplete ?? false),
+      projectStatus: toText(raw.projectStatus || raw.project_status || '', ''),
+      project_status: toText(raw.project_status || raw.projectStatus || '', ''),
+      goalsComplete: Boolean(raw.goalsComplete ?? raw.goals_complete ?? false),
+      goals_complete: Boolean(raw.goals_complete ?? raw.goalsComplete ?? false),
+      backlogComplete: Boolean(raw.backlogComplete ?? raw.backlog_complete ?? false),
+      backlog_complete: Boolean(raw.backlog_complete ?? raw.backlogComplete ?? false),
       tasksDone: doneCount,
       tasksTotal: toNumber(raw.tasksTotal ?? taskCounts.total ?? lastRunSummary.total_tasks ?? 0, 0),
       tasksFailed: failedCount,
@@ -3743,10 +3885,29 @@
     const metrics = normalizeMetrics(context.metrics);
     const config = toObject(context.config);
     const hasRunData = Boolean(raw.id || raw.status || raw.stage || raw.runDir || raw.run_dir || progress.latest_run_dir);
+    const projectCompletion = projectCompletionState(progress, context.goalsCompletion || progress.goals, context.backlog || progress.backlog, context.activeRun || raw);
     const repoPath = toText(raw.repo || repo.path || config.repo || '', '');
     const repoLabel = toText(raw.repoLabel || repo.name || repoNameFromPath(repoPath) || 'agentcli', 'agentcli');
     const stage = toText(raw.stage || progress.current_stage || metrics.last_stage || 'idle', 'idle');
-    const activeStatus = normalizeRunStatus(raw.status || progress.run_status || progress.runStatus, hasRunData);
+    const executionStatus = toText(
+      raw.executionStatus ||
+        raw.execution_status ||
+        progress.executionStatus ||
+        progress.execution_status ||
+        normalizeExecutionStatus(raw.status || progress.run_status || progress.runStatus, hasRunData, {
+          running: Boolean(raw.running || progress.running),
+          exitCode: raw.exitCode ?? raw.exit_code ?? progress.final_rc ?? progress.finalRc,
+          finalReason: raw.finalReason || raw.final_reason || progress.final_reason || '',
+          stopFileExists: Boolean(raw.stopFileExists || raw.stop_file_exists || progress.stop_file_exists || progress.stopFileExists),
+        }),
+      'idle'
+    );
+    const activeStatus = normalizeRunStatus(raw.status || progress.run_status || progress.runStatus, hasRunData, projectCompletion.projectComplete, {
+      running: Boolean(raw.running || progress.running),
+      exitCode: raw.exitCode ?? raw.exit_code ?? progress.final_rc ?? progress.finalRc,
+      finalReason: raw.finalReason || raw.final_reason || progress.final_reason || '',
+      stopFileExists: Boolean(raw.stopFileExists || raw.stop_file_exists || progress.stop_file_exists || progress.stopFileExists),
+    });
     const selectedTask = toText(
       raw.task ||
         progress.current_task_id ||
@@ -3827,6 +3988,16 @@
       quota: clone(quota),
       elapsedSec: toNumber(raw.elapsedSec ?? raw.elapsed_seconds ?? 0, 0),
       status: activeStatus,
+      executionStatus: executionStatus,
+      execution_status: executionStatus,
+      goalsComplete: projectCompletion.goalsComplete,
+      goals_complete: projectCompletion.goalsComplete,
+      backlogComplete: projectCompletion.backlogComplete,
+      backlog_complete: projectCompletion.backlogComplete,
+      projectComplete: projectCompletion.projectComplete,
+      project_complete: projectCompletion.projectComplete,
+      projectStatus: projectCompletion.projectStatus,
+      project_status: projectCompletion.projectStatus,
       task: selectedTask,
       taskTitle: toText(raw.taskTitle || raw.task_title || progress.current_task_title || '', ''),
     };
@@ -4022,7 +4193,7 @@
       items,
       summary: {
         runs: toNumber(summary.runs || items.length, items.length),
-        successes: toNumber(summary.successes || items.filter((run) => run.status === 'success').length, 0),
+        successes: toNumber(summary.successes || items.filter((run) => normalizeProjectStatus(run.projectStatus || run.projectComplete) === 'complete').length, 0),
         failures: toNumber(summary.failures || items.filter((run) => run.status === 'failed').length, 0),
         stopped: toNumber(summary.stopped || items.filter((run) => run.status === 'stopped').length, 0),
         tasksDone,
@@ -5571,7 +5742,11 @@
       parts.push(`${t('history.persistedSummary')}: ${finalReason}`);
     }
     if (status || rc != null) {
-      parts.push(`${t('history.currentState')}: ${runStatusLabel(status, finalReason)}${rc != null ? ` rc=${rc}` : ''}`);
+      parts.push(`${t('runner.runStatus')}: ${executionStatusLabel(toText(raw.executionStatus || raw.execution_status || status, status))}${rc != null ? ` rc=${rc}` : ''}`);
+    }
+    const projectStatus = toText(raw.projectStatus || raw.project_status || (raw.projectComplete ? 'complete' : 'incomplete'), raw.projectComplete ? 'complete' : 'incomplete');
+    if (projectStatus) {
+      parts.push(`${t('nav.project')}: ${projectStatusLabel(projectStatus)}`);
     }
     if (shutdownReason && shutdownReason !== finalReason) {
       parts.push(`${t('history.shutdownReason')}: ${shutdownReason}`);
@@ -5809,7 +5984,9 @@
 
   function renderHistoryRow(run) {
     const selected = state.historySelection === run.id;
-    const statusTone = runStatusTone(run.status, run.finalReason);
+    const executionStatus = toText(run.executionStatus || run.status, run.status);
+    const projectStatus = toText(run.projectStatus || (run.projectComplete ? 'complete' : 'incomplete'), run.projectComplete ? 'complete' : 'incomplete');
+    const statusTone = executionStatusTone(executionStatus);
     const color =
       statusTone === 'success' || statusTone === 'completed'
         ? 'var(--accent)'
@@ -5821,8 +5998,8 @@
     return `
       <button type="button" class="history-table__row ${selected ? 'config-row--active' : ''}" data-history-select="${escapeHTML(run.id)}">
         <span class="history-table__status" style="color:${color}">
-          <span class="${statusTone === 'running' ? 'dot dot--pulse' : 'dot'}" style="background:${color}"></span>
-          ${escapeHTML(runStatusLabel(run.status, run.finalReason))}
+          <span class="${executionStatusClass(executionStatus)}">${escapeHTML(`${t('runner.runStatus')}: ${executionStatusLabel(executionStatus)}`)}</span>
+          <span class="${projectStatusClass(projectStatus)}">${escapeHTML(`${t('nav.project')}: ${projectStatusLabel(projectStatus)}`)}</span>
         </span>
         <span>
           <span>${escapeHTML(run.branch)}</span>
@@ -8335,7 +8512,9 @@
     const worktreeModeText = progress.worktree_mode || run.worktreeMode || '';
     const runDirText = run.runDir || progress.latest_run_dir || state.latestRunDir || '';
     const finalReason = progress.final_reason || run.finalReason || '';
-    const runStatus = progress.run_status || run.status;
+    const executionStatus = progress.execution_status || progress.executionStatus || run.executionStatus || progress.run_status || run.status;
+    const projectStatus = progress.project_status || progress.projectStatus || run.projectStatus || (run.projectComplete ? 'complete' : 'incomplete');
+    const runStatus = executionStatus;
     const runTone = runStatusTone(runStatus, finalReason);
     const runLabel = runStatusLabel(runStatus, finalReason);
     const runSummary = [
@@ -8425,6 +8604,10 @@
                     <div class="section-banner__title">${escapeHTML(runLabel)}</div>
                     <div class="section-banner__copy">${escapeHTML(runSummary)}</div>
                   </div>
+                </div>
+                <div class="runner-control__chips">
+                  <span class="${executionStatusClass(executionStatus)}">${escapeHTML(`${t('runner.runStatus')}: ${executionStatusLabel(executionStatus)}`)}</span>
+                  <span class="${projectStatusClass(projectStatus)}">${escapeHTML(`${t('nav.project')}: ${projectStatusLabel(projectStatus)}`)}</span>
                 </div>
                 <div class="runner-control__details">
                   ${detailCard(t('dashboard.currentTaskId'), taskId || t('common.unavailable'))}
@@ -10249,7 +10432,7 @@
     const selected = currentRun();
     const totalTasks = state.runs.reduce((sum, run) => sum + run.tasksTotal, 0);
     const doneTasks = state.runs.reduce((sum, run) => sum + run.tasksDone, 0);
-    const successes = state.runs.filter((run) => run.status === 'success').length;
+    const successes = state.runs.filter((run) => normalizeProjectStatus(run.projectStatus || run.projectComplete) === 'complete').length;
     const budgetCap = toNumber(state.config?.budget?.max_usd || 0, 0);
     const historyWindow = state.runs.length ? `${t('history.latest')} ${fmtRelative(state.runs[0].startedAt)}` : t('history.noRunsYet');
     const selectedCounts = selected ? historyTaskCounts(selected) : { done: 0, total: 0, failed: 0, skipped: 0, cycles: 0 };
@@ -10258,6 +10441,8 @@
     const selectedShutdownReason = selected ? toText(selected.shutdownReason || selected.stopReason || '', '') : '';
     const selectedFinalReason = selected ? toText(selected.finalReason, '') : '';
     const selectedRunDir = selected ? selected.runDir || t('common.unknown') : t('common.unknown');
+    const selectedExecutionStatus = selected ? toText(selected.executionStatus || selected.status, selected.status || '') : '';
+    const selectedProjectStatus = selected ? toText(selected.projectStatus || (selected.projectComplete ? 'complete' : 'incomplete'), selected.projectComplete ? 'complete' : 'incomplete') : '';
 
     const body = `
       <div class="history-layout">
@@ -10298,6 +10483,10 @@
                   ${
                   selected
                       ? `
+                        <div class="history-details__chips">
+                          <span class="${executionStatusClass(selectedExecutionStatus)}">${escapeHTML(`${t('runner.runStatus')}: ${executionStatusLabel(selectedExecutionStatus)}`)}</span>
+                          <span class="${projectStatusClass(selectedProjectStatus)}">${escapeHTML(`${t('nav.project')}: ${projectStatusLabel(selectedProjectStatus)}`)}</span>
+                        </div>
                         <div class="kpi-grid kpi-grid--four">
                           ${kpiCard(t('history.currentState'), runStatusLabel(selected.status, selected.finalReason), t('history.currentState'), ['success', 'completed'].includes(toText(selected.status, '')))}
                           ${kpiCard(t('history.tasks'), `${selectedCounts.done}/${selectedCounts.total}`, `${t('common.failed')} ${selectedCounts.failed} | ${t('common.skipped')} ${selectedCounts.skipped}`)}
