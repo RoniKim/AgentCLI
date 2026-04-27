@@ -110,6 +110,23 @@ class ProcessGuardTests(unittest.TestCase):
         self.assertEqual(1, snapshot.call_count)
         self.assertEqual([12, 11, 10, 21, 20], killed)
 
+    def test_terminate_pids_waits_for_windows_exit_before_unregister(self) -> None:
+        unregistered: list[int] = []
+
+        with (
+            patch.object(process_guard.sys, "platform", "win32"),
+            patch("agent_runner.process_guard.os.getpid", return_value=999),
+            patch("agent_runner.process_guard._windows_child_pid_map", return_value={}),
+            patch("agent_runner.process_guard._kill_pid", return_value=True),
+            patch("agent_runner.process_guard._pid_alive", side_effect=[True, False, False]) as alive,
+            patch("agent_runner.process_guard.unregister_pid", side_effect=lambda pid: unregistered.append(pid)),
+            patch("agent_runner.process_guard.time.sleep", return_value=None),
+        ):
+            process_guard._terminate_pids([10], wait=True)
+
+        self.assertGreaterEqual(alive.call_count, 2)
+        self.assertEqual([10], unregistered)
+
     def test_pid_summary_caps_large_stop_logs(self) -> None:
         summary = process_guard._summarize_pids(list(range(45)), limit=5)
 

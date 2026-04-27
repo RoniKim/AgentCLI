@@ -429,6 +429,24 @@ def _terminate_windows_pids_bulk(pids: list[int]) -> None:
         _kill_pid(pid)
 
 
+def _wait_for_pids_exit(
+    pids: list[int],
+    *,
+    timeout_seconds: float = 3.0,
+    interval_seconds: float = 0.05,
+) -> None:
+    """Wait briefly for killed processes to become signaled before cleanup."""
+    pending = {pid for pid in pids if pid > 0 and pid != os.getpid()}
+    if not pending:
+        return
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while pending:
+        pending = {pid for pid in pending if _pid_alive(pid)}
+        if not pending or time.monotonic() >= deadline:
+            return
+        time.sleep(max(0.01, interval_seconds))
+
+
 def _terminate_pids(pids: list[int], *, wait: bool = True) -> None:
     """Kill a list of PIDs. If wait=True on Unix, SIGTERM → wait → SIGKILL."""
     seen: set[int] = set()
@@ -444,15 +462,17 @@ def _terminate_pids(pids: list[int], *, wait: bool = True) -> None:
         for pid in unique_pids:
             _kill_pid(pid)
 
-    if wait and sys.platform != "win32":
-        # On Windows, TerminateProcess is already a hard kill — no need to wait.
-        time.sleep(0.5)
-        for pid in unique_pids:
-            if _pid_alive(pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
+    if wait:
+        if sys.platform == "win32":
+            _wait_for_pids_exit(unique_pids)
+        else:
+            time.sleep(0.5)
+            for pid in unique_pids:
+                if _pid_alive(pid):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
 
     # Cleanup tracked set and session files
     for pid in unique_pids:
