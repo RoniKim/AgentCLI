@@ -4149,10 +4149,10 @@
       },
       roles: {
         kind: 'multienum',
-        options: ['PM', 'Dev', 'QA', 'Reporter'],
+        options: ['PM', 'Security', 'Dev', 'QA'],
         restart: false,
         desc: 'Stages enabled in the pipeline.',
-        hint: 'PM should stay first. Reporter appends a summary after QA.',
+        hint: 'PM usually runs first. Security can run before Dev when enabled.',
       },
       autopilot: {
         kind: 'bool',
