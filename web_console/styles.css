@@ -642,6 +642,16 @@ a {
   white-space: nowrap;
 }
 
+.status-chip__label {
+  min-width: 0;
+}
+
+.status-chip__meta {
+  color: var(--text-sub);
+  font-size: 10.5px;
+  line-height: 1.2;
+}
+
 .status-chip--running {
   color: var(--accent);
   border-color: rgba(126, 227, 138, 0.35);
@@ -655,6 +665,12 @@ a {
 }
 
 .status-chip--loading {
+  color: var(--info);
+  border-color: rgba(122, 176, 232, 0.35);
+  background: rgba(122, 176, 232, 0.05);
+}
+
+.status-chip--reconnecting {
   color: var(--info);
   border-color: rgba(122, 176, 232, 0.35);
   background: rgba(122, 176, 232, 0.05);
@@ -691,6 +707,12 @@ a {
 }
 
 .status-chip--warn {
+  color: var(--warn);
+  border-color: rgba(243, 194, 107, 0.35);
+  background: rgba(243, 194, 107, 0.05);
+}
+
+.status-chip--stale {
   color: var(--warn);
   border-color: rgba(243, 194, 107, 0.35);
   background: rgba(243, 194, 107, 0.05);
@@ -3404,6 +3426,12 @@ a {
   color: var(--text);
 }
 
+.section-banner--reconnecting {
+  border-color: rgba(122, 176, 232, 0.35);
+  background: var(--info-soft);
+  color: var(--text);
+}
+
 .section-banner--err {
   border-color: rgba(232, 122, 106, 0.35);
   background: var(--err-soft);
@@ -3417,6 +3445,12 @@ a {
 }
 
 .section-banner--stopped {
+  border-color: rgba(243, 194, 107, 0.35);
+  background: var(--warn-soft);
+  color: var(--text);
+}
+
+.section-banner--stale {
   border-color: rgba(243, 194, 107, 0.35);
   background: var(--warn-soft);
   color: var(--text);

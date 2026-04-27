@@ -148,6 +148,10 @@
         error: 'API error',
         fallback: 'Fallback data',
         stale: 'Stale snapshot',
+        lastUpdated: 'Last updated',
+        reconnecting: 'Reconnecting',
+        reconnectingCopy: 'Last updated {timestamp}. Retrying the live snapshot.',
+        staleCopy: 'Last updated {timestamp}. The controller and process table are out of sync.',
         partial: 'Partial snapshot',
         loadingReadOnly: 'Loading read-only snapshot',
         controlsDisabled: 'Controls disabled',
@@ -2528,10 +2532,12 @@
   }
 
   const MAX_LOG_ROWS = 120;
-  const SNAPSHOT_POLL_MS = 15000;
+  const SNAPSHOT_TEST_HOOKS = typeof globalThis !== 'undefined' ? toObject(globalThis.__AGENTCLI_TEST_HOOKS__) : {};
+  const SNAPSHOT_POLL_MS = Math.max(250, toNumber(SNAPSHOT_TEST_HOOKS.snapshotPollMs, 15000));
+  const SNAPSHOT_RECONNECT_MAX_MS = Math.max(SNAPSHOT_POLL_MS, toNumber(SNAPSHOT_TEST_HOOKS.snapshotMaxBackoffMs, 30000));
   const RUNNER_CONTROL_STATUS_POLL_MS = 500;
   const RUNNER_CONTROL_STATUS_TIMEOUT_MS = 15000;
-  const STALE_AFTER_MS = 30000;
+  const STALE_AFTER_MS = Math.max(SNAPSHOT_POLL_MS, toNumber(SNAPSHOT_TEST_HOOKS.snapshotStaleAfterMs, 30000));
   const STAGE_INDEX = {
     idle: 0,
     pm: 0,
@@ -5404,7 +5410,7 @@
     };
     const staleReasons = toArray(rawStale.reasons).map((reason) => toText(reason, '')).filter(Boolean);
     const derivedStale = {
-      value: Boolean(rawStale.value ?? staleReasons.length || logSourceMissing || controlStatusError || processMismatch),
+      value: Boolean(rawStale.value ?? (staleReasons.length || logSourceMissing || controlStatusError || processMismatch)),
       reasons: staleReasons,
       logs: Boolean(rawStale.logs ?? ['missing_file', 'read_error'].includes(logState)),
       logSourceMissing,
@@ -5535,6 +5541,14 @@
       branch: repo.branch || '',
       source: 'api',
     });
+    const snapshotRefresh = {
+      status: 'ready',
+      lastUpdatedAt: nowMs(),
+      lastSuccessAt: nowMs(),
+      stale: Boolean(toObject(liveRun.stale).value),
+      staleReasons: toArray(toObject(liveRun.stale).reasons).map((reason) => toText(reason, '')).filter(Boolean),
+      latestRunDir: toText(raw.latest_run_dir, ''),
+    };
 
     return {
       ok: Boolean(raw.ok),
@@ -5543,6 +5557,7 @@
       snapshotLabel: 'API snapshot',
       lastSnapshotAt: nowMs(),
       latestRunDir: toText(raw.latest_run_dir, ''),
+      snapshotRefresh,
       repo: {
         path: toText(repo.path, ''),
         name: toText(repo.name, repoNameFromPath(repo.path) || 'agentcli'),
@@ -6238,6 +6253,7 @@
       },
       notifications: [],
       liveRun: {},
+      snapshotRefresh: createBlankSnapshotRefreshState(),
       progress: {
         latest_run_dir: null,
         run_status: 'idle',
@@ -6291,6 +6307,14 @@
       snapshotLabel: t('snapshot.fallback'),
       lastSnapshotAt: nowMs(),
       latestRunDir: '',
+      snapshotRefresh: {
+        status: 'fallback',
+        lastUpdatedAt: nowMs(),
+        lastSuccessAt: nowMs(),
+        stale: false,
+        staleReasons: [],
+        latestRunDir: '',
+      },
       repo: {
         path: 'C:/Dev/AgentCLI',
         name: 'AgentCLI',
@@ -6745,6 +6769,7 @@
     createBlankModel,
     createFallbackFixture,
     createBlankLogTailState,
+    createBlankSnapshotRefreshState,
     normalizeLogTailFilters,
     buildLogTailQuery,
     buildLogTailRequestUrl,
@@ -6762,6 +6787,10 @@
     startServerLogTail,
     stopServerLogTail,
     syncLogTailStreaming,
+    refreshSnapshot,
+    startSnapshotPolling,
+    stopSnapshotPolling,
+    inspectSnapshotRefreshState,
     applyLogTailPayload,
     toggleLogTailSelection,
     clearLogTailSelection,
@@ -6875,6 +6904,34 @@
     state.notifications = toArray(next.notifications).slice(-MAX_LOG_ROWS);
     state.progress = toObject(next.progress);
     state.sectionState = toObject(next.sectionState);
+    const previousRefresh = ensureSnapshotRefreshState();
+    const nextRefresh = toObject(next.snapshotRefresh);
+    const nextLiveRunStale = toObject(toObject(next.liveRun).stale);
+    const staleReasons = toArray(nextRefresh.staleReasons || nextLiveRunStale.reasons)
+      .map((reason) => toText(reason, ''))
+      .filter(Boolean);
+    state.snapshotRefresh = {
+      ...clone(previousRefresh),
+      ...clone(nextRefresh),
+      active: Boolean(previousRefresh.active),
+      inFlight: false,
+      requestSeq: toNumber(previousRefresh.requestSeq, 0),
+      retryCount: 0,
+      retryDelayMs: SNAPSHOT_POLL_MS,
+      maxRetryDelayMs: toNumber(previousRefresh.maxRetryDelayMs, SNAPSHOT_RECONNECT_MAX_MS) || SNAPSHOT_RECONNECT_MAX_MS,
+      nextRefreshAt: 0,
+      lastAttemptAt: toNumber(previousRefresh.lastAttemptAt, 0),
+      lastSuccessAt: nowMs(),
+      lastUpdatedAt: toNumber(nextRefresh.lastUpdatedAt || next.lastSnapshotAt || nowMs(), nowMs()),
+      lastErrorAt: 0,
+      lastErrorStatus: 0,
+      lastError: '',
+      stale: Boolean(nextRefresh.stale || nextLiveRunStale.value),
+      staleReasons,
+      latestRunDir: toText(nextRefresh.latestRunDir || next.latestRunDir, state.latestRunDir),
+      timer: previousRefresh.timer,
+    };
+    applySnapshotRefreshSections(state.snapshotRefresh);
     state.serverMode = state.sourceMode === 'api';
     if (previousSourceMode !== state.sourceMode || previousLatestRunDir !== state.latestRunDir) {
       resetServerLogTailState();
@@ -6904,6 +6961,77 @@
       }
     }
     return true;
+  }
+
+  function snapshotRefreshDisplay(refresh = state.snapshotRefresh) {
+    const current = toObject(refresh);
+    const status = toText(current.status, state.snapshotStatus || 'loading');
+    const lastUpdatedAt = toNumber(current.lastUpdatedAt || state.lastSnapshotAt || 0, 0);
+    const timestampText = lastUpdatedAt ? fmtDateTime(lastUpdatedAt) : t('common.unavailable');
+    const staleReasons = toArray(current.staleReasons).map((reason) => toText(reason, '')).filter(Boolean);
+    const ageMs = lastUpdatedAt ? Math.max(0, nowMs() - lastUpdatedAt) : Number.POSITIVE_INFINITY;
+    const staleByAge = lastUpdatedAt > 0 && ageMs >= STALE_AFTER_MS;
+    const hasStaleSignal = Boolean(current.stale || staleReasons.length || staleByAge);
+
+    let label = state.snapshotLabel || t('snapshot.api');
+    let copy = lastUpdatedAt ? `${t('snapshot.lastUpdated')} ${timestampText}` : t('snapshot.lastUpdated');
+    let tone = 'running';
+    let effectiveStatus = 'ready';
+
+    if (status === 'loading') {
+      label = t('snapshot.loading');
+      copy = t('snapshot.loadingReadOnly');
+      tone = 'loading';
+      effectiveStatus = 'loading';
+    } else if (status === 'fallback') {
+      label = t('snapshot.fallback');
+      copy = lastUpdatedAt ? `${t('snapshot.lastUpdated')} ${timestampText}` : t('snapshot.fallback');
+      tone = 'warn';
+      effectiveStatus = 'fallback';
+    } else if (status === 'error') {
+      label = t('snapshot.error');
+      copy = lastUpdatedAt ? `${t('snapshot.lastUpdated')} ${timestampText}` : t('snapshot.error');
+      tone = 'err';
+      effectiveStatus = 'error';
+    } else if (status === 'reconnecting') {
+      label = hasStaleSignal ? t('snapshot.stale') : t('snapshot.reconnecting');
+      copy = hasStaleSignal
+        ? t('snapshot.staleCopy', { timestamp: timestampText })
+        : t('snapshot.reconnectingCopy', { timestamp: timestampText });
+      tone = hasStaleSignal ? 'stale' : 'reconnecting';
+      effectiveStatus = hasStaleSignal ? 'stale' : 'reconnecting';
+    } else if (status === 'stale' || hasStaleSignal) {
+      label = t('snapshot.stale');
+      copy = t('snapshot.staleCopy', { timestamp: timestampText });
+      tone = 'stale';
+      effectiveStatus = 'stale';
+    }
+
+    return {
+      status: effectiveStatus,
+      tone,
+      label,
+      copy,
+      lastUpdatedAt,
+      lastUpdatedLabel: lastUpdatedAt ? `${t('snapshot.lastUpdated')} ${timestampText}` : t('snapshot.lastUpdated'),
+      timestampText,
+      stale: hasStaleSignal || effectiveStatus === 'stale',
+      staleReasons,
+    };
+  }
+
+  function applySnapshotRefreshSections(refresh = snapshotRefreshDisplay()) {
+    const display = refresh && typeof refresh === 'object' ? refresh : snapshotRefreshDisplay();
+    if (display.status === 'ready') {
+      return;
+    }
+    const sectionStatus = display.status === 'error' ? 'error' : display.status;
+    const source = state.sourceMode === 'fallback' ? 'fallback' : 'api';
+    const message = display.copy || display.lastUpdatedLabel || fallbackSectionMessage('activeRun');
+    const sectionKeys = Object.keys(state.sectionState || {});
+    for (const sectionKey of sectionKeys) {
+      state.sectionState[sectionKey] = buildSectionState(sectionKey, sectionStatus, message, source);
+    }
   }
 
   function applyServerSnapshot(snapshot) {
@@ -6948,7 +7076,11 @@
     const tone =
       section.status === 'error'
         ? 'err'
-        : section.status === 'disabled' || section.status === 'stale' || section.status === 'loading' || section.status === 'fallback' || section.status === 'empty' || section.status === 'partial'
+        : section.status === 'reconnecting'
+          ? 'reconnecting'
+          : section.status === 'stale'
+            ? 'stale'
+            : section.status === 'disabled' || section.status === 'loading' || section.status === 'fallback' || section.status === 'empty' || section.status === 'partial'
           ? 'warn'
           : 'info';
     const label =
@@ -6956,12 +7088,14 @@
         ? t('snapshot.loadingReadOnly')
         : section.status === 'disabled'
           ? t('snapshot.controlsDisabled')
-        : section.status === 'fallback'
+          : section.status === 'reconnecting'
+            ? t('snapshot.reconnecting')
+          : section.status === 'stale'
+            ? t('snapshot.stale')
+          : section.status === 'fallback'
           ? t('snapshot.fallback')
           : section.status === 'partial'
             ? t('snapshot.partial')
-            : section.status === 'stale'
-              ? t('snapshot.stale')
               : section.status === 'empty'
                 ? t('snapshot.emptyState')
               : section.status;
@@ -9803,23 +9937,11 @@
     const activeStatus = runStatusLabel(state.progress?.run_status || state.activeRun.status, state.progress?.final_reason || state.activeRun.finalReason);
     const activeTone = runStatusTone(state.progress?.run_status || state.activeRun.status, state.progress?.final_reason || state.activeRun.finalReason);
     const runLabel = state.activeRun.id || 'no-run';
-    const snapshotLabel =
-      state.snapshotStatus === 'loading'
-        ? t('snapshot.loading')
-        : state.snapshotStatus === 'fallback'
-          ? t('snapshot.fallback')
-          : state.snapshotStatus === 'stale'
-            ? t('snapshot.stale')
-            : state.snapshotLabel || (state.sourceMode === 'fallback' ? t('snapshot.fallback') : t('snapshot.api'));
+    const snapshotDisplay = snapshotRefreshDisplay();
     const runnerControlDisplay = runnerControlStateInfo();
     const runnerBusyAction = runnerControlBusyAction();
     const runnerChipTone = `status-chip--${runnerControlDisplay.chipTone}`;
-    const snapshotTone =
-      state.snapshotStatus === 'error'
-        ? 'status-chip--err'
-        : state.snapshotStatus === 'loading' || state.snapshotStatus === 'fallback' || state.snapshotStatus === 'stale'
-          ? 'status-chip--warn'
-          : 'status-chip--running';
+    const snapshotTone = `status-chip--${snapshotDisplay.tone}`;
     return `
       <div class="topbar__brand">
         <span class="brand-mark"></span>
@@ -9837,9 +9959,10 @@
         <span class="status-chip">${escapeHTML(elapsedLabel)} ${escapeHTML(elapsed)}</span>
       </div>
       <div class="topbar__actions">
-        <span class="status-chip ${snapshotTone}">
+        <span class="status-chip ${snapshotTone}" title="${escapeHTML(snapshotDisplay.copy || snapshotDisplay.lastUpdatedLabel || '')}">
           <span class="dot" style="color: currentColor; background: currentColor;"></span>
-          ${escapeHTML(snapshotLabel)}
+          <span class="status-chip__label">${escapeHTML(snapshotDisplay.label)}</span>
+          <span class="status-chip__meta">${escapeHTML(snapshotDisplay.lastUpdatedLabel)}</span>
         </span>
         <span class="status-chip ${runnerChipTone}" title="${escapeHTML(runnerControlDisplay.copy || '')}">
           <span class="dot" style="color: currentColor; background: currentColor;"></span>
@@ -10293,6 +10416,29 @@
     };
   }
 
+  function createBlankSnapshotRefreshState() {
+    return {
+      status: 'loading',
+      active: false,
+      inFlight: false,
+      requestSeq: 0,
+      retryCount: 0,
+      retryDelayMs: SNAPSHOT_POLL_MS,
+      maxRetryDelayMs: SNAPSHOT_RECONNECT_MAX_MS,
+      nextRefreshAt: 0,
+      lastAttemptAt: 0,
+      lastSuccessAt: 0,
+      lastUpdatedAt: 0,
+      lastErrorAt: 0,
+      lastErrorStatus: 0,
+      lastError: '',
+      stale: false,
+      staleReasons: [],
+      latestRunDir: '',
+      timer: null,
+    };
+  }
+
   function ensureLogTailState() {
     if (!state.logTail || typeof state.logTail !== 'object') {
       state.logTail = createBlankLogTailState();
@@ -10306,6 +10452,16 @@
       state.logTail.selected = [];
     }
     return state.logTail;
+  }
+
+  function ensureSnapshotRefreshState() {
+    if (!state.snapshotRefresh || typeof state.snapshotRefresh !== 'object') {
+      state.snapshotRefresh = createBlankSnapshotRefreshState();
+    }
+    if (!Array.isArray(state.snapshotRefresh.staleReasons)) {
+      state.snapshotRefresh.staleReasons = [];
+    }
+    return state.snapshotRefresh;
   }
 
   function normalizeLogTailFilters(filters = {}) {
@@ -11194,6 +11350,30 @@
       state.logTailSummary = toText(overrides.logTailSummary, '');
     }
     return inspectLogTailState();
+  }
+
+  function inspectSnapshotRefreshState() {
+    const refresh = ensureSnapshotRefreshState();
+    return {
+      status: toText(refresh.status, ''),
+      active: Boolean(refresh.active),
+      inFlight: Boolean(refresh.inFlight),
+      requestSeq: toNumber(refresh.requestSeq, 0),
+      retryCount: toNumber(refresh.retryCount, 0),
+      retryDelayMs: toNumber(refresh.retryDelayMs, SNAPSHOT_POLL_MS),
+      maxRetryDelayMs: toNumber(refresh.maxRetryDelayMs, SNAPSHOT_RECONNECT_MAX_MS),
+      nextRefreshAt: toNumber(refresh.nextRefreshAt, 0),
+      lastAttemptAt: toNumber(refresh.lastAttemptAt, 0),
+      lastSuccessAt: toNumber(refresh.lastSuccessAt, 0),
+      lastUpdatedAt: toNumber(refresh.lastUpdatedAt, 0),
+      lastErrorAt: toNumber(refresh.lastErrorAt, 0),
+      lastErrorStatus: toNumber(refresh.lastErrorStatus, 0),
+      lastError: toText(refresh.lastError, ''),
+      stale: Boolean(refresh.stale),
+      staleReasons: toArray(refresh.staleReasons).map((reason) => toText(reason, '')).filter(Boolean),
+      latestRunDir: toText(refresh.latestRunDir, ''),
+      timerActive: Boolean(refresh.timer),
+    };
   }
 
   function renderPipeline() {
@@ -13885,6 +14065,7 @@
     logFiles: clone(defaults.logFiles),
     notifications: clone(defaults.notifications),
     liveRun: clone(defaults.liveRun),
+    snapshotRefresh: clone(defaults.snapshotRefresh),
     configDefault: clone(defaults.configDefault),
     config: clone(defaults.config),
     configMeta: clone(defaults.configMeta),
@@ -15003,10 +15184,64 @@
   }
 
   function stopSnapshotPolling() {
+    const refresh = ensureSnapshotRefreshState();
+    refresh.active = false;
+    refresh.inFlight = false;
+    refresh.nextRefreshAt = 0;
+    refresh.requestSeq += 1;
+    if (refresh.timer) {
+      window.clearTimeout(refresh.timer);
+      refresh.timer = null;
+    }
     if (state.pollTimer) {
-      window.clearInterval(state.pollTimer);
+      window.clearTimeout(state.pollTimer);
       state.pollTimer = null;
     }
+  }
+
+  function scheduleSnapshotRefresh(delayMs = SNAPSHOT_POLL_MS) {
+    const refresh = ensureSnapshotRefreshState();
+    if (refresh.timer) {
+      window.clearTimeout(refresh.timer);
+      refresh.timer = null;
+    }
+    if (state.pollTimer) {
+      window.clearTimeout(state.pollTimer);
+      state.pollTimer = null;
+    }
+    if (!refresh.active) {
+      refresh.nextRefreshAt = 0;
+      return null;
+    }
+    const waitMs = Math.max(0, toNumber(delayMs, SNAPSHOT_POLL_MS));
+    refresh.nextRefreshAt = nowMs() + waitMs;
+    const timer = window.setTimeout(() => {
+      refresh.timer = null;
+      state.pollTimer = null;
+      void refreshSnapshot({ silent: true });
+    }, waitMs);
+    refresh.timer = timer;
+    state.pollTimer = timer;
+    return timer;
+  }
+
+  function renderSnapshotRefreshUI() {
+    if (state.stopOpen) {
+      renderStopOverlay();
+      return;
+    }
+    if (state.worktreeAction) {
+      renderWorktreeActionOverlay();
+      return;
+    }
+    if (!state.paletteOpen && !state.goalEditor) {
+      renderShell({
+        preserveScroll: true,
+        scrollToBottom: state.activeView === 'logs',
+      });
+      return;
+    }
+    topbarRoot().innerHTML = renderTopbar();
   }
 
   function startFallbackLogStream() {
@@ -15048,7 +15283,24 @@
   }
 
   async function refreshSnapshot(options = {}) {
-    const { allowFallback = false, silent = false } = options;
+    const { allowFallback = false } = options;
+    const refresh = ensureSnapshotRefreshState();
+    if (refresh.inFlight) {
+      return false;
+    }
+    if (refresh.timer) {
+      window.clearTimeout(refresh.timer);
+      refresh.timer = null;
+    }
+    if (state.pollTimer) {
+      window.clearTimeout(state.pollTimer);
+      state.pollTimer = null;
+    }
+    const requestSeq = refresh.requestSeq + 1;
+    refresh.requestSeq = requestSeq;
+    refresh.inFlight = true;
+    const attemptAt = nowMs();
+    refresh.lastAttemptAt = attemptAt;
     try {
       const response = await fetch('/api/status', {
         headers: { Accept: 'application/json' },
@@ -15059,6 +15311,9 @@
       }
       const snapshot = await response.json();
       const normalized = normalizeApiSnapshot(snapshot);
+      if (ensureSnapshotRefreshState().requestSeq !== requestSeq) {
+        return false;
+      }
       const previousSourceMode = state.sourceMode;
       const previousLatestRunDir = state.latestRunDir;
       const signature = JSON.stringify({
@@ -15113,23 +15368,63 @@
       const previousSignature = state.lastSnapshotSignature;
       state.lastSnapshotSignature = signature;
       applySnapshotModel(normalized);
-      if (state.stopOpen) {
-        renderStopOverlay();
-      } else if (state.worktreeAction) {
-        renderWorktreeActionOverlay();
-      } else if (!state.paletteOpen && !state.goalEditor) {
-        renderShell({
-          preserveScroll: true,
-          scrollToBottom: state.activeView === 'logs',
-        });
+      const nextRefresh = ensureSnapshotRefreshState();
+      if (nextRefresh.requestSeq !== requestSeq) {
+        return false;
       }
+      nextRefresh.inFlight = false;
+      nextRefresh.lastAttemptAt = attemptAt;
+      nextRefresh.lastSuccessAt = nowMs();
+      nextRefresh.lastUpdatedAt = toNumber(nextRefresh.lastUpdatedAt || normalized.lastSnapshotAt || nowMs(), nowMs());
+      nextRefresh.lastErrorAt = 0;
+      nextRefresh.lastErrorStatus = 0;
+      nextRefresh.lastError = '';
+      nextRefresh.retryCount = 0;
+      nextRefresh.retryDelayMs = SNAPSHOT_POLL_MS;
+      nextRefresh.nextRefreshAt = 0;
+      nextRefresh.active = Boolean(nextRefresh.active);
+      nextRefresh.stale = Boolean(nextRefresh.stale);
+      nextRefresh.staleReasons = toArray(nextRefresh.staleReasons).map((reason) => toText(reason, '')).filter(Boolean);
+      nextRefresh.latestRunDir = toText(normalized.latestRunDir || nextRefresh.latestRunDir, nextRefresh.latestRunDir);
+      if (nextRefresh.stale) {
+        state.snapshotStatus = 'stale';
+        state.snapshotLabel = t('snapshot.stale');
+      }
+      renderSnapshotRefreshUI();
       syncLogTailStreaming({
         reset: previousSourceMode !== state.sourceMode || previousLatestRunDir !== state.latestRunDir,
       });
+      if (nextRefresh.active) {
+        scheduleSnapshotRefresh(nextRefresh.retryDelayMs);
+      }
       return previousSignature !== signature;
     } catch (error) {
+      const nextRefresh = ensureSnapshotRefreshState();
+      if (nextRefresh.requestSeq !== requestSeq) {
+        return false;
+      }
+      nextRefresh.inFlight = false;
+      nextRefresh.lastErrorAt = nowMs();
+      nextRefresh.lastErrorStatus = toNumber(error?.status || error?.response?.status, 0);
+      nextRefresh.lastError = toText(error?.message || error, '');
+      nextRefresh.retryCount = toNumber(nextRefresh.retryCount, 0) + 1;
+      const baseDelay = Math.max(nextRefresh.retryDelayMs || SNAPSHOT_POLL_MS, SNAPSHOT_POLL_MS);
+      nextRefresh.retryDelayMs = Math.min(nextRefresh.maxRetryDelayMs || SNAPSHOT_RECONNECT_MAX_MS, baseDelay * 2);
+      nextRefresh.nextRefreshAt = nextRefresh.active ? nowMs() + nextRefresh.retryDelayMs : 0;
+
       if (!state.lastSnapshotAt && allowFallback) {
         applySnapshotModel(fallbackFixture);
+        const fallbackRefresh = ensureSnapshotRefreshState();
+        fallbackRefresh.status = 'fallback';
+        fallbackRefresh.lastAttemptAt = attemptAt;
+        fallbackRefresh.lastSuccessAt = nowMs();
+        fallbackRefresh.lastUpdatedAt = state.lastSnapshotAt || nowMs();
+        fallbackRefresh.lastErrorAt = 0;
+        fallbackRefresh.lastErrorStatus = 0;
+        fallbackRefresh.lastError = '';
+        fallbackRefresh.retryCount = 0;
+        fallbackRefresh.retryDelayMs = SNAPSHOT_POLL_MS;
+        fallbackRefresh.nextRefreshAt = fallbackRefresh.active ? nowMs() + fallbackRefresh.retryDelayMs : 0;
         state.snapshotStatus = 'fallback';
         state.snapshotLabel = t('snapshot.fallback');
         state.sourceMode = 'fallback';
@@ -15139,64 +15434,45 @@
           activeRun: state.activeRun.id,
           logs: state.logs.length,
         });
-        if (state.stopOpen) {
-          renderStopOverlay();
-        } else if (state.worktreeAction) {
-          renderWorktreeActionOverlay();
-        } else if (!state.paletteOpen && !state.goalEditor) {
-          renderShell({
-            preserveScroll: true,
-            scrollToBottom: state.activeView === 'logs',
-          });
-        }
+        renderSnapshotRefreshUI();
         syncLogTailStreaming({ reset: true });
+        if (fallbackRefresh.active) {
+          scheduleSnapshotRefresh(fallbackRefresh.retryDelayMs);
+        }
         return true;
       }
 
-      if (state.sourceMode === 'fallback') {
-        if (state.stopOpen) {
-          renderStopOverlay();
-        } else if (state.worktreeAction) {
-          renderWorktreeActionOverlay();
-        } else if (!silent && !state.paletteOpen && !state.goalEditor) {
-          topbarRoot().innerHTML = renderTopbar();
-        }
-        return false;
-      }
-
       if (state.lastSnapshotAt) {
+        nextRefresh.status = 'reconnecting';
+        nextRefresh.stale = Boolean(nextRefresh.staleReasons.length);
+        nextRefresh.staleReasons = toArray(nextRefresh.staleReasons).map((reason) => toText(reason, '')).filter(Boolean);
         state.snapshotStatus = 'stale';
         state.snapshotLabel = t('snapshot.stale');
-        if (state.stopOpen) {
-          renderStopOverlay();
-        } else if (state.worktreeAction) {
-          renderWorktreeActionOverlay();
-        } else if (!silent && !state.paletteOpen && !state.goalEditor) {
-          renderShell({ preserveScroll: true });
-        }
-        return false;
+      } else {
+        nextRefresh.status = 'error';
+        nextRefresh.stale = false;
+        nextRefresh.staleReasons = [];
+        state.snapshotStatus = 'error';
+        state.snapshotLabel = t('snapshot.error');
       }
-
-      state.snapshotStatus = 'error';
-      state.snapshotLabel = t('snapshot.error');
-      if (state.stopOpen) {
-        renderStopOverlay();
-      } else if (state.worktreeAction) {
-        renderWorktreeActionOverlay();
-      } else if (!silent && !state.paletteOpen && !state.goalEditor) {
-        renderShell({ preserveScroll: true });
+      renderSnapshotRefreshUI();
+      if (nextRefresh.active) {
+        scheduleSnapshotRefresh(nextRefresh.retryDelayMs);
       }
       return false;
     }
   }
 
   function startSnapshotPolling() {
-    if (state.pollTimer) {
+    const refresh = ensureSnapshotRefreshState();
+    refresh.active = true;
+    if (refresh.timer) {
       return;
     }
-    state.pollTimer = window.setInterval(() => {
-      refreshSnapshot({ silent: true });
-    }, SNAPSHOT_POLL_MS);
+    const delay = refresh.nextRefreshAt > nowMs()
+      ? Math.max(0, refresh.nextRefreshAt - nowMs())
+      : (refresh.retryDelayMs || SNAPSHOT_POLL_MS);
+    scheduleSnapshotRefresh(delay);
   }
 
   document.addEventListener('click', (event) => {

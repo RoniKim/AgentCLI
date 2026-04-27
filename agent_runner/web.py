@@ -2414,17 +2414,31 @@ def _live_run_payload(
     }
 
     stale_reasons: list[str] = []
+    controller_running = bool(control_status.get("running"))
+    controller_run_dir = _pick_text(control_status.get("run_dir"), control_status.get("runDir"), "")
+    latest_run_dir_text = latest_run_dir.as_posix() if latest_run_dir is not None else ""
+
+    def add_stale_reason(reason: str) -> None:
+        if reason and reason not in stale_reasons:
+            stale_reasons.append(reason)
+
     if latest_run_dir is not None and log_state in {"missing_file", "read_error"}:
-        stale_reasons.append(f"log_{log_state}")
+        add_stale_reason(f"log_{log_state}")
     if latest_run_dir is not None and not bool(log_summary["source"].get("exists", True)):
-        stale_reasons.append("log_source_missing")
+        add_stale_reason("log_source_missing")
     control_status_reason = _pick_text(control_status.get("reason"), "")
     if control_status_reason.startswith("status_error:"):
-        stale_reasons.append("controller_status_error")
-    if bool(control_status.get("running")) and run_status in {"completed", "success", "stopped", "failed"}:
-        stale_reasons.append("controller_run_mismatch")
+        add_stale_reason("controller_status_error")
+    if latest_run_dir_text and run_dir and run_dir != latest_run_dir_text:
+        add_stale_reason("run_dir_mismatch")
+    if latest_run_dir_text and controller_run_dir and controller_run_dir != latest_run_dir_text:
+        add_stale_reason("controller_run_dir_mismatch")
+    if controller_running and run_status in {"completed", "success", "stopped", "failed"}:
+        add_stale_reason("controller_run_mismatch")
+    if not controller_running and run_status == "running" and latest_run_dir_text:
+        add_stale_reason("controller_run_mismatch")
     if latest_run_dir is None and (run_id != "no-run" or run_status != "idle" or current_task_id):
-        stale_reasons.append("missing_run_dir")
+        add_stale_reason("missing_run_dir")
 
     live_run = {
         "identity": {
@@ -2506,8 +2520,14 @@ def _live_run_payload(
             "value": bool(stale_reasons),
             "reasons": stale_reasons,
             "logs": log_state in {"missing_file", "read_error"},
-            "control": bool(control_status_reason.startswith("status_error:") or not bool(control.get("controller_available", True))),
-            "process": bool(control_status.get("running")) and run_status in {"completed", "success", "stopped", "failed"},
+            "control": bool(
+                control_status_reason.startswith("status_error:")
+                or not bool(control.get("controller_available", True))
+                or "run_dir_mismatch" in stale_reasons
+                or "controller_run_dir_mismatch" in stale_reasons
+                or "controller_run_mismatch" in stale_reasons
+            ),
+            "process": bool("controller_run_mismatch" in stale_reasons),
         },
         "runId": run_id,
         "runDir": run_dir,
