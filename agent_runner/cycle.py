@@ -971,6 +971,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "curr_head": curr_head,
                         "changed_files_block": changed_files_block,
                         "current_backlog_block": current_backlog_block,
+                        "failed_tasks_block": failed_tasks_block,
                         "hint_block": hint_block,
                         "task_history_block": _format_history_block(repo, max_items=_hist_max_i) if _hist_enabled_i else "(disabled)",
                     }
