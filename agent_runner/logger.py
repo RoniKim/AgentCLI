@@ -6,11 +6,15 @@ import json
 import logging
 import sys
 import traceback
+import weakref
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .utils import now_iso
+
+
+_ACTIVE_LOGGERS: "weakref.WeakSet[StructuredLogger]" = weakref.WeakSet()
 
 
 class _ProcessGuardFilter(logging.Filter):
@@ -34,6 +38,7 @@ class StructuredLogger:
     def __init__(self, run_dir: Path, debug: bool = False):
         self.run_dir = run_dir
         self.debug_enabled = debug
+        self._closed = False
 
         # Create log directory
         self.log_dir = run_dir / "logs"
@@ -103,6 +108,7 @@ class StructuredLogger:
 
         # Cached file handle for events.jsonl
         self._events_fh: Optional[Any] = None
+        _ACTIVE_LOGGERS.add(self)
 
     def set_context(self, **kwargs: Any) -> None:
         """Set context information for error tracking."""
@@ -305,6 +311,8 @@ class StructuredLogger:
 
     def _write_event(self, event_type: str, **fields: Any) -> None:
         """Write structured event to events.jsonl."""
+        if self._closed:
+            return
         event = {
             "ts": now_iso(),
             "type": event_type,
@@ -320,13 +328,31 @@ class StructuredLogger:
             pass
 
     def close(self) -> None:
-        """Close cached file handles."""
+        """Close cached file handles and detach logging handlers."""
+        self._closed = True
         if self._events_fh is not None and not self._events_fh.closed:
             try:
                 self._events_fh.close()
             except Exception:
                 pass
             self._events_fh = None
+        for handler in self.logger.handlers[:]:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+            try:
+                handler.close()
+            except Exception:
+                pass
+            try:
+                self.logger.removeHandler(handler)
+            except Exception:
+                pass
+        try:
+            _ACTIVE_LOGGERS.discard(self)
+        except Exception:
+            pass
 
     def _write_error_detail(self, error_context: Dict[str, Any]) -> None:
         """Write detailed error information to error.log."""
@@ -360,4 +386,14 @@ class StructuredLogger:
 
 def create_logger(run_dir: Path, debug: bool = False) -> StructuredLogger:
     """Factory function to create a structured logger."""
+    close_all_loggers()
     return StructuredLogger(run_dir, debug)
+
+
+def close_all_loggers() -> None:
+    """Close every active AgentCLI structured logger in this process."""
+    for logger in list(_ACTIVE_LOGGERS):
+        try:
+            logger.close()
+        except Exception:
+            pass

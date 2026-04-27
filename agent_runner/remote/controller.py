@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional
 
 from ..cli import DEFAULTS
 from ..config import AGENT_WORK_DIR, resolve_prompts_dir
+from ..logger import close_all_loggers
 from ..process_guard import register_pid, terminate_all_children, terminate_process_tree, unregister_pid_if_exited
 from ..run_dir import find_latest_run_dir, make_run_dir
 from ..runner_entry import run as run_runner
@@ -368,6 +369,8 @@ class RunnerController:
                 self._refresh_process_state()
 
         running = self._runner_is_alive()
+        if wait:
+            close_all_loggers()
         if running:
             final_phase = "timeout" if wait else "stop_requested"
             final_message = (

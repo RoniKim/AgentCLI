@@ -24,6 +24,7 @@ from .config import (
 from .runner_entry import run as run_runner
 from .run_dir import make_run_dir
 from .run_dir import find_latest_run_dir
+from .logger import close_all_loggers
 from .todo import ensure_todo_file, read_current_todo, set_current_todo, open_path
 from .preflight import run_preflight
 from .process_guard import init_process_guard, terminate_all_children
@@ -630,6 +631,7 @@ class RunnerShell:
                 except KeyboardInterrupt:
                     print("[STOP] Stop is already in progress; keep waiting for cleanup.", flush=True)
             alive = self._runner_thread.is_alive()
+            close_all_loggers()
             self._print_stop_progress(
                 write_stop_progress(
                     self.run_dir,

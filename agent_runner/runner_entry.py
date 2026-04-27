@@ -7,6 +7,7 @@ import traceback
 from pathlib import Path
 
 from .backends.factory import get_runner
+from .logger import close_all_loggers
 from .metrics import MetricsLogger
 from .preflight import run_preflight
 from .process_guard import init_process_guard, install_signal_handlers, terminate_all_children
@@ -206,3 +207,5 @@ def run(args: argparse.Namespace) -> int:
             write_emergency_shutdown_report(Path(_run_dir), f"{type(ex).__name__}: {ex}", repo=_repo)
         terminate_all_children()
         return 1
+    finally:
+        close_all_loggers()
