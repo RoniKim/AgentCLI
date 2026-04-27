@@ -8,7 +8,6 @@ __pycache__/
 
 # C 확장 모듈
 *.so
-.doc
 .AgentCLI
 configs/*.json
 databases/*.db
