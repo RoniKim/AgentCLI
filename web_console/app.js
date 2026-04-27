@@ -596,6 +596,7 @@
         filteredLine: 'filtered line',
         filteredLines: 'filtered lines',
         cursor: 'cursor',
+        emptyState: 'Empty log',
         liveTailActive: 'Live tail active',
         liveTailPaused: 'Live tail paused',
         logFileMissing: 'Log file missing',
@@ -610,6 +611,11 @@
         copySelectedLines: 'Copy selected lines',
         downloadFilteredLogs: 'Download filtered logs',
         clearSelection: 'Clear selection',
+        filterAll: 'ALL',
+        filterInfo: 'INFO',
+        filterWarn: 'WARN',
+        filterErr: 'ERR',
+        filterDebug: 'DEBUG',
         stagePlaceholder: 'Stage',
         taskIdPlaceholder: 'Task ID',
         searchPlaceholder: 'Search',
@@ -766,10 +772,10 @@
       runner: {
         panelTitle: '실행기 컨트롤',
         confirmationPhrases: '확인 문구:',
-        confirmStartPhrase: '실행기 시작',
-        confirmStopPhrase: '실행기 중지',
-        confirmReloadPhrase: '실행기 다시 불러오기',
-        confirmRestartPhrase: '실행기 재시작',
+        confirmStartPhrase: 'START RUNNER',
+        confirmStopPhrase: 'STOP RUNNER',
+        confirmReloadPhrase: 'RELOAD RUNNER',
+        confirmRestartPhrase: 'RESTART RUNNER',
         source: '소스',
         selectedRepo: '선택된 저장소',
         selectedConfig: '선택된 설정',
@@ -1012,16 +1018,16 @@
       },
       worktree: {
         title: '워크트리 검토',
-        pendingMerge: '대기 중인 병합',
+        pendingMerge: '대기 중인 작업트리 병합',
         reviewChecklist: '검토 체크리스트',
-        mergeActions: '병합 작업',
-        confirmMergePhrase: '워크트리 병합',
-        confirmDiscardPhrase: '워크트리 폐기',
+        mergeActions: '병합/폐기 작업',
+        confirmMergePhrase: 'MERGE WORKTREE',
+        confirmDiscardPhrase: 'DISCARD WORKTREE',
         readOnlyMode: '읽기 전용 모드',
         confirmationRequired: '확인 필요',
         manualRecovery: '수동 복구',
-        finalizedWorktree: '워크트리 완료됨',
-        noPendingMerge: '대기 중인 워크트리 병합이 없습니다.',
+        finalizedWorktree: '완료된 작업트리',
+        noPendingMerge: '대기 중인 작업트리 병합이 없습니다.',
         noChangedFiles: '패치에서 변경 파일을 파싱하지 못했습니다.',
         reviewRequired: '소스 저장소 변경 전에 검토가 필요합니다',
         patchApplied: '패치 적용됨',
@@ -1062,8 +1068,8 @@
       logs: {
         title: '로그',
         liveTail: '라이브 tail',
-        tailFilter: 'tail 필터',
-        loadingActiveRunLog: '활성 실행 로그 불러오는 중',
+        tailFilter: '라이브 tail 필터',
+        loadingActiveRunLog: '활성 실행 로그를 불러오는 중',
         liveTailActive: '라이브 tail 활성',
         liveTailPaused: '라이브 tail 일시정지',
         logFileMissing: '로그 파일 없음',
@@ -1183,14 +1189,55 @@
   });
   Object.assign(LOCALE_TEXT.ko.worktree, {
     readOnly: '읽기 전용',
-    finalized: '최종화됨',
+    finalized: '완료됨',
     cleanupRequired: '정리 필요',
-    mergeActions: '병합 작업',
+    mergeActions: '병합/폐기 작업',
     reviewRequired: '검토 필요',
     reviewBeforeMerge: '병합 전 검토',
     changedFiles: '변경된 파일',
     copyPatchPath: '패치 경로 복사',
     noPendingFile: '대기 파일 없음',
+    pendingMerge: '대기 중인 작업트리 병합',
+    finalizedWorktree: '완료된 작업트리',
+    noPendingReview: '대기 중인 작업트리 병합이 없습니다.',
+    manualCleanupRequired: '결정이 기록된 후 정리가 실패했습니다.',
+    noPendingMergeAvailable: '대기 중인 작업트리 병합이 없습니다.',
+    actionUnavailable: '작업트리를 사용할 수 없습니다.',
+    actionFailed: '작업트리 작업 실패.',
+    applyingPendingDecision: '{sourceRepo}에 대한 대기 중인 작업트리 결정을 적용하는 중입니다.',
+    typeConfirmationPhrase: '이 작업을 확인하려면 "{confirmation}"를 정확히 입력하세요.',
+    confirmationPhraseMismatch: '확인 문구는 "{confirmation}"여야 합니다.',
+    noChecklist: '아직 체크리스트가 없습니다.',
+    confirmMergeToApply: '커밋을 만들지 않고 패치를 적용하려면 병합을 확인하세요.',
+    confirmDiscardToRemove: '소스 파일을 건드리지 않고 대기 상태를 제거하려면 폐기를 확인하세요.',
+    backendValidates: '백엔드는 실행 전에 소스 저장소, 실행 디렉터리, 워크트리 경로, 패치 경로를 검증합니다.',
+    cleanupLifecycle: '정리 수명주기',
+    cleanupTarget: '정리 대상',
+    cleanupStatusDetail: '정리 상태 세부 정보',
+    exportStatus: '내보내기 상태',
+    repositoryRoot: '저장소 루트',
+    baseBranchForPatch: '패치 기준 브랜치',
+    mergeBase: '병합 기준점',
+    worktreeHead: '워크트리 헤드',
+    runThatProducedPatch: '패치를 생성한 실행',
+    isolatedSourceTree: '분리된 소스 트리',
+    mergePatchArtifact: '병합 패치 산출물',
+    readOnlyContractSource: '읽기 전용 계약 원본',
+    currentArtifactPath: '현재 산출물 경로',
+    sourceRepoLabel: '소스 저장소',
+    patchExportFailedBeforeMarker: '검토 가능한 병합 마커가 쓰이기 전에 패치 내보내기가 실패했습니다.',
+    exportedPatchNotAutoApplied: '패치가 내보내졌지만 자동 적용이 실행되지 않았습니다.',
+    noSourceRepoChangePending: '대기 중인 소스 저장소 변경이 없습니다.',
+    noCommitWillBeCreated: '커밋은 생성되지 않습니다.',
+    pendingMetadataIncomplete: '대기 중인 작업트리 메타데이터가 불완전합니다.',
+    fixOrDeletePendingFile: '다시 시도하기 전에 CLI에서 대기 파일을 수정하거나 삭제하세요.',
+    applyExportedPatchBeforeConfirming: '병합 또는 폐기를 확인하기 전에 내보낸 패치를 적용하세요.',
+    worktreeAlreadyFinalized: '작업트리가 이미 종료되었습니다.',
+    reviewThePatchBeforeSourceRepoChanges: '소스 저장소 변경 전에 패치를 검토하세요.',
+    reviewChecklist: '검토 체크리스트',
+    riskNotes: '위험 참고',
+    actionFailedHttp: '작업트리 작업 실패(HTTP {status}).',
+    noPatchPathAvailable: '사용 가능한 패치 경로가 없습니다.',
   });
   Object.assign(LOCALE_TEXT.ko.logs, {
     stagePlaceholder: '단계',
@@ -1303,9 +1350,9 @@
   });
   Object.assign(LOCALE_TEXT.ko.worktree, {
     applyMerge: '병합 적용',
-    discardMerge: '병합 취소',
+    discardMerge: '폐기',
     confirmMerge: '병합 확인',
-    confirmDiscard: '취소 확인',
+    confirmDiscard: '폐기 확인',
   });
 
   Object.assign(LOCALE_TEXT.en.logs, {
@@ -1316,6 +1363,12 @@
     exportCursor: 'Cursor',
     exportFilters: 'Filters',
     exportNoMatches: 'No matching log lines',
+    emptyState: 'Empty log',
+    filterAll: 'ALL',
+    filterInfo: 'INFO',
+    filterWarn: 'WARN',
+    filterErr: 'ERR',
+    filterDebug: 'DEBUG',
   });
   Object.assign(LOCALE_TEXT.en.goals, {
     saveGoals: 'Save Goals',
@@ -1496,6 +1549,25 @@
       reviewChecklist: 'Review checklist',
       riskNotes: 'Risk notes',
       reviewCompletedLocally: 'Worktree review marked complete locally.',
+      pendingMerge: 'Pending merge',
+      mergeActions: 'Merge actions',
+      finalizedWorktree: 'Finalized worktree',
+      noPendingReview: 'No pending worktree merge.',
+      actionUnavailable: 'Worktree action unavailable.',
+      typeConfirmationPhrase: 'Type "{confirmation}" to confirm this worktree action.',
+      confirmationPhraseMismatch: 'Confirmation phrase must be "{confirmation}".',
+      cleanupLifecycle: 'Cleanup lifecycle',
+      cleanupTarget: 'Cleanup target',
+      cleanupStatusDetail: 'Cleanup status detail',
+      exportStatus: 'Export status',
+      repositoryRoot: 'Repository root',
+      baseBranchForPatch: 'Base branch for patch',
+      mergeBase: 'Merge base',
+      worktreeHead: 'Worktree head',
+      runThatProducedPatch: 'Run that produced the patch',
+      isolatedSourceTree: 'Isolated source tree',
+      mergePatchArtifact: 'Merge patch artifact',
+      readOnlyContractSource: 'Read-only contract source',
     },
   });
 
@@ -1593,7 +1665,7 @@
       typePhraseToContinue: '계속하려면 문구를 입력하세요',
       refreshingStatus: '예상 상태가 될 때까지 실행기 상태를 새로고침합니다.',
       stopProgress: '중지 진행',
-      actionUnavailable: '작업을 사용할 수 없음',
+      actionUnavailable: '작업을 사용할 수 없습니다.',
       controllerUnavailableMessage: '실행기 컨트롤러를 사용할 수 없습니다.',
       controlsDisabledMessage: '실행기 컨트롤이 비활성화되었습니다.',
       controllerReportedError: '실행기 컨트롤러가 오류를 보고했습니다.',
@@ -1602,7 +1674,7 @@
       actionDisabled: '작업 비활성화',
       actionFailed: '실행기 작업 실패.',
       confirmationRequired: '확인 필요',
-      typeExactConfirmationToEnableAction: '{action}을 활성화하려면 "{confirmation}"를 정확히 입력하세요.',
+      typeExactConfirmationToEnableAction: '{action} 작업을 활성화하려면 "{confirmation}"를 정확히 입력하세요.',
     },
     worktree: {
       ...LOCALE_TEXT.ko.worktree,
@@ -1627,9 +1699,30 @@
       reviewChecklist: '검토 체크리스트',
       riskNotes: '위험 참고',
       mergeSummary: '{sourceRepo}에 {patchPath}를 커밋 없이 적용하려면 병합을 확인하세요.',
-      discardSummary: '{sourceRepo}를 건드리지 않고 대기 상태를 제거하려면 {worktreeDir} 폐기를 확인하세요.',
+      discardSummary: '{sourceRepo}를 건드리지 않고 대기 상태를 제거하려면 {worktreeDir}에서 폐기를 확인하세요.',
       actionFailedHttp: '작업트리 작업 실패(HTTP {status}).',
       noPatchPathAvailable: '사용 가능한 패치 경로가 없습니다.',
+      pendingMerge: '대기 중인 작업트리 병합',
+      mergeActions: '병합/폐기 작업',
+      finalizedWorktree: '완료된 작업트리',
+      noPendingReview: '대기 중인 작업트리 병합이 없습니다.',
+      actionUnavailable: '작업트리를 사용할 수 없습니다.',
+      actionFailed: '작업트리 작업 실패.',
+      applyingPendingDecision: '{sourceRepo}에 대한 대기 중인 작업트리 결정을 적용하는 중입니다.',
+      typeConfirmationPhrase: '이 작업을 확인하려면 "{confirmation}"를 정확히 입력하세요.',
+      confirmationPhraseMismatch: '확인 문구는 "{confirmation}"여야 합니다.',
+      cleanupLifecycle: '정리 수명주기',
+      cleanupTarget: '정리 대상',
+      cleanupStatusDetail: '정리 상태 세부 정보',
+      exportStatus: '내보내기 상태',
+      repositoryRoot: '저장소 루트',
+      baseBranchForPatch: '패치 기준 브랜치',
+      mergeBase: '병합 기준점',
+      worktreeHead: '워크트리 헤드',
+      runThatProducedPatch: '패치를 생성한 실행',
+      isolatedSourceTree: '분리된 소스 트리',
+      mergePatchArtifact: '병합 패치 산출물',
+      readOnlyContractSource: '읽기 전용 계약 원본',
     },
   });
 
@@ -1693,6 +1786,15 @@
     exportCursor: '커서',
     exportFilters: '필터',
     exportNoMatches: '일치하는 로그 줄 없음',
+    emptyState: '로그 비어 있음',
+    cursor: '커서',
+    filteredLine: '필터된 로그 줄',
+    filteredLines: '필터된 로그 줄',
+    filterAll: '전체',
+    filterInfo: '정보',
+    filterWarn: '경고',
+    filterErr: '오류',
+    filterDebug: '디버그',
   });
   Object.assign(LOCALE_TEXT.ko.pipeline, {
     partialLifecycleRecords: '일부 라이프사이클 기록만 게시되었습니다.',
@@ -8490,6 +8592,18 @@
     };
   }
 
+  function logFilterLabel(level) {
+    const normalized = toText(level, 'all').toLowerCase();
+    const labels = {
+      all: t('logs.filterAll'),
+      info: t('logs.filterInfo'),
+      warn: t('logs.filterWarn'),
+      err: t('logs.filterErr'),
+      debug: t('logs.filterDebug'),
+    };
+    return labels[normalized] || String(level || '').toUpperCase();
+  }
+
   function buildLogTailQuery(filters = {}, options = {}) {
     const query = {
       max_lines: Math.max(1, toNumber(options.maxLines, MAX_LOG_ROWS)),
@@ -8716,7 +8830,7 @@
       stateLabel = t('logs.logReadError');
       statusClass = 'status-chip status-chip--err';
     } else if (status === 'empty') {
-      stateLabel = t('snapshot.emptyState');
+      stateLabel = t('logs.emptyState');
       statusClass = 'status-chip status-chip--idle';
     } else if (status === 'malformed_line' && !hasEntries) {
       stateLabel = t('common.failed');
@@ -8766,7 +8880,7 @@
                 type="button"
                 class="filter-chip ${filters.level === level ? 'filter-chip--active' : ''}"
                 data-log-level="${escapeHTML(level)}"
-              >${escapeHTML(level.toUpperCase())}</button>
+              >${escapeHTML(logFilterLabel(level))}</button>
             `)
             .join('')}
         </div>
@@ -9339,7 +9453,7 @@
               <div class="filters">
                 ${filters
                   .map((filter) => `
-                    <button type="button" class="filter-chip ${state.logFilter === filter ? 'filter-chip--active' : ''}" data-filter="${escapeHTML(filter)}">${escapeHTML(filter.toUpperCase())}</button>
+                    <button type="button" class="filter-chip ${state.logFilter === filter ? 'filter-chip--active' : ''}" data-filter="${escapeHTML(filter)}">${escapeHTML(logFilterLabel(filter))}</button>
                   `)
                   .join('')}
               </div>
@@ -10365,13 +10479,34 @@
     const actionEnabled = worktreeActionEnabled(review, 'merge');
     const canCopyPatch = Boolean(review.patchPath || review.patch);
     const reviewSummary = describeWorktreeReview(review);
+    const statusLabel = (() => {
+      const normalized = status.toLowerCase();
+      if (normalized === 'none') return t('common.none');
+      if (normalized === 'pending review' || normalized === 'pending') return t('worktree.reviewRequired');
+      if (normalized === 'applied') return t('worktree.patchApplied');
+      if (normalized === 'discarded') return t('worktree.patchDiscarded');
+      if (normalized === 'apply_failed') return t('worktree.patchExportFailed');
+      if (normalized === 'patch_not_applied' || normalized === 'not_applied') return t('worktree.patchNotApplied');
+      if (normalized === 'applied_cleanup_failed') return t('worktree.mergeRecordedCleanupFailed');
+      if (normalized === 'discard_cleanup_failed') return t('worktree.discardRecordedCleanupFailed');
+      if (normalized === 'error') return t('common.failed');
+      return status;
+    })();
+    const cleanupStateLabel = (() => {
+      const normalized = cleanupState.toLowerCase();
+      if (normalized === 'none') return t('common.none');
+      if (normalized === 'pending') return t('pipeline.pending');
+      if (normalized === 'done') return t('common.complete');
+      if (normalized === 'failed') return t('common.failed');
+      return cleanupState;
+    })();
     // no pending merge
     // This worktree is finalized. The web console stays read-only.
     // The backend validates the pending marker, source repository, run directory, worktree path, and patch path before it applies anything. No commit will be created.
     // Manual recovery:
     const statusSummary = status === 'none'
       ? t('worktree.noPendingMerge')
-      : [status, cleanupState !== 'none' ? `${t('worktree.cleanupState')} ${cleanupState}` : ''].filter(Boolean).join(' | ');
+      : [statusLabel, cleanupState !== 'none' ? `${t('worktree.cleanupState')} ${cleanupStateLabel}` : ''].filter(Boolean).join(' | ');
     const checklistMeta = status === 'none' ? t('worktree.readOnlyMode') : cleanupFailed ? t('worktree.manualRecovery') : reviewRequired ? (actionEnabled ? t('worktree.confirmationRequired') : t('worktree.manualRecovery')) : t('worktree.finalizedWorktree');
     const checklistTitle = status === 'none'
       ? t('worktree.readOnlyMode')
@@ -10385,7 +10520,7 @@
     const checklistCopy = reviewSummary.copy;
     const mergePanelMeta = status === 'none' ? t('worktree.readOnlyMode') : cleanupFailed ? t('worktree.cleanupRequired') : reviewRequired ? (actionEnabled ? t('worktree.confirmationRequired') : t('worktree.manualRecovery')) : t('worktree.finalizedWorktree');
     const detailRows = [
-      { label: t('worktree.status'), value: status, meta: reviewRequired ? t('worktree.reviewRequired') : t('worktree.readOnly') },
+      { label: t('worktree.status'), value: statusLabel, meta: reviewRequired ? t('worktree.reviewRequired') : t('worktree.readOnly') },
       { label: t('worktree.statusFile'), value: review.statusFile || review.pendingFile || '--', meta: t('worktree.currentArtifactPath') },
       { label: t('worktree.sourceRepoLabel'), value: review.sourceRepo || '--', meta: t('worktree.repositoryRoot') },
       { label: t('worktree.sourceBranch'), value: review.sourceBranch || review.branch || 'HEAD', meta: t('worktree.baseBranchForPatch') },
@@ -10395,7 +10530,7 @@
       { label: t('worktree.worktreeDir'), value: review.worktreeDir || review.worktree || '--', meta: t('worktree.isolatedSourceTree') },
       { label: t('worktree.patchPath'), value: review.patchPath || review.patch || '--', meta: t('worktree.mergePatchArtifact') },
       { label: t('worktree.pendingFile'), value: review.pendingFile || '--', meta: t('worktree.readOnlyContractSource') },
-      { label: t('worktree.cleanupState'), value: cleanupState, meta: t('worktree.cleanupLifecycle') },
+      { label: t('worktree.cleanupState'), value: cleanupStateLabel, meta: t('worktree.cleanupLifecycle') },
       { label: t('worktree.cleanupPath'), value: review.cleanupPath || review.worktreeDir || review.worktree || '--', meta: t('worktree.cleanupTarget') },
       { label: t('worktree.cleanupMessage'), value: review.cleanupMessage || '--', meta: t('worktree.cleanupStatusDetail') },
       { label: t('worktree.runnerRc'), value: String(review.runnerRc ?? review.lastRc ?? 0), meta: t('worktree.exportStatus') },
