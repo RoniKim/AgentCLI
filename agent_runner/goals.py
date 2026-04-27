@@ -80,6 +80,17 @@ def _goals_completion_required_sections(completion_level: str) -> list[str]:
     return ["p0", "p1"]
 
 
+def resolve_goals_completion_level(value: Any = None, *, default: str = "all") -> str:
+    """Normalize the configured goals completion level."""
+    fallback = str(default or "all").strip().lower() or "all"
+    if fallback not in {"p0", "p1", "all"}:
+        fallback = "all"
+    level = str(value if value is not None else fallback).strip().lower()
+    if level in {"p0", "p1", "all"}:
+        return level
+    return fallback
+
+
 def parse_goals_completion(goals_text: Optional[str], *,
                            completion_level: str = "all") -> Dict[str, Any]:
     """Parse GOALS.md checkboxes and evaluate completion status.
@@ -97,7 +108,7 @@ def parse_goals_completion(goals_text: Optional[str], *,
       all_total, all_done, p0_complete, p1_complete, project_complete,
       unmet_p0, unmet_p1
     """
-    level = completion_level.lower().strip() if completion_level else "all"
+    level = resolve_goals_completion_level(completion_level)
     required_sections = _goals_completion_required_sections(level)
 
     if not goals_text or not goals_text.strip():
@@ -307,6 +318,7 @@ def should_attempt_goals_refresh(
     goals_refresh_count: int,
     goals_refresh_max: int,
     goals_auto_refresh: bool,
+    completion_level: str = "all",
 ) -> Tuple[bool, str]:
     """Determine whether a goals auto-refresh should be attempted.
 
@@ -326,7 +338,7 @@ def should_attempt_goals_refresh(
         return (False, "max_reached")
 
     _path, goals_text = read_goals(repo)
-    status = parse_goals_completion(goals_text)
+    status = parse_goals_completion(goals_text, completion_level=completion_level)
     if not status.get("has_goals"):
         return (False, "no_goals")
     if not status.get("project_complete"):
@@ -476,8 +488,12 @@ def _parse_and_append_refreshed_goals_inner(repo: Path, llm_output: str) -> Dict
 # GOALS.md checkbox auto-update
 # ---------------------------------------------------------------------------
 
-def update_goals_checkboxes(repo: Path, done_task_titles: list[str],
-                            done_task_prompts: list[str] | None = None) -> Dict[str, Any]:
+def update_goals_checkboxes(
+    repo: Path,
+    done_task_titles: list[str],
+    done_task_prompts: list[str] | None = None,
+    completion_level: str = "all",
+) -> Dict[str, Any]:
     """Auto-check GOALS.md items that match completed task titles/prompts.
 
     Matching strategy (fuzzy keyword):
@@ -528,7 +544,11 @@ def update_goals_checkboxes(repo: Path, done_task_titles: list[str],
         new_lines.append(line)
 
     if not checked_items:
-        return {"updated": False, "checked_items": [], "new_status": parse_goals_completion(original)}
+        return {
+            "updated": False,
+            "checked_items": [],
+            "new_status": parse_goals_completion(original, completion_level=completion_level),
+        }
 
     # Log with strategy detail for transparency
     detail_parts = [f"{t}({s})" for t, s in checked_strategies]
@@ -545,7 +565,7 @@ def update_goals_checkboxes(repo: Path, done_task_titles: list[str],
         eprint(f"[WARN] Failed to update GOALS.md checkboxes: {exc}")
         return {"updated": False, "checked_items": checked_items, "new_status": {}}
 
-    new_status = parse_goals_completion(updated_text)
+    new_status = parse_goals_completion(updated_text, completion_level=completion_level)
     return {"updated": True, "checked_items": checked_items, "new_status": new_status}
 
 

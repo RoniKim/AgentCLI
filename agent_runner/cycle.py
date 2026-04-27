@@ -133,6 +133,7 @@ from .goals import (
     GOALS_EVALUATION_INSTRUCTION,
     GOALS_REFRESH_RESCUABLE_REASONS,
     should_attempt_goals_refresh,
+    resolve_goals_completion_level,
 )
 from .schemas import PMOutputV2
 from .structured import (
@@ -2295,7 +2296,12 @@ async def main_async(args: argparse.Namespace) -> int:
                 try:
                     done_titles = [t.title for t in tasks if t.id in done_set]
                     done_prompts = [t.prompt for t in tasks if t.id in done_set]
-                    goals_update = update_goals_checkboxes(repo, done_titles, done_prompts)
+                    goals_update = update_goals_checkboxes(
+                        repo,
+                        done_titles,
+                        done_prompts,
+                        completion_level=goals_completion_level,
+                    )
                     if goals_update.get("updated"):
                         checked = goals_update.get("checked_items", [])
                         eprint(f"[GOALS] Auto-checked {len(checked)} item(s): {checked[:5]}")
@@ -2308,13 +2314,12 @@ async def main_async(args: argparse.Namespace) -> int:
                 try:
                     _gp_eval, _gt_eval = read_goals(repo)
                     if _gt_eval:
-                        _completion_level = str(getattr(args, "goals_completion_level", "all") or "all")
-                        comp_status = parse_goals_completion(_gt_eval, completion_level=_completion_level)
+                        comp_status = parse_goals_completion(_gt_eval, completion_level=goals_completion_level)
                         unresolved = _count_unresolved_failures(repo, done_set)
                         write_completion_status(run_dir, comp_status, failed_unresolved=unresolved,
                                                stop_reason="cycle_end")
                         if comp_status.get("project_complete") and unresolved == 0:
-                            eprint(f"[GOALS] PROJECT COMPLETE - all goals met (level={_completion_level}), no unresolved failures.")
+                            eprint(f"[GOALS] PROJECT COMPLETE - all goals met (level={goals_completion_level}), no unresolved failures.")
                             metrics.event("project_complete", cycle=cycle_idx, goals=comp_status)
                             return 0, STOP_REASON_PROJECT_COMPLETE, done_delta, ran_tasks
                         else:
@@ -2434,6 +2439,7 @@ async def main_async(args: argparse.Namespace) -> int:
         goals_refresh_count = 0
         goals_refresh_max = int(getattr(args, "goals_refresh_max_per_run", 3) or 3)
         goals_auto_refresh = bool(getattr(args, "goals_auto_refresh", False))
+        goals_completion_level = resolve_goals_completion_level(getattr(args, "goals_completion_level", None))
 
         async def _try_goals_refresh(cycle_idx: int) -> bool:
             """Attempt LLM-driven GOALS.md refresh. Returns True if new items appended."""
@@ -2724,6 +2730,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     _should, _why = should_attempt_goals_refresh(
                         repo, reason, goals_refresh_count, goals_refresh_max,
                         goals_auto_refresh=goals_auto_refresh,
+                        completion_level=goals_completion_level,
                     )
                     if _should:
                         if await _try_goals_refresh(cycle_idx):

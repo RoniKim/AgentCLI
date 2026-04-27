@@ -4721,6 +4721,88 @@ Another unsupported line.
         self.assertEqual([], normalized_complete["goalsCompletion"]["missing_sections"])
         self.assertFalse(normalized_complete["goalsCompletion"]["valid"])
 
+    def test_goals_completion_level_is_shared_across_shell_runner_and_web(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from agent_runner.goals import (
+            parse_goals_completion,
+            resolve_goals_completion_level,
+            should_attempt_goals_refresh,
+            update_goals_checkboxes,
+        )
+        from agent_runner.shell import RunnerShell
+        from agent_runner.utils import STOP_REASON_PROJECT_COMPLETE
+
+        raw_text = """# Project Goals
+
+## P0
+- [x] Keep read-only progress views
+
+## P1
+- [ ] Add FastAPI web console
+"""
+        _write(self.goals_path, raw_text)
+
+        self.assertEqual("all", resolve_goals_completion_level("bogus"))
+
+        expected_by_level = {
+            "p0": True,
+            "p1": False,
+            "all": False,
+        }
+        for level, expected in expected_by_level.items():
+            with self.subTest(level=level):
+                config_path = self.home / "configs" / f"goals-{level}.json"
+                _write_config(config_path, self.repo, goals_completion_level=level)
+
+                parsed = parse_goals_completion(raw_text, completion_level=level)
+                self.assertEqual(expected, parsed["project_complete"])
+                self.assertEqual(level, resolve_goals_completion_level(level))
+
+                should_refresh, why = should_attempt_goals_refresh(
+                    self.repo,
+                    STOP_REASON_PROJECT_COMPLETE,
+                    0,
+                    3,
+                    True,
+                    completion_level=level,
+                )
+                self.assertEqual(expected, should_refresh)
+                self.assertEqual("ok" if expected else "goals_incomplete", why)
+
+                update_result = update_goals_checkboxes(
+                    self.repo,
+                    ["unrelated task"],
+                    ["unrelated prompt"],
+                    completion_level=level,
+                )
+                self.assertFalse(update_result["updated"])
+                self.assertEqual(expected, update_result["new_status"]["project_complete"])
+
+                shell = RunnerShell(initial_argv=["--repo", self.repo.as_posix(), "--config", config_path.as_posix()])
+                self.assertEqual(level, shell.effective()["goals_completion_level"])
+
+                status_buffer = StringIO()
+                with redirect_stdout(status_buffer):
+                    shell.status()
+                status_output = status_buffer.getvalue()
+                self.assertIn(f"goals_completion_level: {level}", status_output)
+
+                doctor_buffer = StringIO()
+                with redirect_stdout(doctor_buffer):
+                    shell.doctor()
+                doctor_output = doctor_buffer.getvalue()
+                self.assertIn(f"goals_completion_level: {level}", doctor_output)
+                self.assertIn(f"project_complete: {expected}", doctor_output)
+
+                client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=config_path)
+                status_payload = client.get("/api/status").json()
+                self.assertEqual(expected, status_payload["goals"]["completion"]["project_complete"])
+                self.assertEqual(expected, status_payload["progress"]["goals_complete"])
+                goals_payload = client.get("/api/goals").json()
+                self.assertEqual(expected, goals_payload["completion"]["project_complete"])
+
     def test_adapter_normalizes_config_contract_shape_and_redaction(self) -> None:
         snapshot = _make_no_run_snapshot()
         snapshot["config_contract"] = {

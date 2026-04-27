@@ -21,6 +21,7 @@ from .config import (
     legacy_config_path,
     resolve_prompts_dir,
 )
+from .goals import resolve_goals_completion_level
 from .runner_entry import run as run_runner
 from .run_dir import make_run_dir
 from .run_dir import find_latest_run_dir
@@ -242,6 +243,7 @@ class RunnerShell:
             eff.update(self.overrides)
         if self.repo:
             eff["repo"] = str(self.repo)
+        eff["goals_completion_level"] = resolve_goals_completion_level(eff.get("goals_completion_level"))
         return eff
 
     def print_config(self, show_all: bool = False) -> None:
@@ -645,6 +647,7 @@ class RunnerShell:
             self.status()
 
     def status(self) -> None:
+        eff = self.effective()
         if self._controller is not None:
             data = self._controller.status()
             run_dir = str(data.get("run_dir") or "").strip()
@@ -657,6 +660,7 @@ class RunnerShell:
             print(f"running: {bool(data.get('running'))}")
             print(f"mode:    {data.get('runner_mode') or 'thread'}")
             print(f"run_dir: {data.get('run_dir') or '(not set)'}")
+            print(f"goals_completion_level: {eff.get('goals_completion_level')}")
             print(f"uptime:  {int(data.get('uptime_seconds') or 0)}s")
             print(f"exit:    {data.get('exit_code') if data.get('exit_code') is not None else '(running/unknown)'}")
             print(
@@ -688,6 +692,7 @@ class RunnerShell:
         print("\n=== Runner Status ===")
         print(f"running: {alive}")
         print(f"run_dir: {_shorten(self.run_dir)}")
+        print(f"goals_completion_level: {eff.get('goals_completion_level')}")
         print(f"uptime:  {dur}")
         print(f"exit:    {self._runner_exit_code if (not alive) else '(running)'}")
         stop_progress = read_stop_progress(self.run_dir)
@@ -1104,9 +1109,12 @@ class RunnerShell:
             try:
                 from .goals import goals_path, read_goals, parse_goals_completion
                 gp = goals_path(self.repo)
+                completion_level = resolve_goals_completion_level(eff.get("goals_completion_level"))
+                report_lines.append(f"- goals_completion_level: {completion_level}")
                 if gp.exists():
                     _, txt = read_goals(self.repo)
-                    comp = parse_goals_completion(txt)
+                    comp = parse_goals_completion(txt, completion_level=completion_level)
+                    report_lines.append(f"  - project_complete: {bool(comp.get('project_complete'))}")
                     p0_info = f"P0: {comp.get('p0_done', 0)}/{comp.get('p0_total', 0)}"
                     p1_info = f"P1: {comp.get('p1_done', 0)}/{comp.get('p1_total', 0)}"
                     report_lines.append(f"  - GOALS.md: found ({p0_info}, {p1_info})")

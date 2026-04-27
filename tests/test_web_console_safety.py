@@ -1223,6 +1223,31 @@ class WebConsoleSafetyTests(unittest.TestCase):
                 backups = list(self.goals_path.parent.glob(f"{self.goals_path.stem}.*.bak{self.goals_path.suffix}"))
                 self.assertEqual([], backups)
 
+    def test_shell_status_and_doctor_use_configured_goals_completion_level(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from agent_runner.shell import RunnerShell
+
+        config_path = self.home / "configs" / "shell-goals-p1.json"
+        _write_config(config_path, self.repo, goals_completion_level="p1")
+
+        shell = RunnerShell(initial_argv=["--repo", self.repo.as_posix(), "--config", config_path.as_posix()])
+        self.assertEqual("p1", shell.effective()["goals_completion_level"])
+
+        status_buffer = StringIO()
+        with redirect_stdout(status_buffer):
+            shell.status()
+        status_output = status_buffer.getvalue()
+        self.assertIn("goals_completion_level: p1", status_output)
+
+        doctor_buffer = StringIO()
+        with redirect_stdout(doctor_buffer):
+            shell.doctor()
+        doctor_output = doctor_buffer.getvalue()
+        self.assertIn("goals_completion_level: p1", doctor_output)
+        self.assertIn("project_complete: False", doctor_output)
+
     def test_prompt_read_rejects_traversal_paths(self) -> None:
         config_path = self.config_path
         prompts_dir = self.home / "prompts" / "agentcli"

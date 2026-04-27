@@ -24,7 +24,7 @@ from .config import (
     resolve_prompts_dir,
 )
 from .cli import DEFAULTS as CLI_DEFAULTS
-from .goals import goals_path, parse_goals_completion, read_goals
+from .goals import goals_path, parse_goals_completion, read_goals, resolve_goals_completion_level
 from .gitops import (
     apply_pending_worktree_merge,
     discard_pending_worktree_merge,
@@ -2047,6 +2047,7 @@ def _parse_goal_items_and_warnings(goals_text: str | None) -> tuple[dict[str, li
 
 
 def _build_goals_payload(repo: Path, *, completion_level: str = "all") -> dict[str, Any]:
+    completion_level = resolve_goals_completion_level(completion_level)
     goal_path = goals_path(repo)
     exists = False
     mtime = None
@@ -4024,12 +4025,13 @@ def _history_item(
     run_dir: Path,
     *,
     branch: str,
+    completion_level: str = "all",
 ) -> dict[str, Any]:
     state = load_state(run_dir / "STATE.json")
     backlog = _load_tasks(run_dir)
     backlog_task_ids = load_backlog_task_ids(run_dir / "BACKLOG.json")
     state_counts = count_state_task_ids(state, backlog_task_ids)
-    goals = _build_goals_payload(repo, completion_level="all")
+    goals = _build_goals_payload(repo, completion_level=completion_level)
     run_summary = _safe_json(run_dir / "run_summary.json", {})
     last_summary = _safe_json(run_dir / "last_run_summary.json", {})
 
@@ -4144,8 +4146,14 @@ def _history_item(
     }
 
 
-def _history_payload(repo: Path, run_dirs: list[Path], *, branch: str) -> dict[str, Any]:
-    items = [_history_item(repo, run_dir, branch=branch) for run_dir in run_dirs]
+def _history_payload(
+    repo: Path,
+    run_dirs: list[Path],
+    *,
+    branch: str,
+    completion_level: str = "all",
+) -> dict[str, Any]:
+    items = [_history_item(repo, run_dir, branch=branch, completion_level=completion_level) for run_dir in run_dirs]
     items.sort(key=lambda item: int(item.get("startedAt") or 0), reverse=True)
     successes = len([item for item in items if item["status"] == "success"])
     failures = len([item for item in items if item["status"] == "failed"])
@@ -4363,7 +4371,7 @@ def _build_progress_payload(
     backlog = _load_backlog_payload(run_dir, state, current_task_id=_pick_text(controller_data.get("current_task_id"), controller_data.get("task_id"), controller_data.get("task")), events=events)
     backlog_task_ids = load_backlog_task_ids(run_dir / "BACKLOG.json") if run_dir else set()
     state_counts = count_state_task_ids(state, backlog_task_ids)
-    completion_level = str(config.get("goals_completion_level") or "all").strip() or "all"
+    completion_level = resolve_goals_completion_level(config.get("goals_completion_level"))
     goals = _build_goals_payload(repo, completion_level=completion_level)
     backlog_items = backlog["items"]
     tasks_total = len(backlog_items)
@@ -4679,7 +4687,7 @@ def build_snapshot(
         save_requires_opt_in=True,
     )
     profile = _prompt_profile(cfg)
-    goals_completion_level = str(cfg.get("goals_completion_level") or "all").strip() or "all"
+    goals_completion_level = resolve_goals_completion_level(cfg.get("goals_completion_level"))
     goals = _build_goals_payload(repo_root, completion_level=goals_completion_level)
     prompt_items = _load_prompt_items(repo_root, prompts_dir, profile=profile)
     branch = _branch_name(repo_root)
@@ -4735,7 +4743,12 @@ def build_snapshot(
         "warnings": 0,
     }
     stages = _stage_payload(repo_root, active_run, progress, cfg, run_dir=latest_run_dir, run_summary=run_summary, last_run_summary=last_run_summary, controller_status=controller_status, events=logs_events)
-    history = _history_payload(repo_root, _run_dirs(repo_root), branch=branch)
+    history = _history_payload(
+        repo_root,
+        _run_dirs(repo_root),
+        branch=branch,
+        completion_level=resolve_goals_completion_level(cfg.get("goals_completion_level")),
+    )
     notifications = _build_notifications(
         run_id=active_run["id"],
         started_at_ms=int(active_run.get("startedAt") or 0),
@@ -5046,7 +5059,7 @@ def create_app(
         return _snapshot()[name]
 
     def _goals() -> dict[str, Any]:
-        completion_level = str(cfg.get("goals_completion_level") or "all").strip() or "all"
+        completion_level = resolve_goals_completion_level(cfg.get("goals_completion_level"))
         return _build_goals_payload(repo_root, completion_level=completion_level)
 
     def _runner_control_snapshot() -> dict[str, Any]:
