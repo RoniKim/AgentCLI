@@ -21,6 +21,7 @@ from agent_runner.gitops import (
     discard_pending_worktree_merge,
     export_worktree_patch,
     remove_worktree,
+    WorktreeCleanupError,
     WorktreeSafetyError,
     sha256_text,
 )
@@ -56,6 +57,34 @@ class WorktreeManualMergeTests(unittest.TestCase):
 
     def _source_branch(self) -> str:
         return self._git("rev-parse", "--abbrev-ref", "HEAD").strip()
+
+    def _cleanup_error(self, cleanup_path: Path, *, attempts: list[dict[str, object]] | None = None) -> WorktreeCleanupError:
+        permission_error = PermissionError(13, "Permission denied", cleanup_path.as_posix())
+        cleanup_attempts = attempts or [
+            {
+                "attempt": 1,
+                "operation": "shutil.rmtree",
+                "path": cleanup_path.as_posix(),
+                "worktree_dir": self.worktree.resolve().as_posix(),
+                "error_type": "PermissionError",
+                "message": str(permission_error),
+                "errno": 13,
+            }
+        ]
+        details = {
+            "path": cleanup_path.as_posix(),
+            "worktree_dir": self.worktree.resolve().as_posix(),
+            "attempts": cleanup_attempts,
+            "operation": "shutil.rmtree",
+            "error_type": "PermissionError",
+            "message": str(permission_error),
+        }
+        return WorktreeCleanupError(
+            str(permission_error),
+            cleanup_path=cleanup_path.as_posix(),
+            details=details,
+            attempts=cleanup_attempts,
+        )
 
     def _write_pending_payload(
         self,
@@ -116,6 +145,83 @@ class WorktreeManualMergeTests(unittest.TestCase):
         self.assertIn("from worktree", patch_text)
         remove_worktree(self.repo, self.worktree)
 
+    def test_remove_worktree_retries_locked_path_before_succeeding(self) -> None:
+        self._init_repo()
+        retry_worktree = self.fixture_root / ".agentcli_worktrees" / "repo" / "retry"
+        locked_file = retry_worktree / "nested" / "locked.txt"
+        locked_file.parent.mkdir(parents=True, exist_ok=True)
+        locked_file.write_text("locked\n", encoding="utf-8")
+        retry_worktree.mkdir(parents=True, exist_ok=True)
+
+        rmtree_calls: list[Path] = []
+
+        def fake_run_cmd(cmd, cwd, timeout_sec=600):
+            if cmd[:3] == ["git", "worktree", "remove"]:
+                return 1, f"permission denied: {locked_file.as_posix()}"
+            if cmd[:3] == ["git", "worktree", "prune"]:
+                return 0, ""
+            self.fail(f"Unexpected command: {cmd}")
+
+        def fake_rmtree(path):
+            rmtree_calls.append(Path(path))
+            if len(rmtree_calls) < 3:
+                raise PermissionError(13, "Permission denied", locked_file.as_posix())
+            target = Path(path)
+            for candidate in sorted(target.rglob("*"), reverse=True):
+                if candidate.is_file() or candidate.is_symlink():
+                    candidate.unlink()
+            for candidate in sorted(target.rglob("*"), reverse=True):
+                if candidate.is_dir():
+                    candidate.rmdir()
+            target.rmdir()
+
+        with (
+            patch("agent_runner.gitops.run_cmd", side_effect=fake_run_cmd),
+            patch("agent_runner.gitops.shutil.rmtree", side_effect=fake_rmtree),
+            patch("agent_runner.gitops.time.sleep") as sleep_mock,
+        ):
+            remove_worktree(self.repo, retry_worktree)
+
+        self.assertEqual(3, len(rmtree_calls))
+        self.assertEqual(2, sleep_mock.call_count)
+        self.assertFalse(retry_worktree.exists())
+
+    def test_remove_worktree_raises_structured_cleanup_error_after_retries_are_exhausted(self) -> None:
+        self._init_repo()
+        retry_worktree = self.fixture_root / ".agentcli_worktrees" / "repo" / "retry-fail"
+        locked_file = retry_worktree / "nested" / "locked.txt"
+        locked_file.parent.mkdir(parents=True, exist_ok=True)
+        locked_file.write_text("locked\n", encoding="utf-8")
+        retry_worktree.mkdir(parents=True, exist_ok=True)
+
+        def fake_run_cmd(cmd, cwd, timeout_sec=600):
+            if cmd[:3] == ["git", "worktree", "remove"]:
+                return 1, f"permission denied: {locked_file.as_posix()}"
+            if cmd[:3] == ["git", "worktree", "prune"]:
+                return 0, ""
+            self.fail(f"Unexpected command: {cmd}")
+
+        def fake_rmtree(path):
+            raise PermissionError(13, "Permission denied", locked_file.as_posix())
+
+        with (
+            patch("agent_runner.gitops.run_cmd", side_effect=fake_run_cmd),
+            patch("agent_runner.gitops.shutil.rmtree", side_effect=fake_rmtree),
+            patch("agent_runner.gitops.time.sleep") as sleep_mock,
+        ):
+            with self.assertRaises(WorktreeCleanupError) as ctx:
+                remove_worktree(self.repo, retry_worktree)
+
+        error = ctx.exception
+        self.assertEqual("worktree_cleanup_failed", error.code)
+        self.assertEqual(locked_file.as_posix(), error.cleanup_path)
+        self.assertIn(locked_file.as_posix(), error.cleanup_message)
+        self.assertEqual(locked_file.as_posix(), error.details["path"])
+        self.assertEqual(locked_file.as_posix(), error.details["attempts"][0]["path"])
+        self.assertEqual(4, len(error.details["attempts"]))
+        self.assertEqual(3, sleep_mock.call_count)
+        self.assertTrue(retry_worktree.exists())
+
     def test_apply_pending_worktree_merge_keeps_patch_applied_when_cleanup_fails(self) -> None:
         base_ref = self._init_repo()
         branch = self._source_branch()
@@ -134,19 +240,34 @@ index 0000000..7c890e8
             branch=branch,
         )
         self.worktree.mkdir()
+        locked_file = self.worktree / "nested" / "locked.txt"
+        locked_file.parent.mkdir(parents=True, exist_ok=True)
+        locked_file.write_text("locked\n", encoding="utf-8")
 
-        with patch("agent_runner.gitops.remove_worktree", side_effect=RuntimeError("locked worktree")):
+        cleanup_error = self._cleanup_error(locked_file)
+        with patch("agent_runner.gitops.remove_worktree", side_effect=cleanup_error):
             result = apply_pending_worktree_merge(self.pending_path)
 
         self.assertEqual("applied_cleanup_failed", result["status"])
-        self.assertIn("locked worktree", str(result["cleanup_error"]))
+        self.assertEqual(locked_file.as_posix(), result["cleanup_path"])
+        self.assertEqual(str(cleanup_error), result["cleanup_message"])
+        self.assertIn(locked_file.as_posix(), str(result["cleanup_error"]))
+        self.assertEqual(locked_file.as_posix(), result["cleanup_details"]["path"])
+        self.assertEqual(locked_file.as_posix(), result["cleanup_details"]["attempts"][0]["path"])
         self.assertEqual("from patch\n", (self.repo / "feature.txt").read_text(encoding="utf-8"))
         self.assertFalse(self.pending_path.exists())
-        self.assertTrue((self.fixture_root / "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json").exists())
+        cleanup_artifact = self.fixture_root / "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json"
+        self.assertTrue(cleanup_artifact.exists())
+        cleanup_payload = json.loads(cleanup_artifact.read_text(encoding="utf-8"))
+        self.assertEqual(locked_file.as_posix(), cleanup_payload["cleanup_path"])
+        self.assertEqual(str(cleanup_error), cleanup_payload["cleanup_message"])
 
     def test_discard_pending_worktree_merge_records_cleanup_failure_without_raising(self) -> None:
         self._init_repo()
         self.worktree.mkdir()
+        locked_file = self.worktree / "nested" / "locked.txt"
+        locked_file.parent.mkdir(parents=True, exist_ok=True)
+        locked_file.write_text("locked\n", encoding="utf-8")
         self._write_pending_payload(
             patch_text=(
                 "diff --git a/feature.txt b/feature.txt\n"
@@ -160,13 +281,21 @@ index 0000000..7c890e8
             branch=self._source_branch(),
         )
 
-        with patch("agent_runner.gitops.remove_worktree", side_effect=RuntimeError("locked worktree")):
+        cleanup_error = self._cleanup_error(locked_file)
+        with patch("agent_runner.gitops.remove_worktree", side_effect=cleanup_error):
             result = discard_pending_worktree_merge(self.pending_path)
 
         self.assertEqual("discard_cleanup_failed", result["status"])
-        self.assertIn("locked worktree", str(result["cleanup_error"]))
+        self.assertEqual(locked_file.as_posix(), result["cleanup_path"])
+        self.assertEqual(str(cleanup_error), result["cleanup_message"])
+        self.assertIn(locked_file.as_posix(), str(result["cleanup_error"]))
+        self.assertEqual(locked_file.as_posix(), result["cleanup_details"]["path"])
         self.assertFalse(self.pending_path.exists())
-        self.assertTrue((self.fixture_root / "WORKTREE_MERGE_DISCARD_CLEANUP_FAILED.json").exists())
+        cleanup_artifact = self.fixture_root / "WORKTREE_MERGE_DISCARD_CLEANUP_FAILED.json"
+        self.assertTrue(cleanup_artifact.exists())
+        cleanup_payload = json.loads(cleanup_artifact.read_text(encoding="utf-8"))
+        self.assertEqual(locked_file.as_posix(), cleanup_payload["cleanup_path"])
+        self.assertEqual(str(cleanup_error), cleanup_payload["cleanup_message"])
 
     def test_apply_pending_worktree_merge_rejects_dirty_source_repo(self) -> None:
         base_ref = self._init_repo()

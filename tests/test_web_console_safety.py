@@ -15,6 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 WEB_CONSOLE = ROOT / "web_console"
 
 
+from agent_runner.gitops import WorktreeCleanupError
+
+
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8", errors="replace")
@@ -723,8 +726,45 @@ class WebConsoleSafetyTests(unittest.TestCase):
         worktree = snapshot["worktree"]
         body = self._worktree_action_payload(worktree, confirmation="DISCARD WORKTREE")
         client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+        locked_file = self.worktree_dir / "nested" / "locked.txt"
+        locked_file.parent.mkdir(parents=True, exist_ok=True)
+        locked_file.write_text("locked\n", encoding="utf-8")
+        permission_error = PermissionError(13, "Permission denied", locked_file.as_posix())
+        cleanup_error = WorktreeCleanupError(
+            str(permission_error),
+            cleanup_path=locked_file.as_posix(),
+            details={
+                "path": locked_file.as_posix(),
+                "worktree_dir": self.worktree_dir.as_posix(),
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "operation": "shutil.rmtree",
+                        "path": locked_file.as_posix(),
+                        "worktree_dir": self.worktree_dir.as_posix(),
+                        "error_type": "PermissionError",
+                        "message": str(permission_error),
+                        "errno": 13,
+                    }
+                ],
+                "operation": "shutil.rmtree",
+                "error_type": "PermissionError",
+                "message": str(permission_error),
+            },
+            attempts=[
+                {
+                    "attempt": 1,
+                    "operation": "shutil.rmtree",
+                    "path": locked_file.as_posix(),
+                    "worktree_dir": self.worktree_dir.as_posix(),
+                    "error_type": "PermissionError",
+                    "message": str(permission_error),
+                    "errno": 13,
+                }
+            ],
+        )
 
-        with patch("agent_runner.gitops.remove_worktree", side_effect=RuntimeError("cleanup exploded")):
+        with patch("agent_runner.gitops.remove_worktree", side_effect=cleanup_error):
             response = client.post("/api/worktree/discard", json=body)
 
         self.assertEqual(200, response.status_code)
@@ -732,8 +772,13 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual("discard_cleanup_failed", payload["status"])
         self.assertEqual("failed", payload["worktree"]["cleanupState"])
-        self.assertIn("cleanup exploded", payload["worktree"]["cleanupMessage"])
-        self.assertIn("cleanup exploded", payload["result"]["cleanup_error"])
+        self.assertEqual(locked_file.as_posix(), payload["worktree"]["cleanupPath"])
+        self.assertEqual(str(permission_error), payload["worktree"]["cleanupMessage"])
+        self.assertEqual(locked_file.as_posix(), payload["worktree"]["cleanupDetails"]["path"])
+        self.assertEqual(locked_file.as_posix(), payload["worktree"]["cleanupDetails"]["attempts"][0]["path"])
+        self.assertEqual(locked_file.as_posix(), payload["result"]["cleanup_path"])
+        self.assertEqual(str(permission_error), payload["result"]["cleanup_message"])
+        self.assertEqual(locked_file.as_posix(), payload["result"]["cleanup_details"]["path"])
         self.assertEqual(fixture["source_text"], fixture["source_file"].read_text(encoding="utf-8"))
         self.assertEqual(fixture["commit"], self._git("rev-parse", "HEAD"))
         self.assertTrue(self.worktree_dir.exists())

@@ -247,10 +247,9 @@ def _history_worktree_outcome(run_dir: Path) -> str:
         ("WORKTREE_APPLY_FAILURE.md", "apply_failed"),
         ("WORKTREE_MERGE_PENDING.json", "pending"),
     )
-    for name, outcome in artifacts:
-        if (run_dir / name).exists():
-            return outcome
-    return "none"
+    candidates = [(outcome, run_dir / name) for name, outcome in artifacts if (run_dir / name).exists()]
+    selected = _worktree_select_artifact(candidates)
+    return selected[0] if selected is not None else "none"
 
 
 WORKTREE_REVIEW_CHECKLIST = [
@@ -275,6 +274,34 @@ WORKTREE_TEXT_STATUS_ARTIFACTS = [
     ("patch_not_applied", "WORKTREE_PATCH_NOT_APPLIED.md"),
     ("not_applied", "WORKTREE_NOT_APPLIED.md"),
 ]
+WORKTREE_STATUS_PRIORITY = {
+    "applied": 2,
+    "discarded": 2,
+    "applied_cleanup_failed": 1,
+    "discard_cleanup_failed": 1,
+    "apply_failed": 1,
+    "patch_not_applied": 1,
+    "not_applied": 1,
+}
+
+
+def _worktree_artifact_sort_key(status: str, path: Path) -> tuple[int, int]:
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    return mtime_ns, WORKTREE_STATUS_PRIORITY.get(status, 0)
+
+
+def _worktree_select_artifact(artifacts: list[tuple[str, Path]]) -> tuple[str, Path] | None:
+    best: tuple[str, Path] | None = None
+    best_score = (-1, -1)
+    for artifact_status, artifact_path in artifacts:
+        score = _worktree_artifact_sort_key(artifact_status, artifact_path)
+        if best is None or score > best_score:
+            best = (artifact_status, artifact_path)
+            best_score = score
+    return best
 
 
 def _worktree_default_payload(repo_root: Path, run_dir: Path | None, branch: str) -> dict[str, Any]:
@@ -298,6 +325,8 @@ def _worktree_default_payload(repo_root: Path, run_dir: Path | None, branch: str
         "statusFile": "",
         "cleanupPath": "",
         "cleanupMessage": "No cleanup state is available.",
+        "cleanupDetails": {},
+        "cleanupAttempts": [],
         "cleanupState": "none",
         "summary": "No pending worktree merge.",
         "risk": "No isolated worktree patch is pending review.",
@@ -432,6 +461,12 @@ def _worktree_status_payload(
         or raw.get("cleanup_error")
         or ""
     ).strip()
+    cleanup_details = raw.get("cleanup_details") if isinstance(raw.get("cleanup_details"), dict) else raw.get("cleanupDetails")
+    if not isinstance(cleanup_details, dict):
+        cleanup_details = {}
+    cleanup_attempts = raw.get("cleanup_attempts") if isinstance(raw.get("cleanup_attempts"), list) else raw.get("cleanupAttempts")
+    if not isinstance(cleanup_attempts, list):
+        cleanup_attempts = []
     pending_file = pending_path.as_posix() if pending_path is not None else ""
     status_file = artifact_path.as_posix()
     changed_files = _worktree_normalize_changed_files(raw.get("changedFiles") or raw.get("changed_files"), patch_path, allow_placeholder=status not in {"error"})
@@ -540,6 +575,8 @@ def _worktree_status_payload(
         "statusFile": status_file,
         "cleanupPath": cleanup_path,
         "cleanupMessage": cleanup_message,
+        "cleanupDetails": cleanup_details,
+        "cleanupAttempts": cleanup_attempts,
         "cleanupState": cleanup_state,
         "summary": summary,
         "risk": risk,
@@ -4382,15 +4419,18 @@ def _build_worktree_payload(repo: Path, run_dir: Path | None, branch: str) -> di
             pending_path=pending_path,
         )
 
-    for artifact_status, artifact_path in _worktree_status_artifacts(repo_root, run_dir):
-        if not artifact_path.exists():
-            continue
-        if artifact_status in {"pending", "applied", "discarded", "applied_cleanup_failed", "discard_cleanup_failed"}:
+    artifact_candidates = [
+        (artifact_status, artifact_path)
+        for artifact_status, artifact_path in _worktree_status_artifacts(repo_root, run_dir)
+        if artifact_status != "pending" and artifact_path.exists()
+    ]
+    selected_artifact = _worktree_select_artifact(artifact_candidates)
+    if selected_artifact is not None:
+        artifact_status, artifact_path = selected_artifact
+        if artifact_status in {"applied", "discarded", "applied_cleanup_failed", "discard_cleanup_failed"}:
             payload = _safe_json(artifact_path, {})
             if not isinstance(payload, dict):
                 payload = {}
-            if artifact_status == "pending":
-                continue
             return _worktree_status_payload(
                 repo_root,
                 run_dir,
@@ -4423,6 +4463,8 @@ def _build_worktree_payload(repo: Path, run_dir: Path | None, branch: str) -> di
                     }[artifact_status],
                     "cleanupPath": "",
                     "cleanupMessage": "Cleanup state is unavailable because no merge marker was written.",
+                    "cleanupDetails": {},
+                    "cleanupAttempts": [],
                     "cleanupState": "none",
                     "statusFile": artifact_path.as_posix(),
                     "pendingFile": "",

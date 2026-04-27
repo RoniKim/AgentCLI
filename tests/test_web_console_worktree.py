@@ -301,7 +301,15 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
         def write_patch() -> None:
             _write(self.patch_path, patch_text)
 
-        def write_artifact(name: str, status: str, *, cleanup_message: str = "") -> None:
+        def write_artifact(
+            name: str,
+            status: str,
+            *,
+            cleanup_message: str = "",
+            cleanup_path: str = "",
+            cleanup_details: dict[str, object] | None = None,
+            cleanup_attempts: list[dict[str, object]] | None = None,
+        ) -> Path:
             payload: dict[str, object] = {
                 "schema_version": 1,
                 "status": status,
@@ -316,7 +324,15 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             }
             if cleanup_message:
                 payload["cleanup_message"] = cleanup_message
-            _write(self.run_dir / name, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            if cleanup_path:
+                payload["cleanup_path"] = cleanup_path
+            if cleanup_details is not None:
+                payload["cleanup_details"] = cleanup_details
+            if cleanup_attempts is not None:
+                payload["cleanup_attempts"] = cleanup_attempts
+            path = self.run_dir / name
+            _write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            return path
 
         def assert_snapshot(
             *,
@@ -373,6 +389,27 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             )
             self.assertIn("malformed", snapshot["worktree"]["reviewRequiredMessage"].lower())
 
+        locked_path = (self.worktree_dir / "nested" / "locked.txt").as_posix()
+        locked_message = str(PermissionError(13, "Permission denied", locked_path))
+        locked_details = {
+            "path": locked_path,
+            "worktree_dir": self.worktree_dir.as_posix(),
+            "attempts": [
+                {
+                    "attempt": 1,
+                    "operation": "shutil.rmtree",
+                    "path": locked_path,
+                    "worktree_dir": self.worktree_dir.as_posix(),
+                    "error_type": "PermissionError",
+                    "message": locked_message,
+                    "errno": 13,
+                }
+            ],
+            "operation": "shutil.rmtree",
+            "error_type": "PermissionError",
+            "message": locked_message,
+        }
+
         for status_name, section_status, cleanup_state in [
             ("applied", "ready", "done"),
             ("discarded", "ready", "done"),
@@ -405,7 +442,14 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             with self.subTest(status_name):
                 self._clear_worktree_artifacts()
                 write_patch()
-                write_artifact(artifact_name, status_name, cleanup_message=f"{status_name} cleanup failed")
+                write_artifact(
+                    artifact_name,
+                    status_name,
+                    cleanup_message=locked_message,
+                    cleanup_path=locked_path,
+                    cleanup_details=locked_details,
+                    cleanup_attempts=locked_details["attempts"],
+                )
                 snapshot = assert_snapshot(
                     label=status_name,
                     expected_status=status_name,
@@ -416,7 +460,35 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
                     expected_changed_files=True,
                 )
                 self.assertIn("cleanup failed", snapshot["worktree"]["reviewRequiredMessage"].lower())
-                self.assertEqual(self.worktree_dir.as_posix(), snapshot["worktree"]["cleanupPath"])
+                self.assertEqual(locked_path, snapshot["worktree"]["cleanupPath"])
+                self.assertEqual(locked_message, snapshot["worktree"]["cleanupMessage"])
+                self.assertEqual(locked_path, snapshot["worktree"]["cleanupDetails"]["path"])
+                self.assertEqual(locked_path, snapshot["worktree"]["cleanupDetails"]["attempts"][0]["path"])
+
+        with self.subTest("reconciled-after-cleanup-failure"):
+            self._clear_worktree_artifacts()
+            write_patch()
+            failure_path = write_artifact(
+                "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json",
+                "applied_cleanup_failed",
+                cleanup_message=locked_message,
+                cleanup_path=locked_path,
+                cleanup_details=locked_details,
+                cleanup_attempts=locked_details["attempts"],
+            )
+            self.assertTrue(failure_path.exists())
+            success_path = write_artifact("WORKTREE_MERGE_APPLIED.json", "applied")
+            os.utime(success_path, (success_path.stat().st_atime, success_path.stat().st_mtime + 10))
+            snapshot = assert_snapshot(
+                label="reconciled-after-cleanup-failure",
+                expected_status="applied",
+                expected_section_status="ready",
+                expected_review_required=False,
+                expected_cleanup_state="done",
+                expected_status_file=success_path.as_posix(),
+                expected_changed_files=True,
+            )
+            self.assertEqual("Patch applied to the source repository.", snapshot["worktree"]["reviewRequiredMessage"])
 
         with self.subTest("stale-central-marker"):
             self._clear_worktree_artifacts()

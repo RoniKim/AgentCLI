@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import fnmatch
 import hashlib
 import json
@@ -40,6 +41,33 @@ class WorktreeSafetyError(RuntimeError):
             self.status = "conflict"
         else:
             self.status = "invalid_request"
+
+
+class WorktreeCleanupError(RuntimeError):
+    """Structured failure raised when isolated worktree cleanup cannot finish."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cleanup_path: str = "",
+        details: dict[str, object] | None = None,
+        attempts: list[dict[str, object]] | None = None,
+        status_code: int = 409,
+        status: str = "conflict",
+    ) -> None:
+        super().__init__(message)
+        self.code = "worktree_cleanup_failed"
+        self.cleanup_path = str(cleanup_path or "").strip()
+        self.cleanup_message = str(message)
+        self.details = dict(details or {})
+        self.attempts = [dict(attempt) for attempt in attempts or []]
+        if self.cleanup_path:
+            self.details.setdefault("path", self.cleanup_path)
+        if self.attempts:
+            self.details.setdefault("attempts", self.attempts)
+        self.status_code = int(status_code)
+        self.status = str(status)
 
 
 def check_and_remove_stale_git_lock(repo: Path, max_age_seconds: int = 300) -> bool:
@@ -943,6 +971,99 @@ def create_worktree(repo: Path, worktree_dir: Path, *, run_dir: Path | None = No
             raise RuntimeError(f"Failed to write worktree reuse contract: {ex}") from ex
 
 
+def _worktree_cleanup_attempt_details(
+    error: BaseException,
+    worktree_dir: Path,
+    *,
+    attempt: int,
+    operation: str,
+) -> dict[str, object]:
+    raw_path = getattr(error, "filename", "") or getattr(error, "filename2", "") or worktree_dir.as_posix()
+    cleanup_path = str(raw_path or "").strip().replace("\\", "/") or worktree_dir.as_posix()
+    details: dict[str, object] = {
+        "attempt": int(attempt),
+        "operation": str(operation),
+        "path": cleanup_path,
+        "worktree_dir": worktree_dir.as_posix(),
+        "error_type": error.__class__.__name__,
+        "message": str(error).strip() or error.__class__.__name__,
+    }
+    filename = getattr(error, "filename", "")
+    if filename:
+        details["filename"] = str(filename).strip().replace("\\", "/")
+    filename2 = getattr(error, "filename2", "")
+    if filename2:
+        details["filename2"] = str(filename2).strip().replace("\\", "/")
+    errno_value = getattr(error, "errno", None)
+    if errno_value is not None:
+        try:
+            details["errno"] = int(errno_value)
+        except Exception:
+            details["errno"] = errno_value
+    winerror = getattr(error, "winerror", None)
+    if winerror is not None:
+        try:
+            details["winerror"] = int(winerror)
+        except Exception:
+            details["winerror"] = winerror
+    return details
+
+
+def _remove_generated_worktree_with_retry(
+    worktree_dir: Path,
+    *,
+    git_remove: dict[str, object] | None = None,
+    git_prune: dict[str, object] | None = None,
+    max_attempts: int = 4,
+    initial_backoff_seconds: float = 0.05,
+) -> None:
+    attempts: list[dict[str, object]] = []
+    last_error: BaseException | None = None
+    total_attempts = max(1, int(max_attempts))
+    backoff = max(0.0, float(initial_backoff_seconds))
+
+    for attempt in range(1, total_attempts + 1):
+        try:
+            shutil.rmtree(worktree_dir)
+            return
+        except PermissionError as ex:
+            attempt_details = _worktree_cleanup_attempt_details(ex, worktree_dir, attempt=attempt, operation="shutil.rmtree")
+            attempts.append(attempt_details)
+            last_error = ex
+        except OSError as ex:
+            if getattr(ex, "errno", None) not in {errno.EACCES, errno.EPERM}:
+                raise
+            attempt_details = _worktree_cleanup_attempt_details(ex, worktree_dir, attempt=attempt, operation="shutil.rmtree")
+            attempts.append(attempt_details)
+            last_error = ex
+
+        if not worktree_dir.exists():
+            return
+        if attempt < total_attempts:
+            time.sleep(backoff)
+            backoff = min(backoff * 2 if backoff else initial_backoff_seconds, 0.25)
+
+    blocked_path = attempts[-1]["path"] if attempts else worktree_dir.as_posix()
+    message = f"Failed to remove generated worktree after {len(attempts) or total_attempts} attempts: {blocked_path}"
+    if attempts:
+        last_attempt = attempts[-1]
+        last_attempt_message = str(last_attempt.get("message") or "").strip()
+        last_attempt_type = str(last_attempt.get("error_type") or (last_error.__class__.__name__ if last_error else "PermissionError"))
+        if last_attempt_message:
+            message = f"{message} ({last_attempt_type}: {last_attempt_message})"
+    details: dict[str, object] = {
+        "path": blocked_path,
+        "worktree_dir": worktree_dir.as_posix(),
+        "attempts": attempts,
+        "operation": "shutil.rmtree",
+    }
+    if git_remove is not None:
+        details["git_worktree_remove"] = dict(git_remove)
+    if git_prune is not None:
+        details["git_worktree_prune"] = dict(git_prune)
+    raise WorktreeCleanupError(message, cleanup_path=str(blocked_path), details=details, attempts=attempts) from last_error
+
+
 def remove_worktree(repo: Path, worktree_dir: Path) -> None:
     if not worktree_dir.exists():
         return
@@ -950,12 +1071,16 @@ def remove_worktree(repo: Path, worktree_dir: Path) -> None:
     if code == 0:
         return
 
-    run_cmd(["git", "worktree", "prune"], cwd=repo, timeout_sec=120)
+    prune_code, prune_out = run_cmd(["git", "worktree", "prune"], cwd=repo, timeout_sec=120)
     if not worktree_dir.exists():
         return
 
     if _safe_generated_worktree_path(worktree_dir):
-        shutil.rmtree(worktree_dir)
+        _remove_generated_worktree_with_retry(
+            worktree_dir,
+            git_remove={"rc": code, "output": out},
+            git_prune={"rc": prune_code, "output": prune_out},
+        )
         return
 
     raise RuntimeError(f"git worktree remove failed: rc={code}\n{out}")
@@ -1283,20 +1408,73 @@ def _pending_companion_paths(payload: dict[str, object], pending_path: Path) -> 
     return uniq
 
 
-def _write_pending_status(payload: dict[str, object], pending_path: Path, status: str, message: str = "") -> None:
+def _write_pending_status(
+    payload: dict[str, object],
+    pending_path: Path,
+    status: str,
+    message: str = "",
+    *,
+    extra: dict[str, object] | None = None,
+) -> None:
     updated = dict(payload)
     updated["status"] = status
     updated["resolved_at"] = now_iso()
     if message:
         updated["message"] = message
+    if extra:
+        updated.update(extra)
     text = json.dumps(updated, ensure_ascii=False, indent=2) + "\n"
-    for path in _pending_companion_paths(payload, pending_path):
+    for path in reversed(_pending_companion_paths(payload, pending_path)):
         if path.exists():
             safe_write_text(path.with_name(f"WORKTREE_MERGE_{status.upper()}.json"), text)
             try:
                 path.unlink()
             except Exception:
                 pass
+
+
+def _cleanup_failure_result(
+    payload: dict[str, object],
+    pending_path: Path,
+    status: str,
+    error: Exception,
+    *,
+    fallback_cleanup_path: Path,
+) -> dict[str, object]:
+    cleanup_message = str(error).strip() or error.__class__.__name__
+    cleanup_path = fallback_cleanup_path.as_posix()
+    cleanup_details: dict[str, object] = {}
+    cleanup_attempts: list[dict[str, object]] = []
+
+    if isinstance(error, WorktreeCleanupError):
+        cleanup_message = str(error).strip() or error.cleanup_message or cleanup_message
+        cleanup_path = str(error.cleanup_path or error.details.get("path") or cleanup_path).strip() or cleanup_path
+        cleanup_details = dict(error.details)
+        raw_attempts = cleanup_details.get("attempts")
+        if isinstance(raw_attempts, list):
+            cleanup_attempts = [dict(item) if isinstance(item, dict) else {"message": str(item)} for item in raw_attempts]
+        elif error.attempts:
+            cleanup_attempts = [dict(item) for item in error.attempts]
+        if cleanup_attempts:
+            cleanup_details["attempts"] = cleanup_attempts
+        if cleanup_path:
+            cleanup_details.setdefault("path", cleanup_path)
+
+    updates: dict[str, object] = {
+        "cleanup_error": cleanup_message,
+        "cleanup_message": cleanup_message,
+        "cleanup_path": cleanup_path,
+    }
+    if cleanup_details:
+        updates["cleanup_details"] = cleanup_details
+    if cleanup_attempts:
+        updates["cleanup_attempts"] = cleanup_attempts
+
+    _write_pending_status(payload, pending_path, status, cleanup_message, extra=updates)
+    result = dict(payload)
+    result["status"] = status
+    result.update(updates)
+    return result
 
 
 def apply_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
@@ -1445,12 +1623,13 @@ def apply_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
     try:
         remove_worktree(source_repo, worktree_dir)
     except Exception as ex:
-        message = str(ex)
-        _write_pending_status(payload, pending_path, "applied_cleanup_failed", message)
-        result = dict(payload)
-        result["status"] = "applied_cleanup_failed"
-        result["cleanup_error"] = message
-        return result
+        return _cleanup_failure_result(
+            payload,
+            pending_path,
+            "applied_cleanup_failed",
+            ex,
+            fallback_cleanup_path=worktree_dir,
+        )
     _write_pending_status(payload, pending_path, "applied")
     result = dict(payload)
     result["status"] = "applied"
@@ -1465,12 +1644,13 @@ def discard_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
         try:
             remove_worktree(source_repo, worktree_dir)
         except Exception as ex:
-            message = str(ex)
-            _write_pending_status(payload, pending_path, "discard_cleanup_failed", message)
-            result = dict(payload)
-            result["status"] = "discard_cleanup_failed"
-            result["cleanup_error"] = message
-            return result
+            return _cleanup_failure_result(
+                payload,
+                pending_path,
+                "discard_cleanup_failed",
+                ex,
+                fallback_cleanup_path=worktree_dir,
+            )
     _write_pending_status(payload, pending_path, "discarded")
     result = dict(payload)
     result["status"] = "discarded"
