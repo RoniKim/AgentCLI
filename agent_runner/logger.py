@@ -320,13 +320,26 @@ class StructuredLogger:
             pass
 
     def close(self) -> None:
-        """Close cached file handles."""
+        """Close cached file handles and detach logging handlers."""
         if self._events_fh is not None and not self._events_fh.closed:
             try:
                 self._events_fh.close()
             except Exception:
                 pass
             self._events_fh = None
+        for handler in self.logger.handlers[:]:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+            try:
+                handler.close()
+            except Exception:
+                pass
+            try:
+                self.logger.removeHandler(handler)
+            except Exception:
+                pass
 
     def _write_error_detail(self, error_context: Dict[str, Any]) -> None:
         """Write detailed error information to error.log."""
