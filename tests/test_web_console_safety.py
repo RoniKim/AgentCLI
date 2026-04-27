@@ -68,10 +68,15 @@ class FakeRunnerController:
         self.stop_error = stop_error
         self._running = False
         self.run_dir: Path | None = None
+        self._start_seq = 0
         self.start_calls = 0
         self.stop_calls: list[bool] = []
         self.status_calls = 0
         self.start_overrides: list[dict[str, object]] = []
+
+    def _next_run_dir(self) -> Path:
+        self._start_seq += 1
+        return self.repo / ".AgentCLI" / "agent_runs" / f"run_20260426_{self._start_seq:06d}"
 
     def _status_payload(self) -> dict[str, object]:
         run_dir = self.run_dir or (self.repo / ".AgentCLI" / "agent_runs" / "run_20260426_010000")
@@ -100,13 +105,21 @@ class FakeRunnerController:
 
     def start(self, overrides=None) -> dict[str, object]:
         self.start_calls += 1
-        self.start_overrides.append(dict(overrides or {}))
+        overrides = dict(overrides or {})
+        self.start_overrides.append(overrides)
         if self.start_error:
             return {"ok": False, "message": self.start_error}
         if self._running:
             return {"ok": False, "message": "Runner is already running."}
+        explicit_run_dir = str(overrides.get("run_dir") or "").strip()
+        if explicit_run_dir:
+            run_dir = Path(explicit_run_dir).expanduser().resolve()
+        elif bool(overrides.get("resume_latest")) and self.run_dir is not None:
+            run_dir = self.run_dir
+        else:
+            run_dir = self._next_run_dir()
         self._running = True
-        self.run_dir = self.repo / ".AgentCLI" / "agent_runs" / "run_20260426_010000"
+        self.run_dir = run_dir
         self.run_dir.mkdir(parents=True, exist_ok=True)
         return {
             "ok": True,
@@ -464,6 +477,9 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual(self.repo.as_posix(), controller.start_overrides[0]["repo"])
         self.assertEqual(self.config_path.as_posix(), controller.start_overrides[0]["config_path"])
         self.assertEqual(self.config_path.as_posix(), controller.start_overrides[0]["config"])
+        self.assertNotIn("run_dir", controller.start_overrides[0])
+        self.assertNotIn("resume_latest", controller.start_overrides[0])
+        start_run_dir = Path(start_body["result"]["run_dir"])
 
         reload_response = client.post("/api/runner/reload", json={"token": "RELOAD RUNNER"})
         self.assertEqual(200, reload_response.status_code)
@@ -475,6 +491,10 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual(2, controller.start_calls)
         self.assertEqual(self.repo.as_posix(), controller.start_overrides[1]["repo"])
         self.assertEqual(self.config_path.as_posix(), controller.start_overrides[1]["config_path"])
+        self.assertNotIn("run_dir", controller.start_overrides[1])
+        self.assertNotIn("resume_latest", controller.start_overrides[1])
+        reload_run_dir = Path(reload_body["result"]["start"]["run_dir"])
+        self.assertNotEqual(start_run_dir, reload_run_dir)
         self.assertTrue(reload_body["snapshot"]["runner_control"]["status"]["running"])
         self.assertEqual(self.config_path.as_posix(), reload_body["snapshot"]["runner_control"]["status"]["config_path"])
 
@@ -488,6 +508,11 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual(3, controller.start_calls)
         self.assertEqual(self.repo.as_posix(), controller.start_overrides[2]["repo"])
         self.assertEqual(self.config_path.as_posix(), controller.start_overrides[2]["config_path"])
+        self.assertNotIn("run_dir", controller.start_overrides[2])
+        self.assertNotIn("resume_latest", controller.start_overrides[2])
+        restart_run_dir = Path(restart_body["result"]["start"]["run_dir"])
+        self.assertNotEqual(reload_run_dir, restart_run_dir)
+        self.assertNotEqual(start_run_dir, restart_run_dir)
         self.assertTrue(restart_body["snapshot"]["runner_control"]["status"]["running"])
         self.assertEqual(self.config_path.as_posix(), restart_body["snapshot"]["runner_control"]["status"]["config_path"])
 

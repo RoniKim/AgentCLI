@@ -100,6 +100,59 @@ class StopProgressTests(unittest.TestCase):
         self.assertEqual("timeout", progress["phase"])
         self.assertIn("1s stop wait timeout", progress["message"])
 
+    def test_controller_start_creates_fresh_run_dir_by_default_and_reuses_only_when_explicit(self) -> None:
+        repo = _scratch_dir("controller_start") / "repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        controller = RunnerController(
+            repo=repo,
+            base_args=argparse.Namespace(
+                stop_file="STOP",
+                config_path="",
+                run_dir="",
+                resume_latest=False,
+            ),
+            runner_mode="thread",
+        )
+
+        with patch("agent_runner.remote.controller.run_runner", return_value=0):
+            first = controller.start()
+            if controller._runner_thread is not None:
+                controller._runner_thread.join(timeout=2)
+            first_run_dir = Path(str(first.get("run_dir") or "")).resolve()
+            self.assertTrue(first_run_dir.exists())
+
+            second = controller.start()
+            if controller._runner_thread is not None:
+                controller._runner_thread.join(timeout=2)
+            second_run_dir = Path(str(second.get("run_dir") or "")).resolve()
+            self.assertTrue(second_run_dir.exists())
+
+            resumed = controller.start({"resume_latest": True})
+            if controller._runner_thread is not None:
+                controller._runner_thread.join(timeout=2)
+            resumed_run_dir = Path(str(resumed.get("run_dir") or "")).resolve()
+
+            explicit_run_dir = repo / ".AgentCLI" / "agent_runs" / "explicit-run"
+            explicit_1 = controller.start({"run_dir": explicit_run_dir.as_posix()})
+            if controller._runner_thread is not None:
+                controller._runner_thread.join(timeout=2)
+            explicit_1_run_dir = Path(str(explicit_1.get("run_dir") or "")).resolve()
+
+            explicit_2 = controller.start({"run_dir": explicit_run_dir.as_posix()})
+            if controller._runner_thread is not None:
+                controller._runner_thread.join(timeout=2)
+            explicit_2_run_dir = Path(str(explicit_2.get("run_dir") or "")).resolve()
+
+        self.assertNotEqual(first_run_dir, second_run_dir)
+        self.assertEqual(second_run_dir, resumed_run_dir)
+        self.assertEqual(explicit_run_dir.resolve(), explicit_1_run_dir)
+        self.assertEqual(explicit_1_run_dir, explicit_2_run_dir)
+        self.assertEqual(first_run_dir.as_posix(), str(first.get("run_dir") or ""))
+        self.assertEqual(second_run_dir.as_posix(), str(second.get("run_dir") or ""))
+        self.assertEqual(resumed_run_dir.as_posix(), str(resumed.get("run_dir") or ""))
+        self.assertEqual(explicit_1_run_dir.as_posix(), str(explicit_1.get("run_dir") or ""))
+        self.assertEqual(explicit_2_run_dir.as_posix(), str(explicit_2.get("run_dir") or ""))
+
 
 if __name__ == "__main__":
     unittest.main()

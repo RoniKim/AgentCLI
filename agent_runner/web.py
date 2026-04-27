@@ -1668,8 +1668,15 @@ def _runner_control_confirmation_value(payload: dict[str, Any] | None) -> str:
     return ""
 
 
-def _runner_control_start_overrides(repo_root: Path, cfg: dict[str, Any], cfg_path: Path) -> dict[str, Any]:
+def _strip_run_dir_intent(cfg: dict[str, Any] | None) -> dict[str, Any]:
     overrides = deepcopy(cfg) if isinstance(cfg, dict) else {}
+    overrides.pop("run_dir", None)
+    overrides.pop("resume_latest", None)
+    return overrides
+
+
+def _runner_control_start_overrides(repo_root: Path, cfg: dict[str, Any], cfg_path: Path) -> dict[str, Any]:
+    overrides = _strip_run_dir_intent(cfg)
     overrides["repo"] = _path_text(repo_root)
     overrides["config"] = _path_text(cfg_path)
     overrides["config_path"] = _path_text(cfg_path)
@@ -1677,7 +1684,7 @@ def _runner_control_start_overrides(repo_root: Path, cfg: dict[str, Any], cfg_pa
 
 
 def _build_runner_base_args(repo: Path, cfg: dict[str, Any], cfg_path: Path) -> argparse.Namespace:
-    payload = dict(cfg or {})
+    payload = _strip_run_dir_intent(cfg)
     payload["repo"] = _path_text(repo)
     payload["config"] = _path_text(cfg_path)
     payload["config_path"] = _path_text(cfg_path)
@@ -5976,6 +5983,10 @@ def create_app(
             reload_required_paths = list(dict.fromkeys(reload_required_paths))
             if not changed_paths:
                 return _config_save_error(400, "config_no_changes", "No config changes were supplied.")
+
+            # Session-only run selection intent should never persist in config.
+            updated_raw.pop("run_dir", None)
+            updated_raw.pop("resume_latest", None)
 
             backup_path = _config_save_backup_path(cfg_path)
             backup_path.parent.mkdir(parents=True, exist_ok=True)

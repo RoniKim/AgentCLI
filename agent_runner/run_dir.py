@@ -10,9 +10,21 @@ from .config import AGENT_WORK_DIR, ensure_work_dir
 def make_run_dir(repo: Path) -> Path:
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     work_root = ensure_work_dir(repo)
-    run_dir = work_root / "agent_runs" / ts
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
+    runs_root = work_root / "agent_runs"
+    runs_root.mkdir(parents=True, exist_ok=True)
+
+    # Keep second-level timestamps for readability, but guarantee uniqueness when
+    # multiple starts land in the same second.
+    for suffix in range(0, 10_000):
+        name = ts if suffix == 0 else f"{ts}-{suffix:04d}"
+        run_dir = runs_root / name
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+            return run_dir
+        except FileExistsError:
+            continue
+
+    raise RuntimeError("Unable to allocate a unique run directory.")
 
 
 def find_latest_run_dir(repo: Path) -> Optional[Path]:

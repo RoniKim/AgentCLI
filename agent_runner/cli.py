@@ -366,8 +366,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--telegram-stalled-seconds", type=int, default=None, help="Stall detection threshold seconds (default: 600)")
 
     # Paths
-    p.add_argument("--run-dir", default=None, help="Fixed run_dir to reuse. Empty/None = auto")
-    p.add_argument("--resume-latest", action=argparse.BooleanOptionalAction, default=None, help="Resume latest run_dir")
+    p.add_argument("--run-dir", default=None, help="Explicit run_dir to reuse. Empty/None creates a new run_dir")
+    p.add_argument("--resume-latest", action=argparse.BooleanOptionalAction, default=None, help="Explicitly reuse the latest run_dir")
 
     # Execution backend
     p.add_argument(

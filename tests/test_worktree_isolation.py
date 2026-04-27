@@ -303,6 +303,54 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertIn("issues: none", output)
         self.assertEqual(before, after)
 
+    def test_shell_start_creates_fresh_run_dir_by_default_and_resumes_latest_explicitly(self) -> None:
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+
+        with (
+            patch("agent_runner.shell.init_process_guard", return_value=None),
+            patch("agent_runner.shell.run_runner", return_value=0),
+        ):
+            shell.start([])
+            if shell._runner_thread is not None:
+                shell._runner_thread.join(timeout=2)
+            first_run_dir = shell.run_dir
+            self.assertIsNotNone(first_run_dir)
+
+            shell.start([])
+            if shell._runner_thread is not None:
+                shell._runner_thread.join(timeout=2)
+            second_run_dir = shell.run_dir
+            self.assertIsNotNone(second_run_dir)
+
+            shell.start(["--resume-latest"])
+            if shell._runner_thread is not None:
+                shell._runner_thread.join(timeout=2)
+            resumed_run_dir = shell.run_dir
+
+        self.assertNotEqual(first_run_dir, second_run_dir)
+        self.assertEqual(second_run_dir, resumed_run_dir)
+        self.assertTrue(first_run_dir.exists())
+        self.assertTrue(second_run_dir.exists())
+        self.assertTrue(resumed_run_dir.exists())
+
+    def test_shell_save_drops_transient_run_dir_intent(self) -> None:
+        home = self.fixture_root / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        explicit_run_dir = self.repo / ".AgentCLI" / "agent_runs" / "explicit-run"
+
+        with patch.dict(os.environ, {"AGENTCLI_HOME": str(home)}, clear=False):
+            shell = RunnerShell()
+            shell.set_repo(self.repo.as_posix())
+            shell.overrides["run_dir"] = explicit_run_dir.as_posix()
+            shell.overrides["resume_latest"] = True
+            shell.save()
+
+        self.assertIsNotNone(shell.config_path)
+        saved = json.loads(shell.config_path.read_text(encoding="utf-8"))
+        self.assertNotIn("run_dir", saved)
+        self.assertNotIn("resume_latest", saved)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -236,7 +236,7 @@ class RunnerShell:
         # Apply known keys from config (forward-compat: keep unknown keys in self.config for /save)
         if self.config:
             for k in DEFAULTS.keys():
-                if k in self.config:
+                if k in self.config and k not in {"run_dir", "resume_latest"}:
                     eff[k] = self.config[k]
         if self.overrides:
             eff.update(self.overrides)
@@ -252,7 +252,9 @@ class RunnerShell:
         print("\n=== AgentCLI Shell: Current Settings ===")
         print(f"repo:       {_shorten(repo)}")
         print(f"config:     {_shorten(cfgp)}")
-        print(f"run_dir:    {eff.get('run_dir') or '(auto)'}")
+        run_dir_display = eff.get("run_dir") or (self.run_dir.as_posix() if self.run_dir else "(auto, fresh)")
+        print(f"run_dir:    {run_dir_display}")
+        print(f"resume_latest: {bool(eff.get('resume_latest'))}")
         print(f"autopilot:  {bool(eff.get('autopilot'))}")
         print(f"loop:       {bool(eff.get('loop'))} (sleep={eff.get('loop_sleep_seconds')}s, max_cycles={eff.get('loop_max_cycles')})")
         print(f"continuous: {bool(eff.get('continuous'))} (iterations={eff.get('iterations')}, max_turns_per_task={eff.get('max_turns_per_task')})")
@@ -351,12 +353,10 @@ class RunnerShell:
         if rd:
             self.run_dir = Path(rd).expanduser().resolve()
             return self.run_dir
-        # For unattended overnight ops, prefer resuming the latest run_dir
-        # (prevents backlog/state duplication when the shell restarts).
-        prefer_resume = bool(eff.get("loop") or eff.get("continuous") or eff.get("autopilot"))
-        latest = find_latest_run_dir(self.repo) if prefer_resume else None
+        # Fresh runs are the default. Only an explicit resume_latest request or
+        # explicit run_dir should reuse an existing run directory.
+        latest = find_latest_run_dir(self.repo) if bool(eff.get("resume_latest")) else None
         self.run_dir = latest if latest is not None else make_run_dir(self.repo)
-        self.overrides["run_dir"] = str(self.run_dir)
         return self.run_dir
 
     def todo(self, args: list[str]) -> None:
@@ -440,7 +440,6 @@ class RunnerShell:
             if run_dir:
                 try:
                     self.run_dir = Path(run_dir).expanduser().resolve()
-                    self.overrides["run_dir"] = str(self.run_dir)
                 except Exception:
                     pass
             if result.get("ok", False):
@@ -826,6 +825,9 @@ class RunnerShell:
         cfg_out: Dict[str, Any] = dict(self.config or {})
         for k in DEFAULTS.keys():
             cfg_out[k] = eff.get(k)
+        # run_dir/resume_latest are session-only start intent, not persisted config.
+        cfg_out.pop("run_dir", None)
+        cfg_out.pop("resume_latest", None)
 
         try:
             save_config(out_path, cfg_out)
@@ -881,6 +883,8 @@ class RunnerShell:
             "  - 시작 전 /config로 설정을 확인하세요.",
             "  - backend=claudecode 사용 시 Claude Code 로그인(claude auth login)과 claude-agent-sdk가 필요합니다.",
         ]
+        print("  - /start creates a new run_dir by default.")
+        print("  - Use /start --resume-latest or /start --run-dir <path> to reuse an existing run.")
         print("\n".join(lines))
 
     def worktree(self, args: list[str]) -> None:
@@ -1195,9 +1199,11 @@ def _build_completer() -> Any:
         sorted(
             {
                 "--autopilot",
+                "--run-dir",
                 "--loop",
                 "--continuous",
                 "--debug",
+                "--resume-latest",
                 "--no-build",
                 "--run-tests",
                 "--no-policy-scan",

@@ -101,13 +101,9 @@ class RunnerController:
         explicit = str(eff.get("run_dir") or "").strip()
         if explicit:
             return Path(explicit).expanduser().resolve()
-        prefer_resume = bool(
-            eff.get("resume_latest")
-            or eff.get("loop")
-            or eff.get("continuous")
-            or eff.get("autopilot")
-        )
-        latest = find_latest_run_dir(self.repo) if prefer_resume else None
+        # Fresh runs are the default. Only an explicit resume_latest request may
+        # reuse the latest observed run directory.
+        latest = find_latest_run_dir(self.repo) if bool(eff.get("resume_latest")) else None
         return latest if latest is not None else make_run_dir(self.repo)
 
     def _refresh_process_state(self) -> None:
