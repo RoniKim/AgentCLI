@@ -964,7 +964,7 @@ def _run_adapter_harness(fixtures):
     ).replace("__SOURCE_PATH__", json.dumps(str(WEB_CONSOLE / "app.js"))).replace(
         "__FIXTURES__", json.dumps(fixtures, ensure_ascii=False)
     )
-    completed = subprocess.run([node, "-"], input=script, capture_output=True, text=True, check=True)
+    completed = subprocess.run([node, "-"], input=script, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
     return json.loads(completed.stdout)
 
 
@@ -1084,7 +1084,7 @@ def _run_log_tail_harness(ops):
     ).replace("__SOURCE_PATH__", json.dumps(str(WEB_CONSOLE / "app.js"))).replace(
         "__OPS__", json.dumps(ops, ensure_ascii=False)
     )
-    completed = subprocess.run([node, "-"], input=script, capture_output=True, text=True, check=True)
+    completed = subprocess.run([node, "-"], input=script, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
     return json.loads(completed.stdout)
 
 
@@ -1313,7 +1313,7 @@ def _run_log_tail_session_harness(steps, fetch_responses=None):
     script = script.replace("__SOURCE_PATH__", json.dumps(str(WEB_CONSOLE / "app.js"))).replace(
         "__FETCH_RESPONSES__", json.dumps(fetch_responses or [], ensure_ascii=False)
     ).replace("__STEPS__", json.dumps(steps, ensure_ascii=False))
-    completed = subprocess.run([node, "-"], input=script, capture_output=True, text=True, check=True)
+    completed = subprocess.run([node, "-"], input=script, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
     return json.loads(completed.stdout)
 
 
@@ -1950,7 +1950,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(0, history_item["tasksSkipped"])
         self.assertEqual({"done": 1, "failed": 0, "skipped": 0, "total": 2, "cycles": 1}, history_item["taskCounts"])
         self.assertEqual(120, history_item["durationSec"])
-        self.assertIn(history_item["branch"], {"main", "HEAD"})
+        self.assertEqual(payload["repo"]["branch"], history_item["branch"])
         self.assertEqual(self.run_dir.as_posix(), history_item["runDir"])
         self.assertEqual("pending", history_item["worktreeOutcome"])
         self.assertIn("runSummary", history_item)
@@ -2515,6 +2515,9 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         goals = self.client.get("/api/goals").json()
         for key in ("path", "exists", "mtime", "size", "raw_text", "items", "completion", "completion_level", "summary", "warnings"):
             self.assertIn(key, goals)
+        self.assertEqual(3, goals["summary"]["total"])
+        self.assertEqual(1, goals["summary"]["done"])
+        self.assertEqual(4, goals["items"]["p0"][0]["line_number"])
 
     def test_adapter_normalizes_live_run_contract_from_api_snapshot(self) -> None:
         status_payload = self.client.get("/api/status").json()
@@ -2549,9 +2552,6 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(status_payload["liveRun"]["runnerControl"]["status"]["running"], adapted["runnerControl"]["status"]["running"])
         self.assertEqual(status_payload["liveRun"]["process"]["running"], adapted["process"]["running"])
         self.assertEqual(len(status_payload["liveRun"]["stageSummaries"]), len(adapted["stageSummaries"]))
-        self.assertEqual(3, goals["summary"]["total"])
-        self.assertEqual(1, goals["summary"]["done"])
-        self.assertEqual(4, goals["items"]["p0"][0]["line_number"])
 
         config = self.client.get("/api/config").json()
         self.assertIn("values", config)
@@ -3899,7 +3899,7 @@ Another unsupported line.
         self.assertEqual("project_complete", history_item["shutdownReason"])
         self.assertEqual("project_complete", history_item["stopReason"])
         self.assertEqual({"done": 1, "failed": 0, "skipped": 0, "total": 2, "cycles": 1}, history_item["taskCounts"])
-        self.assertIn(history_item["branch"], {"main", "HEAD"})
+        self.assertEqual(populated["repo"]["branch"], history_item["branch"])
         self.assertEqual(120, history_item["durationSec"])
         self.assertEqual("pending", history_item["worktreeOutcome"])
         self.assertIn("runSummary", history_item)
