@@ -28,17 +28,23 @@ function Resolve-LatestRunDir {
         return (Resolve-Path -LiteralPath $Value).Path
     }
     $runsRoot = Join-Path $RepoRoot ".AgentCLI\agent_runs"
-    $latest = Get-ChildItem -LiteralPath $runsRoot -Directory -ErrorAction Stop |
+    if (-not (Test-Path -LiteralPath $runsRoot)) {
+        return $null
+    }
+    $latest = Get-ChildItem -LiteralPath $runsRoot -Directory -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     if (-not $latest) {
-        throw "No AgentCLI run directories found under $runsRoot"
+        return $null
     }
     return $latest.FullName
 }
 
 function Read-JsonFile {
     param([string]$Path)
+    if (-not $Path) {
+        return $null
+    }
     if (-not (Test-Path -LiteralPath $Path)) {
         return $null
     }
@@ -58,6 +64,9 @@ function Read-JsonFile {
 
 function Read-LastJsonLine {
     param([string]$Path)
+    if (-not $Path) {
+        return $null
+    }
     if (-not (Test-Path -LiteralPath $Path)) {
         return $null
     }
@@ -77,6 +86,12 @@ function Read-LastJsonLine {
 
 function Get-FileProbe {
     param([string]$Path)
+    if (-not $Path) {
+        return [ordered]@{
+            path = ""
+            exists = $false
+        }
+    }
     if (-not (Test-Path -LiteralPath $Path)) {
         return [ordered]@{
             path = $Path
@@ -126,7 +141,14 @@ function Get-ProcessTreeSnapshot {
         [array]$Sessions,
         [switch]$IncludeCommandLine
     )
-    $all = @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CreationDate,HandleCount,ThreadCount,WorkingSetSize,VirtualSize,CommandLine)
+    try {
+        $all = @(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId,ParentProcessId,Name,CreationDate,HandleCount,ThreadCount,WorkingSetSize,VirtualSize,CommandLine)
+    } catch {
+        return @([ordered]@{
+            error = $_.Exception.Message
+            source = "Get-CimInstance Win32_Process"
+        })
+    }
     $byParent = @{}
     foreach ($proc in $all) {
         $parent = [int]$proc.ParentProcessId
@@ -253,7 +275,13 @@ function Get-LogHandles {
     try {
         Set-Location -LiteralPath $env:TEMP
         foreach ($proc in $Processes) {
+            if ($null -eq $proc.pid) {
+                continue
+            }
             $targetPid = [int]$proc.pid
+            if ($targetPid -le 0) {
+                continue
+            }
             foreach ($pattern in @(".AgentCLI", "error.log", "run.log", "events.jsonl")) {
                 try {
                     $output = & handle.exe -accepteula -nobanner -p $targetPid $pattern 2>&1
@@ -288,6 +316,7 @@ function Get-LogHandles {
 }
 
 $repoRootResolved = Resolve-RepoRoot -Value $RepoRoot
+$explicitRunDir = [bool]$RunDir
 $runDirResolved = Resolve-LatestRunDir -RepoRoot $repoRootResolved -Value $RunDir
 $diagnosticsDir = Join-Path $repoRootResolved ".AgentCLI\diagnostics"
 New-Item -ItemType Directory -Force -Path $diagnosticsDir | Out-Null
@@ -308,7 +337,11 @@ $durationSeconds = if ($DurationMinutes -gt 0) { $DurationMinutes * 60 } else { 
 
 Write-Host "Writing diagnostics to $OutputPath"
 Write-Host "RepoRoot=$repoRootResolved"
-Write-Host "RunDir=$runDirResolved"
+if ($runDirResolved) {
+    Write-Host "RunDir=$runDirResolved"
+} else {
+    Write-Host "RunDir=(none yet; will auto-detect latest .AgentCLI\agent_runs entry)"
+}
 Write-Host "Press Ctrl+C to stop when DurationMinutes is 0."
 
 while ($true) {
@@ -319,9 +352,18 @@ while ($true) {
 
     $sessions = Get-SessionRecords
     $processes = Get-ProcessTreeSnapshot -Sessions $sessions -IncludeCommandLine:$IncludeCommandLine
-    $metricsPath = Join-Path $runDirResolved "metrics.jsonl"
-    $statePath = Join-Path $runDirResolved "STATE.json"
-    $logDir = Join-Path $runDirResolved "logs"
+    if (-not $explicitRunDir) {
+        $latestRunDir = Resolve-LatestRunDir -RepoRoot $repoRootResolved -Value ""
+        if ($latestRunDir) {
+            $runDirResolved = $latestRunDir
+        }
+    }
+    $metricsPath = if ($runDirResolved) { Join-Path $runDirResolved "metrics.jsonl" } else { "" }
+    $statePath = if ($runDirResolved) { Join-Path $runDirResolved "STATE.json" } else { "" }
+    $logDir = if ($runDirResolved) { Join-Path $runDirResolved "logs" } else { "" }
+    $runLogPath = if ($logDir) { Join-Path $logDir "run.log" } else { "" }
+    $errorLogPath = if ($logDir) { Join-Path $logDir "error.log" } else { "" }
+    $eventsPath = if ($logDir) { Join-Path $logDir "events.jsonl" } else { "" }
 
     $sample = [ordered]@{
         schema = 1
@@ -334,9 +376,9 @@ while ($true) {
         files = [ordered]@{
             metrics = Get-FileProbe -Path $metricsPath
             state = Get-FileProbe -Path $statePath
-            runLog = Get-FileProbe -Path (Join-Path $logDir "run.log")
-            errorLog = Get-FileProbe -Path (Join-Path $logDir "error.log")
-            events = Get-FileProbe -Path (Join-Path $logDir "events.jsonl")
+            runLog = Get-FileProbe -Path $runLogPath
+            errorLog = Get-FileProbe -Path $errorLogPath
+            events = Get-FileProbe -Path $eventsPath
         }
         sessions = $sessions
         processTree = $processes
@@ -350,7 +392,11 @@ while ($true) {
 
     $json = $sample | ConvertTo-Json -Depth 12 -Compress
     Add-Content -LiteralPath $OutputPath -Value $json -Encoding UTF8
-    Write-Host ("[{0}] sample={1} processes={2} latestEvent={3} output={4}" -f $now.ToString("HH:mm:ss"), $sampleIndex, @($processes).Count, $sample.latestMetric.event, $OutputPath)
+    $latestEvent = ""
+    if ($sample.latestMetric -and $sample.latestMetric.event) {
+        $latestEvent = [string]$sample.latestMetric.event
+    }
+    Write-Host ("[{0}] sample={1} processes={2} latestEvent={3} output={4}" -f $now.ToString("HH:mm:ss"), $sampleIndex, @($processes).Count, $latestEvent, $OutputPath)
 
     $sampleIndex += 1
     Start-Sleep -Seconds ([Math]::Max(1, $IntervalSeconds))
