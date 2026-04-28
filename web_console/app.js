@@ -2481,6 +2481,23 @@
     failed: 'status-chip status-chip--failed',
   };
 
+  const SNAPSHOT_STATUS_CLASS_NAMES = {
+    loading: 'status-chip--loading',
+    running: 'status-chip--running',
+    warn: 'status-chip--warn',
+    err: 'status-chip--err',
+    reconnecting: 'status-chip--reconnecting',
+    stale: 'status-chip--stale',
+  };
+
+  const SECTION_NOTICE_CLASS_NAMES = {
+    info: 'section-banner--info',
+    warn: 'section-banner--warn',
+    err: 'section-banner--err',
+    reconnecting: 'section-banner--reconnecting',
+    stale: 'section-banner--stale',
+  };
+
   const RUN_BANNER_CLASS_NAMES = {
     idle: 'modal-banner section-banner section-banner--idle',
     running: 'modal-banner section-banner section-banner--running',
@@ -2498,6 +2515,16 @@
   function runBannerClass(status, finalReason = '') {
     const tone = runStatusTone(status, finalReason);
     return RUN_BANNER_CLASS_NAMES[tone] || RUN_BANNER_CLASS_NAMES.idle;
+  }
+
+  function snapshotStatusClass(tone) {
+    const normalized = toText(tone, 'running');
+    return SNAPSHOT_STATUS_CLASS_NAMES[normalized] || SNAPSHOT_STATUS_CLASS_NAMES.running;
+  }
+
+  function sectionNoticeClass(tone) {
+    const normalized = toText(tone, 'info');
+    return SECTION_NOTICE_CLASS_NAMES[normalized] || SECTION_NOTICE_CLASS_NAMES.info;
   }
 
   function severityClass(level) {
@@ -7106,7 +7133,7 @@
           ? t('snapshot.controlsDisabled')
           : section.message || fallbackSectionMessage(sectionKey);
     return `
-      <div class="modal-banner section-banner section-banner--${tone}">
+      <div class="modal-banner section-banner ${sectionNoticeClass(tone)}">
         <span class="dot" style="background: currentColor;"></span>
         <div>
           <div class="section-banner__title">${escapeHTML(label)}</div>
@@ -9941,7 +9968,7 @@
     const runnerControlDisplay = runnerControlStateInfo();
     const runnerBusyAction = runnerControlBusyAction();
     const runnerChipTone = `status-chip--${runnerControlDisplay.chipTone}`;
-    const snapshotTone = `status-chip--${snapshotDisplay.tone}`;
+    const snapshotTone = snapshotStatusClass(snapshotDisplay.tone);
     return `
       <div class="topbar__brand">
         <span class="brand-mark"></span>

@@ -784,7 +784,7 @@ def _normalize_execution_status(
         if rc != 0:
             return "failed"
 
-    if reason in {"failed", "error", "exception", "abandoned", "abandon_failed", "build_failed", "test_failed", "policy_violation", "exhausted_attempts"}:
+    if reason in {"failed", "error", "exception", "abandoned", "abandon_failed", "build_failed", "test_failed", "fast_regression_failed", "policy_violation", "exhausted_attempts"}:
         return "failed"
     return "running" if has_run_dir else "idle"
 
@@ -3732,7 +3732,7 @@ def _normalize_lifecycle_status(
         return "done"
     if reason_value in {"stop_file", "stop_requested", "stopped", "manual_stop", "quota_exhausted"}:
         return "stopped"
-    if reason_value in {"failed", "error", "exception", "abandoned", "abandon_failed", "build_failed", "test_failed", "policy_violation", "exhausted_attempts", "needs_dependency", "blocked_dependency", "no_diff"}:
+    if reason_value in {"failed", "error", "exception", "abandoned", "abandon_failed", "build_failed", "test_failed", "fast_regression_failed", "policy_violation", "exhausted_attempts", "needs_dependency", "blocked_dependency", "no_diff"}:
         return "failed"
     return "running" if has_activity else default
 
@@ -5146,6 +5146,7 @@ def _controller_run_dir_is_current_or_terminal(controller_data: dict[str, Any]) 
         "abandon_failed",
         "build_failed",
         "test_failed",
+        "fast_regression_failed",
         "policy_violation",
         "exhausted_attempts",
     }

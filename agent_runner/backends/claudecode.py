@@ -27,6 +27,8 @@ from ..gates import (
     run_fast_web_worktree_regression_async,
     run_test_gate_async,
     should_run_fast_web_worktree_regression,
+    should_retry_fast_web_worktree_regression_failure,
+    summarize_fast_web_worktree_regression_failure,
 )
 from ..gitops import (
     git_head,
@@ -1694,7 +1696,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
             task_completed = False
             task_failure_reason = ""
-            _prev_build_error: str = ""  # Carried across attempts for build-error-aware retry
+            _prev_gate_error: str = ""  # Carried across attempts for gate-aware retry
+            _prev_gate_error_label: str = ""
 
             def _isolate_or_stop(reason: str) -> tuple[bool, str]:
                 """Isolate failed task work: abandon branch (non-destructive) or restore checkpoint (fallback)."""
@@ -1750,10 +1753,6 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     metrics.event("escalate_attempt", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
 
                 if attempt > 0 and (tb or cp):
-                    # Clear stale build error - branch reset reverts all changes,
-                    # so previous build errors are no longer relevant and would
-                    # confuse the escalation model with errors from wrong files.
-                    _prev_build_error = ""
                     if tb:
                         try:
                             reset_task_branch(repo, tb)
@@ -1794,12 +1793,16 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 }
                 dev_prompt = _patch_prompt_for_claude(store.render("dev_task_prompt", DEV_TASK_TEMPLATE_DEFAULT, dev_ctx))
 
-                # Inject build error context from a previous failed attempt
-                if _prev_build_error:
+                # Inject gate failure context from a previous failed attempt.
+                gate_error_for_prompt = _prev_gate_error
+                gate_error_label = _prev_gate_error_label or "VERIFICATION FAILED"
+                _prev_gate_error = ""
+                _prev_gate_error_label = ""
+                if gate_error_for_prompt:
                     dev_prompt = dev_prompt + (
-                        f"\n\n[BUILD FAILED] The previous attempt broke the build. "
-                        f"Fix these errors:\n```\n{_prev_build_error}\n```\n"
-                        "Fix the build errors first, then complete the task."
+                        f"\n\n[{gate_error_label}] The previous attempt failed a verification gate. "
+                        f"Fix these errors:\n```\n{gate_error_for_prompt}\n```\n"
+                        "Fix this verification failure first, then complete the task."
                     )
 
                 metrics.event("dev_attempt_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, model=model_name)
@@ -2103,13 +2106,15 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                             eprint(f"[WARN] Incremental checkpoint failed: {_cp_ex}")
                     if not ok:
                         if dev_auto_escalate and (attempt + 1) < max_attempts and "build_failed" in dev_escalate_on:
-                            # Capture build errors for injection into the next attempt's prompt
+                            # Capture build errors for injection into the next attempt's prompt.
                             try:
                                 _berr_raw = (attempt_dir / "build.txt").read_text(encoding="utf-8", errors="replace")
                                 _berr_lines = [ln for ln in _berr_raw.splitlines() if "error " in ln.lower()]
-                                _prev_build_error = "\n".join(_berr_lines[:50]) or _berr_raw[-2000:]
+                                _prev_gate_error = "\n".join(_berr_lines[:50]) or _berr_raw[-4000:]
+                                _prev_gate_error_label = "BUILD FAILED"
                             except Exception:
-                                _prev_build_error = ""
+                                _prev_gate_error = ""
+                                _prev_gate_error_label = ""
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="build_failed")
                             continue
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
@@ -2140,6 +2145,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     metrics.event("test_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
                     if not ok:
                         if dev_auto_escalate and (attempt + 1) < max_attempts and "test_failed" in dev_escalate_on:
+                            try:
+                                _prev_gate_error = (attempt_dir / "test.txt").read_text(encoding="utf-8", errors="replace")[-4000:]
+                                _prev_gate_error_label = "TEST FAILED"
+                            except Exception:
+                                _prev_gate_error = ""
+                                _prev_gate_error_label = ""
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="test_failed")
                             continue
                         state.setdefault("failed", []).append({"task": next_task.id, "reason": "test_failed"})
@@ -2253,6 +2264,28 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                                 failed_summary = json.dumps(failed_command, ensure_ascii=False, default=str)
                         except Exception:
                             pass
+                        if should_retry_fast_web_worktree_regression_failure(
+                            dev_auto_escalate,
+                            attempt,
+                            max_attempts,
+                            dev_escalate_on,
+                        ):
+                            _prev_gate_error = summarize_fast_web_worktree_regression_failure(
+                                fast_regression,
+                                fast_regression_log,
+                            )
+                            _prev_gate_error_label = "FAST REGRESSION FAILED"
+                            metrics.event(
+                                "dev_attempt_retry",
+                                cycle=cycle_idx,
+                                step=step,
+                                task_id=next_task.id,
+                                attempt=attempt,
+                                reason="fast_regression_failed",
+                                failed_command=failed_name,
+                                log_path=str(fast_regression_log),
+                            )
+                            continue
                         state.setdefault("failed", []).append({
                             "task": next_task.id,
                             "reason": "fast_regression_failed",

@@ -25,6 +25,66 @@ FAST_WEB_WORKTREE_REGRESSION_SCOPE_FILES: tuple[str, ...] = (
 )
 
 
+def _tail_text(text: str, max_chars: int) -> str:
+    limit = max(1, int(max_chars))
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def summarize_fast_web_worktree_regression_failure(
+    result: dict[str, object],
+    log_path: Path | None = None,
+    *,
+    max_chars: int = 4000,
+) -> str:
+    """Build a compact retry prompt excerpt for a failed fast regression gate."""
+    failed_command = result.get("failed_command")
+    failed = failed_command if isinstance(failed_command, dict) else {}
+    name = str(failed.get("name") or failed.get("test_file") or "fast_regression")
+    test_file = str(failed.get("test_file") or "").strip()
+    rc = failed.get("rc")
+    cmd = failed.get("cmd")
+    summary = str(failed.get("summary") or "").strip()
+    command_log = str(failed.get("log_path") or "").strip()
+
+    parts = [f"fast_web_worktree_regression failed: {name}"]
+    if test_file:
+        parts.append(f"test_file: {test_file}")
+    if rc is not None:
+        parts.append(f"return_code: {rc}")
+    if isinstance(cmd, list) and cmd:
+        parts.append("command: " + " ".join(str(part) for part in cmd))
+    elif cmd:
+        parts.append(f"command: {cmd}")
+    if summary:
+        parts.append("summary:\n" + _tail_text(summary, min(2000, max_chars)))
+
+    log_candidate = Path(command_log) if command_log else None
+    if log_candidate and log_candidate.exists():
+        try:
+            parts.append("log_tail:\n" + _tail_text(log_candidate.read_text(encoding="utf-8", errors="replace"), 2000))
+        except Exception:
+            pass
+    elif log_path:
+        parts.append(f"log_path: {log_path}")
+
+    return _tail_text("\n".join(parts), max_chars)
+
+
+def should_retry_fast_web_worktree_regression_failure(
+    dev_auto_escalate: bool,
+    attempt: int,
+    max_attempts: int,
+    dev_escalate_on: Sequence[object] | set[object] | None,
+) -> bool:
+    """Return True when a fast regression failure should feed the next Dev attempt."""
+    if not dev_auto_escalate or (int(attempt) + 1) >= max(1, int(max_attempts)):
+        return False
+    reasons = {str(item) for item in (dev_escalate_on or [])}
+    return "fast_regression_failed" in reasons or "test_failed" in reasons
+
+
 def _norm_cmd(v: object) -> list[str]:
     """Best-effort normalize a command spec into argv list."""
     if v is None:

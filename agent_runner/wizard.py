@@ -238,7 +238,7 @@ def run_wizard(repo: Path, defaults: Dict[str, Any]) -> Dict[str, Any]:
         "dev_model_tier2": dev_model_tier2,
         "dev_auto_escalate": dev_auto_escalate,
         "dev_max_escalations": dev_max_escalations,
-        "dev_escalate_on": ["no_diff", "build_failed", "test_failed"],
+        "dev_escalate_on": ["no_diff", "build_failed", "test_failed", "fast_regression_failed"],
         "reporter_model": reporter_model,
         "report_max_turns": report_max_turns,
         "qa_model": qa_model,

@@ -215,7 +215,7 @@ DEFAULTS: Dict[str, Any] = {
     "dev_max_escalations": 2,
     "dev_model_tier1": "gpt-5.4",
     "dev_model_tier2": "gpt-5.5",
-    "dev_escalate_on": ["no_diff", "build_failed", "test_failed", "no_commits"],
+    "dev_escalate_on": ["no_diff", "build_failed", "test_failed", "fast_regression_failed", "no_commits"],
 
     # Timeouts (seconds) - referenced by cycle.py
     "pm_timeout_seconds": 900,
@@ -524,7 +524,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dev-max-escalations", type=int, default=None)
     p.add_argument("--dev-model-tier1", default=None)
     p.add_argument("--dev-model-tier2", default=None)
-    p.add_argument("--dev-escalate-on", action="append", default=None, help="Escalate conditions (repeatable): no_diff, build_failed, test_failed")
+    p.add_argument("--dev-escalate-on", action="append", default=None, help="Escalate conditions (repeatable): no_diff, build_failed, test_failed, fast_regression_failed")
     p.add_argument("--qa-always", action=argparse.BooleanOptionalAction, default=None)
 
     p.add_argument("--mcp-mode", default=None, choices=["npx", "codex", "disabled"])
@@ -975,6 +975,16 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         eff["dev_escalate_on"] = list(defaults.get("dev_escalate_on", []))
     elif isinstance(de, str):
         eff["dev_escalate_on"] = [de]
+    else:
+        try:
+            eff["dev_escalate_on"] = list(de)
+        except TypeError:
+            eff["dev_escalate_on"] = [str(de)]
+    if (
+        "test_failed" in eff.get("dev_escalate_on", [])
+        and "fast_regression_failed" not in eff.get("dev_escalate_on", [])
+    ):
+        eff["dev_escalate_on"].append("fast_regression_failed")
 
     # ---- normalize generic gate commands ----
     def _norm_cmd(v: Any) -> list[str]:

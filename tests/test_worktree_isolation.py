@@ -499,6 +499,48 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertEqual(2, len(summary["commands"]))
         self.assertTrue((self.run_dir / "fast_web_worktree_regression" / "02_test_web_console_safety.txt").exists())
 
+    def test_fast_web_worktree_regression_failure_summary_and_retry_policy(self) -> None:
+        from agent_runner.gates import (
+            should_retry_fast_web_worktree_regression_failure,
+            summarize_fast_web_worktree_regression_failure,
+        )
+
+        command_log = self.run_dir / "failed_static.txt"
+        command_log.write_text("AssertionError: missing status-chip--reconnecting\n", encoding="utf-8")
+        result = {
+            "ok": False,
+            "failed_command": {
+                "name": "test_web_console_static",
+                "test_file": "tests/test_web_console_static.py",
+                "cmd": ["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_web_console_static.py"],
+                "rc": 1,
+                "summary": "FAILED tests/test_web_console_static.py",
+                "log_path": str(command_log),
+            },
+        }
+
+        summary = summarize_fast_web_worktree_regression_failure(result, self.run_dir / "summary.json")
+
+        self.assertIn("test_web_console_static", summary)
+        self.assertIn("tests/test_web_console_static.py", summary)
+        self.assertIn("status-chip--reconnecting", summary)
+        self.assertTrue(
+            should_retry_fast_web_worktree_regression_failure(
+                True,
+                attempt=0,
+                max_attempts=3,
+                dev_escalate_on={"test_failed"},
+            )
+        )
+        self.assertFalse(
+            should_retry_fast_web_worktree_regression_failure(
+                True,
+                attempt=2,
+                max_attempts=3,
+                dev_escalate_on={"test_failed"},
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
