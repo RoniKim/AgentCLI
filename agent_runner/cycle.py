@@ -74,7 +74,12 @@ from .prompts import (
     PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT,
     PM_TURN_BUDGET_WARNING,
 )
-from .reporting import collect_shutdown_context, build_local_shutdown_report, write_run_report_artifacts
+from .reporting import (
+    collect_shutdown_context,
+    build_local_shutdown_report,
+    write_cycle_change_summary_artifacts,
+    write_run_report_artifacts,
+)
 from .run_dir import make_run_dir, find_latest_run_dir
 from .state import (
     TaskItem,
@@ -1525,6 +1530,9 @@ async def main_async(args: argparse.Namespace) -> int:
             skipped_set: set[str] = set()  # Track skipped/failed tasks separately from done
             task_results: list[dict] = []  # Per-task results for cycle-end progress report
             token_tracker = TokenTracker()  # Per-cycle token usage accumulator
+            goals_update_result: dict[str, Any] = {}
+            goals_before_status: dict[str, Any] = {}
+            goals_after_status: dict[str, Any] = {}
 
             task_ids = {t.id for t in tasks}
             class _ScopedDoneSet(set[str]):
@@ -3037,6 +3045,7 @@ async def main_async(args: argparse.Namespace) -> int:
             done_delta = done_count - before_done
 
             # Update repo snapshot at END of cycle as well (helps resume/restart correctness when HEAD changes during work).
+            latest_head = ""
             try:
                 latest_head = git_head(repo).strip()
                 if latest_head:
@@ -3056,18 +3065,44 @@ async def main_async(args: argparse.Namespace) -> int:
                 try:
                     done_titles = [t.title for t in tasks if t.id in done_set]
                     done_prompts = [t.prompt for t in tasks if t.id in done_set]
+                    _gp_before, _gt_before = read_goals(repo)
+                    if _gt_before:
+                        goals_before_status = parse_goals_completion(_gt_before, completion_level=goals_completion_level)
                     goals_update = update_goals_checkboxes(
                         repo,
                         done_titles,
                         done_prompts,
                         completion_level=goals_completion_level,
                     )
+                    goals_update_result = dict(goals_update)
+                    goals_after_status = dict(goals_update.get("new_status") or goals_before_status)
                     if goals_update.get("updated"):
                         checked = goals_update.get("checked_items", [])
                         eprint(f"[GOALS] Auto-checked {len(checked)} item(s): {checked[:5]}")
                         metrics.event("goals_updated", cycle=cycle_idx, checked_count=len(checked), items=checked[:10])
                 except Exception as goals_ex:
                     eprint(f"[WARN] Goals auto-check failed: {goals_ex}")
+
+            try:
+                final_head = git_head(repo).strip() or latest_head or curr_head
+            except Exception:
+                final_head = latest_head or curr_head
+            try:
+                write_cycle_change_summary_artifacts(
+                    repo=repo,
+                    run_dir=run_dir,
+                    cycle_idx=cycle_idx,
+                    start_head=curr_head,
+                    end_head=final_head,
+                    changed_files=changed_files,
+                    task_results=task_results,
+                    goals_before=goals_before_status,
+                    goals_after=goals_after_status,
+                    goals_update=goals_update_result,
+                    completion_level=goals_completion_level,
+                )
+            except Exception as cycle_summary_ex:
+                eprint(f"[WARN] Cycle change summary write failed: {cycle_summary_ex}")
 
             # --- Completion evaluation ---
             if _goals_on:

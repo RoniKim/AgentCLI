@@ -560,6 +560,7 @@
         selectedRun: 'Selected run',
         finalRunReport: 'Final run report',
         qaValidationReport: 'QA validation report',
+        cycleChangeSummary: 'Cycle change summary',
         reportSummary: 'Report summary',
         reportStatus: 'Report status',
         reportMissing: 'No report artifact is available yet.',
@@ -575,6 +576,7 @@
         noSummaries: 'No persisted run summaries are available yet.',
         validationCommands: 'Validation commands',
         validationArtifacts: 'Validation artifacts',
+        cycleArtifacts: 'Cycle artifacts',
         skippedRationale: 'Skipped rationale',
         nextActions: 'Next actions',
         success: 'Success',
@@ -583,6 +585,16 @@
         branchId: 'Branch / ID',
         duration: 'Duration',
         cycles: '{count} cycle(s)',
+        commits: 'Commits',
+        changedFiles: 'Changed files',
+        validationResults: 'Validation results',
+        goalsChanges: 'GOALS updates',
+        pendingWorktree: 'Pending worktree',
+        unresolvedFailures: 'Unresolved failures',
+        cycleGoalsLevel: 'GOALS level',
+        failedTaskSplitRequired: 'Split required',
+        failedTaskNewIdRequired: 'New task ID required',
+        failedTaskRetryDifferent: 'Retry with a different approach',
         started: 'Started',
         action: 'Action',
         currentState: 'current state',
@@ -1175,6 +1187,7 @@
         selectedRun: '선택된 실행',
         finalRunReport: '최종 실행 보고서',
         qaValidationReport: 'QA 검증 보고서',
+        cycleChangeSummary: '사이클 변경 요약',
         reportSummary: '보고서 요약',
         reportStatus: '보고서 상태',
         reportMissing: '아직 보고서 아티팩트가 없습니다.',
@@ -1190,11 +1203,23 @@
         noSummaries: '아직 저장된 실행 요약이 없습니다.',
         validationCommands: '검증 명령',
         validationArtifacts: '검증 아티팩트',
+        cycleArtifacts: '사이클 아티팩트',
         skippedRationale: '건너뜀 사유',
         nextActions: '다음 조치',
         success: '성공',
         tasks: '작업',
         budgetCap: '예산 상한',
+        cycles: '{count} 사이클',
+        commits: '커밋',
+        changedFiles: '변경 파일',
+        validationResults: '검증 결과',
+        goalsChanges: 'GOALS 변경',
+        pendingWorktree: '대기 작업트리',
+        unresolvedFailures: '미해결 실패',
+        cycleGoalsLevel: 'GOALS 수준',
+        failedTaskSplitRequired: '분할 필요',
+        failedTaskNewIdRequired: '새 작업 ID 필요',
+        failedTaskRetryDifferent: '다른 접근으로 재시도',
       },
       notifications: {
         title: '알림',
@@ -5153,6 +5178,10 @@
       qa_validation_report: toObject(raw.qa_validation_report || raw.qaValidationReport),
       finalRunReport: toObject(raw.finalRunReport || raw.final_run_report),
       final_run_report: toObject(raw.final_run_report || raw.finalRunReport),
+      cycleChangeSummary: toObject(raw.cycleChangeSummary || raw.cycle_change_summary),
+      cycle_change_summary: toObject(raw.cycle_change_summary || raw.cycleChangeSummary),
+      failedTasks: toObject(raw.failedTasks || raw.failed_tasks),
+      failed_tasks: toObject(raw.failed_tasks || raw.failedTasks),
       reportSummary: toText(raw.reportSummary || raw.report_summary || raw.finalRunReport?.summary || raw.final_run_report?.summary, ''),
       reportStatus: toText(raw.reportStatus || raw.report_status || raw.finalRunReport?.status || raw.final_run_report?.status, ''),
       qaValidationReportStatus: toText(raw.qaValidationReportStatus || raw.qa_validation_report_status || raw.qaValidationReport?.status || raw.qa_validation_report?.status, ''),
@@ -9130,6 +9159,8 @@
     const raw = toObject(run);
     const runSummary = toObject(raw.runSummary);
     const lastRunSummary = toObject(raw.lastRunSummary);
+    const cycleChangeSummary = toObject(raw.cycleChangeSummary || raw.cycle_change_summary);
+    const cycleFailedTasks = toObject(raw.failedTasks || raw.failed_tasks || cycleChangeSummary.failedTasks || cycleChangeSummary.failed_tasks);
     const counts = historyTaskCounts(raw);
     const parts = [];
     const finalReason = toText(raw.finalReason, runSummary.final?.reason || '');
@@ -9151,6 +9182,14 @@
     }
     if (counts.cycles) {
       parts.push(t('history.cycles', { count: counts.cycles }));
+    }
+    const cycleSummaryText = toText(cycleChangeSummary.summaryText || cycleChangeSummary.summary_text, '');
+    if (cycleSummaryText) {
+      parts.push(`${t('history.cycleChangeSummary')}: ${compactText(cycleSummaryText, 120)}`);
+    }
+    const unresolvedCount = toNumber(cycleFailedTasks.unresolved_count || cycleFailedTasks.unresolvedCount || toArray(cycleFailedTasks.items).length, 0);
+    if (unresolvedCount) {
+      parts.push(`${t('history.unresolvedFailures')}: ${unresolvedCount}`);
     }
     const reportSummary = toText(toObject(raw.finalRunReport).summary || toObject(raw.final_run_report).summary, '');
     if (reportSummary) {
@@ -9237,8 +9276,132 @@
       qaMarkdown: toText(raw.artifacts?.markdown || artifacts.markdown || validation.reportMarkdownPath || validation.report_markdown_path || '', ''),
       finalJson: toText(raw.artifacts?.final_run_json || artifacts.final_run_json || raw.artifactPath || '', ''),
       finalMarkdown: toText(raw.artifacts?.final_run_markdown || artifacts.final_run_markdown || '', ''),
+      cycleJson: toText(raw.artifacts?.cycleChangeSummaryJson || artifacts.cycleChangeSummaryJson || raw.cycleChangeSummary?.artifacts?.json || raw.cycle_change_summary?.artifacts?.json || '', ''),
+      cycleMarkdown: toText(raw.artifacts?.cycleChangeSummaryMarkdown || artifacts.cycleChangeSummaryMarkdown || raw.cycleChangeSummary?.artifacts?.markdown || raw.cycle_change_summary?.artifacts?.markdown || '', ''),
+      failedJson: toText(raw.artifacts?.failedTasksJson || artifacts.failedTasksJson || raw.failedTasks?.artifacts?.json || raw.failed_tasks?.artifacts?.json || '', ''),
+      failedMarkdown: toText(raw.artifacts?.failedTasksMarkdown || artifacts.failedTasksMarkdown || raw.failedTasks?.artifacts?.markdown || raw.failed_tasks?.artifacts?.markdown || '', ''),
       shutdownReport: toText(raw.artifacts?.shutdown_report || artifacts.shutdown_report || '', ''),
     };
+  }
+
+  function historyCycleChangeSummary(run) {
+    const raw = toObject(run);
+    return toObject(raw.cycleChangeSummary || raw.cycle_change_summary);
+  }
+
+  function historyCycleChangeArtifacts(summary) {
+    const raw = toObject(summary);
+    const artifacts = toObject(raw.artifacts);
+    const failedTasks = toObject(raw.failedTasks || raw.failed_tasks);
+    const failedArtifacts = toObject(failedTasks.artifacts);
+    return {
+      json: toText(artifacts.json || raw.json || '', ''),
+      markdown: toText(artifacts.markdown || raw.markdown || '', ''),
+      failedJson: toText(failedArtifacts.json || failedTasks.artifacts?.json || '', ''),
+      failedMarkdown: toText(failedArtifacts.markdown || failedTasks.artifacts?.markdown || '', ''),
+    };
+  }
+
+  function historyCycleChangeCommitText(commit) {
+    const raw = toObject(commit);
+    const sha = toText(raw.full_sha || raw.sha, '');
+    const subject = compactText(redactionAwareText(raw.subject || raw.message || ''), 120);
+    return [sha, subject].filter(Boolean).join(' ');
+  }
+
+  function historyCycleChangeValidationText(result) {
+    const raw = toObject(result);
+    const taskLabel = toText(raw.task_id || raw.taskId || raw.task_title || raw.taskTitle, t('common.unknown'));
+    const status = historyReportStatusLabel(toText(raw.status, 'missing'));
+    const summary = compactText(redactionAwareText(toText(raw.summary || raw.detail || '', '')), 120);
+    return [taskLabel, status, summary].filter(Boolean).join(' | ');
+  }
+
+  function historyCycleChangeFailureText(item) {
+    const raw = toObject(item);
+    const attempts = toObject(raw.attempts);
+    const retry = toObject(raw.retryConstraints || raw.retry_constraints);
+    const links = toArray(raw.artifact_links || raw.artifactLinks)
+      .map((link) => toObject(link))
+      .map((link) => toText(link.path || link.label, ''))
+      .filter(Boolean);
+    const attemptText = `${t('history.attempts')}: ${toNumber(attempts.current, 0)}/${toNumber(attempts.max, 0) || t('common.unknown')}`;
+    const retryNotes = [];
+    if (retry.split_required) {
+      retryNotes.push(t('history.failedTaskSplitRequired'));
+    }
+    if (retry.new_task_id_required) {
+      retryNotes.push(t('history.failedTaskNewIdRequired'));
+    }
+    if (!retryNotes.length) {
+      retryNotes.push(t('history.failedTaskRetryDifferent'));
+    }
+    const retryText = retryNotes.join(' | ');
+    const meta = [attemptText, retryText, links.length ? compactText(links.join(' | '), 120) : ''].filter(Boolean).join(' | ');
+    return compactFactItem(
+      toText(raw.title || raw.task_title || raw.taskId || raw.task_id, t('common.unknown')),
+      `${toText(raw.reason, t('common.unknown'))}${raw.detail ? ` | ${compactText(redactionAwareText(raw.detail), 120)}` : ''}`,
+      meta,
+    );
+  }
+
+  function renderHistoryCycleChangePanel(summary) {
+    const raw = toObject(summary);
+    const summaryText = toText(raw.summaryText || raw.summary_text, '');
+    const commits = toArray(raw.commits);
+    const changedFiles = toArray(raw.changedFiles || raw.changed_files);
+    const validationResults = toArray(raw.validationResults || raw.validation_results);
+    const goals = toObject(raw.goals);
+    const failedTasks = toObject(raw.failedTasks || raw.failed_tasks);
+    const pendingWorktree = toObject(raw.pendingWorktree || raw.pending_worktree);
+    const artifacts = historyCycleChangeArtifacts(raw);
+    const unresolvedItems = toArray(failedTasks.items);
+    if (!summaryText && !commits.length && !changedFiles.length && !validationResults.length && !unresolvedItems.length && !toArray(goals.checked_items).length && !pendingWorktree.status) {
+      return '';
+    }
+
+    const failureChipStatus = unresolvedItems.length ? 'failed' : 'passed';
+    const commitSummary = commits.length ? compactText(commits.map(historyCycleChangeCommitText).filter(Boolean).join(' | '), 180) : '';
+    const changedFilesSummary = changedFiles.length ? compactText(changedFiles.map((item) => toText(item, '')).filter(Boolean).join(' | '), 180) : '';
+    const validationSummary = validationResults.length ? compactText(validationResults.map(historyCycleChangeValidationText).filter(Boolean).join(' | '), 180) : '';
+    const goalsSummary = compactText(toArray(goals.checked_items).map((item) => toText(item, '')).filter(Boolean).join(' | '), 180);
+    const pendingSummary = pendingWorktree.status && pendingWorktree.status !== 'none'
+      ? compactText(`${toText(pendingWorktree.status, t('common.unknown'))}${pendingWorktree.summary ? ` | ${pendingWorktree.summary}` : ''}`, 180)
+      : '';
+
+    return `
+      <div class="history-report history-report--cycle">
+        <div class="history-report__head">
+          <div>
+            <div class="history-report__title">${escapeHTML(t('history.cycleChangeSummary'))}</div>
+            <div class="history-report__copy">${escapeHTML(summaryText || t('history.reportUnavailable'))}</div>
+          </div>
+          ${chip(historyReportStatusLabel(failureChipStatus), historyReportStatusClass(failureChipStatus))}
+        </div>
+        <div class="kpi-grid kpi-grid--four">
+          ${kpiCard(t('history.commits'), String(commits.length), commitSummary || t('common.none'))}
+          ${kpiCard(t('history.changedFiles'), String(changedFiles.length), changedFilesSummary || t('common.none'))}
+          ${kpiCard(t('history.validationResults'), String(validationResults.length), validationSummary || t('common.none'))}
+          ${kpiCard(t('history.goalsChanges'), String(toArray(goals.checked_items).length), goalsSummary || t('common.none'))}
+        </div>
+        <div class="compact-list">
+          ${compactFactItem(t('history.cycleArtifacts'), fmtList([artifacts.json, artifacts.markdown, artifacts.failedJson, artifacts.failedMarkdown].filter(Boolean)) || t('common.none'), t('history.readOnlyRunArtifacts'))}
+          ${commitSummary ? compactFactItem(t('history.commits'), commitSummary, t('history.reportSummary')) : ''}
+          ${changedFilesSummary ? compactFactItem(t('history.changedFiles'), changedFilesSummary, t('history.reportSummary')) : ''}
+          ${validationSummary ? compactFactItem(t('history.validationResults'), validationSummary, t('history.reportStatus')) : ''}
+          ${goalsSummary ? compactFactItem(t('history.goalsChanges'), goalsSummary, `${t('history.cycleGoalsLevel')}: ${toText(goals.completion_level || goals.completionLevel, t('common.unknown'))}`) : ''}
+          ${pendingSummary ? compactFactItem(t('history.pendingWorktree'), pendingSummary, pendingWorktree.worktree_dir || pendingWorktree.patch_path || pendingWorktree.pending_path || t('common.none')) : ''}
+        </div>
+        ${unresolvedItems.length ? `
+          <div class="history-report__failures">
+            <div class="history-report__section-title">${escapeHTML(t('history.unresolvedFailures'))}</div>
+            <div class="compact-list">
+              ${unresolvedItems.map((item) => historyCycleChangeFailureText(item)).join('')}
+            </div>
+          </div>
+        ` : ''}
+      </div>
+    `;
   }
 
   function historyReportCommandRows(report) {
@@ -15241,6 +15404,7 @@
     const selectedFinalReason = selected ? toText(selected.finalReason, '') : '';
     const selectedFinalRunReport = selected ? toObject(selected.finalRunReport || selected.final_run_report) : {};
     const selectedQaValidationReport = selected ? toObject(selected.qaValidationReport || selected.qa_validation_report) : {};
+    const selectedCycleChangeSummary = selected ? historyCycleChangeSummary(selected) : {};
     const selectedFinalReportStatus = selected ? toText(selectedFinalRunReport.status, '') : '';
     const selectedQaReportStatus = selected ? toText(selectedQaValidationReport.status, '') : '';
     const selectedRunDir = selected ? selected.runDir || t('common.unknown') : t('common.unknown');
@@ -15310,6 +15474,7 @@
                           ${renderHistoryReportPanel(t('history.finalRunReport'), selectedFinalRunReport, 'final')}
                           ${renderHistoryReportPanel(t('history.qaValidationReport'), selectedQaValidationReport, 'qa')}
                         </div>
+                        ${renderHistoryCycleChangePanel(selectedCycleChangeSummary)}
                         <div class="summary-note">${escapeHTML(t('history.persistedSummariesDriveThisView'))}</div>
                       `
                       : `

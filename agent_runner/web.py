@@ -161,12 +161,16 @@ RUN_DIR_ARTIFACT_NAMES = {
     "STATE.json",
     "STOP",
     "cycle_summary.log",
+    "cycle_change_summary.json",
+    "cycle_change_summary.md",
     "last_run_summary.json",
     "metrics.jsonl",
     "FINAL_RUN_REPORT.json",
     "FINAL_RUN_REPORT.md",
     "QA_VALIDATION_REPORT.json",
     "QA_VALIDATION_REPORT.md",
+    "failed_tasks.json",
+    "failed_tasks.md",
     RUNNER_CONTROL_EVENT_FILE,
     "run_summary.json",
     "WORKTREE_APPLY_FAILURE.md",
@@ -1296,7 +1300,7 @@ def _redact_web_history_item(item: dict[str, Any]) -> dict[str, Any]:
         if redacted.get(key) not in (None, "", False):
             redacted[key] = REDACTED_VALUE
             redaction_fields.append(key)
-    for key in ("runSummary", "run_summary", "lastRunSummary", "last_run_summary"):
+    for key in ("runSummary", "run_summary", "lastRunSummary", "last_run_summary", "cycleChangeSummary", "cycle_change_summary", "failedTasks", "failed_tasks"):
         summary = redacted.get(key)
         if isinstance(summary, dict):
             redacted[key] = _redact_web_history_summary(summary)
@@ -1359,6 +1363,8 @@ def _redact_web_history_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "items.run_summary",
         "items.lastRunSummary",
         "items.last_run_summary",
+        "items.cycleChangeSummary",
+        "items.cycle_change_summary",
     )
     return redacted
 
@@ -5811,11 +5817,14 @@ def _history_item(
     worktree_outcome = _history_worktree_outcome(run_dir)
     qa_validation_report = _safe_json(run_dir / "QA_VALIDATION_REPORT.json", {})
     final_run_report = _safe_json(run_dir / "FINAL_RUN_REPORT.json", {})
+    cycle_change_summary = _safe_json(run_dir / "cycle_change_summary.json", {})
     qa_validation_report = qa_validation_report if isinstance(qa_validation_report, dict) else {}
     final_run_report = final_run_report if isinstance(final_run_report, dict) else {}
+    cycle_change_summary = cycle_change_summary if isinstance(cycle_change_summary, dict) else {}
     report_summary = _pick_text(final_run_report.get("summary"), "")
     report_status = _pick_text(final_run_report.get("status"), "")
     qa_report_status = _pick_text(qa_validation_report.get("status"), "")
+    failed_tasks = cycle_change_summary.get("failed_tasks") if isinstance(cycle_change_summary.get("failed_tasks"), dict) else {}
 
     last_cycle = _tail_text(run_dir / "cycle_summary.log", 1).strip()
     return {
@@ -5863,6 +5872,10 @@ def _history_item(
         "qa_validation_report": qa_validation_report,
         "finalRunReport": final_run_report,
         "final_run_report": final_run_report,
+        "cycleChangeSummary": cycle_change_summary,
+        "cycle_change_summary": cycle_change_summary,
+        "failedTasks": failed_tasks,
+        "failed_tasks": failed_tasks,
         "reportSummary": report_summary,
         "reportStatus": report_status,
         "qaValidationReportStatus": qa_report_status,
@@ -5872,6 +5885,10 @@ def _history_item(
             "qaValidationMarkdown": (run_dir / "QA_VALIDATION_REPORT.md").as_posix(),
             "finalRunJson": (run_dir / "FINAL_RUN_REPORT.json").as_posix(),
             "finalRunMarkdown": (run_dir / "FINAL_RUN_REPORT.md").as_posix(),
+            "cycleChangeSummaryJson": (run_dir / "cycle_change_summary.json").as_posix(),
+            "cycleChangeSummaryMarkdown": (run_dir / "cycle_change_summary.md").as_posix(),
+            "failedTasksJson": (run_dir / "failed_tasks.json").as_posix(),
+            "failedTasksMarkdown": (run_dir / "failed_tasks.md").as_posix(),
             "shutdownReport": (run_dir / "SHUTDOWN_REPORT.md").as_posix(),
         },
     }

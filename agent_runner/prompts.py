@@ -191,15 +191,8 @@ def append_pm_essential_context(
     if failed_tasks_block and failed_tasks_block.strip() != "(none)" and "<pm_failed_tasks>" not in s:
         s += (
             "\n\n<pm_failed_tasks>\n"
-            "## FAILED TASKS — MANDATORY RETRY (MUST address each one)\n"
-            "Each failed task below MUST be addressed in the new backlog.\n"
-            "For each: create a retry task with a DIFFERENT approach that avoids the failure cause.\n"
-            "If genuinely impossible, add to open_questions with explanation.\n"
-            "Do NOT ignore or skip any failed task.\n\n"
-            "IMPORTANT: If a task has failed multiple times (marked SPLIT REQUIRED), it is TOO LARGE.\n"
-            "You MUST split it into 2-3 smaller, independent subtasks.\n"
-            "Each subtask MUST have a COMPLETELY NEW task ID — do NOT reuse the failed task's ID "
-            "or any previously completed task ID. Use canonical form: T1, T2, ... (no leading zeros).\n\n"
+            "## Failed tasks (structured)\n"
+            "Review the unresolved failures below and follow retry_constraints for each item.\n"
             f"{failed_tasks_block}\n"
             "</pm_failed_tasks>"
         )

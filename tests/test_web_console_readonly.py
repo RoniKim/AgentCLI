@@ -371,6 +371,261 @@ def _write_run_bundle(
     )
     _write(run_dir / "cycle_summary.log", f"2026-04-26T12:08:00 cycle=1 done={1 if status == 'success' else 0}/{task_count} failed={1 if status == 'failed' else 0} dt=480.0s\n")
     _write_log_source_files(run_dir)
+
+    repo_path = run_dir.parents[2].as_posix()
+    pending_worktree_payload = {
+        "schema_version": 1,
+        "status": "pending",
+        "message": "Review patch from main to abc12345.",
+        "summary": "Review patch from main to abc12345.",
+        "source_repo": repo_path,
+        "run_dir": run_dir.as_posix(),
+        "worktree_dir": (run_dir.parents[2] / "worktree").as_posix(),
+        "patch_path": (run_dir / "worktree.patch").as_posix(),
+        "cleanup_path": (run_dir.parents[2] / "worktree").as_posix(),
+        "base_ref": "main",
+        "head_ref": "abc12345",
+        "changed_files": [
+            {
+                "path": "agent_runner/web.py",
+                "kind": "modified",
+                "summary": "History payload surfaces the cycle change summary.",
+            },
+            {
+                "path": "web_console/app.js",
+                "kind": "modified",
+                "summary": "Browser history view renders cycle change details.",
+            },
+        ],
+        "resolution_actions": [
+            {
+                "action": "merge-worktree",
+                "label": "Apply patch to source repo",
+                "path": (run_dir / "WORKTREE_MERGE_PENDING.json").as_posix(),
+            },
+            {
+                "action": "discard-worktree",
+                "label": "Discard isolated worktree",
+                "path": (run_dir / "WORKTREE_MERGE_PENDING.json").as_posix(),
+            },
+        ],
+    }
+    _write(run_dir / "WORKTREE_MERGE_PENDING.json", json.dumps(pending_worktree_payload, ensure_ascii=False, indent=2) + "\n")
+    _write(
+        run_dir / "WORKTREE_MERGE_PENDING.md",
+        "# Pending Worktree\n\n- status: pending\n- summary: Review patch from main to abc12345.\n",
+    )
+
+    failed_tasks_payload: dict[str, object]
+    if status == "failed":
+        failed_task_item = {
+            "task_id": task_id,
+            "taskId": task_id,
+            "title": task_title,
+            "task_title": task_title,
+            "taskTitle": task_title,
+            "reason": "persistent_failure",
+            "detail": "Build failed during attempt 2 while validating the browser console.",
+            "attempts": {
+                "current": 2,
+                "max": 2,
+                "history_count": 1,
+                "consecutive_failures": 3,
+                "remaining": 0,
+                "recorded_at": "2026-04-26T12:08:00",
+                "run_id": run_dir.name,
+                "backend": "codex",
+            },
+            "artifact_links": [
+                {
+                    "label": "build log (attempt_02)",
+                    "path": f"tasks/c001_s000_{task_id}/attempt_02/build.txt",
+                },
+                {
+                    "label": "dev output (attempt_02)",
+                    "path": f"tasks/c001_s000_{task_id}/attempt_02/dev_output.txt",
+                },
+                {
+                    "label": "notes (attempt_02)",
+                    "path": f"tasks/c001_s000_{task_id}/attempt_02/NOTES.md",
+                },
+            ],
+            "artifactLinks": [
+                {
+                    "label": "build log (attempt_02)",
+                    "path": f"tasks/c001_s000_{task_id}/attempt_02/build.txt",
+                },
+                {
+                    "label": "dev output (attempt_02)",
+                    "path": f"tasks/c001_s000_{task_id}/attempt_02/dev_output.txt",
+                },
+                {
+                    "label": "notes (attempt_02)",
+                    "path": f"tasks/c001_s000_{task_id}/attempt_02/NOTES.md",
+                },
+            ],
+            "retry_constraints": {
+                "must_use_different_approach": True,
+                "split_required": True,
+                "new_task_id_required": True,
+                "retry_allowed": False,
+                "remaining_attempts": 0,
+                "max_attempts": 2,
+                "reason": "Persistent failures must be split into smaller subtasks with new task IDs.",
+            },
+            "retryConstraints": {
+                "must_use_different_approach": True,
+                "split_required": True,
+                "new_task_id_required": True,
+                "retry_allowed": False,
+                "remaining_attempts": 0,
+                "max_attempts": 2,
+                "reason": "Persistent failures must be split into smaller subtasks with new task IDs.",
+            },
+            "cycle_idx": 1,
+            "cycle": 1,
+            "step": 0,
+            "run_id": run_dir.name,
+            "backend": "codex",
+            "recorded_at": "2026-04-26T12:08:00",
+            "source": "state",
+            "summary": f"{task_id} | {task_title} | persistent_failure | 2/2",
+        }
+        failed_tasks_payload = {
+            "schema_version": 1,
+            "kind": "failed_tasks",
+            "generated_at": "2026-04-26T12:08:00",
+            "repo": repo_path,
+            "run_dir": run_dir.as_posix(),
+            "run_id": run_dir.name,
+            "source": "state",
+            "unresolved_count": 1,
+            "summary": "1 unresolved failed task(s); latest reason: persistent_failure",
+            "items": [failed_task_item],
+            "artifacts": {
+                "json": (run_dir / "failed_tasks.json").as_posix(),
+                "markdown": (run_dir / "failed_tasks.md").as_posix(),
+            },
+        }
+    else:
+        failed_tasks_payload = {
+            "schema_version": 1,
+            "kind": "failed_tasks",
+            "generated_at": "2026-04-26T12:08:00",
+            "repo": repo_path,
+            "run_dir": run_dir.as_posix(),
+            "run_id": run_dir.name,
+            "source": "state",
+            "unresolved_count": 0,
+            "summary": "No unresolved failed tasks",
+            "items": [],
+            "artifacts": {
+                "json": (run_dir / "failed_tasks.json").as_posix(),
+                "markdown": (run_dir / "failed_tasks.md").as_posix(),
+            },
+        }
+    _write(run_dir / "failed_tasks.json", json.dumps(failed_tasks_payload, ensure_ascii=False, indent=2) + "\n")
+    _write(
+        run_dir / "failed_tasks.md",
+        "# Failed Tasks\n\n- summary: "
+        + str(failed_tasks_payload["summary"])
+        + "\n- unresolved_count: "
+        + str(failed_tasks_payload["unresolved_count"])
+        + "\n",
+    )
+
+    cycle_change_summary_payload = {
+        "schema_version": 1,
+        "kind": "cycle_change_summary",
+        "generated_at": "2026-04-26T12:08:00",
+        "repo": repo_path,
+        "run_dir": run_dir.as_posix(),
+        "run_id": run_dir.name,
+        "cycle": 1,
+        "start_head": "a1b2c3d4",
+        "end_head": "b2c3d4e5" if status == "success" else "a1b2c3d4",
+        "commits": [
+            {
+                "sha": "a1b2c3d4",
+                "full_sha": "a1b2c3d4e5f67890abcdeffedcba987654321000",
+                "subject": "Refresh the browser read path",
+            },
+            {
+                "sha": "b2c3d4e5",
+                "full_sha": "b2c3d4e5f67890abcdeffedcba987654321001",
+                "subject": "Surface cycle change summary",
+            },
+        ],
+        "changed_files": [
+            "agent_runner/task_history.py",
+            "agent_runner/reporting.py",
+            "agent_runner/web.py",
+            "web_console/app.js",
+            "tests/test_web_console_readonly.py",
+        ],
+        "validation_results": [
+            {
+                "task_id": task_id,
+                "taskTitle": task_title,
+                "status": "passed" if status == "success" else "failed",
+                "summary": "Read-only web console tests passed." if status == "success" else "Read-only web console tests failed.",
+                "detail": "Structured history and cycle change summaries are rendered in the browser.",
+                "artifact_path": (run_dir / "QA_VALIDATION_REPORT.json").as_posix(),
+            },
+            {
+                "task_id": secondary_task_id,
+                "taskTitle": "Backlog follows lifecycle records",
+                "status": "passed" if status == "success" else "skipped",
+                "summary": "Focused browser checks completed." if status == "success" else "Focused browser checks were skipped after the failed build.",
+                "detail": "Cycle change summaries and failed-task retries are available to the PM prompt.",
+                "artifact_path": (run_dir / "FINAL_RUN_REPORT.json").as_posix(),
+            },
+        ],
+        "validation_summary": {
+            "total": 2,
+            "passed": 2 if status == "success" else 0,
+            "failed": 0 if status == "success" else 1,
+            "skipped": 0 if status == "success" else 1,
+            "tasks_total": task_count,
+            "tasks_done": 1 if status == "success" else 0,
+            "tasks_failed": 0 if status == "success" else 1,
+            "tasks_skipped": 0,
+        },
+        "goals": {
+            "updated": True,
+            "checked_items": ["Serve the web console"],
+            "checked_count": 1,
+            "completion_level": "all",
+            "before": {
+                "completion_status": "incomplete",
+                "project_complete": False,
+                "checked_items": [],
+            },
+            "after": {
+                "completion_status": "incomplete",
+                "project_complete": False,
+                "checked_items": ["Serve the web console"],
+            },
+        },
+        "pending_worktree": pending_worktree_payload,
+        "failed_tasks": failed_tasks_payload,
+        "summary_text": (
+            "2 commit(s) | 5 changed file(s) | 2 validation result(s) | 1 GOALS checkbox update(s) | worktree pending"
+            + (" | 1 unresolved failure(s)" if status == "failed" else "")
+        ),
+        "artifacts": {
+            "json": (run_dir / "cycle_change_summary.json").as_posix(),
+            "markdown": (run_dir / "cycle_change_summary.md").as_posix(),
+        },
+    }
+    _write(run_dir / "cycle_change_summary.json", json.dumps(cycle_change_summary_payload, ensure_ascii=False, indent=2) + "\n")
+    _write(
+        run_dir / "cycle_change_summary.md",
+        "# Cycle Change Summary\n\n- summary: "
+        + str(cycle_change_summary_payload["summary_text"])
+        + "\n- commits: 2\n- changed_files: 5\n- validation_results: 2\n- goals_updates: 1\n- pending_worktree: pending\n",
+    )
+
     if write_reports:
         repo_path = run_dir.parents[2].as_posix()
         qa_report_json = run_dir / "QA_VALIDATION_REPORT.json"
@@ -3367,6 +3622,79 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("", normalized_history_item["reportStatus"])
         self.assertIn("No report artifact is available yet.", history_html)
         self.assertIn("history-report--empty", history_html)
+
+    def test_api_history_and_history_view_show_cycle_change_summary_and_failed_tasks(self) -> None:
+        failed_run_dir = self._make_live_run_dir("20260426-131500")
+        _write_run_bundle(
+            failed_run_dir,
+            status="failed",
+            final_rc=1,
+            final_reason="persistent_failure",
+            branch="main",
+        )
+
+        from agent_runner.backlog_utils import build_failed_tasks_block
+        from agent_runner.prompts import append_pm_essential_context
+        from fastapi.testclient import TestClient
+
+        client = TestClient(self._create_app(self.repo))
+        status_payload = client.get("/api/status").json()
+        history_payload = client.get("/api/history").json()
+        history_item = next(item for item in history_payload["items"] if item["id"] == failed_run_dir.name)
+
+        self.assertEqual("failed", history_item["status"])
+        self.assertEqual("failed", history_item["executionStatus"])
+        self.assertEqual("persistent_failure", history_item["finalReason"])
+        self.assertIn("cycleChangeSummary", history_item)
+        self.assertIn("failedTasks", history_item)
+
+        cycle_summary = history_item["cycleChangeSummary"]
+        failed_tasks = history_item["failedTasks"]
+        self.assertEqual("cycle_change_summary", cycle_summary["kind"])
+        self.assertIn("summary_text", cycle_summary)
+        self.assertIn("changed_files", cycle_summary)
+        self.assertIn("validation_results", cycle_summary)
+        self.assertIn("pending_worktree", cycle_summary)
+        self.assertEqual(1, cycle_summary["failed_tasks"]["unresolved_count"])
+        self.assertEqual(1, failed_tasks["unresolved_count"])
+        self.assertEqual("persistent_failure", failed_tasks["items"][0]["reason"])
+        self.assertTrue(failed_tasks["items"][0]["retry_constraints"]["split_required"])
+        self.assertEqual(
+            history_item["reportArtifacts"]["cycleChangeSummaryJson"],
+            (failed_run_dir / "cycle_change_summary.json").as_posix(),
+        )
+        self.assertEqual(
+            history_item["reportArtifacts"]["failedTasksJson"],
+            (failed_run_dir / "failed_tasks.json").as_posix(),
+        )
+
+        normalized, history_html, _history_title = self._render_history_view(status_payload)
+        normalized_history_item = next(item for item in normalized["history"] if item["id"] == failed_run_dir.name)
+        self.assertEqual("cycle_change_summary", normalized_history_item["cycleChangeSummary"]["kind"])
+        self.assertIn("Cycle change summary", history_html)
+        self.assertIn("Cycle artifacts", history_html)
+        self.assertIn("Changed files", history_html)
+        self.assertIn("Validation results", history_html)
+        self.assertIn("GOALS updates", history_html)
+        self.assertIn("Pending worktree", history_html)
+        self.assertIn("Unresolved failures", history_html)
+        self.assertIn("persistent_failure", history_html)
+        self.assertIn("Split required", history_html)
+        self.assertIn("New task ID required", history_html)
+        self.assertIn("agent_runner/task_history.py", history_html)
+        self.assertIn("web_console/app.js", history_html)
+
+        failed_block = build_failed_tasks_block(failed_run_dir / "STATE.json", failed_run_dir)
+        pm_prompt = append_pm_essential_context("Plan the next PM turn.", failed_tasks_block=failed_block)
+        self.assertIn("<pm_failed_tasks>", pm_prompt)
+        self.assertIn("## Failed tasks (structured)", pm_prompt)
+        self.assertIn('"title": "API-backed observation path"', pm_prompt)
+        self.assertIn('"attempts"', pm_prompt)
+        self.assertIn('"artifact_links"', pm_prompt)
+        self.assertIn("persistent_failure", pm_prompt)
+        self.assertIn('"retry_constraints"', pm_prompt)
+        self.assertIn('"task_id": "T-020"', pm_prompt)
+        self.assertIn("Persistent failures must be split into smaller subtasks with new task IDs.", pm_prompt)
 
     def test_api_status_long_running_stage_summary_covers_recent_pm_dev_qa_output(self) -> None:
         for stage_name in ("PM", "Dev", "QA"):

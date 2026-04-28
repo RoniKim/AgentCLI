@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .state import load_backlog_json, parse_backlog_md, load_state, TaskItem
-from .task_history import record_task as _record_task_history
+from .task_history import (
+    build_failed_tasks_artifact as _build_failed_tasks_artifact,
+    record_task as _record_task_history,
+    render_failed_tasks_block as _render_failed_tasks_block,
+)
 from .utils import eprint
 
 
@@ -342,47 +346,35 @@ def find_latest_dev_log_for_task(run_dir: Path, task_id: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def build_failed_tasks_block(state_path: Path, run_dir: Path) -> str:
-    """Build a summary of failed tasks with reasons for PM context."""
+    """Build a structured failed-tasks block for PM context."""
     try:
+        _backlog_block, tasks, done_ids, _failed_ids = load_backlog_context_for_pm(
+            run_dir / "BACKLOG.json",
+            run_dir / "BACKLOG.md",
+            state_path,
+        )
         state_obj = load_state(state_path)
     except Exception:
         state_obj = {"failed": []}
+        tasks = []
+        done_ids = set()
     failed_list = state_obj.get("failed", []) or []
     if not failed_list:
         return "(none)"
-    lines: list[str] = []
-    for f in failed_list:
-        if isinstance(f, dict):
-            tid = f.get("task", "?")
-            reason = f.get("reason", "unknown")
-            detail = f.get("detail", "")
-            lines.append(f"- {tid}: {reason}")
-            if reason == "persistent_failure" or reason == "persistent_skip":
-                attempts_raw = f.get("attempts")
-                attempts_txt = ""
-                if isinstance(attempts_raw, int) and attempts_raw > 0:
-                    attempts_txt = str(attempts_raw)
-                else:
-                    # detail example: "Failed 6 consecutive times across runs"
-                    m_attempts = re.search(r"(\d+)\s+consecutive", str(detail), re.IGNORECASE)
-                    if m_attempts:
-                        attempts_txt = str(m_attempts.group(1))
-                if not attempts_txt:
-                    attempts_txt = "multiple"
-                lines.append(
-                    f"  ⚠ SPLIT REQUIRED: This task failed {attempts_txt} times — "
-                    "must be decomposed into smaller subtasks with NEW IDs"
-                )
-            if detail:
-                lines.append(f"  Detail: {detail}")
-            dev_log = find_latest_dev_log_for_task(run_dir, tid)
-            if dev_log:
-                lines.append("  Last dev log (tail):")
-                for dl in dev_log[-8:]:
-                    lines.append(f"    {dl}")
-        else:
-            lines.append(f"- {f}: unknown")
-    return "\n".join(lines)
+    title_lookup = {task.id: task.title for task in tasks}
+    try:
+        repo = run_dir.parents[2]
+    except Exception:
+        repo = run_dir
+    artifact = _build_failed_tasks_artifact(
+        repo,
+        run_dir,
+        failed_items=[item for item in failed_list if isinstance(item, dict)],
+        task_lookup=title_lookup,
+        done_ids=done_ids,
+        source="state",
+    )
+    return _render_failed_tasks_block(artifact)
 
 
 # ---------------------------------------------------------------------------

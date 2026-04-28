@@ -3,15 +3,16 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from .docs import read_text_robust
 from .gates import FAST_WEB_WORKTREE_REGRESSION_TEST_FILES, find_build_cmd, find_test_cmd
 from .goals import parse_goals_completion, read_goals
-from .gitops import git_head, git_porcelain, list_untracked
+from .gitops import find_pending_worktree_merge, git_head, git_porcelain, list_untracked, read_pending_worktree_merge
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, parse_backlog_md, load_state
+from .task_history import build_failed_tasks_artifact
 from .todo import read_current_todo
-from .utils import atomic_write_json, now_iso, safe_write_text
+from .utils import atomic_write_json, now_iso, run_cmd, safe_write_text
 
 
 def _read_text_limited(p: Path, max_chars: int = 8000) -> str:
@@ -191,6 +192,15 @@ def collect_shutdown_context(repo: Path, run_dir: Path) -> dict[str, Any]:
     else:
         ctx["cycle_summary_tail"] = ""
 
+    cycle_change_summary_path = run_dir / "cycle_change_summary.json"
+    if cycle_change_summary_path.exists():
+        try:
+            ctx["cycle_change_summary"] = json.loads(cycle_change_summary_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            ctx["cycle_change_summary"] = {}
+    else:
+        ctx["cycle_change_summary"] = {}
+
     last_run_summary = run_dir / "last_run_summary.json"
     if last_run_summary.exists():
         try:
@@ -277,6 +287,439 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, tuple):
         return list(value)
     return [value]
+
+
+def _limit_items(items: Sequence[Any], limit: int) -> list[Any]:
+    if limit <= 0:
+        return list(items)
+    return list(items[:limit])
+
+
+def _short_text(value: Any, *, max_chars: int = 240, default: str = "") -> str:
+    text = _text(value, default)
+    if not text:
+        return default
+    if max_chars and len(text) > max_chars:
+        return text[: max(0, max_chars - 3)].rstrip() + "..."
+    return text
+
+
+def _safe_rel_path(base: Path, path: Any) -> str:
+    try:
+        path_obj = Path(str(path))
+    except Exception:
+        return _text(path)
+    try:
+        return path_obj.resolve().relative_to(base.resolve()).as_posix()
+    except Exception:
+        try:
+            return path_obj.as_posix()
+        except Exception:
+            return _text(path)
+
+
+def _summarize_commit_range(repo: Path, start_head: str, end_head: str, *, max_items: int = 10) -> list[dict[str, Any]]:
+    if not start_head or not end_head or start_head == end_head:
+        return []
+    code, output = run_cmd(
+        [
+            "git",
+            "log",
+            "--reverse",
+            "--no-merges",
+            f"--max-count={max_items}",
+            "--date=iso-strict",
+            "--format=%H%x1f%ad%x1f%s",
+            f"{start_head}..{end_head}",
+        ],
+        cwd=repo,
+        timeout_sec=60,
+    )
+    if code != 0 or not output.strip():
+        return []
+    commits: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        parts = line.split("\x1f")
+        if len(parts) < 3:
+            continue
+        sha, committed_at, subject = parts[:3]
+        commits.append(
+            {
+                "sha": _short_text(sha, max_chars=12),
+                "full_sha": _short_text(sha, max_chars=40),
+                "committed_at": _text(committed_at),
+                "subject": _short_text(subject, max_chars=160),
+            }
+        )
+    return commits[:max_items]
+
+
+def _summarize_validation_result(raw_result: dict[str, Any], artifact_path: str = "") -> dict[str, Any]:
+    validation = _json_file(Path(artifact_path), {}) if artifact_path else {}
+    if not isinstance(validation, dict):
+        validation = {}
+    summary = validation.get("summary")
+    if isinstance(summary, dict):
+        commands_total = _int(summary.get("commands_total") or summary.get("total"), 0)
+        commands_executed = _int(summary.get("commands_executed") or summary.get("executed"), 0)
+        commands_passed = _int(summary.get("commands_passed") or summary.get("passed"), 0)
+        commands_failed = _int(summary.get("commands_failed") or summary.get("failed"), 0)
+        commands_skipped = _int(summary.get("commands_skipped") or summary.get("skipped"), 0)
+    else:
+        commands_total = 0
+        commands_executed = 0
+        commands_passed = 0
+        commands_failed = 0
+        commands_skipped = 0
+    return {
+        "task_id": _text(raw_result.get("task_id") or raw_result.get("taskId") or validation.get("task_id") or validation.get("taskId")),
+        "task_title": _text(raw_result.get("task_title") or raw_result.get("taskTitle") or validation.get("task_title") or validation.get("taskTitle")),
+        "status": _text(validation.get("status") or validation.get("validation_status") or validation.get("validationStatus") or raw_result.get("status"), "unknown"),
+        "reason": _text(validation.get("reason") or validation.get("validation_reason") or validation.get("validationReason") or raw_result.get("reason"), ""),
+        "detail": _short_text(validation.get("detail") or validation.get("validation_detail") or validation.get("validationDetail") or raw_result.get("detail"), max_chars=240),
+        "artifact_path": artifact_path,
+        "summary": _short_text(validation.get("summary_text") or validation.get("summary") or raw_result.get("validation_summary") or raw_result.get("summary"), max_chars=240),
+        "attempt": _int(validation.get("attempt") or raw_result.get("attempt"), 0),
+        "cycle": _int(validation.get("cycle") or raw_result.get("cycle") or validation.get("cycle_idx"), 0),
+        "step": _int(validation.get("step") or raw_result.get("step"), 0),
+        "command_counts": {
+            "total": commands_total,
+            "executed": commands_executed,
+            "passed": commands_passed,
+            "failed": commands_failed,
+            "skipped": commands_skipped,
+        },
+    }
+
+
+def _summarize_pending_worktree(repo: Path, run_dir: Path) -> dict[str, Any]:
+    pending_path = find_pending_worktree_merge(repo, run_dir)
+    if not pending_path:
+        return {
+            "status": "none",
+            "summary": "",
+            "pending_path": "",
+            "worktree_dir": "",
+            "patch_path": "",
+            "cleanup_path": "",
+            "changed_files": [],
+            "resolution_actions": [],
+        }
+    payload = read_pending_worktree_merge(pending_path)
+    if not isinstance(payload, dict):
+        payload = {}
+    changed_files_raw = _as_list(payload.get("changed_files") or payload.get("changedFiles"))
+    changed_files: list[dict[str, Any]] = []
+    for item in changed_files_raw:
+        if isinstance(item, dict):
+            changed_files.append(
+                {
+                    "path": _text(item.get("path") or item.get("old_path") or item.get("new_path")),
+                    "kind": _text(item.get("kind") or item.get("state") or item.get("type") or "modified"),
+                    "summary": _short_text(item.get("summary") or item.get("note") or item.get("message"), max_chars=180),
+                }
+            )
+        else:
+            path_text = _text(item)
+            if path_text:
+                changed_files.append({"path": path_text, "kind": "modified", "summary": ""})
+    resolution_actions_raw = _as_list(payload.get("resolution_actions") or payload.get("resolutionActions"))
+    resolution_actions: list[dict[str, Any]] = []
+    for item in resolution_actions_raw:
+        if isinstance(item, dict):
+            resolution_actions.append(
+                {
+                    "action": _text(item.get("action") or item.get("kind") or item.get("name") or ""),
+                    "label": _short_text(item.get("label") or item.get("title") or item.get("summary"), max_chars=180),
+                    "path": _safe_rel_path(run_dir, item.get("path") or item.get("artifact_path") or item.get("artifactPath")),
+                }
+            )
+        else:
+            text = _text(item)
+            if text:
+                resolution_actions.append({"action": text, "label": text, "path": ""})
+    return {
+        "status": _text(payload.get("status") or payload.get("worktree_state") or payload.get("worktreeState") or "pending", "pending"),
+        "summary": _short_text(payload.get("summary") or payload.get("message") or payload.get("risk") or "", max_chars=240),
+        "pending_path": pending_path.as_posix(),
+        "worktree_dir": _text(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree"), ""),
+        "patch_path": _text(payload.get("patch_path") or payload.get("patchPath") or payload.get("patch"), ""),
+        "cleanup_path": _text(payload.get("cleanup_path") or payload.get("cleanupPath"), ""),
+        "base_ref": _text(payload.get("base_ref") or payload.get("baseRef"), ""),
+        "head_ref": _text(payload.get("head_ref") or payload.get("headRef"), ""),
+        "changed_files": changed_files[:10],
+        "resolution_actions": resolution_actions[:10],
+    }
+
+
+def build_cycle_change_summary(
+    *,
+    repo: Path,
+    run_dir: Path,
+    cycle_idx: int,
+    start_head: str,
+    end_head: str,
+    changed_files: Sequence[str] | None = None,
+    task_results: Sequence[dict[str, Any]] | None = None,
+    goals_before: dict[str, Any] | None = None,
+    goals_after: dict[str, Any] | None = None,
+    goals_update: dict[str, Any] | None = None,
+    completion_level: str = "all",
+) -> dict[str, Any]:
+    changed_files_list = []
+    for path in _limit_items(changed_files or [], 200):
+        text = _text(path)
+        if text and text not in changed_files_list:
+            changed_files_list.append(text)
+
+    commits = _summarize_commit_range(repo, start_head, end_head, max_items=10)
+
+    validation_results: list[dict[str, Any]] = []
+    task_results_list = [item for item in list(task_results or []) if isinstance(item, dict)]
+    for result in task_results_list[:20]:
+        artifact_path = _text(result.get("validation_artifact") or result.get("validationArtifact") or "")
+        validation_results.append(_summarize_validation_result(result, artifact_path))
+
+    state = {}
+    try:
+        state = load_state(run_dir / "STATE.json")
+    except Exception:
+        state = {"done": [], "failed": [], "warnings": []}
+    backlog = _load_backlog_tasks(run_dir)
+    title_lookup = {task.id: task.title for task in backlog}
+    done_ids = set(state.get("done", []) or [])
+    failed_artifact = build_failed_tasks_artifact(
+        repo,
+        run_dir,
+        failed_items=[item for item in (state.get("failed", []) or []) if isinstance(item, dict)],
+        task_lookup=title_lookup,
+        done_ids=done_ids,
+        source="state",
+    )
+
+    goals_before_status = goals_before if isinstance(goals_before, dict) else {}
+    goals_after_status = goals_after if isinstance(goals_after, dict) else {}
+    goals_update_obj = goals_update if isinstance(goals_update, dict) else {}
+    checked_items = [text for text in (_text(item) for item in _as_list(goals_update_obj.get("checked_items"))) if text][:20]
+    goals_changes = {
+        "updated": bool(goals_update_obj.get("updated")),
+        "checked_items": checked_items,
+        "checked_count": len(checked_items),
+        "completion_level": completion_level,
+        "before": goals_before_status,
+        "after": goals_after_status or goals_update_obj.get("new_status") or {},
+    }
+
+    pending_worktree = _summarize_pending_worktree(repo, run_dir)
+
+    task_total = len(task_results_list)
+    task_done = len([item for item in task_results_list if _text(item.get("status")) == "done"])
+    task_failed = len([item for item in task_results_list if _text(item.get("status")) == "failed"])
+    task_skipped = len([item for item in task_results_list if _text(item.get("status")) == "skipped"])
+    validation_passed = len([item for item in validation_results if _text(item.get("status")).lower() in {"passed", "pass", "success", "completed", "ok"}])
+    validation_failed = len([item for item in validation_results if _text(item.get("status")).lower() in {"failed", "fail", "error"}])
+    validation_skipped = len([item for item in validation_results if _text(item.get("status")).lower() == "skipped"])
+
+    summary_bits = [
+        f"{len(commits)} commit(s)",
+        f"{len(changed_files_list)} changed file(s)",
+        f"{len(validation_results)} validation result(s)",
+    ]
+    if goals_changes["updated"]:
+        summary_bits.append(f"{goals_changes['checked_count']} GOALS checkbox update(s)")
+    else:
+        summary_bits.append("0 GOALS checkbox updates")
+    summary_bits.append(f"worktree {pending_worktree['status']}")
+    if failed_artifact.get("unresolved_count"):
+        summary_bits.append(f"{failed_artifact['unresolved_count']} unresolved failure(s)")
+    summary_text = " | ".join(summary_bits)
+
+    return {
+        "schema_version": 1,
+        "kind": "cycle_change_summary",
+        "generated_at": now_iso(),
+        "repo": repo.as_posix(),
+        "run_dir": run_dir.as_posix(),
+        "run_id": run_dir.name,
+        "cycle": cycle_idx,
+        "start_head": _short_text(start_head, max_chars=40),
+        "end_head": _short_text(end_head, max_chars=40),
+        "commits": commits,
+        "changed_files": changed_files_list,
+        "validation_results": validation_results,
+        "validation_summary": {
+            "total": len(validation_results),
+            "passed": validation_passed,
+            "failed": validation_failed,
+            "skipped": validation_skipped,
+            "tasks_total": task_total,
+            "tasks_done": task_done,
+            "tasks_failed": task_failed,
+            "tasks_skipped": task_skipped,
+        },
+        "goals": goals_changes,
+        "pending_worktree": pending_worktree,
+        "failed_tasks": failed_artifact,
+        "summary_text": summary_text,
+        "artifacts": {
+            "json": (run_dir / "cycle_change_summary.json").as_posix(),
+            "markdown": (run_dir / "cycle_change_summary.md").as_posix(),
+        },
+    }
+
+
+def _render_cycle_change_summary_md(summary: dict[str, Any]) -> str:
+    lines: list[str] = []
+    lines.append("# Cycle Change Summary")
+    lines.append("")
+    lines.append(f"- cycle: {summary.get('cycle')}")
+    lines.append(f"- start_head: {summary.get('start_head') or '(none)'}")
+    lines.append(f"- end_head: {summary.get('end_head') or '(none)'}")
+    lines.append(f"- summary: {summary.get('summary_text') or '(none)'}")
+    lines.append("")
+    commits = _as_list(summary.get("commits"))
+    if commits:
+        lines.append("## Commits")
+        lines.append("")
+        for commit in commits:
+            if not isinstance(commit, dict):
+                continue
+            lines.append(f"- {commit.get('full_sha') or commit.get('sha')}: {commit.get('subject') or '(unknown)'}")
+        lines.append("")
+    changed_files = _as_list(summary.get("changed_files"))
+    if changed_files:
+        lines.append("## Changed files")
+        lines.append("")
+        for path in changed_files[:40]:
+            lines.append(f"- {path}")
+        lines.append("")
+    validation = summary.get("validation_summary") if isinstance(summary.get("validation_summary"), dict) else {}
+    if validation:
+        lines.append("## Validation")
+        lines.append("")
+        lines.append(
+            "- totals: "
+            f"tasks={validation.get('tasks_total', 0)} done={validation.get('tasks_done', 0)} "
+            f"failed={validation.get('tasks_failed', 0)} skipped={validation.get('tasks_skipped', 0)} "
+            f"results={validation.get('total', 0)} passed={validation.get('passed', 0)} "
+            f"failed={validation.get('failed', 0)} skipped={validation.get('skipped', 0)}"
+        )
+        lines.append("")
+    goals = summary.get("goals") if isinstance(summary.get("goals"), dict) else {}
+    if goals:
+        lines.append("## GOALS")
+        lines.append("")
+        lines.append(f"- updated: {bool(goals.get('updated'))}")
+        if goals.get("checked_items"):
+            lines.append(f"- checked_items: {', '.join(_text(item) for item in goals.get('checked_items') or [])}")
+        before = goals.get("before") if isinstance(goals.get("before"), dict) else {}
+        after = goals.get("after") if isinstance(goals.get("after"), dict) else {}
+        if before or after:
+            lines.append(f"- before: {before.get('completion_status') or before.get('completionStatus') or before.get('project_complete') or 'unknown'}")
+            lines.append(f"- after: {after.get('completion_status') or after.get('completionStatus') or after.get('project_complete') or 'unknown'}")
+        lines.append("")
+    pending_worktree = summary.get("pending_worktree") if isinstance(summary.get("pending_worktree"), dict) else {}
+    if pending_worktree and pending_worktree.get("status") != "none":
+        lines.append("## Pending worktree")
+        lines.append("")
+        lines.append(f"- status: {pending_worktree.get('status')}")
+        lines.append(f"- summary: {pending_worktree.get('summary') or '(none)'}")
+        lines.append(f"- worktree_dir: {pending_worktree.get('worktree_dir') or '(none)'}")
+        lines.append(f"- patch_path: {pending_worktree.get('patch_path') or '(none)'}")
+        lines.append("")
+    failed_tasks = summary.get("failed_tasks") if isinstance(summary.get("failed_tasks"), dict) else {}
+    if failed_tasks and failed_tasks.get("items"):
+        lines.append("## Unresolved failures")
+        lines.append("")
+        for item in _as_list(failed_tasks.get("items"))[:20]:
+            if not isinstance(item, dict):
+                continue
+            attempts = item.get("attempts") if isinstance(item.get("attempts"), dict) else {}
+            lines.append(
+                f"- {item.get('task_id') or item.get('taskId')}: {item.get('title') or '(unknown)'} "
+                f"| {item.get('reason') or 'unknown'} | {attempts.get('current', 0)}/{attempts.get('max', 0) or '?'}"
+            )
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_failed_tasks_md(artifact: dict[str, Any]) -> str:
+    lines: list[str] = []
+    lines.append("# Failed Tasks")
+    lines.append("")
+    lines.append(f"- summary: {artifact.get('summary') or '(none)'}")
+    lines.append(f"- unresolved_count: {artifact.get('unresolved_count', 0)}")
+    lines.append("")
+    items = artifact.get("items") if isinstance(artifact.get("items"), list) else []
+    if items:
+        lines.append("## Items")
+        lines.append("")
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            attempts = item.get("attempts") if isinstance(item.get("attempts"), dict) else {}
+            lines.append(
+                f"- {item.get('task_id') or item.get('taskId')}: {item.get('title') or '(unknown)'} "
+                f"| {item.get('reason') or 'unknown'} | attempts {attempts.get('current', 0)}/{attempts.get('max', 0) or '?'}"
+            )
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_cycle_change_summary_artifacts(
+    *,
+    repo: Path,
+    run_dir: Path,
+    cycle_idx: int,
+    start_head: str,
+    end_head: str,
+    changed_files: Sequence[str] | None = None,
+    task_results: Sequence[dict[str, Any]] | None = None,
+    goals_before: dict[str, Any] | None = None,
+    goals_after: dict[str, Any] | None = None,
+    goals_update: dict[str, Any] | None = None,
+    completion_level: str = "all",
+) -> dict[str, Any]:
+    summary = build_cycle_change_summary(
+        repo=repo,
+        run_dir=run_dir,
+        cycle_idx=cycle_idx,
+        start_head=start_head,
+        end_head=end_head,
+        changed_files=changed_files,
+        task_results=task_results,
+        goals_before=goals_before,
+        goals_after=goals_after,
+        goals_update=goals_update,
+        completion_level=completion_level,
+    )
+    json_path = run_dir / "cycle_change_summary.json"
+    md_path = run_dir / "cycle_change_summary.md"
+    try:
+        atomic_write_json(json_path, summary)
+    except Exception:
+        safe_write_text(json_path, json.dumps(summary, ensure_ascii=False, indent=2, default=str) + "\n")
+    try:
+        safe_write_text(md_path, _render_cycle_change_summary_md(summary))
+    except Exception:
+        pass
+    failed_tasks = summary.get("failed_tasks") if isinstance(summary.get("failed_tasks"), dict) else {}
+    failed_json_path = run_dir / "failed_tasks.json"
+    failed_md_path = run_dir / "failed_tasks.md"
+    if failed_tasks:
+        try:
+            atomic_write_json(failed_json_path, failed_tasks)
+        except Exception:
+            safe_write_text(failed_json_path, json.dumps(failed_tasks, ensure_ascii=False, indent=2, default=str) + "\n")
+        try:
+            safe_write_text(failed_md_path, _render_failed_tasks_md(failed_tasks))
+        except Exception:
+            pass
+    summary["artifacts"] = {
+        "json": json_path.as_posix(),
+        "markdown": md_path.as_posix(),
+    }
+    return summary
 
 
 def _cmd_list(value: Any) -> list[str]:
@@ -1070,6 +1513,7 @@ def build_local_shutdown_report(
     hints_preview = "\n".join([f"- {n}" for n in hints[:40]]) if hints else "(none)"
 
     cycle_summary_tail = (ctx.get("cycle_summary_tail") or "").strip() or "(none)"
+    cycle_change_summary = ctx.get("cycle_change_summary") or {}
 
     resume_cmd = (
         f"python agent_cli.py --repo \"{repo}\" --resume-latest --continuous --autopilot"
@@ -1218,6 +1662,21 @@ def build_local_shutdown_report(
     lines.append(cycle_summary_tail)
     lines.append("```")
     lines.append("")
+
+    if isinstance(cycle_change_summary, dict) and cycle_change_summary:
+        lines.append("## Cycle change summary")
+        lines.append("")
+        lines.append(f"- summary: {cycle_change_summary.get('summary_text') or '(none)'}")
+        lines.append(f"- commits: {len(cycle_change_summary.get('commits') or [])}")
+        lines.append(f"- changed_files: {len(cycle_change_summary.get('changed_files') or [])}")
+        lines.append(f"- validations: {len(cycle_change_summary.get('validation_results') or [])}")
+        failed_tasks = cycle_change_summary.get("failed_tasks") if isinstance(cycle_change_summary.get("failed_tasks"), dict) else {}
+        if failed_tasks and failed_tasks.get("items"):
+            lines.append(f"- unresolved_failures: {len(failed_tasks.get('items') or [])}")
+        pending_worktree = cycle_change_summary.get("pending_worktree") if isinstance(cycle_change_summary.get("pending_worktree"), dict) else {}
+        if pending_worktree:
+            lines.append(f"- pending_worktree: {pending_worktree.get('status') or 'unknown'}")
+        lines.append("")
 
     lines.append("## TODO (selected)")
     lines.append("")

@@ -48,6 +48,9 @@ _MIGRATIONS = [
 ]
 
 _MAX_DETAIL_LEN = 500
+_MAX_PROMPT_TEXT_LEN = 240
+_MAX_PROMPT_FAILURES = 12
+_MAX_PROMPT_ARTIFACT_LINKS = 6
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -174,6 +177,357 @@ def query_history(
         return []
 
 
+def _text(value: Any, default: str = "", *, max_chars: int = 0) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return default
+    if max_chars and len(text) > max_chars:
+        return text[: max(0, max_chars - 3)].rstrip() + "..."
+    return text
+
+
+def _int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def _done_ids_set(done_ids: set[str] | Sequence[str] | None) -> set[str]:
+    result: set[str] = set()
+    for item in done_ids or []:
+        text = _text(item)
+        if text:
+            result.add(text)
+    return result
+
+
+def _history_rows_by_task(rows: Sequence[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    rows_by_task: dict[str, list[dict[str, Any]]] = {}
+    rows_by_title: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        task_id = _text(row.get("task_id"))
+        title = _text(row.get("title"))
+        if task_id:
+            rows_by_task.setdefault(task_id, []).append(dict(row))
+        if title:
+            rows_by_title.setdefault(title.lower(), []).append(dict(row))
+    return {"task": rows_by_task, "title": rows_by_title}
+
+
+def _collect_unresolved_failure_rows(
+    rows: Sequence[dict[str, Any]],
+    *,
+    done_ids: set[str] | Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    done = _done_ids_set(done_ids)
+    done_entries: list[tuple[str, str]] = []
+    failed_rows: list[dict[str, Any]] = []
+    failed_keys: set[str] = set()
+
+    for row in rows:
+        status = _text(row.get("status"), "").upper()
+        task_id = _text(row.get("task_id"))
+        title = _text(row.get("title"))
+        if status == "DONE":
+            done_entries.append((task_id, title))
+            continue
+        key = task_id or title.lower()
+        if not key or key in failed_keys:
+            continue
+        failed_keys.add(key)
+        failed_rows.append(dict(row))
+
+    done_id_set = {task_id for task_id, _title in done_entries if task_id}
+    done_title_corpus = " ||| ".join(title.lower().strip() for _task_id, title in done_entries if title)
+
+    unresolved: list[dict[str, Any]] = []
+    for row in failed_rows:
+        task_id = _text(row.get("task_id"))
+        title = _text(row.get("title"))
+        if task_id and (task_id in done_id_set or task_id in done):
+            continue
+        if title and done_title_corpus and _title_resolved(title, done_title_corpus):
+            continue
+        unresolved.append(row)
+
+    return unresolved
+
+
+def collect_unresolved_failure_items(
+    repo: Path,
+    *,
+    done_ids: set[str] | Sequence[str] | None = None,
+    max_items: int = 200,
+) -> list[dict[str, Any]]:
+    """Return unresolved failure rows from task history, newest-first."""
+    try:
+        rows = query_history(repo, max_items=max_items)
+        return _collect_unresolved_failure_rows(rows, done_ids=done_ids)
+    except Exception as exc:
+        eprint(f"[WARN] task_history.collect_unresolved_failure_items failed: {exc}")
+        return []
+
+
+def _relative_run_path(run_dir: Path, path: Path | str) -> str:
+    try:
+        path_obj = Path(path)
+    except Exception:
+        return _text(path)
+    try:
+        return path_obj.resolve().relative_to(run_dir.resolve()).as_posix()
+    except Exception:
+        try:
+            return path_obj.as_posix()
+        except Exception:
+            return _text(path)
+
+
+def _collect_task_artifact_links(
+    run_dir: Path,
+    task_id: str,
+    *,
+    limit: int = _MAX_PROMPT_ARTIFACT_LINKS,
+) -> list[dict[str, str]]:
+    links: list[dict[str, str]] = []
+    if not run_dir or not run_dir.exists() or not run_dir.is_dir():
+        return links
+
+    tasks_root = run_dir / "tasks"
+    if not tasks_root.exists() or not tasks_root.is_dir():
+        return links
+
+    candidates: list[Path] = []
+    for child in tasks_root.iterdir():
+        if child.is_dir() and task_id and task_id in child.name:
+            candidates.append(child)
+    candidates.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+
+    file_names = (
+        ("validation.json", "validation"),
+        ("validation.txt", "validation text"),
+        ("dev_output.txt", "dev output"),
+        ("build.txt", "build log"),
+        ("test.txt", "test log"),
+        ("NOTES.md", "notes"),
+    )
+
+    for task_root in candidates[:1]:
+        attempt_dirs = [p for p in task_root.iterdir() if p.is_dir() and p.name.startswith("attempt_")]
+        attempt_dirs.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+        for attempt_dir in attempt_dirs:
+            for file_name, label in file_names:
+                artifact = attempt_dir / file_name
+                if not artifact.exists() or not artifact.is_file():
+                    continue
+                links.append(
+                    {
+                        "label": f"{label} ({attempt_dir.name})",
+                        "path": _relative_run_path(run_dir, artifact),
+                    }
+                )
+                if len(links) >= limit:
+                    return links
+        if not links:
+            links.append({"label": task_root.name, "path": _relative_run_path(run_dir, task_root)})
+            break
+
+    return links[:limit]
+
+
+def _build_failed_task_item(
+    repo: Path,
+    run_dir: Path,
+    row: dict[str, Any],
+    *,
+    source: str,
+    task_lookup: dict[str, str] | None = None,
+    history_rows_by_task: dict[str, list[dict[str, Any]]] | None = None,
+    history_rows_by_title: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    task_id = _text(row.get("task_id") or row.get("task") or row.get("taskId") or row.get("id"))
+    title = _text(row.get("title") or row.get("task_title") or row.get("taskTitle"))
+    if task_lookup and task_id:
+        title = _text(task_lookup.get(task_id), title)
+
+    if not title and history_rows_by_task and task_id:
+        matching_rows = history_rows_by_task.get(task_id, [])
+        if matching_rows:
+            title = _text(matching_rows[0].get("title"), task_id)
+
+    if not title:
+        title = task_id or _text(row.get("task_title") or row.get("taskTitle"), "unknown")
+
+    reason = _text(row.get("reason"), "unknown")
+    detail = _text(row.get("detail"), "", max_chars=_MAX_PROMPT_TEXT_LEN)
+    current_attempt = _int(row.get("attempt"), 0)
+    max_attempts = _int(row.get("max_attempts"), 0)
+    cycle_idx = _int(row.get("cycle_idx") or row.get("cycle"), 0)
+    step = _int(row.get("step"), 0)
+    recorded_at = _text(row.get("recorded_at"), "")
+    run_id = _text(row.get("run_id"), "")
+    backend = _text(row.get("backend"), "")
+
+    matching_rows = []
+    if history_rows_by_task and task_id:
+        matching_rows = list(history_rows_by_task.get(task_id, []))
+    if not matching_rows and history_rows_by_task and title:
+        matching_rows = list(history_rows_by_task.get(title.lower(), []))
+    if not matching_rows and reason:
+        matching_rows = [dict(row)]
+
+    if current_attempt <= 0 and matching_rows:
+        current_attempt = _int(matching_rows[0].get("attempt"), current_attempt)
+    if max_attempts <= 0 and matching_rows:
+        max_attempts = _int(matching_rows[0].get("max_attempts"), max_attempts)
+
+    history_count = len(matching_rows) if matching_rows else 1
+    consecutive_failures = count_consecutive_title_failures(repo, title) if title else 0
+    artifact_links = _collect_task_artifact_links(run_dir, task_id)
+    remaining_attempts = max(0, max_attempts - current_attempt) if max_attempts > 0 and current_attempt > 0 else None
+    split_required = reason in {"persistent_failure", "persistent_skip"} or consecutive_failures >= 3
+    retry_allowed = not split_required and (remaining_attempts is None or remaining_attempts > 0 or max_attempts <= 0)
+
+    attempts = {
+        "current": current_attempt,
+        "max": max_attempts,
+        "history_count": history_count,
+        "consecutive_failures": consecutive_failures,
+        "remaining": remaining_attempts,
+        "recorded_at": recorded_at,
+        "run_id": run_id,
+        "backend": backend,
+    }
+    retry_constraints = {
+        "must_use_different_approach": True,
+        "split_required": split_required,
+        "new_task_id_required": split_required,
+        "retry_allowed": retry_allowed,
+        "remaining_attempts": remaining_attempts,
+        "max_attempts": max_attempts,
+        "reason": (
+            "Persistent failures must be split into smaller subtasks with new task IDs."
+            if split_required
+            else "Retry with a different approach and avoid repeating the same failure cause."
+        ),
+    }
+
+    item = {
+        "task_id": task_id,
+        "taskId": task_id,
+        "title": title,
+        "task_title": title,
+        "taskTitle": title,
+        "reason": reason,
+        "detail": detail,
+        "attempts": attempts,
+        "artifact_links": artifact_links,
+        "artifactLinks": artifact_links,
+        "retry_constraints": retry_constraints,
+        "retryConstraints": retry_constraints,
+        "cycle_idx": cycle_idx,
+        "cycle": cycle_idx,
+        "step": step,
+        "run_id": run_id,
+        "backend": backend,
+        "recorded_at": recorded_at,
+        "source": source,
+        "summary": f"{task_id or '?'} | {title} | {reason} | {current_attempt or '?'}{'/' + str(max_attempts) if max_attempts else ''}",
+    }
+    return item
+
+
+def build_failed_tasks_artifact(
+    repo: Path,
+    run_dir: Path,
+    *,
+    failed_items: Sequence[dict[str, Any]] | None = None,
+    task_lookup: dict[str, str] | None = None,
+    done_ids: set[str] | Sequence[str] | None = None,
+    max_items: int = 200,
+    source: str = "state",
+) -> dict[str, Any]:
+    """Build a structured failed-tasks artifact for prompts and history."""
+    try:
+        rows = query_history(repo, max_items=max_items)
+        history_index = _history_rows_by_task(rows)
+        if failed_items is None:
+            failed_items = collect_unresolved_failure_items(repo, done_ids=done_ids, max_items=max_items)
+            source = "history"
+        normalized_failed: list[dict[str, Any]] = []
+        for raw in list(failed_items or [])[:_MAX_PROMPT_FAILURES]:
+            if not isinstance(raw, dict):
+                continue
+            normalized_failed.append(
+                _build_failed_task_item(
+                    repo,
+                    run_dir,
+                    dict(raw),
+                    source=source,
+                    task_lookup=task_lookup,
+                    history_rows_by_task=history_index["task"],
+                    history_rows_by_title=history_index["title"],
+                )
+            )
+        unresolved_count = len(normalized_failed)
+        top_reason = normalized_failed[0]["reason"] if normalized_failed else ""
+        summary = (
+            f"{unresolved_count} unresolved failed task(s)"
+            if unresolved_count
+            else "No unresolved failed tasks"
+        )
+        if top_reason:
+            summary += f"; latest reason: {top_reason}"
+        return {
+            "schema_version": 1,
+            "kind": "failed_tasks",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "repo": str(repo),
+            "run_dir": str(run_dir),
+            "run_id": run_dir.name if run_dir else "",
+            "source": source,
+            "unresolved_count": unresolved_count,
+            "summary": summary,
+            "items": normalized_failed,
+            "artifacts": {
+                "json": (run_dir / "failed_tasks.json").as_posix(),
+                "markdown": (run_dir / "failed_tasks.md").as_posix(),
+            },
+        }
+    except Exception as exc:
+        eprint(f"[WARN] task_history.build_failed_tasks_artifact failed: {exc}")
+        return {
+            "schema_version": 1,
+            "kind": "failed_tasks",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "repo": str(repo),
+            "run_dir": str(run_dir),
+            "run_id": run_dir.name if run_dir else "",
+            "source": source,
+            "unresolved_count": 0,
+            "summary": "Failed tasks unavailable",
+            "items": [],
+            "artifacts": {
+                "json": (run_dir / "failed_tasks.json").as_posix(),
+                "markdown": (run_dir / "failed_tasks.md").as_posix(),
+            },
+        }
+
+
+def render_failed_tasks_block(artifact: dict[str, Any]) -> str:
+    """Render a failed-tasks artifact as a JSON prompt block."""
+    try:
+        items = artifact.get("items") if isinstance(artifact, dict) else None
+        if not items:
+            return "(none)"
+        return "```json\n" + json.dumps(artifact, ensure_ascii=False, indent=2, default=str) + "\n```"
+    except Exception as exc:
+        eprint(f"[WARN] task_history.render_failed_tasks_block failed: {exc}")
+        return "(none)"
+
+
 def format_history_block(
     repo: Path,
     *,
@@ -237,10 +591,9 @@ def format_split_history_blocks(
     try:
         rows = query_history(repo, max_items=max_items)
         if not rows:
-            return "(no history)", "(no failures)"
+            return "(no history)", "(none)"
 
         done_lines: list[str] = []
-        failed_lines: list[str] = []
 
         for r in reversed(rows):  # oldest first
             status = r["status"].upper()
@@ -248,30 +601,27 @@ def format_split_history_blocks(
 
             if status == "DONE":
                 done_lines.append(f"- [DONE] {r['task_id']}: {r['title']} ({date_str})")
-            else:
-                reason = r.get("reason") or ""
-                att = int(r.get("attempt") or 0)
-                max_att = int(r.get("max_attempts") or 0)
-                detail = (r.get("detail") or "").strip()
-
-                tag = f"{status}/{reason}" if reason else status
-                if att > 0 and max_att > 0:
-                    tag += f" {att}/{max_att}"
-
-                line = f"- [{tag}] {r['task_id']}: {r['title']} ({date_str})"
-                if detail:
-                    if len(detail) > 120:
-                        detail = detail[:117] + "..."
-                    line += f"\n  failure_detail: {detail}"
-                failed_lines.append(line)
 
         done_block = "\n".join(done_lines) if done_lines else "(no completed tasks)"
-        failed_block = "\n".join(failed_lines) if failed_lines else "(no failures)"
+        try:
+            from .run_dir import find_latest_run_dir
+
+            latest_run_dir = find_latest_run_dir(repo) or repo
+        except Exception:
+            latest_run_dir = repo
+        failed_artifact = build_failed_tasks_artifact(
+            repo,
+            latest_run_dir,
+            failed_items=None,
+            max_items=max_items,
+            source="history",
+        )
+        failed_block = render_failed_tasks_block(failed_artifact)
 
         return done_block, failed_block
     except Exception as exc:
         eprint(f"[WARN] task_history.format_split_history_blocks failed: {exc}")
-        return "(history unavailable)", "(history unavailable)"
+        return "(history unavailable)", "(none)"
 
 
 def count_unresolved_failures(
@@ -292,34 +642,7 @@ def count_unresolved_failures(
       3. done_ids from current cycle's STATE.json done set (catches same-cycle resolution).
     """
     try:
-        rows = query_history(repo, max_items=max_items)
-        done = done_ids or set()
-        # Deduplicate by task_id: keep latest title per ID (rows are newest-first)
-        failed_map: dict[str, str] = {}   # task_id → title (first=latest wins)
-        done_entries: list[tuple[str, str]] = []    # (task_id, title)
-        for r in rows:
-            tid = r.get("task_id", "")
-            title = r.get("title", "")
-            if r["status"].upper() == "DONE":
-                done_entries.append((tid, title))
-            else:
-                if tid not in failed_map:
-                    failed_map[tid] = title
-
-        done_id_set = {t[0] for t in done_entries}
-        done_title_corpus = " ||| ".join(t[1].lower().strip() for t in done_entries)
-
-        unresolved_count = 0
-        for ftid, ftitle in failed_map.items():
-            # 1. Exact task_id match
-            if ftid in done_id_set or ftid in done:
-                continue
-            # 2. Title similarity: check if any DONE task has similar title keywords
-            if ftitle and done_title_corpus and _title_resolved(ftitle, done_title_corpus):
-                continue
-            unresolved_count += 1
-
-        return unresolved_count
+        return len(collect_unresolved_failure_items(repo, done_ids=done_ids, max_items=max_items))
     except Exception as exc:
         eprint(f"[WARN] task_history.count_unresolved_failures failed: {exc}")
         return 0
