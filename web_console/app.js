@@ -3582,6 +3582,9 @@
     const busy = Boolean(overrides.busy);
     const source = toText(overrides.source, 'default');
     const runStatus = toText(overrides.runStatus, running ? 'running' : 'idle');
+    const currentEvent = toObject(overrides.currentEvent || overrides.current_event);
+    const history = toArray(overrides.history || overrides.eventHistory || overrides.event_history);
+    const eventCount = toNumber(overrides.eventCount || overrides.event_count, history.length);
     const message = toText(
       overrides.message,
       controllerAvailable
@@ -3616,6 +3619,13 @@
         warnings: toNumber(overrides.warnings, 0),
         reason: toText(overrides.reason, ''),
         lastEvent: toText(overrides.lastEvent, ''),
+        currentEvent,
+        current_event: currentEvent,
+        history,
+        eventHistory: history,
+        event_history: history,
+        eventCount,
+        event_count: eventCount,
       },
       actions: {
         start: {
@@ -3649,6 +3659,13 @@
       lastAction: toText(overrides.lastAction, ''),
       lastMessage: toText(overrides.lastMessage, ''),
       lastError: toText(overrides.lastError, ''),
+      currentEvent,
+      current_event: currentEvent,
+      history,
+      eventHistory: history,
+      event_history: history,
+      eventCount,
+      event_count: eventCount,
     };
   }
 
@@ -4014,6 +4031,9 @@
     const status = toObject(raw.status);
     const actions = toObject(raw.actions);
     const confirmation = toObject(raw.confirmation);
+    const currentEvent = toObject(raw.current_event || raw.currentEvent || status.current_event || status.currentEvent);
+    const history = toArray(raw.history || raw.event_history || raw.eventHistory || status.history || status.event_history || status.eventHistory);
+    const eventCount = toNumber(raw.event_count || raw.eventCount || status.event_count || status.eventCount, history.length);
     const message = toText(raw.message, '');
     const enabled = Boolean(raw.enabled);
     const controllerAvailable = Boolean(raw.controller_available || raw.controllerAvailable);
@@ -4042,7 +4062,14 @@
         failed: toNumber(status.failed, 0),
         warnings: toNumber(status.warnings, 0),
         reason: toText(status.reason, ''),
-        lastEvent: toText(status.last_event || status.lastEvent, ''),
+        lastEvent: toText(status.last_event || status.lastEvent || currentEvent.phase || currentEvent.status, ''),
+        currentEvent,
+        current_event: currentEvent,
+        history,
+        eventHistory: history,
+        event_history: history,
+        eventCount,
+        event_count: eventCount,
       },
       actions: {
         start: normalizeRunnerControlAction(actions.start),
@@ -4059,6 +4086,13 @@
       lastAction: toText(raw.last_action || raw.lastAction, ''),
       lastMessage: toText(raw.last_message || raw.lastMessage, ''),
       lastError: toText(raw.last_error || raw.lastError, ''),
+      currentEvent,
+      current_event: currentEvent,
+      history,
+      eventHistory: history,
+      event_history: history,
+      eventCount,
+      event_count: eventCount,
       liveState: normalizeLiveState(raw.live_state || raw.liveState || status.live_state || status.liveState),
     };
   }

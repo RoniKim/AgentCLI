@@ -273,6 +273,13 @@ def write_runner_control_event(
     return normalize_runner_control_event(payload)
 
 
+def _runner_control_request_message(action: str) -> str:
+    normalized = str(action or "").strip().lower()
+    if not normalized:
+        return "Runner control requested."
+    return f"{normalized.capitalize()} requested."
+
+
 def _runner_control_success_status(action: str) -> str:
     normalized = str(action or "").strip().lower()
     if normalized == "reload":
@@ -1107,6 +1114,49 @@ class RunnerController:
             snapshot["timeoutGuidance"] = dict(snapshot["timeout_guidance"])
         return snapshot
 
+    def _record_runner_control_event(
+        self,
+        run_dir: Path | None,
+        *,
+        action: str,
+        status: str,
+        message: str = "",
+        error: str = "",
+        ok: bool | None = None,
+        running: bool | None = None,
+        phase: str = "",
+        details: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+        stop_progress: dict[str, Any] | None = None,
+        **fields: Any,
+    ) -> dict[str, Any]:
+        payload_fields = dict(fields)
+        if running is None:
+            running = self._runner_is_alive()
+        if running is not None:
+            payload_fields["running"] = bool(running)
+        payload_fields["runner_mode"] = self.runner_mode
+        if phase:
+            payload_fields["phase"] = phase
+        if details is not None:
+            payload_fields["details"] = details
+        if result is not None:
+            payload_fields["result"] = result
+        if stop_progress is not None:
+            payload_fields["stop_progress"] = stop_progress
+        return write_runner_control_event(
+            run_dir,
+            action=action,
+            status=status,
+            message=message,
+            error=error,
+            ok=ok,
+            source="controller",
+            repo=self.repo.as_posix(),
+            config_path=self._config_path_name(),
+            **payload_fields,
+        )
+
     def _effective_dict(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         eff: dict[str, Any] = {}
         for key, default_value in DEFAULTS.items():
@@ -1248,13 +1298,48 @@ class RunnerController:
                 or self._config_path_name()
             ),
         }
+        event_run_dir = self.run_dir or find_latest_run_dir(self.repo)
         if validation_error:
+            if event_run_dir is not None:
+                self._record_runner_control_event(
+                    event_run_dir,
+                    action=control_action,
+                    status="error",
+                    message="",
+                    error=str(validation_error.get("message") or "Runner start options are invalid."),
+                    ok=False,
+                    running=False,
+                    phase="validation",
+                    details=validation_error,
+                )
             return {"ok": False, "message": str(validation_error.get("message") or "Runner start options are invalid."), "error": validation_error, **context}
         if not self._start_lock.acquire(blocking=False):
+            if event_run_dir is not None:
+                self._record_runner_control_event(
+                    event_run_dir,
+                    action=control_action,
+                    status="error",
+                    message="",
+                    error="\ub7ec\ub108 \uc2dc\uc791\uc774 \uc774\ubbf8 \uc9c4\ud589 \uc911\uc785\ub2c8\ub2e4.",
+                    ok=False,
+                    running=self._runner_is_alive(),
+                    phase="start",
+                )
             return {"ok": False, "message": "\ub7ec\ub108 \uc2dc\uc791\uc774 \uc774\ubbf8 \uc9c4\ud589 \uc911\uc785\ub2c8\ub2e4.", **context}
 
         try:
             if self._runner_is_alive():
+                if event_run_dir is not None:
+                    self._record_runner_control_event(
+                        event_run_dir,
+                        action=control_action,
+                        status="error",
+                        message="",
+                        error="\ub7ec\ub108\uac00 \uc774\ubbf8 \uc2e4\ud589 \uc911\uc785\ub2c8\ub2e4.",
+                        ok=False,
+                        running=True,
+                        phase="start",
+                    )
                 return {"ok": False, "message": "\ub7ec\ub108\uac00 \uc774\ubbf8 \uc2e4\ud589 \uc911\uc785\ub2c8\ub2e4.", **context}
 
             base_run_dir_intent = str(getattr(self.base_args, "run_dir", "") or "").strip()
@@ -1264,6 +1349,17 @@ class RunnerController:
             run_dir.mkdir(parents=True, exist_ok=True)
             self.run_dir = run_dir
             eff["run_dir"] = run_dir.as_posix()
+
+            self._record_runner_control_event(
+                run_dir,
+                action=control_action,
+                status="request",
+                message=_runner_control_request_message(control_action),
+                error="",
+                ok=False,
+                running=False,
+                phase="request",
+            )
 
             stop_paths = {run_dir / self._stop_file_name(), run_dir / "STOP"}
             for stop_path in stop_paths:
@@ -1278,10 +1374,24 @@ class RunnerController:
             self._runner_exit_code = None
             self._runner_started_at = time.time()
 
-            if self.runner_mode == "subprocess":
-                self._start_subprocess(args, run_dir)
-            else:
-                self._start_thread(args)
+            try:
+                if self.runner_mode == "subprocess":
+                    self._start_subprocess(args, run_dir)
+                else:
+                    self._start_thread(args)
+            except Exception as ex:
+                self._record_runner_control_event(
+                    run_dir,
+                    action=control_action,
+                    status="error",
+                    message="",
+                    error=str(ex),
+                    ok=False,
+                    running=False,
+                    phase="launch",
+                    result={"ok": False, "message": str(ex)},
+                )
+                raise
 
             event_message = "Runner started."
             if str(control_action or "").strip().lower() == "reload":
@@ -1289,18 +1399,14 @@ class RunnerController:
             elif str(control_action or "").strip().lower() == "restart":
                 event_message = "Runner restarted."
 
-            write_runner_control_event(
+            self._record_runner_control_event(
                 run_dir,
                 action=control_action,
                 status=_runner_control_success_status(control_action),
                 message=event_message,
                 error="",
                 ok=True,
-                source="controller",
-                repo=self.repo.as_posix(),
-                config_path=context["config_path"],
                 running=True,
-                runner_mode=self.runner_mode,
                 result={
                     "ok": True,
                     "runner_mode": self.runner_mode,
@@ -1374,9 +1480,31 @@ class RunnerController:
         context = {"repo": self.repo.as_posix(), "config_path": self._config_path_name()}
         run_dir = self.run_dir or find_latest_run_dir(self.repo)
         if run_dir is None:
+            fallback_run_dir = find_latest_run_dir(self.repo)
+            if fallback_run_dir is not None:
+                self._record_runner_control_event(
+                    fallback_run_dir,
+                    action=control_action,
+                    status="error",
+                    message="",
+                    error="\uc2e4\ud589 \ub514\ub809\ud1a0\ub9ac\ub97c \ucc3e\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.",
+                    ok=False,
+                    running=False,
+                    phase="request",
+                )
             return {"ok": False, "message": "\uc2e4\ud589 \ub514\ub809\ud1a0\ub9ac\ub97c \ucc3e\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.", **context}
         self.run_dir = run_dir
         requested_at = time.monotonic()
+        self._record_runner_control_event(
+            run_dir,
+            action=control_action,
+            status="request",
+            message=_runner_control_request_message(control_action),
+            error="",
+            ok=False,
+            running=self._runner_is_alive(),
+            phase="request",
+        )
         self._emit_stop_progress(
             run_dir,
             phase="request",
@@ -1389,6 +1517,17 @@ class RunnerController:
         try:
             stop_path.write_text(STOP_REASON_STOP_FILE + "\n", encoding="utf-8", errors="replace")
         except Exception as ex:
+            self._record_runner_control_event(
+                run_dir,
+                action=control_action,
+                status="error",
+                message="",
+                error=f"Failed to create stop file: {ex}",
+                ok=False,
+                running=self._runner_is_alive(),
+                phase="stop_file_write",
+                result={"ok": False, "message": f"\uc815\uc9c0 \ud30c\uc77c \uc0dd\uc131 \uc2e4\ud328: {ex}"},
+            )
             self._emit_stop_progress(
                 run_dir,
                 phase="failed",
@@ -1405,6 +1544,17 @@ class RunnerController:
             requested_at_monotonic=requested_at,
             progress_callback=progress_callback,
         )
+        self._record_runner_control_event(
+            run_dir,
+            action=control_action,
+            status="stop_file_write",
+            message=f"Stop file written: {stop_path.as_posix()}",
+            error="",
+            ok=False,
+            running=self._runner_is_alive(),
+            phase="stop_file_write",
+            stop_progress=read_stop_progress(run_dir),
+        )
 
         if self.runner_mode == "thread":
             try:
@@ -1415,6 +1565,17 @@ class RunnerController:
                     requested_at_monotonic=requested_at,
                     progress_callback=progress_callback,
                 )
+                self._record_runner_control_event(
+                    run_dir,
+                    action=control_action,
+                    status="child_termination",
+                    message="Terminating tracked child processes.",
+                    error="",
+                    ok=False,
+                    running=self._runner_is_alive(),
+                    phase="child_termination",
+                    stop_progress=read_stop_progress(run_dir),
+                )
                 terminate_all_children()
             except Exception:
                 pass
@@ -1422,6 +1583,17 @@ class RunnerController:
             if wait and self._runner_thread and self._runner_thread.is_alive():
                 wait_timeout = self._stop_wait_timeout_seconds()
                 deadline = time.monotonic() + wait_timeout
+                self._record_runner_control_event(
+                    run_dir,
+                    action=control_action,
+                    status="runner_wait",
+                    message="Waiting for runner shutdown and final artifacts.",
+                    error="",
+                    ok=False,
+                    running=True,
+                    phase="runner_wait",
+                    stop_progress=read_stop_progress(run_dir),
+                )
                 while self._runner_thread.is_alive() and time.monotonic() < deadline:
                     self._emit_stop_progress(
                         run_dir,
@@ -1435,6 +1607,17 @@ class RunnerController:
             self._refresh_process_state()
             if wait and self._runner_process and self._runner_process.poll() is None:
                 grace_deadline = time.monotonic() + 12
+                self._record_runner_control_event(
+                    run_dir,
+                    action=control_action,
+                    status="runner_wait",
+                    message="Waiting for runner subprocess to exit.",
+                    error="",
+                    ok=False,
+                    running=True,
+                    phase="runner_wait",
+                    stop_progress=read_stop_progress(run_dir),
+                )
                 while self._runner_process and self._runner_process.poll() is None and time.monotonic() < grace_deadline:
                     self._emit_stop_progress(
                         run_dir,
@@ -1455,6 +1638,17 @@ class RunnerController:
                             requested_at_monotonic=requested_at,
                             progress_callback=progress_callback,
                             pid=int(self._runner_process.pid) if self._runner_process.pid else None,
+                        )
+                        self._record_runner_control_event(
+                            run_dir,
+                            action=control_action,
+                            status="child_termination",
+                            message="Grace period expired; terminating runner process tree.",
+                            error="",
+                            ok=False,
+                            running=True,
+                            phase="child_termination",
+                            stop_progress=read_stop_progress(run_dir),
                         )
                         terminate_process_tree(int(self._runner_process.pid), include_root=True)
                         force_deadline = time.monotonic() + 20
@@ -1486,6 +1680,18 @@ class RunnerController:
                 progress_callback=progress_callback,
                 exit_code=self._runner_exit_code,
             )
+            self._record_runner_control_event(
+                run_dir,
+                action=control_action,
+                status="final_artifact_collection",
+                message="Collecting final artifacts and logs.",
+                error="",
+                ok=False,
+                running=False,
+                phase="final_artifact_collection",
+                stop_progress=read_stop_progress(run_dir),
+                result={"ok": True, "message": "Collecting final artifacts and logs."},
+            )
             final_phase = "finalized"
             final_message = "Runner stop sequence finished."
             self._emit_stop_progress(
@@ -1495,6 +1701,18 @@ class RunnerController:
                 requested_at_monotonic=requested_at,
                 progress_callback=progress_callback,
                 exit_code=self._runner_exit_code,
+            )
+            self._record_runner_control_event(
+                run_dir,
+                action=control_action,
+                status=final_phase,
+                message=final_message,
+                error="",
+                ok=True,
+                running=False,
+                phase=final_phase,
+                stop_progress=read_stop_progress(run_dir),
+                result={"ok": True, "message": final_message, "running": False, "run_dir": run_dir.as_posix()},
             )
         elif wait:
             final_phase = "timeout"
@@ -1507,6 +1725,18 @@ class RunnerController:
                 progress_callback=progress_callback,
                 exit_code=self._runner_exit_code,
             )
+            self._record_runner_control_event(
+                run_dir,
+                action=control_action,
+                status=final_phase,
+                message="",
+                error=final_message,
+                ok=False,
+                running=True,
+                phase=final_phase,
+                stop_progress=read_stop_progress(run_dir),
+                result={"ok": False, "message": final_message, "running": True, "run_dir": run_dir.as_posix()},
+            )
         else:
             final_phase = "runner_wait"
             final_message = "Stop requested; runner is still shutting down."
@@ -1518,23 +1748,31 @@ class RunnerController:
                 progress_callback=progress_callback,
                 exit_code=self._runner_exit_code,
             )
+            self._record_runner_control_event(
+                run_dir,
+                action=control_action,
+                status=final_phase,
+                message=final_message,
+                error="",
+                ok=False,
+                running=True,
+                phase=final_phase,
+                stop_progress=read_stop_progress(run_dir),
+                result={"ok": True, "message": final_message, "running": True, "run_dir": run_dir.as_posix()},
+            )
 
         final_progress = read_stop_progress(run_dir)
         event_status = "timeout" if (wait and running) else ("stopping" if running else "stopped")
         event_message = final_message
         event_error = final_message if event_status == "timeout" else ""
-        write_runner_control_event(
+        self._record_runner_control_event(
             run_dir,
             action=control_action,
             status=event_status,
             message=event_message if event_status != "timeout" else "",
             error=event_error,
             ok=not (wait and running),
-            source="controller",
-            repo=self.repo.as_posix(),
-            config_path=context["config_path"],
             running=running,
-            runner_mode=self.runner_mode,
             stop_progress=final_progress,
             result={
                 "ok": not (wait and running),
@@ -1835,17 +2073,36 @@ class RunnerController:
         status["last_event"] = self._latest_event(run_dir)
         status["stop_progress"] = read_stop_progress(run_dir)
         control_event = read_runner_control_event(run_dir)
+        current_event = control_event.get("current_event") if isinstance(control_event.get("current_event"), dict) else {}
+        history = list(control_event.get("history") or [])
+        control_event_status = str(
+            (current_event.get("phase") if isinstance(current_event, dict) else "")
+            or (current_event.get("status") if isinstance(current_event, dict) else "")
+            or control_event.get("phase")
+            or control_event.get("status")
+            or ""
+        ).strip()
         if control_event:
             status["last_action"] = str(control_event.get("last_action") or control_event.get("action") or "").strip()
             status["last_message"] = str(control_event.get("last_message") or control_event.get("message") or "").strip()
             status["last_error"] = str(control_event.get("last_error") or control_event.get("error") or "").strip()
+            if control_event_status:
+                status["last_event"] = control_event_status
         else:
             status["last_action"] = ""
             status["last_message"] = ""
             status["last_error"] = ""
+        status["current_event"] = current_event
+        status["currentEvent"] = current_event
+        status["history"] = history
+        status["event_history"] = history
+        status["eventHistory"] = history
+        status["event_count"] = len(history)
+        status["eventCount"] = len(history)
         status["lastAction"] = status["last_action"]
         status["lastMessage"] = status["last_message"]
         status["lastError"] = status["last_error"]
+        status["lastEvent"] = status["last_event"]
         status["start_options"] = start_options
         status["startOptions"] = start_options
         return status

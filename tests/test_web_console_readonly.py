@@ -2926,6 +2926,20 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("Runner control failed: controller offline", payload["runner_control"]["message"])
         self.assertEqual("status_error: controller offline", payload["runner_control"]["status"]["reason"])
         self.assertEqual(self.config_path.as_posix(), payload["runner_control"]["status"]["config_path"])
+        self.assertEqual("restart", payload["runner_control"]["status"]["current_event"]["action"])
+        self.assertEqual("controller_error", payload["runner_control"]["status"]["current_event"]["status"])
+        self.assertEqual(1, payload["runner_control"]["status"]["event_count"])
+        self.assertEqual("restart", payload["runner_control"]["status"]["history"][0]["action"])
+        self.assertEqual("controller_error", payload["runner_control"]["status"]["history"][0]["status"])
+
+        browser_payload = json.loads(json.dumps(payload))
+        adapted = _run_adapter_harness([{"kind": "snapshot", "data": browser_payload}])[0]
+        self.assertEqual("restart", adapted["runnerControl"]["currentEvent"]["action"])
+        self.assertEqual("controller_error", adapted["runnerControl"]["currentEvent"]["status"])
+        self.assertEqual("restart", adapted["runnerControl"]["status"]["currentEvent"]["action"])
+        self.assertEqual("controller_error", adapted["runnerControl"]["status"]["currentEvent"]["status"])
+        self.assertEqual(1, adapted["runnerControl"]["status"]["eventCount"])
+        self.assertEqual("controller_error", adapted["runnerControl"]["history"][0]["status"])
 
     def test_section_endpoints_return_stable_shapes(self) -> None:
         progress = self.client.get("/api/progress").json()

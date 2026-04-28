@@ -555,6 +555,17 @@ class RunnerShell:
         except Exception:
             pass
 
+        self._record_runner_control_event(
+            run_dir,
+            action="start",
+            status="request",
+            message="Start requested.",
+            error="",
+            ok=False,
+            running=False,
+            phase="request",
+        )
+
         eff = self.effective()
         # NOTE: DEFAULTS includes "repo" so passing repo twice will crash.
         args_dict = {k: eff.get(k) for k in DEFAULTS.keys()}
@@ -584,18 +595,14 @@ class RunnerShell:
         self._runner_thread = threading.Thread(target=_target, name="agentcli-runner", daemon=True)
         self._runner_thread.start()
 
-        write_runner_control_event(
+        self._record_runner_control_event(
             run_dir,
             action="start",
             status="started",
             message="Runner started.",
             error="",
             ok=True,
-            source="shell",
-            repo=self.repo.as_posix(),
-            config_path=self._config_path_name(),
             running=True,
-            runner_mode=self.runner_mode,
             result={"ok": True, "runner_mode": self.runner_mode, "run_dir": run_dir.as_posix()},
         )
 
@@ -623,6 +630,48 @@ class RunnerShell:
             except TypeError:
                 return self._controller.stop(wait=wait)
         return self._controller.stop(wait=wait)
+
+    def _record_runner_control_event(
+        self,
+        run_dir: Path | None,
+        *,
+        action: str,
+        status: str,
+        message: str = "",
+        error: str = "",
+        ok: bool | None = None,
+        running: bool | None = None,
+        phase: str = "",
+        stop_progress: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+        **fields: Any,
+    ) -> dict[str, Any]:
+        if run_dir is None or self.repo is None:
+            return {}
+        payload_fields = dict(fields)
+        if running is None:
+            running = self._runner_is_alive()
+        if running is not None:
+            payload_fields["running"] = bool(running)
+        payload_fields["runner_mode"] = self.runner_mode
+        if phase:
+            payload_fields["phase"] = phase
+        if stop_progress is not None:
+            payload_fields["stop_progress"] = stop_progress
+        if result is not None:
+            payload_fields["result"] = result
+        return write_runner_control_event(
+            run_dir,
+            action=action,
+            status=status,
+            message=message,
+            error=error,
+            ok=ok,
+            source="shell",
+            repo=self.repo.as_posix(),
+            config_path=self._config_path_name(),
+            **payload_fields,
+        )
 
     def stop(self, wait: bool = False) -> None:
         if self._controller is not None:
@@ -659,16 +708,26 @@ class RunnerShell:
         stop_path = target_run_dirs[0] / stop_file
         stop_file_paths = self._shell_stop_file_paths(target_run_dirs, stop_file)
         requested_at = time.monotonic()
-        self._print_stop_progress(
-            write_stop_progress(
-                self.run_dir,
-                phase="requested",
-                message="Stop requested.",
-                requested_at_monotonic=requested_at,
-                running=self._runner_is_alive(),
-                runner_alive=self._runner_is_alive(),
-                stop_file_paths=stop_file_paths,
-            )
+        request_progress = write_stop_progress(
+            self.run_dir,
+            phase="requested",
+            message="Stop requested.",
+            requested_at_monotonic=requested_at,
+            running=self._runner_is_alive(),
+            runner_alive=self._runner_is_alive(),
+            stop_file_paths=stop_file_paths,
+        )
+        self._print_stop_progress(request_progress)
+        self._record_runner_control_event(
+            self.run_dir,
+            action="stop",
+            status="request",
+            message="Stop requested.",
+            error="",
+            ok=False,
+            running=self._runner_is_alive(),
+            phase="request",
+            stop_progress=request_progress,
         )
         try:
             written_stop_paths: list[Path] = []
@@ -680,44 +739,74 @@ class RunnerShell:
             print(f"[OK] Stop requested via: {stop_path}")
             for alternate_stop_path in written_stop_paths[1:]:
                 print(f"[INFO] Also wrote stop file: {alternate_stop_path}")
-            self._print_stop_progress(
-                write_stop_progress(
-                    self.run_dir,
-                    phase="stop_file_written",
-                    message=f"Stop file written: {stop_path}",
-                    requested_at_monotonic=requested_at,
-                    running=self._runner_is_alive(),
-                    runner_alive=self._runner_is_alive(),
-                    stop_file_paths=stop_file_paths,
-                )
+            stop_file_progress = write_stop_progress(
+                self.run_dir,
+                phase="stop_file_written",
+                message=f"Stop file written: {stop_path}",
+                requested_at_monotonic=requested_at,
+                running=self._runner_is_alive(),
+                runner_alive=self._runner_is_alive(),
+                stop_file_paths=stop_file_paths,
+            )
+            self._print_stop_progress(stop_file_progress)
+            self._record_runner_control_event(
+                self.run_dir,
+                action="stop",
+                status="stop_file_written",
+                message=f"Stop file written: {stop_path}",
+                error="",
+                ok=False,
+                running=self._runner_is_alive(),
+                phase="stop_file_written",
+                stop_progress=stop_file_progress,
             )
         except Exception as ex:
-            self._print_stop_progress(
-                write_stop_progress(
-                    self.run_dir,
-                    phase="failed",
-                    message=f"Failed to create stop file: {ex}",
-                    requested_at_monotonic=requested_at,
-                    running=self._runner_is_alive(),
-                    runner_alive=self._runner_is_alive(),
-                    stop_file_paths=stop_file_paths,
-                )
+            failed_progress = write_stop_progress(
+                self.run_dir,
+                phase="failed",
+                message=f"Failed to create stop file: {ex}",
+                requested_at_monotonic=requested_at,
+                running=self._runner_is_alive(),
+                runner_alive=self._runner_is_alive(),
+                stop_file_paths=stop_file_paths,
+            )
+            self._print_stop_progress(failed_progress)
+            self._record_runner_control_event(
+                self.run_dir,
+                action="stop",
+                status="error",
+                message="",
+                error=f"Failed to create stop file: {ex}",
+                ok=False,
+                running=self._runner_is_alive(),
+                phase="failed",
+                stop_progress=failed_progress,
             )
             print(f"[ERR] Failed to create stop file: {ex}")
             return
 
         # Kill any tracked child processes immediately
         try:
-            self._print_stop_progress(
-                write_stop_progress(
-                    self.run_dir,
-                    phase="terminating_children",
-                    message="Terminating tracked child processes.",
-                    requested_at_monotonic=requested_at,
-                    running=self._runner_is_alive(),
-                    runner_alive=self._runner_is_alive(),
-                    stop_file_paths=stop_file_paths,
-                )
+            child_progress = write_stop_progress(
+                self.run_dir,
+                phase="terminating_children",
+                message="Terminating tracked child processes.",
+                requested_at_monotonic=requested_at,
+                running=self._runner_is_alive(),
+                runner_alive=self._runner_is_alive(),
+                stop_file_paths=stop_file_paths,
+            )
+            self._print_stop_progress(child_progress)
+            self._record_runner_control_event(
+                self.run_dir,
+                action="stop",
+                status="child_termination",
+                message="Terminating tracked child processes.",
+                error="",
+                ok=False,
+                running=self._runner_is_alive(),
+                phase="child_termination",
+                stop_progress=child_progress,
             )
             terminate_all_children()
         except Exception:
@@ -730,6 +819,26 @@ class RunnerShell:
                 wait_timeout = 180
             wait_timeout = max(1, wait_timeout)
             deadline = time.monotonic() + wait_timeout
+            wait_progress = write_stop_progress(
+                self.run_dir,
+                phase="waiting_runner",
+                message="Waiting for runner shutdown and final artifacts.",
+                requested_at_monotonic=requested_at,
+                running=True,
+                runner_alive=True,
+                stop_file_paths=stop_file_paths,
+            )
+            self._record_runner_control_event(
+                self.run_dir,
+                action="stop",
+                status="runner_wait",
+                message="Waiting for runner shutdown and final artifacts.",
+                error="",
+                ok=False,
+                running=True,
+                phase="runner_wait",
+                stop_progress=wait_progress,
+            )
             while self._runner_thread.is_alive() and time.monotonic() < deadline:
                 self._print_stop_progress(
                     write_stop_progress(
@@ -749,19 +858,17 @@ class RunnerShell:
             alive = self._runner_thread.is_alive()
             if not alive:
                 close_all_loggers()
-            self._print_stop_progress(
-                write_stop_progress(
-                    self.run_dir,
-                    phase="timeout" if alive else "finalized",
-                    message=f"Runner is still alive after {wait_timeout}s stop wait timeout." if alive else "Runner stop sequence finished.",
-                    requested_at_monotonic=requested_at,
-                    running=alive,
-                    runner_alive=alive,
-                    exit_code=self._runner_exit_code,
-                    stop_file_paths=stop_file_paths,
-                )
+            final_wait_progress = write_stop_progress(
+                self.run_dir,
+                phase="timeout" if alive else "finalized",
+                message=f"Runner is still alive after {wait_timeout}s stop wait timeout." if alive else "Runner stop sequence finished.",
+                requested_at_monotonic=requested_at,
+                running=alive,
+                runner_alive=alive,
+                exit_code=self._runner_exit_code,
+                stop_file_paths=stop_file_paths,
             )
-            self.status()
+            self._print_stop_progress(final_wait_progress)
 
         alive = bool(self._runner_thread and self._runner_thread.is_alive())
         final_status = "timeout" if (wait and alive) else ("stopping" if alive else "stopped")
@@ -770,19 +877,16 @@ class RunnerShell:
             if (wait and alive)
             else ("Stop requested; runner is still shutting down." if alive else "Runner stop sequence finished.")
         )
-        write_runner_control_event(
+        final_stop_progress = read_stop_progress(self.run_dir)
+        self._record_runner_control_event(
             self.run_dir,
             action="stop",
             status=final_status,
             message="" if final_status == "timeout" else final_message,
             error=final_message if final_status == "timeout" else "",
             ok=final_status != "timeout",
-            source="shell",
-            repo=self.repo.as_posix(),
-            config_path=self._config_path_name(),
             running=alive,
-            runner_mode=self.runner_mode,
-            stop_progress=read_stop_progress(self.run_dir),
+            stop_progress=final_stop_progress,
             result={
                 "ok": final_status != "timeout",
                 "message": final_message if final_status == "timeout" else (
@@ -792,6 +896,8 @@ class RunnerShell:
                 "run_dir": self.run_dir.as_posix(),
             },
         )
+        if wait:
+            self.status()
 
     def status(self) -> None:
         eff = self.effective()
@@ -855,9 +961,18 @@ class RunnerShell:
         print(f"uptime:  {dur}")
         print(f"exit:    {self._runner_exit_code if (not alive) else '(running)'}")
         control_event = read_runner_control_event(run_dir)
+        last_event = str(
+            control_event.get("last_event")
+            or control_event.get("lastEvent")
+            or control_event.get("phase")
+            or control_event.get("status")
+            or ""
+        ).strip()
         last_action = str(control_event.get("last_action") or control_event.get("lastAction") or "").strip()
         last_message = str(control_event.get("last_message") or control_event.get("lastMessage") or "").strip()
         last_error = str(control_event.get("last_error") or control_event.get("lastError") or "").strip()
+        if last_event:
+            print(f"last_event: {last_event}")
         if last_action:
             print(f"last_action: {last_action}")
         if last_message:

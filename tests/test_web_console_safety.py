@@ -703,6 +703,49 @@ class WebConsoleSafetyTests(unittest.TestCase):
         )
         _write(self.run_dir / "cycle_summary.log", "2026-04-26 12:00:00 [INFO] cycle summary token=abc123\n")
         controller = FakeRunnerController(repo=self.repo, base_args=_runner_base_args(self.config_path))
+        base_status_payload = controller._status_payload
+        current_event = {
+            "action": "start",
+            "status": "started",
+            "message": "Runner started.",
+            "error": "",
+            "ok": True,
+            "source": "controller",
+            "repo": self.repo.as_posix(),
+            "config_path": self.config_path.as_posix(),
+            "run_dir": self.run_dir.as_posix(),
+        }
+        history = [
+            {
+                "action": "start",
+                "status": "request",
+                "message": "Start requested.",
+                "error": "",
+                "ok": False,
+                "source": "controller",
+                "repo": self.repo.as_posix(),
+                "config_path": self.config_path.as_posix(),
+                "run_dir": self.run_dir.as_posix(),
+            },
+            current_event,
+        ]
+
+        def _status_payload_with_event_history() -> dict[str, object]:
+            payload = base_status_payload()
+            payload.update(
+                {
+                    "current_event": current_event,
+                    "currentEvent": current_event,
+                    "history": history,
+                    "event_history": history,
+                    "eventHistory": history,
+                    "event_count": len(history),
+                    "eventCount": len(history),
+                }
+            )
+            return payload
+
+        controller._status_payload = _status_payload_with_event_history  # type: ignore[method-assign]
         client, _ = _create_client(
             self.repo,
             enable_runner_controls=False,
@@ -732,6 +775,8 @@ class WebConsoleSafetyTests(unittest.TestCase):
         status_prompt = next(item for item in status_payload["prompts"]["items"] if item["file"] == "pm_instructions.md")
         self.assertEqual("[redacted]", status_prompt["preview"])
         self.assertEqual("[redacted]", status_payload["runner_control"]["status"]["config_path"])
+        self.assertEqual("[redacted]", status_payload["runner_control"]["status"]["current_event"]["config_path"])
+        self.assertEqual("[redacted]", status_payload["runner_control"]["status"]["history"][0]["config_path"])
         self.assertEqual("[redacted]", status_payload["runner_control"]["startOptions"]["path"])
         self.assertEqual("[redacted]", status_payload["runner_control"]["startOptions"]["defaults_path"])
         self.assertEqual("[redacted]", status_payload["runner_control"]["startOptions"]["values"]["config_path"])
@@ -969,6 +1014,8 @@ class WebConsoleSafetyTests(unittest.TestCase):
         terminate_children.assert_called()
 
     def test_confirmation_is_required_when_controls_are_enabled(self) -> None:
+        from agent_runner.remote.controller import read_runner_control_event
+
         client, app = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
 
         expected_confirmations = {
@@ -996,6 +1043,17 @@ class WebConsoleSafetyTests(unittest.TestCase):
 
         self.assertEqual(0, app.state.runner_controller.start_calls)
         self.assertEqual([], app.state.runner_controller.stop_calls)
+
+        app.state.runner_controller.run_dir = self.run_dir
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        mismatch = client.post("/api/runner/start", json={"confirmation": "WRONG"})
+        self.assertEqual(400, mismatch.status_code)
+        event = read_runner_control_event(self.run_dir)
+        self.assertEqual("start", event["action"])
+        self.assertEqual("confirmation_mismatch", event["status"])
+        self.assertEqual("confirmation_mismatch", event["current_event"]["status"])
+        self.assertGreaterEqual(int(event["event_count"]), 1)
+        self.assertEqual("confirmation_mismatch", event["history"][-1]["status"])
 
     def test_start_reload_restart_and_stop_round_trip_through_controller(self) -> None:
         client, app = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
@@ -1322,6 +1380,11 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("reload", controller_status["last_action"])
         self.assertEqual("Runner reloaded.", controller_status["last_message"])
         self.assertEqual("", controller_status["last_error"])
+        self.assertEqual("reload", controller_status["current_event"]["action"])
+        self.assertEqual("reloaded", controller_status["current_event"]["status"])
+        self.assertEqual(1, controller_status["event_count"])
+        self.assertEqual(1, len(controller_status["history"]))
+        self.assertEqual("reload", controller_status["history"][0]["action"])
 
         client, _ = _create_client(
             self.repo,
@@ -1338,6 +1401,10 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("Runner reloaded.", payload["runner_control"]["status"]["last_message"])
         self.assertEqual("", payload["runner_control"]["status"]["last_error"])
         self.assertEqual("[redacted]", payload["runner_control"]["status"]["config_path"])
+        self.assertEqual("reload", payload["runner_control"]["status"]["current_event"]["action"])
+        self.assertEqual("reloaded", payload["runner_control"]["status"]["current_event"]["status"])
+        self.assertEqual(1, payload["runner_control"]["status"]["event_count"])
+        self.assertEqual("reload", payload["runner_control"]["status"]["history"][0]["action"])
         self.assertEqual("reload", payload["runner_control"]["last_action"])
         self.assertEqual("Runner reloaded.", payload["runner_control"]["last_message"])
         self.assertEqual("Runner reloaded.", payload["runner_control"]["message"])
@@ -1350,8 +1417,36 @@ class WebConsoleSafetyTests(unittest.TestCase):
         with redirect_stdout(stdout):
             shell.status()
         rendered = stdout.getvalue()
+        self.assertIn("last_event: reloaded", rendered)
         self.assertIn("last_action: reload", rendered)
         self.assertIn("last_message: Runner reloaded.", rendered)
+
+    def test_runner_controller_validation_error_writes_artifact_event(self) -> None:
+        from agent_runner.remote.controller import RunnerController, read_runner_control_event
+
+        controller = RunnerController(
+            repo=self.repo,
+            base_args=SimpleNamespace(
+                config_path=self.config_path.as_posix(),
+                config=self.config_path.as_posix(),
+                run_dir=self.run_dir.as_posix(),
+            ),
+        )
+        controller.run_dir = self.run_dir
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+
+        result = controller.start({"execution_backend": "bogus"}, control_action="start")
+        self.assertFalse(result["ok"])
+
+        event = read_runner_control_event(self.run_dir)
+        self.assertEqual("start", event["action"])
+        self.assertEqual("error", event["status"])
+        self.assertEqual("validation", event["phase"])
+        self.assertEqual(1, event["event_count"])
+        self.assertEqual("start", event["current_event"]["action"])
+        self.assertEqual("error", event["current_event"]["status"])
+        self.assertEqual(1, len(event["history"]))
+        self.assertEqual("error", event["history"][0]["status"])
 
     def test_worktree_actions_require_opt_in_and_report_pending_state(self) -> None:
         from agent_runner.web import build_snapshot

@@ -1206,6 +1206,19 @@ def _redact_web_runner_status_payload(status: dict[str, Any], *, redact_start_op
                 "start_options.argv_preview",
             ]
         )
+    current_event = redacted.get("current_event")
+    if isinstance(current_event, dict):
+        redacted_current_event = _redact_web_runner_result(current_event)
+        redacted["current_event"] = redacted_current_event
+        redacted["currentEvent"] = redacted_current_event
+        redaction_fields.append("current_event")
+    history = redacted.get("history")
+    if isinstance(history, list):
+        redacted_history = [_redact_web_runner_result(item) if isinstance(item, dict) else item for item in history]
+        redacted["history"] = redacted_history
+        redacted["event_history"] = redacted_history
+        redacted["eventHistory"] = redacted_history
+        redaction_fields.append("history")
     if redaction_fields:
         redacted["redaction"] = _web_redaction_meta(*redaction_fields)
     return redacted
@@ -1234,6 +1247,19 @@ def _redact_web_runner_control(control: dict[str, Any], *, redact_start_options:
                         "status.start_options.argv_preview",
                     ]
                 )
+    current_event = redacted.get("current_event")
+    if isinstance(current_event, dict):
+        redacted_current_event = _redact_web_runner_result(current_event)
+        redacted["current_event"] = redacted_current_event
+        redacted["currentEvent"] = redacted_current_event
+        redaction_fields.append("current_event")
+    history = redacted.get("history")
+    if isinstance(history, list):
+        redacted_history = [_redact_web_runner_result(item) if isinstance(item, dict) else item for item in history]
+        redacted["history"] = redacted_history
+        redacted["event_history"] = redacted_history
+        redacted["eventHistory"] = redacted_history
+        redaction_fields.append("history")
     start_options = redacted.get("start_options")
     if redact_start_options and isinstance(start_options, dict):
         redacted_start_options = _redact_web_runner_start_options(start_options)
@@ -1998,6 +2024,15 @@ def _runner_control_status_payload(
             control_event = read_runner_control_event(Path(current_run_dir))
         except Exception:
             control_event = {}
+    control_event_current = control_event.get("current_event") if isinstance(control_event.get("current_event"), dict) else {}
+    control_event_history = list(control_event.get("history") or [])
+    control_event_last_event = str(
+        (control_event_current.get("phase") if isinstance(control_event_current, dict) else "")
+        or (control_event_current.get("status") if isinstance(control_event_current, dict) else "")
+        or control_event.get("phase")
+        or control_event.get("status")
+        or ""
+    ).strip()
     start_options_contract = _runner_control_start_options_contract(
         controller,
         repo=repo,
@@ -2009,8 +2044,13 @@ def _runner_control_status_payload(
         config_path_value = fallback_config_path
         if redact_sensitive and config_path_value:
             config_path_value = REDACTED_VALUE
+        stop_progress = control_event.get("stop_progress")
+        if not isinstance(stop_progress, dict):
+            stop_progress = {}
+        else:
+            stop_progress = normalize_stop_progress_payload(stop_progress)
         return {
-            "running": False,
+            "running": bool(control_event.get("running")) if control_event else False,
             "runner_mode": "unknown",
             "repo": _path_text(repo),
             "config_path": config_path_value,
@@ -2024,15 +2064,22 @@ def _runner_control_status_payload(
             "warnings": 0,
             "state_counts": {"done": 0, "failed": 0, "warnings": 0},
             "reason": "",
-            "last_event": "",
+            "last_event": control_event_last_event,
             "last_action": str(control_event.get("last_action") or control_event.get("action") or ""),
             "lastAction": str(control_event.get("last_action") or control_event.get("action") or ""),
             "last_message": str(control_event.get("last_message") or control_event.get("message") or ""),
             "lastMessage": str(control_event.get("last_message") or control_event.get("message") or ""),
             "last_error": str(control_event.get("last_error") or control_event.get("error") or ""),
             "lastError": str(control_event.get("last_error") or control_event.get("error") or ""),
-            "stop_progress": {},
-            "stopProgress": {},
+            "current_event": control_event_current,
+            "currentEvent": control_event_current,
+            "history": control_event_history,
+            "event_history": control_event_history,
+            "eventHistory": control_event_history,
+            "event_count": len(control_event_history),
+            "eventCount": len(control_event_history),
+            "stop_progress": stop_progress,
+            "stopProgress": stop_progress,
             "start_options": start_options_contract,
             "startOptions": start_options_contract,
         }
@@ -2046,8 +2093,13 @@ def _runner_control_status_payload(
         config_path_value = fallback_config_path
         if redact_sensitive and config_path_value:
             config_path_value = REDACTED_VALUE
+        stop_progress = control_event.get("stop_progress")
+        if not isinstance(stop_progress, dict):
+            stop_progress = {}
+        else:
+            stop_progress = normalize_stop_progress_payload(stop_progress)
         return {
-            "running": False,
+            "running": bool(control_event.get("running")) if control_event else False,
             "runner_mode": "unknown",
             "repo": _path_text(repo),
             "config_path": config_path_value,
@@ -2061,15 +2113,22 @@ def _runner_control_status_payload(
             "warnings": 0,
             "state_counts": {"done": 0, "failed": 0, "warnings": 0},
             "reason": REDACTED_VALUE if redact_sensitive else f"status_error: {ex}",
-            "last_event": "",
+            "last_event": control_event_last_event,
             "last_action": str(control_event.get("last_action") or control_event.get("action") or ""),
             "lastAction": str(control_event.get("last_action") or control_event.get("action") or ""),
             "last_message": str(control_event.get("last_message") or control_event.get("message") or ""),
             "lastMessage": str(control_event.get("last_message") or control_event.get("message") or ""),
             "last_error": REDACTED_VALUE if redact_sensitive else str(control_event.get("last_error") or control_event.get("error") or f"status_error: {ex}"),
             "lastError": REDACTED_VALUE if redact_sensitive else str(control_event.get("last_error") or control_event.get("error") or f"status_error: {ex}"),
-            "stop_progress": {},
-            "stopProgress": {},
+            "current_event": control_event_current,
+            "currentEvent": control_event_current,
+            "history": control_event_history,
+            "event_history": control_event_history,
+            "eventHistory": control_event_history,
+            "event_count": len(control_event_history),
+            "eventCount": len(control_event_history),
+            "stop_progress": stop_progress,
+            "stopProgress": stop_progress,
             "start_options": start_options_contract,
             "startOptions": start_options_contract,
         }
@@ -2081,7 +2140,7 @@ def _runner_control_status_payload(
 
     stop_progress = status.get("stop_progress")
     if not isinstance(stop_progress, dict):
-        stop_progress = {}
+        stop_progress = control_event.get("stop_progress") if isinstance(control_event.get("stop_progress"), dict) else {}
     else:
         stop_progress = normalize_stop_progress_payload(stop_progress)
     state_counts = status.get("state_counts")
@@ -2110,13 +2169,20 @@ def _runner_control_status_payload(
             "warnings": int(state_counts.get("warnings") or status.get("warnings") or 0),
         },
         "reason": str(status.get("reason") or "").strip(),
-        "last_event": str(status.get("last_event") or "").strip(),
+        "last_event": str(status.get("last_event") or control_event_last_event or "").strip(),
         "last_action": str(status.get("last_action") or status.get("lastAction") or control_event.get("last_action") or control_event.get("action") or "").strip(),
         "lastAction": str(status.get("last_action") or status.get("lastAction") or control_event.get("last_action") or control_event.get("action") or "").strip(),
         "last_message": str(status.get("last_message") or status.get("lastMessage") or control_event.get("last_message") or control_event.get("message") or "").strip(),
         "lastMessage": str(status.get("last_message") or status.get("lastMessage") or control_event.get("last_message") or control_event.get("message") or "").strip(),
         "last_error": str(status.get("last_error") or status.get("lastError") or control_event.get("last_error") or control_event.get("error") or "").strip(),
         "lastError": str(status.get("last_error") or status.get("lastError") or control_event.get("last_error") or control_event.get("error") or "").strip(),
+        "current_event": status.get("current_event") if isinstance(status.get("current_event"), dict) else control_event_current,
+        "currentEvent": status.get("current_event") if isinstance(status.get("current_event"), dict) else control_event_current,
+        "history": list(status.get("history") or control_event_history),
+        "event_history": list(status.get("event_history") or status.get("eventHistory") or control_event_history),
+        "eventHistory": list(status.get("eventHistory") or status.get("history") or control_event_history),
+        "event_count": int(status.get("event_count") or status.get("eventCount") or len(control_event_history)),
+        "eventCount": int(status.get("eventCount") or status.get("event_count") or len(control_event_history)),
         "stop_progress": stop_progress,
         "stopProgress": stop_progress,
         "start_options": start_options,
@@ -6612,6 +6678,14 @@ def create_app(
                     contract=start_options_contract,
                 )
                 if validation_error:
+                    _record_runner_control_event(
+                        normalized_action,
+                        status="error",
+                        message="",
+                        error=str(validation_error.get("message") or "Runner start options are invalid."),
+                        details=validation_error,
+                        controller_status=current_status,
+                    )
                     return _runner_control_response(
                         action=normalized_action,
                         status_code=400,
