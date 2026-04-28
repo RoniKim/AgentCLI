@@ -29,7 +29,7 @@ from .config import (
     validate_roles_value,
 )
 from .cli import DEFAULTS as CLI_DEFAULTS
-from .goals import goals_path, parse_goals_completion, read_goals, resolve_goals_completion_level
+from .goals import GOALS_INCOMPLETE_STATUS, goals_path, parse_goals_completion, read_goals, resolve_goals_completion_level
 from .gitops import (
     apply_pending_worktree_merge,
     discard_pending_worktree_merge,
@@ -71,7 +71,7 @@ from .remote.controller import (
 from .runtime_contract import CODEX_MODEL_FIELD_SPECS, PIPELINE_ROLE_FIELD_SPEC, PIPELINE_STAGE_ORDER
 from .stop_progress import normalize_stop_progress_payload, summarize_stop_progress_liveness
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, load_state, parse_backlog_md
-from .utils import atomic_write_json, atomic_write_text, now_iso, run_cmd
+from .utils import atomic_write_json, atomic_write_text, now_iso, run_cmd, STOP_REASON_PROJECT_COMPLETE
 
 try:  # Optional dependency: the app must still import when FastAPI is absent.
     from fastapi import Body, FastAPI, HTTPException, Request
@@ -930,14 +930,14 @@ def _normalize_execution_status(
         return "running"
 
     reason = _pick_text(final_reason).lower()
-    if reason in {"project_complete", "all_tasks_done", "completed", "success", "ok", "done"}:
+    if reason in {"project_complete", "all_tasks_done", "completed", "success", "ok", "done", GOALS_INCOMPLETE_STATUS}:
         return "completed"
     if reason in {"stop_file", "stop_requested", "stopped", "user_stop", "manual_stop"} or stop_file_exists:
         return "stopped"
 
     rc = _coerce_optional_int(exit_code)
     if rc is not None:
-        if rc == 0 and reason in {"", "ok", "prepared_only", "completed", "success", "project_complete", "all_tasks_done", "done"} and has_run_dir:
+        if rc == 0 and reason in {"", "ok", "prepared_only", "completed", "success", "project_complete", "all_tasks_done", "done", GOALS_INCOMPLETE_STATUS} and has_run_dir:
             return "completed"
         if rc != 0:
             return "failed"
@@ -988,6 +988,45 @@ def _project_completion_status(
         "backlog_complete": backlog_complete,
         "project_complete": project_complete,
         "project_status": "complete" if project_complete else "incomplete",
+    }
+
+
+def _completion_status_payload(run_dir: Path | None, *, final_reason: str = "") -> dict[str, Any]:
+    completion_payload: dict[str, Any] = {}
+    if run_dir is not None:
+        payload = _safe_json(run_dir / "COMPLETION_STATUS.json", {})
+        if isinstance(payload, dict):
+            completion_payload = payload
+
+    completion_status = _pick_text(
+        completion_payload.get("completion_status"),
+        completion_payload.get("completionStatus"),
+    ).strip().lower()
+    completion_reason = _pick_text(
+        completion_payload.get("completion_reason"),
+        completion_payload.get("completionReason"),
+    ).strip().lower()
+    resolved_final_reason = _pick_text(final_reason).strip().lower()
+
+    if not completion_status and resolved_final_reason in {STOP_REASON_PROJECT_COMPLETE, GOALS_INCOMPLETE_STATUS}:
+        completion_status = resolved_final_reason
+    if not completion_reason and completion_status:
+        completion_reason = completion_status
+    if completion_status in {STOP_REASON_PROJECT_COMPLETE, GOALS_INCOMPLETE_STATUS} and resolved_final_reason in {
+        "",
+        "ok",
+        STOP_REASON_PROJECT_COMPLETE,
+        GOALS_INCOMPLETE_STATUS,
+    }:
+        resolved_final_reason = completion_status
+
+    return {
+        "completion_status": completion_status,
+        "completionStatus": completion_status,
+        "completion_reason": completion_reason,
+        "completionReason": completion_reason,
+        "final_reason": resolved_final_reason,
+        "finalReason": resolved_final_reason,
     }
 
 
@@ -2870,6 +2909,8 @@ def _live_run_payload(
     attempt_value = _coerce_optional_int(_pick_value(active.get("attempt"), progress_data.get("attempt"), progress_data.get("current_attempt")))
     worktree_mode = _pick_text(active.get("worktreeMode"), active.get("worktree_mode"), progress_data.get("worktree_mode"), controller_data.get("worktree_mode"), "")
     final_reason = _pick_text(active.get("finalReason"), active.get("final_reason"), progress_data.get("final_reason"), controller_data.get("final_reason"), "")
+    completion = _completion_status_payload(latest_run_dir, final_reason=final_reason)
+    final_reason = completion["final_reason"]
     started_at = _coerce_optional_ms(_pick_value(active.get("startedAt"), active.get("started_at")))
     if started_at is None:
         started_at = 0
@@ -2980,11 +3021,17 @@ def _live_run_payload(
         },
         "activeRun": active,
         "progress": progress_data,
+        "completion_status": completion["completion_status"],
+        "completionStatus": completion["completionStatus"],
+        "completion_reason": completion["completion_reason"],
+        "completionReason": completion["completionReason"],
         "status": {
             "run": run_status,
             "runStatus": run_status,
             "execution": execution_status,
             "executionStatus": execution_status,
+            "completionStatus": completion["completionStatus"],
+            "completionReason": completion["completionReason"],
             "project": project_status,
             "projectStatus": project_status,
             "projectComplete": project_complete,
@@ -4261,7 +4308,7 @@ def _normalize_lifecycle_status(
         return "failed"
 
     reason_value = _pick_text(reason).strip().lower()
-    if reason_value in {"project_complete", "all_tasks_done", "completed", "success", "ok", "done"}:
+    if reason_value in {"project_complete", "all_tasks_done", "completed", "success", "ok", "done", GOALS_INCOMPLETE_STATUS}:
         return "done"
     if reason_value in {"stop_file", "stop_requested", "stopped", "manual_stop", "quota_exhausted"}:
         return "stopped"
@@ -5099,6 +5146,8 @@ def _active_run_payload(
         last_run_summary.get("stop_reason"),
         run_summary.get("final").get("reason") if isinstance(run_summary.get("final"), dict) else "",
     )
+    completion = _completion_status_payload(run_dir, final_reason=final_reason_text)
+    final_reason_text = completion["final_reason"]
 
     tasks_total = _coerce_optional_int(progress.get("tasks_total"))
     if tasks_total is None:
@@ -5223,6 +5272,10 @@ def _active_run_payload(
         "progress": round(progress_value, 3) if progress_value is not None else None,
         "executionStatus": execution_status,
         "execution_status": execution_status,
+        "completion_status": completion["completion_status"],
+        "completionStatus": completion["completionStatus"],
+        "completion_reason": completion["completion_reason"],
+        "completionReason": completion["completionReason"],
         "goalsComplete": project_completion["goals_complete"],
         "goals_complete": project_completion["goals_complete"],
         "backlogComplete": project_completion["backlog_complete"],
@@ -5681,6 +5734,8 @@ def _history_item(
     shutdown_reason = _pick_text(last_summary.get("stop_reason"), final_reason)
     if not final_reason:
         final_reason = shutdown_reason
+    completion = _completion_status_payload(run_dir, final_reason=final_reason)
+    final_reason = completion["final_reason"]
 
     tasks_done = state_counts["done"]
 
@@ -5758,6 +5813,10 @@ def _history_item(
         "project_complete": project_completion["project_complete"],
         "projectStatus": project_completion["project_status"],
         "project_status": project_completion["project_status"],
+        "completionStatus": completion["completionStatus"],
+        "completion_status": completion["completion_status"],
+        "completionReason": completion["completionReason"],
+        "completion_reason": completion["completion_reason"],
         "goalsComplete": project_completion["goals_complete"],
         "goals_complete": project_completion["goals_complete"],
         "backlogComplete": project_completion["backlog_complete"],
@@ -5871,6 +5930,7 @@ def _controller_run_dir_is_current_or_terminal(controller_data: dict[str, Any]) 
         "success",
         "ok",
         "prepared_only",
+        GOALS_INCOMPLETE_STATUS,
         "stop_file",
         "stop_requested",
         "stopped",
@@ -6034,6 +6094,8 @@ def _build_progress_payload(
         final.get("reason") if isinstance(final, dict) else "",
         last_run_summary.get("stop_reason"),
     )
+    completion = _completion_status_payload(run_dir, final_reason=final_reason)
+    final_reason = completion["final_reason"]
     final_rc = _coerce_optional_int(controller_data.get("exit_code"))
     if final_rc is None:
         final_rc = _coerce_optional_int(final.get("rc") if isinstance(final, dict) else None)
@@ -6113,6 +6175,10 @@ def _build_progress_payload(
         "progress_available": progress_available,
         "execution_status": execution_status,
         "executionStatus": execution_status,
+        "completion_status": completion["completion_status"],
+        "completionStatus": completion["completionStatus"],
+        "completion_reason": completion["completion_reason"],
+        "completionReason": completion["completionReason"],
         "project_complete": project_completion["project_complete"],
         "projectComplete": project_completion["project_complete"],
         "project_status": project_completion["project_status"],
@@ -6772,6 +6838,10 @@ def build_snapshot(
             "worktree_mode": progress.get("worktree_mode", ""),
             "execution_status": progress.get("execution_status", ""),
             "executionStatus": progress.get("executionStatus", progress.get("execution_status", "")),
+            "completion_status": progress.get("completion_status", ""),
+            "completionStatus": progress.get("completionStatus", progress.get("completion_status", "")),
+            "completion_reason": progress.get("completion_reason", ""),
+            "completionReason": progress.get("completionReason", progress.get("completion_reason", "")),
             "project_complete": bool(progress.get("project_complete", False)),
             "projectComplete": bool(progress.get("projectComplete", progress.get("project_complete", False))),
             "project_status": progress.get("project_status", ""),
@@ -8096,6 +8166,10 @@ def create_app(
             "current_task_title": progress.get("current_task_title", ""),
             "run_status": progress.get("run_status", "idle"),
             "final_reason": progress.get("final_reason", ""),
+            "completion_status": progress.get("completion_status", ""),
+            "completionStatus": progress.get("completionStatus", progress.get("completion_status", "")),
+            "completion_reason": progress.get("completion_reason", ""),
+            "completionReason": progress.get("completionReason", progress.get("completion_reason", "")),
             "state": progress.get("state", {}),
             "execution_status": progress.get("execution_status", ""),
             "executionStatus": progress.get("executionStatus", progress.get("execution_status", "")),

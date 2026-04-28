@@ -637,6 +637,11 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertTrue(summary["ok"])
         self.assertEqual(expected_files, [item["test_file"] for item in summary["commands"]])
         self.assertEqual(expected_files, [item["test_file"] for item in result["commands"]])
+        self.assertEqual(summary_path.as_posix(), summary["artifact_path"])
+        self.assertEqual(summary_path.as_posix(), summary["artifactPath"])
+        self.assertEqual(expected_files, summary["suite_files"])
+        self.assertEqual([], summary["trigger_files"])
+        self.assertEqual("", summary["failure_summary"])
 
         for call, expected_file in zip(calls, expected_files, strict=True):
             self.assertEqual(Path(expected_file).name, call["cmd"][-1])
@@ -646,6 +651,8 @@ class WorktreeIsolationTests(unittest.TestCase):
         log_dir = self.run_dir / "fast_web_worktree_regression"
         self.assertTrue((log_dir / "01_test_web_console_readonly.txt").exists())
         self.assertTrue((log_dir / "06_test_worktree_manual_merge.txt").exists())
+        self.assertEqual("01_test_web_console_readonly.txt", Path(summary["commands"][0]["artifact_path"]).name)
+        self.assertEqual("", summary["commands"][0]["failure_summary"])
 
     def test_fast_web_worktree_regression_stops_on_first_failure_and_records_summary(self) -> None:
         from agent_runner.gates import run_fast_web_worktree_regression_async
@@ -687,6 +694,15 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertFalse(summary["ok"])
         self.assertEqual("test_web_console_safety", summary["failed_command"]["name"])
         self.assertEqual(2, len(summary["commands"]))
+        self.assertEqual(summary_path.as_posix(), summary["artifact_path"])
+        self.assertEqual(summary_path.as_posix(), summary["artifactPath"])
+        self.assertIn("fast_web_worktree_regression failed:", summary["failure_summary"])
+        self.assertEqual("boom", summary["failed_command"]["failure_summary"])
+        self.assertEqual(
+            (self.run_dir / "fast_web_worktree_regression" / "02_test_web_console_safety.txt").as_posix(),
+            summary["commands"][1]["artifact_path"],
+        )
+        self.assertEqual("boom", summary["commands"][1]["failure_summary"])
         self.assertTrue((self.run_dir / "fast_web_worktree_regression" / "02_test_web_console_safety.txt").exists())
 
     def test_fast_web_worktree_regression_failure_summary_and_retry_policy(self) -> None:

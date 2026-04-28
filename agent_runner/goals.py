@@ -28,6 +28,9 @@ from .utils import (
 from .utils import eprint, now_iso
 
 
+GOALS_INCOMPLETE_STATUS = "goals_incomplete"
+
+
 def goals_path(repo: Path) -> Path:
     """Canonical location for project goals."""
     return repo / ".doc" / "GOALS.md"
@@ -313,17 +316,51 @@ def parse_goals_completion(goals_text: Optional[str], *,
     return _analyze_goals_markdown(goals_text, completion_level=completion_level)
 
 
+def classify_goals_completion_status(
+    status: Dict[str, Any],
+    *,
+    failed_unresolved: int = 0,
+) -> Dict[str, Any]:
+    """Classify a goals evaluation into an explicit terminal completion status."""
+    has_goals = bool(status.get("has_goals", False))
+    project_complete = bool(status.get("project_complete", False)) and failed_unresolved == 0
+    if not has_goals:
+        completion_status = "no_goals"
+        completion_reason = "ok"
+    elif project_complete:
+        completion_status = STOP_REASON_PROJECT_COMPLETE
+        completion_reason = STOP_REASON_PROJECT_COMPLETE
+    else:
+        completion_status = GOALS_INCOMPLETE_STATUS
+        completion_reason = GOALS_INCOMPLETE_STATUS
+    return {
+        "has_goals": has_goals,
+        "project_complete": project_complete,
+        "completion_status": completion_status,
+        "completionStatus": completion_status,
+        "completion_reason": completion_reason,
+        "completionReason": completion_reason,
+    }
+
+
 def write_completion_status(run_dir: Path, status: Dict[str, Any], *,
                             failed_unresolved: int = 0,
                             stop_reason: str = "") -> Path:
     """Write COMPLETION_STATUS.json to run_dir."""
     import json
+    completion = classify_goals_completion_status(status, failed_unresolved=failed_unresolved)
     payload = {
         "generated_at": now_iso(),
         "stop_reason": stop_reason,
         "goals": status,
         "failed_tasks_unresolved": failed_unresolved,
-        "project_complete": status.get("project_complete", False) and failed_unresolved == 0,
+        "project_complete": completion["project_complete"],
+        "completion_status": completion["completion_status"],
+        "completionStatus": completion["completionStatus"],
+        "completion_reason": completion["completion_reason"],
+        "completionReason": completion["completionReason"],
+        "has_goals": completion["has_goals"],
+        "hasGoals": completion["has_goals"],
     }
     out = run_dir / "COMPLETION_STATUS.json"
     out.parent.mkdir(parents=True, exist_ok=True)

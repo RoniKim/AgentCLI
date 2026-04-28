@@ -174,6 +174,8 @@ def _write_run_bundle(
     stop_file: bool = False,
     backlog_tasks: list[dict[str, object]] | None = None,
     state_payload: dict[str, object] | None = None,
+    completion_status: str | None = None,
+    completion_reason: str | None = None,
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
@@ -343,6 +345,29 @@ def _write_run_bundle(
         )
         + "\n",
     )
+    if completion_status:
+        resolved_completion_reason = completion_reason or completion_status
+        _write(
+            run_dir / "COMPLETION_STATUS.json",
+            json.dumps(
+                {
+                    "generated_at": "2026-04-26T12:08:00",
+                    "stop_reason": final_reason if status == "stopped" else "",
+                    "goals": {"project_complete": completion_status == "project_complete"},
+                    "failed_tasks_unresolved": 0,
+                    "project_complete": completion_status == "project_complete",
+                    "completion_status": completion_status,
+                    "completionStatus": completion_status,
+                    "completion_reason": resolved_completion_reason,
+                    "completionReason": resolved_completion_reason,
+                    "has_goals": True,
+                    "hasGoals": True,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
     _write(run_dir / "cycle_summary.log", f"2026-04-26T12:08:00 cycle=1 done={1 if status == 'success' else 0}/{task_count} failed={1 if status == 'failed' else 0} dt=480.0s\n")
     _write_log_source_files(run_dir)
     if stop_file:
@@ -4092,6 +4117,71 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("task_done", completed["notifications"][0]["kind"])
         self.assertEqual("done", completed["stages"][1]["status"])
         self.assertEqual(2, completed["backlog"]["counts"]["done"])
+
+    def test_api_status_surfaces_explicit_goals_incomplete_completion_state(self) -> None:
+        completion_run_dir = self._make_live_run_dir("20260426-131000")
+        _write_run_bundle(
+            completion_run_dir,
+            status="success",
+            final_rc=0,
+            final_reason="goals_incomplete",
+            branch="main",
+            completion_status="goals_incomplete",
+        )
+
+        from agent_runner import web as web_module
+        from fastapi.testclient import TestClient
+
+        controller = FakeRunnerController(
+            self._controller_status(
+                completion_run_dir,
+                running=False,
+                reason="goals_incomplete",
+                exit_code=0,
+                stage="QA",
+                current_task_id="T-GOALS-1",
+                current_task_title="Keep goals explicit",
+                branch="main",
+                attempt=4,
+                worktree_mode="manual",
+                startedAt=1714140000000,
+                elapsedSec=2400,
+                progress=1.0,
+            )
+        )
+        with patch.object(web_module, "_build_runner_controller", return_value=controller):
+            client = TestClient(self._create_app(self.repo))
+
+        status_payload = client.get("/api/status").json()
+        progress_payload = client.get("/api/progress").json()
+        history_payload = client.get("/api/history").json()
+        history_item = next(item for item in history_payload["items"] if item["id"] == completion_run_dir.name)
+
+        self.assertEqual("completed", status_payload["progress"]["execution_status"])
+        self.assertEqual("completed", status_payload["progress"]["run_status"])
+        self.assertEqual("goals_incomplete", status_payload["progress"]["final_reason"])
+        self.assertEqual("goals_incomplete", status_payload["progress"]["completion_status"])
+        self.assertEqual("goals_incomplete", status_payload["progress"]["completion_reason"])
+        self.assertEqual("completed", status_payload["active_run"]["executionStatus"])
+        self.assertEqual("completed", status_payload["active_run"]["status"])
+        self.assertEqual("goals_incomplete", status_payload["active_run"]["finalReason"])
+        self.assertEqual("goals_incomplete", status_payload["active_run"]["completionStatus"])
+        self.assertEqual("goals_incomplete", status_payload["active_run"]["completionReason"])
+        self.assertEqual("goals_incomplete", status_payload["liveRun"]["status"]["finalReason"])
+        self.assertEqual("goals_incomplete", status_payload["liveRun"]["status"]["completionStatus"])
+
+        self.assertEqual("completed", progress_payload["execution_status"])
+        self.assertEqual("completed", progress_payload["run_status"])
+        self.assertEqual("goals_incomplete", progress_payload["final_reason"])
+        self.assertEqual("goals_incomplete", progress_payload["completion_status"])
+        self.assertEqual("goals_incomplete", progress_payload["completion_reason"])
+
+        self.assertEqual("completed", history_item["executionStatus"])
+        self.assertEqual("completed", history_item["status"])
+        self.assertEqual("goals_incomplete", history_item["finalReason"])
+        self.assertEqual("goals_incomplete", history_item["completionStatus"])
+        self.assertFalse(history_item["projectComplete"])
+        self.assertEqual("incomplete", history_item["projectStatus"])
 
     def test_api_worktree_normalizes_empty_malformed_applied_and_failed_states(self) -> None:
         patch_text = "\n".join(

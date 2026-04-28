@@ -109,6 +109,38 @@ def _norm_cmd(v: object) -> list[str]:
     return []
 
 
+def _validation_record(
+    *,
+    name: str,
+    kind: str,
+    gate: str,
+    cmd: Sequence[object],
+    rc: int,
+    artifact_path: Path,
+    summary: str,
+    extra: dict[str, object] | None = None,
+) -> dict[str, object]:
+    failure_summary = summary if int(rc) != 0 else ""
+    record: dict[str, object] = {
+        "name": str(name),
+        "kind": str(kind),
+        "gate": str(gate),
+        "cmd": [str(part) for part in cmd],
+        "rc": int(rc),
+        "ok": int(rc) == 0,
+        "artifact_path": artifact_path.as_posix(),
+        "artifactPath": artifact_path.as_posix(),
+        "log_path": artifact_path.as_posix(),
+        "logPath": artifact_path.as_posix(),
+        "summary": summary,
+        "failure_summary": failure_summary,
+        "failureSummary": failure_summary,
+    }
+    if extra:
+        record.update(extra)
+    return record
+
+
 def repo_has_web_worktree_markers(repo: Path) -> bool:
     """Return True when the repository looks like the AgentCLI web/worktree repo."""
     try:
@@ -205,6 +237,7 @@ async def run_fast_web_worktree_regression_async(
     *,
     stop_path: Path | None = None,
     max_output_bytes: int = 10_000_000,
+    trigger_files: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """Run the fast web/worktree regression command set and persist a summary."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -222,9 +255,17 @@ async def run_fast_web_worktree_regression_async(
         "ended_at": "",
         "ok": False,
         "commands": records,
-        "log_path": str(log_path),
-        "log_dir": str(log_dir),
+        "log_path": log_path.as_posix(),
+        "artifact_path": log_path.as_posix(),
+        "artifactPath": log_path.as_posix(),
+        "log_dir": log_dir.as_posix(),
         "failed_command": None,
+        "failure_summary": "",
+        "failureSummary": "",
+        "trigger_files": [str(item) for item in dict.fromkeys(str(file).replace("\\", "/") for file in (trigger_files or []) if str(file).strip())],
+        "triggerFiles": [str(item) for item in dict.fromkeys(str(file).replace("\\", "/") for file in (trigger_files or []) if str(file).strip())],
+        "suite_files": list(FAST_WEB_WORKTREE_REGRESSION_TEST_FILES),
+        "suiteFiles": list(FAST_WEB_WORKTREE_REGRESSION_TEST_FILES),
     }
 
     try:
@@ -248,13 +289,24 @@ async def run_fast_web_worktree_regression_async(
                 "cmd": cmd,
                 "rc": rc,
                 "summary": summary,
-                "log_path": str(cmd_log_path),
+                "log_path": cmd_log_path.as_posix(),
+                "artifact_path": cmd_log_path.as_posix(),
+                "artifactPath": cmd_log_path.as_posix(),
+                "failure_summary": summary if rc != 0 else "",
+                "failureSummary": summary if rc != 0 else "",
             }
             records.append(record)
             if rc != 0:
                 result["failed_command"] = record
                 break
         result["ok"] = bool(records) and all(int(item.get("rc", 1)) == 0 for item in records)
+        if not result["ok"]:
+            try:
+                failure_summary = summarize_fast_web_worktree_regression_failure(result, log_path)
+            except Exception:
+                failure_summary = ""
+            result["failure_summary"] = failure_summary
+            result["failureSummary"] = failure_summary
         result["ended_at"] = now_iso()
     finally:
         try:
@@ -292,19 +344,16 @@ async def run_build_gate_async(
     stop_path: Path | None = None,
     max_output_bytes: int = 10_000_000,
 ) -> bool:
-    cmd = _norm_cmd(build_cmd)
-    if not cmd:
-        cmd = find_build_cmd(repo, legacy_build_target)
-    timeout = int(build_timeout_sec or 1800)
-    code, _summary = await run_cmd_async(
-        cmd,
-        cwd=repo,
-        log_path=log_path,
-        timeout_sec=timeout,
+    result = await run_build_validation_async(
+        repo,
+        build_cmd,
+        build_timeout_sec,
+        legacy_build_target,
+        log_path,
         stop_path=stop_path,
         max_output_bytes=max_output_bytes,
     )
-    return code == 0
+    return bool(result.get("ok", False))
 
 
 def run_test_gate(
@@ -342,11 +391,34 @@ async def run_test_gate_async(
     stop_path: Path | None = None,
     max_output_bytes: int = 10_000_000,
 ) -> bool:
-    cmd = _norm_cmd(test_cmd)
+    result = await run_test_validation_async(
+        repo,
+        test_cmd,
+        test_timeout_sec,
+        legacy_test_target,
+        legacy_test_filter,
+        log_path,
+        stop_path=stop_path,
+        max_output_bytes=max_output_bytes,
+    )
+    return bool(result.get("ok", False))
+
+
+async def run_build_validation_async(
+    repo: Path,
+    build_cmd: object,
+    build_timeout_sec: int,
+    legacy_build_target: str,
+    log_path: Path,
+    *,
+    stop_path: Path | None = None,
+    max_output_bytes: int = 10_000_000,
+) -> dict[str, object]:
+    cmd = _norm_cmd(build_cmd)
     if not cmd:
-        cmd = find_test_cmd(repo, legacy_test_target, legacy_test_filter)
-    timeout = int(test_timeout_sec or 3600)
-    code, _summary = await run_cmd_async(
+        cmd = find_build_cmd(repo, legacy_build_target)
+    timeout = int(build_timeout_sec or 1800)
+    code, summary = await run_cmd_async(
         cmd,
         cwd=repo,
         log_path=log_path,
@@ -354,7 +426,49 @@ async def run_test_gate_async(
         stop_path=stop_path,
         max_output_bytes=max_output_bytes,
     )
-    return code == 0
+    return _validation_record(
+        name="build",
+        kind="compile",
+        gate="build",
+        cmd=cmd,
+        rc=code,
+        artifact_path=log_path,
+        summary=summary,
+    )
+
+
+async def run_test_validation_async(
+    repo: Path,
+    test_cmd: object,
+    test_timeout_sec: int,
+    legacy_test_target: str,
+    legacy_test_filter: str,
+    log_path: Path,
+    *,
+    stop_path: Path | None = None,
+    max_output_bytes: int = 10_000_000,
+) -> dict[str, object]:
+    cmd = _norm_cmd(test_cmd)
+    if not cmd:
+        cmd = find_test_cmd(repo, legacy_test_target, legacy_test_filter)
+    timeout = int(test_timeout_sec or 3600)
+    code, summary = await run_cmd_async(
+        cmd,
+        cwd=repo,
+        log_path=log_path,
+        timeout_sec=timeout,
+        stop_path=stop_path,
+        max_output_bytes=max_output_bytes,
+    )
+    return _validation_record(
+        name="test",
+        kind="test",
+        gate="test",
+        cmd=cmd,
+        rc=code,
+        artifact_path=log_path,
+        summary=summary,
+    )
 
 
 def find_build_cmd(repo: Path, explicit: str) -> list[str]:

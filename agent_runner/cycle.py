@@ -14,8 +14,10 @@ from .analysis_cache import merge_dev_hints_to_global_changelog
 from .docs import resolve_docs_dir, generate_docs_digest
 from .gates import (
     extract_build_warnings,
+    run_build_validation_async,
     run_build_gate_async,
     run_fast_web_worktree_regression_async,
+    run_test_validation_async,
     run_test_gate_async,
     should_run_fast_web_worktree_regression,
     should_retry_fast_web_worktree_regression_failure,
@@ -131,6 +133,8 @@ from .backlog_utils import (
     record_history,
 )
 from .goals import (
+    classify_goals_completion_status,
+    GOALS_INCOMPLETE_STATUS,
     read_goals,
     format_goals_block,
     parse_goals_completion,
@@ -1564,6 +1568,89 @@ async def main_async(args: argparse.Namespace) -> int:
             tasks_root = run_dir / "tasks"
             tasks_root.mkdir(parents=True, exist_ok=True)
 
+            def _write_task_validation_artifact(
+                *,
+                task: TaskItem,
+                attempt_dir: Path,
+                validations: list[dict[str, Any]],
+                status: str,
+                reason: str,
+                detail: str = "",
+            ) -> Path:
+                """Persist a structured per-attempt validation artifact."""
+                artifact_path = attempt_dir / "validation.json"
+                validation_status = str(status or "").strip() or "unknown"
+                validation_reason = str(reason or "").strip()
+                validation_detail = str(detail or "").strip()
+                fast_validation = next((record for record in validations if str(record.get("gate") or "") == "fast_web_worktree_regression"), {})
+                selected_fast_suite = list(fast_validation.get("suite_files") or fast_validation.get("suiteFiles") or [])
+                trigger_files = list(fast_validation.get("trigger_files") or fast_validation.get("triggerFiles") or [])
+                compile_validation = next((record for record in validations if str(record.get("kind") or "") == "compile"), {})
+                test_validation = next((record for record in validations if str(record.get("kind") or "") == "test"), {})
+                payload = {
+                    "schema_version": 1,
+                    "artifact_path": artifact_path.as_posix(),
+                    "task_id": task.id,
+                    "task_title": task.title,
+                    "task_files": list(task.files or []),
+                    "goal_ref": task_goal_ref,
+                    "goal_text": task_goal_text,
+                    "goal_trace": task_goal_trace,
+                    "cycle": cycle_idx,
+                    "step": step,
+                    "attempt": attempt,
+                    "status": validation_status,
+                    "reason": validation_reason,
+                    "detail": validation_detail,
+                    "validation_status": validation_status,
+                    "validationStatus": validation_status,
+                    "validation_reason": validation_reason,
+                    "validationReason": validation_reason,
+                    "validation_detail": validation_detail,
+                    "validationDetail": validation_detail,
+                    "compile_validation": compile_validation,
+                    "compileValidation": compile_validation,
+                    "test_validation": test_validation,
+                    "testValidation": test_validation,
+                    "fast_regression_validation": fast_validation,
+                    "fastRegressionValidation": fast_validation,
+                    "selected_fast_regression_suite": selected_fast_suite,
+                    "selectedFastRegressionSuite": selected_fast_suite,
+                    "trigger_files": trigger_files,
+                    "triggerFiles": trigger_files,
+                    "validations": validations,
+                    "failure_summary": validation_detail if validation_status != "passed" else "",
+                    "failureSummary": validation_detail if validation_status != "passed" else "",
+                }
+                try:
+                    safe_write_text(artifact_path, json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n")
+                except Exception:
+                    pass
+
+                summary_lines = [
+                    f"validation_status={validation_status}",
+                    f"reason={validation_reason or 'ok'}",
+                ]
+                if selected_fast_suite:
+                    summary_lines.append("fast_suite=" + ", ".join(selected_fast_suite))
+                if trigger_files:
+                    summary_lines.append("trigger_files=" + ", ".join(trigger_files))
+                for record in validations:
+                    record_name = str(record.get("name") or record.get("gate") or record.get("kind") or "validation")
+                    record_rc = record.get("rc")
+                    record_artifact = str(record.get("artifact_path") or record.get("artifactPath") or record.get("log_path") or record.get("logPath") or "")
+                    summary_lines.append(f"{record_name}: rc={record_rc} artifact={record_artifact}")
+                    record_failure = str(record.get("failure_summary") or record.get("failureSummary") or "").strip()
+                    if record_failure and record_failure != validation_detail:
+                        summary_lines.append(f"{record_name}_failure={record_failure}")
+                if validation_detail:
+                    summary_lines.append(f"failure_summary={validation_detail}")
+                try:
+                    safe_write_text(attempt_dir / "validation.txt", "\n".join(summary_lines).rstrip() + "\n")
+                except Exception:
+                    pass
+                return artifact_path
+
             # --- Cycle-start git health check ---
             ensure_clean_working_tree(repo)
 
@@ -1944,6 +2031,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
                     attempt_dir = task_dir / f"attempt_{attempt:02d}"
                     attempt_dir.mkdir(parents=True, exist_ok=True)
+                    validation_records: list[dict[str, Any]] = []
 
                     before = git_porcelain(repo)
                     before_untracked = set(git_untracked_files(repo))
@@ -2292,7 +2380,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         return 1, "no_diff", 0, (len(done_set) > before_done)
                     if build_enabled:
                         metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
-                        ok = await run_build_gate_async(
+                        build_validation = await run_build_validation_async(
                             repo=repo,
                             build_cmd=getattr(args, "build_cmd", []),
                             build_timeout_sec=int(getattr(args, "build_timeout_seconds", 1800)),
@@ -2300,6 +2388,17 @@ async def main_async(args: argparse.Namespace) -> int:
                             log_path=attempt_dir / "build.txt",
                             stop_path=stop_path,
                         )
+                        build_validation.update(
+                            {
+                                "cycle": cycle_idx,
+                                "step": step,
+                                "task_id": next_task.id,
+                                "task_title": next_task.title,
+                                "attempt": attempt,
+                            }
+                        )
+                        validation_records.append(build_validation)
+                        ok = bool(build_validation.get("ok", False))
                         metrics.event("build_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
                         if stop_path.exists():
                             _record_task_stop("build_gate", attempt)
@@ -2346,12 +2445,28 @@ async def main_async(args: argparse.Namespace) -> int:
                                 except Exception:
                                     _prev_gate_error = ""
                                     _prev_gate_error_label = ""
+                                _write_task_validation_artifact(
+                                    task=next_task,
+                                    attempt_dir=attempt_dir,
+                                    validations=validation_records,
+                                    status="failed",
+                                    reason="build_failed",
+                                    detail=str(build_validation.get("failure_summary") or build_validation.get("summary") or ""),
+                                )
                                 metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="build_failed")
                                 continue
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
                             save_state(state_path, state)
                             _record_history(next_task.id, next_task.title, "failed", reason="build_failed", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                             logger.gate_event("build", next_task.id, passed=False)
+                            _write_task_validation_artifact(
+                                task=next_task,
+                                attempt_dir=attempt_dir,
+                                validations=validation_records,
+                                status="failed",
+                                reason="build_failed",
+                                detail=str(build_validation.get("failure_summary") or build_validation.get("summary") or ""),
+                            )
                             if tb or cp:
                                 ok_restore, fail_reason = _isolate_or_stop("build_failed")
                                 if not ok_restore:
@@ -2364,7 +2479,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             return 1, "build_failed", 0, (len(done_set) > before_done)
                     if run_tests:
                         metrics.event("test_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
-                        ok = await run_test_gate_async(
+                        test_validation = await run_test_validation_async(
                             repo=repo,
                             test_cmd=getattr(args, "test_cmd", []),
                             test_timeout_sec=int(getattr(args, "test_timeout_seconds", 3600)),
@@ -2373,6 +2488,17 @@ async def main_async(args: argparse.Namespace) -> int:
                             log_path=attempt_dir / "test.txt",
                             stop_path=stop_path,
                         )
+                        test_validation.update(
+                            {
+                                "cycle": cycle_idx,
+                                "step": step,
+                                "task_id": next_task.id,
+                                "task_title": next_task.title,
+                                "attempt": attempt,
+                            }
+                        )
+                        validation_records.append(test_validation)
+                        ok = bool(test_validation.get("ok", False))
                         metrics.event("test_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
                         if stop_path.exists():
                             _record_task_stop("test_gate", attempt)
@@ -2385,12 +2511,28 @@ async def main_async(args: argparse.Namespace) -> int:
                                 except Exception:
                                     _prev_gate_error = ""
                                     _prev_gate_error_label = ""
+                                _write_task_validation_artifact(
+                                    task=next_task,
+                                    attempt_dir=attempt_dir,
+                                    validations=validation_records,
+                                    status="failed",
+                                    reason="test_failed",
+                                    detail=str(test_validation.get("failure_summary") or test_validation.get("summary") or ""),
+                                )
                                 metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="test_failed")
                                 continue
                             state.setdefault("failed", []).append({"task": next_task.id, "reason": "test_failed"})
                             save_state(state_path, state)
                             _record_history(next_task.id, next_task.title, "failed", reason="test_failed", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                             logger.gate_event("test", next_task.id, passed=False)
+                            _write_task_validation_artifact(
+                                task=next_task,
+                                attempt_dir=attempt_dir,
+                                validations=validation_records,
+                                status="failed",
+                                reason="test_failed",
+                                detail=str(test_validation.get("failure_summary") or test_validation.get("summary") or ""),
+                            )
                             if tb or cp:
                                 ok_restore, fail_reason = _isolate_or_stop("test_failed")
                                 if not ok_restore:
@@ -2504,7 +2646,32 @@ async def main_async(args: argparse.Namespace) -> int:
                             repo=repo,
                             log_path=fast_regression_log,
                             stop_path=stop_path,
+                            trigger_files=fast_regression_files,
                         )
+                        fast_validation = {
+                            "name": "fast_web_worktree_regression",
+                            "kind": "regression",
+                            "gate": "fast_web_worktree_regression",
+                            "cmd": list(fast_regression.get("suite_files") or fast_regression.get("suiteFiles") or []),
+                            "rc": 0 if bool(fast_regression.get("ok", False)) else 1,
+                            "ok": bool(fast_regression.get("ok", False)),
+                            "artifact_path": str(fast_regression_log),
+                            "artifactPath": str(fast_regression_log),
+                            "log_path": str(fast_regression_log),
+                            "logPath": str(fast_regression_log),
+                            "summary": str(fast_regression.get("failure_summary") or fast_regression.get("failureSummary") or fast_regression_log),
+                            "failure_summary": str(fast_regression.get("failure_summary") or ""),
+                            "failureSummary": str(fast_regression.get("failureSummary") or ""),
+                            "trigger_files": list(fast_regression.get("trigger_files") or fast_regression.get("triggerFiles") or fast_regression_files),
+                            "triggerFiles": list(fast_regression.get("trigger_files") or fast_regression.get("triggerFiles") or fast_regression_files),
+                            "suite_files": list(fast_regression.get("suite_files") or fast_regression.get("suiteFiles") or []),
+                            "suiteFiles": list(fast_regression.get("suite_files") or fast_regression.get("suiteFiles") or []),
+                            "commands": list(fast_regression.get("commands") or []),
+                            "failed_command": fast_regression.get("failed_command"),
+                            "started_at": fast_regression.get("started_at"),
+                            "ended_at": fast_regression.get("ended_at"),
+                        }
+                        validation_records.append(fast_validation)
                         fast_command_count = len(fast_regression.get("commands", []) or [])
                         fast_ok = bool(fast_regression.get("ok", False))
                         metrics.event(
@@ -2524,12 +2691,15 @@ async def main_async(args: argparse.Namespace) -> int:
                         if not fast_ok:
                             failed_command = fast_regression.get("failed_command") or {}
                             failed_name = str(failed_command.get("name") or failed_command.get("test_file") or "fast_regression")
-                            failed_summary = str(fast_regression_log)
-                            try:
-                                if isinstance(failed_command, dict):
-                                    failed_summary = json.dumps(failed_command, ensure_ascii=False, default=str)
-                            except Exception:
-                                pass
+                            failed_summary = str(fast_regression.get("failure_summary") or fast_regression.get("failureSummary") or "")
+                            if not failed_summary:
+                                try:
+                                    failed_summary = summarize_fast_web_worktree_regression_failure(
+                                        fast_regression,
+                                        fast_regression_log,
+                                    )
+                                except Exception:
+                                    failed_summary = str(fast_regression_log)
                             if should_retry_fast_web_worktree_regression_failure(
                                 dev_auto_escalate,
                                 attempt,
@@ -2550,6 +2720,14 @@ async def main_async(args: argparse.Namespace) -> int:
                                     reason="fast_regression_failed",
                                     failed_command=failed_name,
                                     log_path=str(fast_regression_log),
+                                )
+                                _write_task_validation_artifact(
+                                    task=next_task,
+                                    attempt_dir=attempt_dir,
+                                    validations=validation_records,
+                                    status="failed",
+                                    reason="fast_regression_failed",
+                                    detail=failed_summary,
                                 )
                                 continue
                             state.setdefault("failed", []).append({
@@ -2579,6 +2757,8 @@ async def main_async(args: argparse.Namespace) -> int:
                                 "goal_trace": task_goal_trace,
                                 "goal_ref": task_goal_ref,
                                 "goal_text": task_goal_text,
+                                "validation_artifact": str(attempt_dir / "validation.json"),
+                                "validation_status": "failed",
                             })
                             metrics.event(
                                 "task_end",
@@ -2600,6 +2780,14 @@ async def main_async(args: argparse.Namespace) -> int:
                                 goal_trace=task_goal_trace,
                                 goal_ref=task_goal_ref,
                                 goal_text=task_goal_text,
+                            )
+                            _write_task_validation_artifact(
+                                task=next_task,
+                                attempt_dir=attempt_dir,
+                                validations=validation_records,
+                                status="failed",
+                                reason="fast_regression_failed",
+                                detail=failed_summary,
                             )
                             task_failure_reason = "fast_regression_failed"
                             if tb or cp:
@@ -2628,6 +2816,15 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 if task_failure_reason:
                     continue
+
+                if task_completed:
+                    _write_task_validation_artifact(
+                        task=next_task,
+                        attempt_dir=attempt_dir,
+                        validations=validation_records,
+                        status="passed",
+                        reason="completed",
+                    )
 
                 if stop_path.exists():
                     _record_task_stop("dev_after_attempt", locals().get("attempt") if "attempt" in locals() else None)
@@ -2739,7 +2936,17 @@ async def main_async(args: argparse.Namespace) -> int:
                 save_state(state_path, state)
                 mark_backlog_done(backlog_md, next_task.id)
                 _record_history(next_task.id, next_task.title, "done", files=next_task.files, cycle=cycle_idx)
-                task_results.append({"id": next_task.id, "title": next_task.title, "status": "done", "duration": time.time() - task_outer_t0, "goal_trace": task_goal_trace, "goal_ref": task_goal_ref, "goal_text": task_goal_text})
+                task_results.append({
+                    "id": next_task.id,
+                    "title": next_task.title,
+                    "status": "done",
+                    "duration": time.time() - task_outer_t0,
+                    "goal_trace": task_goal_trace,
+                    "goal_ref": task_goal_ref,
+                    "goal_text": task_goal_text,
+                    "validation_artifact": str(attempt_dir / "validation.json"),
+                    "validation_status": "passed",
+                })
 
                 # Use current-cycle task IDs to avoid cross-cycle accumulation (done=16/11 bug)
                 _done_this_cycle = len(done_set.intersection(task_ids))
@@ -3334,6 +3541,23 @@ async def main_async(args: argparse.Namespace) -> int:
             except Exception:
                 detected_reason = ""
             final_reason = choose_stop_reason([last_reason, detected_reason]) or last_reason
+            if last_rc == 0 and final_reason in {"", "ok"}:
+                try:
+                    completion_status = ""
+                    completion_payload = _load_json_if_exists(run_dir / "COMPLETION_STATUS.json", {})
+                    if isinstance(completion_payload, dict):
+                        completion_status = str(
+                            completion_payload.get("completion_status")
+                            or completion_payload.get("completionStatus")
+                            or completion_payload.get("completion_reason")
+                            or completion_payload.get("completionReason")
+                            or ""
+                        ).strip().lower()
+                    if completion_status in {GOALS_INCOMPLETE_STATUS, STOP_REASON_PROJECT_COMPLETE}:
+                        final_reason = completion_status
+                        last_reason = completion_status
+                except Exception:
+                    pass
             report_path = run_dir / "SHUTDOWN_REPORT.md"
             if final_reason == STOP_REASON_STOP_FILE or not report_path.exists():
                 try:
