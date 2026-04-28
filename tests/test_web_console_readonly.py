@@ -1999,10 +1999,150 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("", no_run["metrics"]["quota_window"])
         self.assertIsNone(no_run["metrics"]["quotaUsed"])
         self.assertIsNone(no_run["metrics"]["quota_used"])
+        self.assertIn("live_state", no_run["runner_control"])
+        self.assertFalse(no_run["runner_control"]["live_state"]["available"])
+        self.assertEqual("unavailable", no_run["runner_control"]["live_state"]["runner_process"]["status"])
+        self.assertEqual("Unavailable", no_run["runner_control"]["live_state"]["runner_process"]["statusLabel"])
+        self.assertEqual("unavailable", no_run["runner_control"]["live_state"]["task_backend"]["status"])
+        self.assertEqual("Unavailable", no_run["runner_control"]["live_state"]["task_backend"]["statusLabel"])
+        self.assertEqual("unavailable", no_run["runner_control"]["live_state"]["tracked_children"]["status"])
+        self.assertEqual("Unavailable", no_run["runner_control"]["live_state"]["tracked_children"]["statusLabel"])
+        self.assertEqual("unavailable", no_run["runner_control"]["live_state"]["artifact_writer"]["status"])
+        self.assertEqual("Unavailable", no_run["runner_control"]["live_state"]["artifact_writer"]["statusLabel"])
+        self.assertFalse(no_run["liveRun"]["liveState"]["available"])
+        self.assertEqual("unavailable", no_run["liveRun"]["liveState"]["runnerProcess"]["status"])
+        self.assertEqual("unavailable", no_run["liveRun"]["liveState"]["taskBackend"]["status"])
 
         live_run_dir = self._make_live_run_dir("20260426-110000")
         later_run_dir = self._make_live_run_dir("20260426-140000")
         _write_run_bundle(later_run_dir, status="success", final_rc=0, final_reason="project_complete", branch="main")
+        stop_progress = {
+            "phase": "timeout",
+            "message": "Runner is still alive after 1s stop wait timeout.",
+            "elapsed_seconds": 12,
+            "updated_at": "2026-04-28T00:00:12",
+            "requested_at": "2026-04-28T00:00:00",
+            "history": [
+                {
+                    "phase": "request",
+                    "message": "Stop requested.",
+                    "elapsed_seconds": 0,
+                    "updated_at": "2026-04-28T00:00:00",
+                },
+                {
+                    "phase": "runner_wait",
+                    "message": "Waiting for runner shutdown and final artifacts.",
+                    "elapsed_seconds": 8,
+                    "updated_at": "2026-04-28T00:00:08",
+                    "tracked_child_pids": [321, 654],
+                    "tracked_child_processes": [
+                        {
+                            "pid": 321,
+                            "alive": True,
+                            "session_file": "C:/temp/session_321.json",
+                            "session_exists": True,
+                        },
+                        {
+                            "pid": 654,
+                            "alive": False,
+                            "session_file": "C:/temp/session_654.json",
+                            "session_exists": False,
+                        },
+                    ],
+                    "last_artifact_signal": {
+                        "path": "C:/temp/run_summary.json",
+                        "updated_at": "2026-04-28T00:00:10",
+                    },
+                    "timeout_guidance": {
+                        "summary": "Retry stop after checking the runner.",
+                        "recoverable": True,
+                        "steps": [
+                            "Retry stop after checking the runner.",
+                            "Inspect the tracked child PIDs.",
+                        ],
+                        "manual_cleanup_hints": ["Close the runner."],
+                        "locked_file_paths": ["C:/temp/locked.txt"],
+                    },
+                },
+                {
+                    "phase": "timeout",
+                    "message": "Runner is still alive after 1s stop wait timeout.",
+                    "elapsed_seconds": 12,
+                    "updated_at": "2026-04-28T00:00:12",
+                },
+            ],
+            "current_phase": {
+                "phase": "timeout",
+                "message": "Runner is still alive after 1s stop wait timeout.",
+                "elapsed_seconds": 12,
+                "updated_at": "2026-04-28T00:00:12",
+                "runner_alive": True,
+                "tracked_child_pids": [321, 654],
+                "tracked_child_processes": [
+                    {
+                        "pid": 321,
+                        "alive": True,
+                        "session_file": "C:/temp/session_321.json",
+                        "session_exists": True,
+                    },
+                    {
+                        "pid": 654,
+                        "alive": False,
+                        "session_file": "C:/temp/session_654.json",
+                        "session_exists": False,
+                    },
+                ],
+                "stop_file_paths": {
+                    "stop_file_path": "C:/temp/STOP",
+                    "stop_progress_path": "C:/temp/STOP_PROGRESS.json",
+                    "stop_progress_log_path": "C:/temp/stop_progress.log",
+                },
+                "last_artifact_signal": {
+                    "path": "C:/temp/run_summary.json",
+                    "updated_at": "2026-04-28T00:00:10",
+                },
+                "timeout_guidance": {
+                    "summary": "Retry stop after checking the runner.",
+                    "recoverable": True,
+                    "steps": [
+                        "Retry stop after checking the runner.",
+                        "Inspect the tracked child PIDs.",
+                    ],
+                    "manual_cleanup_hints": ["Close the runner."],
+                    "locked_file_paths": ["C:/temp/locked.txt"],
+                },
+            },
+            "runner_alive": True,
+            "tracked_child_pids": [321, 654],
+            "tracked_child_processes": [
+                {
+                    "pid": 321,
+                    "alive": True,
+                    "session_file": "C:/temp/session_321.json",
+                    "session_exists": True,
+                },
+                {
+                    "pid": 654,
+                    "alive": False,
+                    "session_file": "C:/temp/session_654.json",
+                    "session_exists": False,
+                },
+            ],
+            "last_artifact_signal": {
+                "path": "C:/temp/run_summary.json",
+                "updated_at": "2026-04-28T00:00:10",
+            },
+            "timeout_guidance": {
+                "summary": "Retry stop after checking the runner.",
+                "recoverable": True,
+                "steps": [
+                    "Retry stop after checking the runner.",
+                    "Inspect the tracked child PIDs.",
+                ],
+                "manual_cleanup_hints": ["Close the runner."],
+                "locked_file_paths": ["C:/temp/locked.txt"],
+            },
+        }
         live = self._api_status(
             self.repo,
             self._controller_status(
@@ -2017,6 +2157,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
                 stage="Dev",
                 startedAt=1714136400000,
                 elapsedSec=900,
+                stop_progress=stop_progress,
             ),
         )
         self.assertEqual(live_run_dir.resolve().as_posix(), live["latest_run_dir"])
@@ -2054,6 +2195,56 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("", live["metrics"]["quota_window"])
         self.assertIsNone(live["metrics"]["quotaUsed"])
         self.assertIsNone(live["metrics"]["quota_used"])
+        self.assertIn("live_state", live["runner_control"])
+        self.assertTrue(live["runner_control"]["live_state"]["available"])
+        self.assertEqual("alive", live["runner_control"]["live_state"]["runner_process"]["status"])
+        self.assertEqual("Alive", live["runner_control"]["live_state"]["runner_process"]["statusLabel"])
+        self.assertEqual("alive", live["runner_control"]["live_state"]["task_backend"]["status"])
+        self.assertEqual("Alive", live["runner_control"]["live_state"]["task_backend"]["statusLabel"])
+        self.assertEqual("alive", live["runner_control"]["live_state"]["tracked_children"]["status"])
+        self.assertEqual("Alive", live["runner_control"]["live_state"]["tracked_children"]["statusLabel"])
+        self.assertEqual(2, live["runner_control"]["live_state"]["tracked_children"]["count"])
+        self.assertEqual(1, live["runner_control"]["live_state"]["tracked_children"]["aliveCount"])
+        self.assertEqual("flushing", live["runner_control"]["live_state"]["artifact_writer"]["status"])
+        self.assertEqual("Flushing", live["runner_control"]["live_state"]["artifact_writer"]["statusLabel"])
+        self.assertTrue(live["runner_control"]["live_state"]["artifact_writer"]["flushing"])
+        self.assertEqual("flushing", live["liveRun"]["liveState"]["artifactWriter"]["status"])
+        self.assertTrue(live["liveRun"]["process"]["liveState"]["artifact_writer"]["flushing"])
+        live_state_html = _run_adapter_harness(
+            [
+                {
+                    "kind": "call",
+                    "name": "normalizeLiveState",
+                    "args": [live["runner_control"]["live_state"]],
+                },
+                {
+                    "kind": "call",
+                    "name": "runnerControlLiveStateChips",
+                    "args": [live["runner_control"]["live_state"]],
+                },
+                {
+                    "kind": "call",
+                    "name": "runnerControlLiveStateChips",
+                    "args": [no_run["runner_control"]["live_state"]],
+                },
+            ]
+        )
+        normalized_live_state = live_state_html[0]
+        self.assertEqual("alive", normalized_live_state["runnerProcess"]["status"])
+        self.assertEqual("alive", normalized_live_state["taskBackend"]["status"])
+        self.assertEqual("alive", normalized_live_state["trackedChildren"]["status"])
+        self.assertEqual(2, normalized_live_state["trackedChildren"]["count"])
+        self.assertEqual(1, normalized_live_state["trackedChildren"]["aliveCount"])
+        self.assertEqual("flushing", normalized_live_state["artifactWriter"]["status"])
+        self.assertTrue(normalized_live_state["artifactWriter"]["flushing"])
+        self.assertIn("Live states", live_state_html[1])
+        self.assertIn("Runner process", live_state_html[1])
+        self.assertIn("Task backend", live_state_html[1])
+        self.assertIn("Tracked children", live_state_html[1])
+        self.assertIn("Artifact writer", live_state_html[1])
+        self.assertIn("Alive", live_state_html[1])
+        self.assertIn("Flushing", live_state_html[1])
+        self.assertIn("unavailable", live_state_html[2])
 
     def test_api_status_prefers_active_run_quota_over_metrics_when_both_are_real(self) -> None:
         from agent_runner import web as web_module
@@ -2552,6 +2743,13 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(status_payload["liveRun"]["runnerControl"]["status"]["running"], adapted["runnerControl"]["status"]["running"])
         self.assertEqual(status_payload["liveRun"]["process"]["running"], adapted["process"]["running"])
         self.assertEqual(len(status_payload["liveRun"]["stageSummaries"]), len(adapted["stageSummaries"]))
+        self.assertIn("liveState", status_payload["liveRun"])
+        self.assertIn("liveState", status_payload["liveRun"]["process"])
+        self.assertIn("liveState", adapted)
+        self.assertIn("liveState", adapted["process"])
+        self.assertEqual(status_payload["liveRun"]["liveState"]["runner_process"]["status"], adapted["liveState"]["runnerProcess"]["status"])
+        self.assertEqual(status_payload["liveRun"]["process"]["liveState"]["task_backend"]["status"], adapted["process"]["liveState"]["taskBackend"]["status"])
+        self.assertEqual(status_payload["liveRun"]["process"]["liveState"]["tracked_children"]["status"], adapted["process"]["liveState"]["trackedChildren"]["status"])
 
         config = self.client.get("/api/config").json()
         self.assertIn("values", config)

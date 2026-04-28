@@ -207,7 +207,14 @@
         backend: 'Backend',
         configPath: 'Config path',
         runStatus: 'Run status',
+        liveStates: 'Live states',
+        runnerProcess: 'Runner process',
+        taskBackend: 'Task backend',
+        trackedChildren: 'Tracked children',
+        artifactWriter: 'Artifact writer',
         runnerAlive: 'Runner alive',
+        alive: 'Alive',
+        flushing: 'Flushing',
         stopProgress: 'Stop progress',
         currentStopPhase: 'Current phase',
         phaseHistory: 'Phase history',
@@ -811,6 +818,11 @@
         state: '상태',
         runMode: '실행 모드',
         runStatus: '실행 상태',
+        liveStates: '실시간 상태',
+        runnerProcess: '실행기 프로세스',
+        taskBackend: '작업 백엔드',
+        trackedChildren: '추적된 자식 프로세스',
+        artifactWriter: '아티팩트 작성기',
         lastAction: '마지막 작업',
         lastMessage: '마지막 메시지',
         lastError: '마지막 오류',
@@ -821,6 +833,8 @@
         controlsDisabled: '실행기 컨트롤이 비활성화되었습니다.',
         unavailable: '사용 불가',
         available: '사용 가능',
+        alive: '실행 중',
+        flushing: '플러시 중',
         ready: '준비됨',
         running: '실행 중',
         idle: '대기',
@@ -3200,6 +3214,20 @@
     };
   }
 
+  function runnerControlLiveStateChips(liveState = currentLiveRunLiveState()) {
+    const current = normalizeLiveState(liveState);
+    const chips = toArray(current.items)
+      .map((entry) => {
+        const label = `${entry.label}: ${entry.statusLabel}`;
+        return chip(label, liveStateToneClass(entry.kind, entry.status, entry.available));
+      })
+      .join('');
+    return `
+      <div class="summary-note">${escapeHTML(t('runner.liveStates'))}</div>
+      <div class="runner-control__chips">${chips}</div>
+    `;
+  }
+
   function runnerControlValueClass(tone) {
     const normalized = toText(tone, '').toLowerCase();
     if (normalized === 'err') {
@@ -3552,6 +3580,7 @@
       busy,
       message,
       runStatus,
+      liveState: normalizeLiveState(overrides.liveState),
       status: {
         running,
         runnerMode: toText(overrides.runnerMode, 'unknown'),
@@ -3803,6 +3832,156 @@
     return normalized;
   }
 
+  function normalizeLiveStateKey(value) {
+    const raw = toText(value, '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+    const compact = raw.replace(/_/g, '');
+    if (compact === 'runnerprocess') {
+      return 'runnerProcess';
+    }
+    if (compact === 'taskbackend') {
+      return 'taskBackend';
+    }
+    if (compact === 'trackedchildren') {
+      return 'trackedChildren';
+    }
+    if (compact === 'artifactwriter') {
+      return 'artifactWriter';
+    }
+    return raw;
+  }
+
+  function liveStateKindLabel(kind) {
+    const key = normalizeLiveStateKey(kind);
+    const labels = {
+      runnerProcess: t('runner.runnerProcess'),
+      taskBackend: t('runner.taskBackend'),
+      trackedChildren: t('runner.trackedChildren'),
+      artifactWriter: t('runner.artifactWriter'),
+    };
+    return labels[key] || toText(kind, t('common.unavailable'));
+  }
+
+  function liveStateStatusLabel(status) {
+    const normalized = toText(status, '').trim().toLowerCase();
+    if (normalized === 'alive') {
+      return t('runner.alive');
+    }
+    if (normalized === 'flushing') {
+      return t('runner.flushing');
+    }
+    if (normalized === 'idle') {
+      return t('runner.idle');
+    }
+    if (normalized === 'stopped') {
+      return t('runner.stopped');
+    }
+    return t('common.unavailable');
+  }
+
+  function liveStateToneClass(kind, status, available) {
+    const normalizedStatus = toText(status, '').trim().toLowerCase();
+    if (!available || normalizedStatus === 'unavailable') {
+      return 'chip--muted';
+    }
+    if (normalizedStatus === 'flushing') {
+      return 'chip--warn';
+    }
+    if (normalizedStatus === 'alive') {
+      return normalizeLiveStateKey(kind) === 'trackedChildren' ? 'chip--warn' : 'chip--accent';
+    }
+    return 'chip--muted';
+  }
+
+  function normalizeLiveStateEntry(raw, kind = '') {
+    const item = toObject(raw);
+    const canonicalKind = normalizeLiveStateKey(item.kind || item.key || kind || '');
+    const availableValue = item.available ?? item.present ?? item.known;
+    const aliveValue = item.alive ?? item.running ?? item.active;
+    const flushingValue = item.flushing ?? item.writing;
+    let status = toText(item.status, '').trim().toLowerCase();
+    const hasAvailable = availableValue == null
+      ? aliveValue != null || flushingValue != null || Boolean(status)
+      : Boolean(availableValue);
+    if (!status) {
+      if (!hasAvailable) {
+        status = 'unavailable';
+      } else if (canonicalKind === 'artifactWriter') {
+        status = flushingValue ? 'flushing' : 'idle';
+      } else if (canonicalKind === 'taskBackend') {
+        status = aliveValue ? 'alive' : 'idle';
+      } else {
+        status = aliveValue ? 'alive' : 'stopped';
+      }
+    }
+    const available = hasAvailable && status !== 'unavailable';
+    const count = toMaybeNumber(item.count ?? item.total ?? item.trackedCount ?? item.tracked_count);
+    const aliveCount = toMaybeNumber(item.aliveCount ?? item.alive_count);
+    const normalized = {
+      kind: canonicalKind || normalizeLiveStateKey(kind) || 'unknown',
+      label: liveStateKindLabel(canonicalKind || kind),
+      available: Boolean(available),
+      status: status || 'unavailable',
+      statusLabel: liveStateStatusLabel(status || 'unavailable'),
+      source: toText(item.source, ''),
+      alive: aliveValue == null ? null : Boolean(aliveValue),
+      flushing: flushingValue == null ? null : Boolean(flushingValue),
+      count: count == null ? null : count,
+      aliveCount: aliveCount == null ? null : aliveCount,
+      phase: toText(item.phase, ''),
+    };
+    if (!normalized.available) {
+      normalized.status = 'unavailable';
+      normalized.statusLabel = t('common.unavailable');
+      normalized.alive = null;
+      normalized.flushing = null;
+    }
+    return normalized;
+  }
+
+  function normalizeLiveState(raw) {
+    const item = toObject(raw);
+    const rawItems = toArray(item.items);
+    const lookup = new Map();
+    rawItems.forEach((entry) => {
+      const normalized = toObject(entry);
+      const key = normalizeLiveStateKey(normalized.kind || normalized.key || '');
+      if (key) {
+        lookup.set(key, normalized);
+      }
+    });
+    const runnerProcess = normalizeLiveStateEntry(
+      lookup.get('runnerProcess') || item.runner_process || item.runnerProcess,
+      'runnerProcess'
+    );
+    const taskBackend = normalizeLiveStateEntry(
+      lookup.get('taskBackend') || item.task_backend || item.taskBackend,
+      'taskBackend'
+    );
+    const trackedChildren = normalizeLiveStateEntry(
+      lookup.get('trackedChildren') || item.tracked_children || item.trackedChildren,
+      'trackedChildren'
+    );
+    const artifactWriter = normalizeLiveStateEntry(
+      lookup.get('artifactWriter') || item.artifact_writer || item.artifactWriter,
+      'artifactWriter'
+    );
+    const items = [runnerProcess, taskBackend, trackedChildren, artifactWriter];
+    const normalized = {
+      available: Boolean(item.available ?? items.some((entry) => entry.available)),
+      source: toText(item.source, items.some((entry) => entry.available) ? 'api' : 'unavailable'),
+      runnerProcess,
+      runner_process: runnerProcess,
+      taskBackend,
+      task_backend: taskBackend,
+      trackedChildren,
+      tracked_children: trackedChildren,
+      artifactWriter,
+      artifact_writer: artifactWriter,
+      items,
+    };
+    return normalized;
+  }
+
   function normalizeRunnerControlAction(action) {
     const raw = toObject(action);
     return {
@@ -3873,6 +4052,7 @@
       lastAction: toText(raw.last_action || raw.lastAction, ''),
       lastMessage: toText(raw.last_message || raw.lastMessage, ''),
       lastError: toText(raw.last_error || raw.lastError, ''),
+      liveState: normalizeLiveState(raw.live_state || raw.liveState || status.live_state || status.liveState),
     };
   }
 
@@ -5350,6 +5530,14 @@
     const normalizedLogTail = normalizedLog.tail;
     const normalizedNotificationItems = normalizedNotifications.items;
     const runnerControl = normalizeRunnerControl(rawRunnerControl);
+    const liveState = normalizeLiveState(
+      raw.liveState ||
+        raw.live_state ||
+        rawProcess.liveState ||
+        rawProcess.live_state ||
+        rawRunnerControl.liveState ||
+        rawRunnerControl.live_state
+    );
     const identity = {
       id: toText(rawIdentity.id || rawIdentity.runId || activeRun.id, activeRun.id || 'no-run'),
       runId: toText(rawIdentity.runId || rawIdentity.id || activeRun.id, activeRun.id || 'no-run'),
@@ -5434,6 +5622,8 @@
       reason: toText(rawProcess.reason, ''),
       lastEvent: toText(rawProcess.lastEvent || rawProcess.last_event, ''),
       stopProgress: normalizeStopProgress(rawProcess.stopProgress || rawProcess.stop_progress),
+      liveState,
+      live_state: liveState,
     };
     const staleReasons = toArray(rawStale.reasons).map((reason) => toText(reason, '')).filter(Boolean);
     const derivedStale = {
@@ -5500,6 +5690,8 @@
       logSource: logSummary.source,
       logCursor: logSummary.cursor,
       logState: logSummary.state,
+      liveState,
+      live_state: liveState,
     };
   }
 
@@ -6431,6 +6623,8 @@
           controlPlaneEvent: '',
           controlPlaneSnapshot: '',
         },
+        liveState: clone(fallbackRunnerControl.liveState),
+        live_state: clone(fallbackRunnerControl.liveState),
         runnerControl: clone(fallbackRunnerControl),
         control: clone(fallbackRunnerControl),
         process: {
@@ -6451,6 +6645,8 @@
           reason: '',
           lastEvent: '',
           stopProgress: {},
+          liveState: clone(fallbackRunnerControl.liveState),
+          live_state: clone(fallbackRunnerControl.liveState),
         },
         timestamps: {
           startedAt: 0,
@@ -6787,11 +6983,19 @@
     toggleRunnerControlAutopilot,
     updateRunnerControlStartField,
     normalizeStopProgress,
+    normalizeLiveStateKey,
+    liveStateKindLabel,
+    liveStateStatusLabel,
+    liveStateToneClass,
+    normalizeLiveStateEntry,
+    normalizeLiveState,
+    runnerControlLiveStateChips,
     runnerControlStateInfo,
     runnerControlDetailRows,
     runnerControlActionEnabled,
     runnerControlActionDisabledReason,
     renderStopProgressSection,
+    currentLiveRunLiveState,
     normalizeSnapshot: normalizeApiSnapshot,
     createBlankModel,
     createFallbackFixture,
@@ -8642,6 +8846,21 @@
     return toObject(current.status);
   }
 
+  function currentLiveRunLiveState(liveRun = currentLiveRun()) {
+    const current = toObject(liveRun);
+    const currentProcess = toObject(current.process);
+    const currentRunnerControl = toObject(current.runnerControl || current.control);
+    const liveState = current.liveState
+      || current.live_state
+      || currentProcess.liveState
+      || currentProcess.live_state
+      || currentRunnerControl.liveState
+      || currentRunnerControl.live_state
+      || state.runnerControl?.liveState
+      || state.runnerControl?.live_state;
+    return normalizeLiveState(liveState);
+  }
+
   function currentLiveRunLog(liveRun = currentLiveRun()) {
     const current = toObject(liveRun);
     return toObject(current.log);
@@ -10094,6 +10313,7 @@
     const liveRun = currentLiveRun();
     const control = currentLiveRunRunnerControl(liveRun);
     const liveStatus = currentLiveRunStatus(liveRun);
+    const liveState = currentLiveRunLiveState(liveRun);
     const liveProcess = toObject(liveRun.process);
     const display = runnerControlStateInfo(control);
     const messageTone = display.bannerTone;
@@ -10150,6 +10370,9 @@
           </div>
           <div class="runner-control__details">
             ${detailHTML}
+          </div>
+          <div style="margin-top:12px;">
+            ${runnerControlLiveStateChips(liveState)}
           </div>
           <div class="runner-control__chips">
             ${startOptionsChips}
@@ -13314,6 +13537,7 @@
     const control = state.runnerControl;
     const display = runnerControlStateInfo(control);
     const stopProgress = normalizeStopProgress(toObject(control.status).stopProgress);
+    const liveState = currentLiveRunLiveState();
     const timeoutActive = stopProgress.phase === 'timeout';
     const finalizedState = stopProgress.phase === 'finalized';
     const confirmation = runnerControlConfirmationPhrase(action);
@@ -13412,6 +13636,9 @@
             </div>
             <div class="runner-control__details" style="margin-top:12px;">
               ${detailHTML}
+            </div>
+            <div style="margin-top:12px;">
+              ${runnerControlLiveStateChips(liveState)}
             </div>
             ${stopProgressHTML ? `<div style="margin-top:12px;">${stopProgressHTML}</div>` : ''}
             ${startOptionsHTML}
