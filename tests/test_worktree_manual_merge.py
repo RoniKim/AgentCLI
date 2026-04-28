@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
 import sys
 import unittest
 import uuid
@@ -28,17 +30,31 @@ from agent_runner.gitops import (
 from agent_runner.utils import run_cmd
 
 
+def _rmtree_best_effort(path: Path) -> None:
+    def _clear_readonly(func, path_text, _exc_info):
+        try:
+            os.chmod(path_text, stat.S_IWRITE)
+            func(path_text)
+        except Exception:
+            pass
+
+    try:
+        shutil.rmtree(path, onerror=_clear_readonly)
+    except Exception:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 class WorktreeManualMergeTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.fixture_base = ROOT / ".tmp-worktree-manual-merge-tests"
-        self.fixture_base.mkdir(exist_ok=True)
-        self.fixture_root = self.fixture_base / f"{self._testMethodName}-{uuid.uuid4().hex}"
+        self.fixture_base = Path.home() / ".codex" / "memories" / "agentcli-wmm-tests"
+        self.fixture_base.mkdir(parents=True, exist_ok=True)
+        self.fixture_root = self.fixture_base / f"t-{uuid.uuid4().hex[:12]}"
         self.fixture_root.mkdir()
         self.repo = self.fixture_root / "repo"
         self.worktree = self.fixture_root / "worktree"
         self.patch_path = self.fixture_root / "worktree.patch"
         self.pending_path = self.fixture_root / WORKTREE_MERGE_PENDING
-        self.addCleanup(lambda: shutil.rmtree(self.fixture_root, ignore_errors=True))
+        self.addCleanup(lambda: _rmtree_best_effort(self.fixture_root))
 
     def _git(self, *args: str, cwd: Path | None = None) -> str:
         code, out = run_cmd(["git", *args], cwd=cwd or self.repo, timeout_sec=60)

@@ -244,6 +244,7 @@ class WebConsoleStaticTests(unittest.TestCase):
             "adaptMetrics",
             "adaptHistory",
             "adaptWorktree",
+            "timestampMs",
             "normalizeLiveStateKey",
             "liveStateKindLabel",
             "liveStateStatusLabel",
@@ -1323,6 +1324,10 @@ class WebConsoleStaticTests(unittest.TestCase):
 
         for literal in forbidden_literals:
             self.assertNotIn(literal, runtime_js)
+
+    def test_logs_view_uses_defined_toggle_label(self) -> None:
+        self.assertNotIn("button(logsAction", self.app_js)
+        self.assertIn("button(logsButtonLabel, 'toggle-logs', logsButtonClass, logsButtonAttrs)", self.app_js)
 
 
 if __name__ == "__main__":

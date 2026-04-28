@@ -2069,9 +2069,23 @@
     return `$${Number(value).toFixed(2)}`;
   }
 
+  function timestampMs(ts) {
+    if (ts == null || ts === '') return null;
+    const text = String(ts).trim();
+    const numeric = typeof ts === 'number' || /^[+-]?\d+(\.\d+)?$/.test(text);
+    if (numeric) {
+      const n = Number(ts);
+      if (!Number.isFinite(n)) return null;
+      return Math.abs(n) < 1000000000000 ? n * 1000 : n;
+    }
+    const parsed = Date.parse(text);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
   function fmtRelative(ts) {
-    if (!ts) return '--';
-    const diff = (nowMs() - Number(ts || 0)) / 1000;
+    const ms = timestampMs(ts);
+    if (ms == null) return '--';
+    const diff = Math.max(0, (nowMs() - ms) / 1000);
     if (diff < 60) return `${Math.floor(diff)}s ago`;
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
@@ -2079,8 +2093,9 @@
   }
 
   function fmtClock(ts) {
-    if (!ts) return '--';
-    return new Date(ts).toLocaleTimeString('en-GB', {
+    const ms = timestampMs(ts);
+    if (ms == null) return '--';
+    return new Date(ms).toLocaleTimeString('en-GB', {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
@@ -2088,16 +2103,18 @@
   }
 
   function fmtTime(ts) {
-    if (!ts) return '--';
-    return new Date(ts).toLocaleTimeString('en-GB', {
+    const ms = timestampMs(ts);
+    if (ms == null) return '--';
+    return new Date(ms).toLocaleTimeString('en-GB', {
       hour: '2-digit',
       minute: '2-digit',
     });
   }
 
   function fmtDateTime(ts) {
-    if (ts == null || ts === '' || Number.isNaN(Number(ts))) return '--';
-    return new Date(Number(ts) * 1000).toLocaleString('en-GB', {
+    const ms = timestampMs(ts);
+    if (ms == null) return '--';
+    return new Date(ms).toLocaleString('en-GB', {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
@@ -2188,12 +2205,12 @@
     );
     // quota unavailable
     if (!available) {
-      return `<span class="meter-chip meter-chip--unavailable" title="${escapeHTML(titleText)}">${escapeHTML(t('topbar.quotaUnavailable'))}</span>`;
+      return `<span class="meter-chip meter-chip--quota meter-chip--unavailable" title="${escapeHTML(titleText)}">${escapeHTML(t('topbar.quotaUnavailable'))}</span>`;
     }
     const quotaText = formatQuotaUsage(data);
     const quotaWidth = progressWidth(data.used);
     return `
-      <span class="meter-chip" title="${escapeHTML(titleText)}">
+      <span class="meter-chip meter-chip--quota" title="${escapeHTML(titleText)}">
         ${escapeHTML(t('topbar.quotaUsage'))} ${escapeHTML(quotaText)}
         <span class="meter" aria-hidden="true">
           <span class="meter__fill meter__fill--info" style="width:${escapeHTML(quotaWidth)}"></span>
@@ -10205,12 +10222,12 @@
         <span class="status-chip">${escapeHTML(elapsedLabel)} ${escapeHTML(elapsed)}</span>
       </div>
       <div class="topbar__actions">
-        <span class="status-chip ${snapshotTone}" title="${escapeHTML(snapshotDisplay.copy || snapshotDisplay.lastUpdatedLabel || '')}">
+        <span class="status-chip status-chip--snapshot ${snapshotTone}" title="${escapeHTML(snapshotDisplay.copy || snapshotDisplay.lastUpdatedLabel || '')}">
           <span class="dot" style="color: currentColor; background: currentColor;"></span>
           <span class="status-chip__label">${escapeHTML(snapshotDisplay.label)}</span>
           <span class="status-chip__meta">${escapeHTML(snapshotDisplay.lastUpdatedLabel)}</span>
         </span>
-        <span class="status-chip ${runnerChipTone}" title="${escapeHTML(runnerControlDisplay.copy || '')}">
+        <span class="status-chip status-chip--runner-control ${runnerChipTone}" title="${escapeHTML(runnerControlDisplay.copy || '')}">
           <span class="dot" style="color: currentColor; background: currentColor;"></span>
           ${escapeHTML(runnerControlDisplay.label)}
         </span>
@@ -10222,7 +10239,7 @@
         ${button(t('topbar.commandPalette'), 'open-palette', 'button--ghost', `aria-label="${escapeHTML(t('topbar.commandPaletteTitle'))}"`)}
         ${renderLocaleToggle()}
         ${quotaControl}
-        <span class="meter-chip ${state.activeRun.budgetAvailable ? '' : 'meter-chip--unavailable'}" title="${escapeHTML(t('dashboard.budget'))}">
+        <span class="meter-chip meter-chip--budget ${state.activeRun.budgetAvailable ? '' : 'meter-chip--unavailable'}" title="${escapeHTML(t('dashboard.budget'))}">
           ${escapeHTML(t('dashboard.budget').toLowerCase())} ${escapeHTML(budgetPct)}
           <span class="meter ${state.activeRun.budgetAvailable ? '' : 'meter--unavailable'}" aria-hidden="true"><span class="meter__fill ${state.activeRun.budgetAvailable ? 'meter__fill--warn' : 'meter__fill--muted'}" style="width:${escapeHTML(budgetWidth)}"></span></span>
         </span>
@@ -11905,7 +11922,7 @@
       t('logs.title'),
       `cycle_summary.log | ${escapeHTML(logsMode)}`,
       `
-        ${button(logsAction, 'toggle-logs', logsButtonClass)}
+        ${button(logsButtonLabel, 'toggle-logs', logsButtonClass, logsButtonAttrs)}
         ${button(t('common.openDashboard'), 'nav-dashboard', 'button--quiet')}
       `,
       body
