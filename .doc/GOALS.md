@@ -143,14 +143,14 @@
 - [x] Stop controls show phase-by-phase progress from request, stop file write, child termination, runner wait, final artifact collection, timeout, and finalized states.
 - [x] Stop timeout state stays visibly actionable in the browser, including whether the runner is still alive, which child PIDs remain tracked, and which files may still be locked.
 - [x] Browser restart/reload flows preserve intended run options instead of falling back to hidden defaults.
-- [ ] The browser can distinguish "runner process alive", "task backend alive", "tracked children alive", and "artifact writer still flushing" as separate states.
-- [ ] Runner control events are written to durable artifacts so shell, web, and remote-controller views agree after refresh or reconnect.
+- [x] The browser can distinguish "runner process alive", "task backend alive", "tracked children alive", and "artifact writer still flushing" as separate states.
+- [x] Runner control events are written to durable artifacts so shell, web, and remote-controller views agree after refresh or reconnect.
 
 ### P0-N. Real-Time Monitoring Completeness
 
 - [x] Active run state updates use one consistent polling or streaming model with backoff, reconnect, stale-data detection, and visible last-updated timestamps.
 - [x] Dashboard, Pipeline, Logs, Notifications, and Runner Controls consume the same normalized live-run contract instead of each reconstructing status independently.
-- [ ] A long-running PM/Dev/QA task shows elapsed time, last log line, latest backend event, and "no output for N minutes" warning without requiring terminal access.
+- [x] A long-running PM/Dev/QA task shows elapsed time, last log line, latest backend event, and "no output for N minutes" warning without requiring terminal access.
 - [x] Live logs preserve scroll position, selection, pause state, and filters across route changes and refreshes.
 - [ ] Log tailing can switch between `run.log`, `error.log`, `events.jsonl`, `cycle_summary.log`, and backend transcript sources when available.
 - [x] UI explicitly marks stale snapshots when the run directory, controller state, and process table disagree.
