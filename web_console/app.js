@@ -101,6 +101,7 @@
         ready: 'Ready',
         enabled: 'Enabled',
         disabled: 'Disabled',
+        available: 'available',
         unavailable: 'unavailable',
         cancel: 'Cancel',
         save: 'Save',
@@ -1423,6 +1424,8 @@
     filterWarn: 'WARN',
     filterErr: 'ERR',
     filterDebug: 'DEBUG',
+    backendTranscript: 'backend transcript',
+    noSourcesAvailable: 'No log sources available.',
   });
   Object.assign(LOCALE_TEXT.en.goals, {
     saveGoals: 'Save Goals',
@@ -1446,6 +1449,7 @@
     common: {
       ...LOCALE_TEXT.en.common,
       source: 'Source',
+      available: 'available',
       parsed: 'parsed',
       empty: 'empty',
       missing: 'missing',
@@ -1629,6 +1633,7 @@
     common: {
       ...LOCALE_TEXT.ko.common,
       source: '출처',
+      available: '사용 가능',
       parsed: '파싱됨',
       empty: '비어 있음',
       missing: '없음',
@@ -1849,6 +1854,8 @@
     filterWarn: '경고',
     filterErr: '오류',
     filterDebug: '디버그',
+    backendTranscript: '백엔드 트랜스크립트',
+    noSourcesAvailable: '사용 가능한 로그 소스가 없습니다.',
   });
   Object.assign(LOCALE_TEXT.ko.pipeline, {
     partialLifecycleRecords: '일부 라이프사이클 기록만 게시되었습니다.',
@@ -5479,10 +5486,22 @@
       }
       files[key] = redaction.active ? REDACTED_VALUE : text;
     }
+    const sources = normalizeLogTailSources(raw.sources || raw.source_catalog || raw.sourceCatalog || []);
+    const source = normalizeLogTailSource(raw.source || {});
+    const sourceId = toText(raw.source_id || raw.selected_source_id || raw.sourceId || source.id, '').trim();
+    const selection = resolveLogTailSourceSelection({
+      sources,
+      sourceId,
+      source,
+    });
     return {
       entries: items,
       tail: toText(raw.tail, ''),
       files,
+      source: selection.source,
+      sourceId: selection.sourceId,
+      selectedSourceId: selection.sourceId,
+      sources: selection.sources,
       state: buildSectionState('logs', items.length ? 'ready' : 'empty', items.length ? '' : fallbackSectionMessage('logs')),
     };
   }
@@ -5855,6 +5874,8 @@
       logTail: logs.tail,
       logTailSummary: logs.tail,
       logFiles: logs.files,
+      logTailSource: logs.source,
+      logTailSelectedSourceId: logs.selectedSourceId,
       configDefault: clone(configDefaults),
       config: clone(configValues),
       configMeta: clone(toObject(configContract.meta || {
@@ -5872,6 +5893,8 @@
       worktreeMerge: worktree,
       runnerControl,
       liveRun,
+      logSources: logs.sources,
+      logTailSourceId: logs.sourceId,
       redaction: {
         active: Boolean(redaction.active),
         placeholder: toText(redaction.placeholder, REDACTED_VALUE),
@@ -7064,6 +7087,13 @@
     createBlankLogTailState,
     createBlankSnapshotRefreshState,
     normalizeLogTailFilters,
+    normalizeLogTailSource,
+    normalizeLogTailSources,
+    resolveLogTailSourceSelection,
+    applyLogTailSourceSelection,
+    logTailSourceDisplayName,
+    logTailSourceAvailabilityLabel,
+    renderLogTailSourceSelector,
     buildLogTailQuery,
     buildLogTailRequestUrl,
     mergeLogTailEntries,
@@ -7087,6 +7117,7 @@
     applyLogTailPayload,
     toggleLogTailSelection,
     clearLogTailSelection,
+    updateLogTailSource,
     updateLogTailFilter,
     inspectLogTailState,
     seedLogTailState,
@@ -7172,6 +7203,25 @@
     state.logs = toArray(next.logs).slice(-MAX_LOG_ROWS);
     state.logTailSummary = toText(next.logTailSummary || next.logTail, '');
     state.logFiles = toObject(next.logFiles);
+    const nextLogTailSources = normalizeLogTailSources(next.logSources);
+    const nextLogTailSource = normalizeLogTailSource(next.logTailSource);
+    const nextLogTailSourceId = toText(next.logTailSelectedSourceId || next.logTailSourceId || nextLogTailSource.id || '', '').trim();
+    const tailState = ensureLogTailState();
+    const sourceContextChanged = previousSourceMode !== state.sourceMode || previousLatestRunDir !== state.latestRunDir;
+    tailState.sources = nextLogTailSources;
+    if (sourceContextChanged && !nextLogTailSources.length && !nextLogTailSourceId && !nextLogTailSource.id && !nextLogTailSource.path && !nextLogTailSource.label) {
+      tailState.sourceId = '';
+      tailState.source = normalizeLogTailSource({});
+    }
+    applyLogTailSourceSelection(
+      tailState,
+      resolveLogTailSourceSelection({
+        ...tailState,
+        sources: nextLogTailSources,
+        sourceId: nextLogTailSourceId || tailState.sourceId || '',
+        source: nextLogTailSource,
+      })
+    );
     state.configDefault = deepMerge(clone(next.configDefault || {}), null);
     state.config = deepMerge(clone(next.config || {}), null);
     state.configMeta = toObject(next.configMeta);
@@ -10749,11 +10799,19 @@
       cursor: 0,
       nextCursor: 0,
       malformedLines: 0,
+      sourceId: '',
       source: {
+        id: '',
+        label: '',
         path: '',
         name: '',
         exists: false,
+        available: false,
+        selected: false,
+        kind: 'log',
+        unavailableReason: 'missing',
       },
+      sources: [],
       filters: {
         level: 'all',
         stage: '',
@@ -10803,6 +10861,14 @@
     if (!Array.isArray(state.logTail.selected)) {
       state.logTail.selected = [];
     }
+    if (!Array.isArray(state.logTail.sources)) {
+      state.logTail.sources = [];
+    }
+    if (!state.logTail.source || typeof state.logTail.source !== 'object') {
+      state.logTail.source = {};
+    }
+    const normalizedSelection = resolveLogTailSourceSelection(state.logTail);
+    applyLogTailSourceSelection(state.logTail, normalizedSelection);
     return state.logTail;
   }
 
@@ -10825,6 +10891,141 @@
     };
   }
 
+  function normalizeLogTailSource(source = {}) {
+    const raw = toObject(source);
+    const path = toText(raw.path || raw.source_path || raw.sourcePath, '').trim();
+    const name = toText(raw.name || raw.file_name || raw.fileName || tailSourceName(path), '').trim();
+    const label = toText(raw.label || raw.title || raw.displayName || raw.display_name || name || path || '', '').trim();
+    const id = toText(raw.id || raw.sourceId || raw.source_id || raw.key || name || label || path, '').trim();
+    const kind = toText(raw.kind || raw.type || 'log', 'log').trim().toLowerCase() || 'log';
+    const exists = Boolean(raw.exists ?? false);
+    const available = Boolean(raw.available ?? exists);
+    const selected = Boolean(raw.selected);
+    const unavailableReason = toText(raw.unavailableReason || raw.unavailable_reason || raw.reason || '', '').trim().toLowerCase();
+    return {
+      id,
+      label: label || (kind === 'transcript' ? t('logs.backendTranscript') : name || id),
+      name: name || (path ? tailSourceName(path) : ''),
+      path,
+      exists,
+      available,
+      selected,
+      kind,
+      unavailableReason,
+    };
+  }
+
+  function normalizeLogTailSources(sources = []) {
+    return toArray(sources)
+      .map((source) => normalizeLogTailSource(source))
+      .filter((source) => Boolean(source.id || source.path || source.label));
+  }
+
+  function resolveLogTailSourceSelection(tail = {}) {
+    const model = toObject(tail);
+    const sources = normalizeLogTailSources(model.sources);
+    const currentSource = normalizeLogTailSource(model.source);
+    const preferredId = toText(model.sourceId || currentSource.id || '', '').trim();
+    let selected = preferredId ? sources.find((source) => source.id === preferredId) : null;
+    if (!selected) {
+      selected = sources.find((source) => source.selected) || sources.find((source) => source.available) || sources[0] || currentSource;
+    }
+    const selectedId = toText(selected.id || currentSource.id || '', '').trim();
+    const selectedSource = normalizeLogTailSource(selected);
+    const selectedSources = sources.map((source) => ({
+      ...source,
+      selected: selectedId ? source.id === selectedId : Boolean(source.selected),
+    }));
+    if (selectedId && selectedSource.id !== selectedId) {
+      selectedSource.id = selectedId;
+    }
+    selectedSource.selected = Boolean(selectedId);
+    return {
+      sourceId: selectedId,
+      source: selectedSource,
+      sources: selectedSources.length ? selectedSources : (selectedId ? [selectedSource] : []),
+    };
+  }
+
+  function applyLogTailSourceSelection(tail, selection = null) {
+    const model = toObject(tail);
+    const resolved = selection && typeof selection === 'object' ? selection : resolveLogTailSourceSelection(model);
+    model.sources = normalizeLogTailSources(resolved.sources);
+    model.sourceId = toText(resolved.sourceId || '', '').trim();
+    model.source = normalizeLogTailSource(resolved.source);
+    if (!model.source.id && model.sourceId) {
+      model.source.id = model.sourceId;
+    }
+    model.source.selected = Boolean(model.sourceId);
+    return model;
+  }
+
+  function logTailSourceDisplayName(source) {
+    const model = normalizeLogTailSource(source);
+    return model.label || model.name || model.path || t('logs.activeRunLog');
+  }
+
+  function logTailSourceAvailabilityLabel(source) {
+    const model = normalizeLogTailSource(source);
+    if (model.available) {
+      return t('common.available');
+    }
+    if (model.kind === 'transcript') {
+      return t('common.unavailable');
+    }
+    return t('common.missing');
+  }
+
+  function renderLogTailSourceSelector(tail) {
+    const model = toObject(tail);
+    const selection = resolveLogTailSourceSelection(model);
+    const sources = toArray(selection.sources);
+    if (!sources.length) {
+      return `
+        <div class="log-tail-field log-tail-field--sources">
+          <span class="log-tail-field__label">${escapeHTML(t('common.source'))}</span>
+          <div class="summary-note">${escapeHTML(t('logs.noSourcesAvailable'))}</div>
+        </div>
+      `;
+    }
+    const currentId = toText(selection.sourceId, '');
+    return `
+      <div class="log-tail-field log-tail-field--sources">
+        <span class="log-tail-field__label">${escapeHTML(t('common.source'))}</span>
+        <div class="log-tail-sources">
+          ${sources
+            .map((source) => {
+              const sourceLabel = logTailSourceDisplayName(source);
+              const sourceMeta = logTailSourceAvailabilityLabel(source);
+              const active = currentId && source.id === currentId;
+              const disabled = !source.available ? 'disabled' : '';
+              const titleParts = [sourceLabel];
+              if (source.path) {
+                titleParts.push(source.path);
+              }
+              if (sourceMeta) {
+                titleParts.push(sourceMeta);
+              }
+              return `
+                <button
+                  type="button"
+                  class="log-tail-source ${active ? 'log-tail-source--active' : ''} ${!source.available ? 'log-tail-source--unavailable' : ''}"
+                  data-log-source="${escapeHTML(source.id)}"
+                  aria-pressed="${active ? 'true' : 'false'}"
+                  ${disabled}
+                  title="${escapeHTML(titleParts.join(' | '))}"
+                >
+                  <span class="log-tail-source__label">${escapeHTML(sourceLabel)}</span>
+                  <span class="log-tail-source__meta">${escapeHTML(sourceMeta)}</span>
+                </button>
+              `;
+            })
+            .join('')}
+        </div>
+      </div>
+    `;
+  }
+
   function logFilterLabel(level) {
     const normalized = toText(level, 'all').toLowerCase();
     const labels = {
@@ -10844,6 +11045,10 @@
     const cursor = toMaybeNumber(options.cursor);
     if (cursor != null && cursor > 0) {
       query.cursor = cursor;
+    }
+    const sourceId = toText(options.sourceId || options.source || '', '').trim();
+    if (sourceId) {
+      query.source = sourceId;
     }
     const normalized = normalizeLogTailFilters(filters);
     if (normalized.level && !['all', 'any', '*'].includes(normalized.level)) {
@@ -10931,8 +11136,10 @@
   function buildLogTailDownloadArtifact(tail, context = {}) {
     const model = toObject(tail);
     const filters = normalizeLogTailFilters(model.filters);
-    const source = toObject(model.source);
-    const sourceName = redactionAwareText(tailSourceName(source.path || source.name || ''), t('logs.activeRunLog'));
+    const selection = resolveLogTailSourceSelection(model);
+    const source = normalizeLogTailSource(selection.source);
+    const sourceName = redactionAwareText(logTailSourceDisplayName(source), t('logs.activeRunLog'));
+    const sourceMeta = source.available ? '' : logTailSourceAvailabilityLabel(source);
     const runLabel = toText(context.runId || context.latestRunDir || model.runDir || 'agentcli', 'agentcli')
       .replace(/[^a-z0-9._-]+/gi, '_')
       .replace(/^_+|_+$/g, '') || 'agentcli';
@@ -10950,9 +11157,10 @@
       filterParts.push(`search=${filters.search}`);
     }
     const sourceLabel = redactionAwareText(source.path || sourceName || t('common.unknown'), t('logs.activeRunLog'));
+    const sourceLine = sourceMeta ? `${sourceLabel} (${sourceMeta})` : sourceLabel;
     const lines = [
       `# ${t('logs.exportHeader')}`,
-      `# ${t('logs.exportSource')}: ${sourceLabel}`,
+      `# ${t('logs.exportSource')}: ${sourceLine}`,
       `# ${t('logs.exportCursor')}: ${toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0}`,
       `# ${t('logs.exportFilters')}: ${filterParts.length ? filterParts.join(' | ') : t('common.none')}`,
       '',
@@ -10971,27 +11179,19 @@
 
   function describeLogTailState(tail) {
     const model = toObject(tail);
-    const paused = Boolean(model.paused);
     const status = toText(model.status, 'loading');
+    const paused = Boolean(model.paused);
     const entries = toArray(model.entries);
-    const source = toObject(model.source);
-    const sourceName = redactionAwareText(tailSourceName(source.path || source.name || ''), t('logs.activeRunLog')) || t('logs.activeRunLog');
+    const selection = resolveLogTailSourceSelection(model);
+    const source = normalizeLogTailSource(selection.source);
+    const sourceName = redactionAwareText(logTailSourceDisplayName(source), t('logs.activeRunLog')) || t('logs.activeRunLog');
+    const sourceMeta = source.available ? '' : logTailSourceAvailabilityLabel(source);
     const malformedLines = toNumber(model.malformedLines, 0);
-    if (paused) {
-      const cursor = toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0;
-      return {
-        tone: 'stopped',
-        title: t('logs.liveTailPaused'),
-        copy: `${sourceName} ${t('logs.pauseLiveTail').toLowerCase()}. ${t('logs.resumeLiveTail')} ${t('logs.cursor')} ${cursor}.`,
-        badge: 'paused',
-        state: 'paused',
-      };
-    }
     if (status === 'missing_file') {
       return {
         tone: 'err',
         title: t('logs.logFileMissing'),
-        copy: `${t('common.loading')} ${sourceName}.`,
+        copy: sourceMeta ? `${sourceName} ${sourceMeta}.` : `${t('common.loading')} ${sourceName}.`,
         badge: 'missing_file',
         state: 'missing_file',
       };
@@ -11005,11 +11205,21 @@
         state: 'read_error',
       };
     }
+    if (paused) {
+      const cursor = toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0;
+      return {
+        tone: 'stopped',
+        title: t('logs.liveTailPaused'),
+        copy: `${sourceName} ${t('logs.pauseLiveTail').toLowerCase()}. ${t('logs.resumeLiveTail')} ${t('logs.cursor')} ${cursor}.${sourceMeta ? ` ${sourceMeta}.` : ''}`,
+        badge: 'paused',
+        state: 'paused',
+      };
+    }
     if (status === 'empty') {
       return {
         tone: 'idle',
         title: t('logs.noMatchingLogLines'),
-        copy: source.exists ? t('logs.noMatchCurrentFilter') : `${t('logs.logFileMissing')}: ${sourceName}`,
+        copy: source.exists ? t('logs.noMatchCurrentFilter') : `${t('logs.logFileMissing')}: ${sourceName}${sourceMeta ? ` (${sourceMeta})` : ''}`,
         badge: 'empty',
         state: 'empty',
       };
@@ -11028,7 +11238,7 @@
       return {
         tone: 'running',
         title: t('logs.liveTailActive'),
-        copy: `${sourceName} ${t('logs.liveTailActive').toLowerCase()} ${t('logs.cursor')} ${cursor}.`,
+        copy: `${sourceName} ${t('logs.liveTailActive').toLowerCase()} ${t('logs.cursor')} ${cursor}.${sourceMeta ? ` ${sourceMeta}.` : ''}`,
         badge: 'live',
         state: 'live',
       };
@@ -11036,7 +11246,7 @@
     return {
       tone: 'info',
       title: t('logs.loadingActiveRunLog'),
-      copy: `${t('common.loading')} ${sourceName}.`,
+      copy: `${t('common.loading')} ${sourceName}.${sourceMeta ? ` ${sourceMeta}.` : ''}`,
       badge: 'loading',
       state: 'loading',
     };
@@ -11053,15 +11263,15 @@
     const busy = loadingState;
     let stateLabel = t('logs.liveTail');
     let statusClass = 'status-chip status-chip--running';
-    if (paused) {
-      stateLabel = t('logs.liveTailPaused');
-      statusClass = 'status-chip status-chip--paused';
-    } else if (status === 'missing_file') {
+    if (status === 'missing_file') {
       stateLabel = t('logs.logFileMissing');
       statusClass = 'status-chip status-chip--warn';
     } else if (status === 'read_error') {
       stateLabel = t('logs.logReadError');
       statusClass = 'status-chip status-chip--err';
+    } else if (paused) {
+      stateLabel = t('logs.liveTailPaused');
+      statusClass = 'status-chip status-chip--paused';
     } else if (status === 'empty') {
       stateLabel = t('logs.emptyState');
       statusClass = 'status-chip status-chip--idle';
@@ -11100,24 +11310,26 @@
   }
 
   function renderLogTailFilters(tail) {
-    const filters = normalizeLogTailFilters(toObject(tail).filters);
-    const control = describeLogTailControl(tail);
+    const model = toObject(tail);
+    const filters = normalizeLogTailFilters(model.filters);
+    const control = describeLogTailControl(model);
     const levels = ['all', 'info', 'warn', 'err', 'debug'];
-    const selectedCount = toArray(tail?.selected).length;
+    const selectedCount = toArray(model.selected).length;
     return `
       <div class="logs-toolbar log-tail-toolbar">
-        <div class="filters log-tail-levels">
-          ${levels
-            .map((level) => `
-              <button
-                type="button"
-                class="filter-chip ${filters.level === level ? 'filter-chip--active' : ''}"
-                data-log-level="${escapeHTML(level)}"
-              >${escapeHTML(logFilterLabel(level))}</button>
-            `)
-            .join('')}
-        </div>
         <div class="log-tail-fields">
+          ${renderLogTailSourceSelector(model)}
+          <div class="filters log-tail-levels">
+            ${levels
+              .map((level) => `
+                <button
+                  type="button"
+                  class="filter-chip ${filters.level === level ? 'filter-chip--active' : ''}"
+                  data-log-level="${escapeHTML(level)}"
+                >${escapeHTML(logFilterLabel(level))}</button>
+              `)
+              .join('')}
+          </div>
           <label class="log-tail-field">
             <span class="log-tail-field__label">${escapeHTML(t('logs.stage'))}</span>
             <input
@@ -11415,8 +11627,9 @@
     state.logsPaused = Boolean(paused);
   }
 
-  function resetServerLogTailState() {
+  function resetServerLogTailState(options = {}) {
     const tail = ensureLogTailState();
+    const preserveSource = options.preserveSource !== false;
     tail.entries = [];
     tail.cursor = 0;
     tail.nextCursor = 0;
@@ -11424,11 +11637,21 @@
     tail.loading = false;
     tail.error = '';
     tail.malformedLines = 0;
-    tail.source = {
-      path: '',
-      name: '',
-      exists: false,
-    };
+    if (!preserveSource) {
+      tail.sourceId = '';
+      tail.source = {
+        id: '',
+        label: '',
+        path: '',
+        name: '',
+        exists: false,
+        available: false,
+        selected: false,
+        kind: 'log',
+        unavailableReason: 'missing',
+      };
+      tail.sources = [];
+    }
     tail.selected = [];
     tail.requestSeq = toNumber(tail.requestSeq, 0) + 1;
   }
@@ -11455,6 +11678,7 @@
     const queryUrl = buildLogTailRequestUrl(tail.filters, {
       cursor: reset ? null : tail.nextCursor || tail.cursor,
       maxLines: MAX_LOG_ROWS,
+      sourceId: tail.sourceId || toObject(tail.source).id || '',
     });
 
     try {
@@ -11530,22 +11754,22 @@
     tail.requestSeq = toNumber(tail.requestSeq, 0) + 1;
   }
 
-    function syncLogTailStreaming(options = {}) {
-      if (state.sourceMode === 'api') {
-        stopLiveLogStream();
-        if (state.activeView === 'logs' && !isLiveTailPaused()) {
-          return startServerLogTail({ reset: Boolean(options.reset) });
-        }
-        if (state.activeView === 'logs' && Boolean(options.reset)) {
-          return refreshServerLogTail({ reset: true, silent: true }).then(() => {
-            if (state.activeView === 'logs') {
-              renderShell({ preserveScroll: true });
-            }
-          });
-        }
-        stopServerLogTail();
-        return false;
+  function syncLogTailStreaming(options = {}) {
+    if (state.sourceMode === 'api') {
+      stopLiveLogStream();
+      if (state.activeView === 'logs' && !isLiveTailPaused()) {
+        return startServerLogTail({ reset: Boolean(options.reset) });
       }
+      if (state.activeView === 'logs' && Boolean(options.reset)) {
+        return refreshServerLogTail({ reset: true, silent: true }).then(() => {
+          if (state.activeView === 'logs') {
+            renderShell({ preserveScroll: true });
+          }
+        });
+      }
+      stopServerLogTail();
+      return false;
+    }
 
     stopServerLogTail();
     if (state.sourceMode === 'fallback' && !state.logsPaused) {
@@ -11561,10 +11785,23 @@
     const response = toObject(payload);
     const reset = Boolean(options.reset);
     const incomingEntries = toArray(response.entries).map(normalizeLogEntry).slice(-MAX_LOG_ROWS);
-    const existingEntries = reset ? [] : toArray(tail.entries);
+    const responseSource = normalizeLogTailSource(response.source);
+    const responseSources = normalizeLogTailSources(response.sources);
+    const previousSources = normalizeLogTailSources(tail.sources);
+    const previousSourceId = toText(tail.sourceId || toObject(tail.source).id || '', '').trim();
+    const responseSourceId = toText(response.source_id || response.selected_source_id || responseSource.id || '', '').trim();
+    const selection = resolveLogTailSourceSelection({
+      ...tail,
+      sources: responseSources.length ? responseSources : previousSources,
+      sourceId: responseSourceId || previousSourceId,
+      source: responseSource.id ? responseSource : tail.source,
+    });
+    const sourceChanged = Boolean(previousSourceId && selection.sourceId && selection.sourceId !== previousSourceId);
+    const clearSelection = reset || sourceChanged;
+    const existingEntries = clearSelection ? [] : toArray(tail.entries);
     const nextEntries = incomingEntries.length ? mergeLogTailEntries(existingEntries, incomingEntries) : existingEntries.slice(-MAX_LOG_ROWS);
-    const source = toObject(response.source);
-    const selected = reset
+    const source = normalizeLogTailSource(selection.source);
+    const selected = clearSelection
       ? []
       : toArray(tail.selected).filter((value) => nextEntries.some((entry) => String(toMaybeNumber(entry.line_number ?? entry.cursor, null)) === String(toMaybeNumber(value, null))));
     const nextCursor = toMaybeNumber(response.next_cursor, tail.nextCursor || tail.cursor || 0);
@@ -11579,11 +11816,9 @@
       cursor: cursor == null ? 0 : cursor,
       nextCursor: nextCursor == null ? 0 : nextCursor,
       malformedLines: toNumber(response.malformed_lines, 0),
-      source: {
-        path: toText(source.path || response.source_path || response.source_file, ''),
-        name: toText(source.name || tailSourceName(source.path || response.source_path || response.source_file || ''), ''),
-        exists: Boolean(source.exists ?? response.source_exists ?? response.source?.exists ?? false),
-      },
+      sourceId: selection.sourceId,
+      source,
+      sources: selection.sources,
       selected,
       lastUpdatedAt: nowMs(),
     };
@@ -11610,6 +11845,28 @@
     tail.selected = [];
   }
 
+  function updateLogTailSource(sourceId) {
+    const tail = ensureLogTailState();
+    const normalizedSourceId = toText(sourceId, '').trim();
+    const selection = resolveLogTailSourceSelection({
+      ...tail,
+      sourceId: normalizedSourceId,
+    });
+    const nextSourceId = selection.sourceId;
+    if (!nextSourceId || nextSourceId === toText(tail.sourceId || tail.source?.id || '', '').trim()) {
+      return false;
+    }
+    clearLogTailSelection();
+    resetServerLogTailState();
+    tail.sourceId = nextSourceId;
+    applyLogTailSourceSelection(tail, selection);
+    if (state.sourceMode === 'api') {
+      return syncLogTailStreaming({ reset: true, silent: false });
+    }
+    renderShell({ preserveScroll: true });
+    return false;
+  }
+
   function updateLogTailFilter(field, rawValue) {
     const tail = ensureLogTailState();
     const next = {
@@ -11632,7 +11889,8 @@
 
   function inspectLogTailState() {
     const tail = ensureLogTailState();
-    const source = toObject(tail.source);
+    const selection = resolveLogTailSourceSelection(tail);
+    const source = normalizeLogTailSource(selection.source);
     return {
       activeView: state.activeView,
       sourceMode: state.sourceMode,
@@ -11644,13 +11902,21 @@
       requestSeq: toNumber(tail.requestSeq, 0),
       timerActive: Boolean(tail.timer),
       selected: toArray(tail.selected),
+      sourceId: toText(selection.sourceId, ''),
       filters: normalizeLogTailFilters(tail.filters),
       entries: toArray(tail.entries).map(normalizeLogEntry),
       source: {
+        id: toText(source.id, ''),
+        label: toText(source.label, ''),
         path: toText(source.path, ''),
         name: toText(source.name, ''),
         exists: Boolean(source.exists),
+        available: Boolean(source.available),
+        selected: Boolean(source.selected),
+        kind: toText(source.kind, 'log'),
+        unavailableReason: toText(source.unavailableReason, ''),
       },
+      sources: normalizeLogTailSources(tail.sources),
       error: toText(tail.error, ''),
       malformedLines: toNumber(tail.malformedLines, 0),
       summary: toText(state.logTailSummary, ''),
@@ -11666,12 +11932,11 @@
       .map((value) => toMaybeNumber(value, null))
       .filter((value) => value != null)
       .map((value) => Number(value));
-    const source = toObject(tail.source);
-    tail.source = {
-      path: toText(source.path, ''),
-      name: toText(source.name, ''),
-      exists: Boolean(source.exists),
-    };
+    tail.sources = normalizeLogTailSources(tail.sources);
+    const source = normalizeLogTailSource(tail.source);
+    tail.source = source;
+    tail.sourceId = toText(tail.sourceId || source.id, '').trim();
+    applyLogTailSourceSelection(tail, resolveLogTailSourceSelection(tail));
     tail.paused = Boolean(tail.paused);
     tail.loading = Boolean(tail.loading);
     tail.malformedLines = toNumber(tail.malformedLines, 0);
@@ -11861,9 +12126,9 @@
       const selected = new Set(toArray(tail.selected).map((value) => String(toMaybeNumber(value, null))).filter(Boolean));
       const banner = describeLogTailState(tail);
       const liveLogSource = toObject(liveLog.source);
-      const liveLogCursor = toMaybeNumber(liveLog.nextCursor ?? liveLog.cursor ?? tail.nextCursor ?? tail.cursor, 0) ?? 0;
+      const liveLogCursor = toMaybeNumber(tail.nextCursor ?? tail.cursor ?? liveLog.nextCursor ?? liveLog.cursor, 0) ?? 0;
       const sourceName = redactionAwareText(
-        tailSourceName(tail.source?.path || tail.source?.name || liveLogSource.path || liveLogSource.name || ''),
+        logTailSourceDisplayName(tail.source?.id ? tail.source : liveLogSource),
         t('logs.activeRunLog'),
       ) || t('logs.activeRunLog');
       const body = `
@@ -15867,6 +16132,12 @@
     if (logSelect) {
       toggleLogTailSelection(logSelect.dataset.logSelect);
       renderShell({ preserveScroll: true });
+      return;
+    }
+
+    const logSource = event.target.closest('[data-log-source]');
+    if (logSource) {
+      updateLogTailSource(logSource.dataset.logSource);
       return;
     }
 

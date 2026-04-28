@@ -1099,6 +1099,10 @@ a {
   min-width: 0;
 }
 
+.log-tail-field--sources {
+  grid-column: 1 / -1;
+}
+
 .log-tail-field--wide {
   min-width: 0;
   grid-column: span 2;
@@ -1134,6 +1138,63 @@ a {
 .log-tail-input:focus {
   outline: 1px solid rgba(126, 227, 138, 0.42);
   outline-offset: 1px;
+}
+
+.log-tail-sources {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.log-tail-source {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 7px 10px 8px;
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius-1);
+  background: var(--bg);
+  color: var(--text);
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.25;
+}
+
+.log-tail-source:hover,
+.log-tail-source:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(126, 227, 138, 0.06);
+  outline: none;
+}
+
+.log-tail-source--active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(126, 227, 138, 0.1);
+}
+
+.log-tail-source--unavailable {
+  opacity: 0.72;
+}
+
+.log-tail-source:disabled {
+  cursor: not-allowed;
+}
+
+.log-tail-source__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.log-tail-source__meta {
+  color: var(--text-sub);
+  font-size: 10.5px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
 }
 
 .log-tail-actions {

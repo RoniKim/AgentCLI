@@ -926,6 +926,20 @@ def _redact_web_log_payload(payload: dict[str, Any]) -> dict[str, Any]:
         if source_copy.get("name") not in (None, "", False):
             source_copy["name"] = REDACTED_VALUE
         redacted["source"] = source_copy
+    sources = redacted.get("sources")
+    if isinstance(sources, list):
+        redacted_sources: list[dict[str, Any] | Any] = []
+        for item in sources:
+            if not isinstance(item, dict):
+                redacted_sources.append(item)
+                continue
+            item_copy = deepcopy(item)
+            if item_copy.get("path") not in (None, "", False):
+                item_copy["path"] = REDACTED_VALUE
+            if item_copy.get("name") not in (None, "", False):
+                item_copy["name"] = REDACTED_VALUE
+            redacted_sources.append(item_copy)
+        redacted["sources"] = redacted_sources
     redacted["redaction"] = _web_redaction_meta(
         "entries.msg",
         "entries.message",
@@ -944,6 +958,8 @@ def _redact_web_log_payload(payload: dict[str, Any]) -> dict[str, Any]:
         *redaction_fields,
         "source.path",
         "source.name",
+        "sources.path",
+        "sources.name",
         "source_file",
         "source_path",
         "error",
@@ -4319,27 +4335,61 @@ def _normalize_log_tail_level(value: Any) -> str:
     return level
 
 
-def _log_tail_source_candidates(run_dir: Path | None) -> list[Path]:
+def _log_tail_source_catalog(run_dir: Path | None) -> list[dict[str, Any]]:
     if run_dir is None:
         return []
-    return [
-        run_dir / "metrics.jsonl",
-        run_dir / "logs" / "events.jsonl",
-        run_dir / "logs" / "run.log",
-    ]
+    sources: list[dict[str, Any]] = []
 
-
-def _resolve_log_tail_source(run_dir: Path | None) -> Path | None:
-    candidates = _log_tail_source_candidates(run_dir)
-    if not candidates:
-        return None
-    for candidate in candidates:
+    def add(source_id: str, relative_path: str, label: str, *, kind: str = "log") -> None:
+        source_path = run_dir / relative_path
+        exists = False
         try:
-            if candidate.exists() and candidate.is_file():
-                return candidate
+            exists = source_path.exists() and source_path.is_file()
         except OSError:
-            continue
-    return candidates[0]
+            exists = False
+        sources.append(
+            {
+                "id": source_id,
+                "label": label,
+                "name": source_path.name,
+                "path": source_path.as_posix(),
+                "exists": exists,
+                "available": exists,
+                "kind": kind,
+                "selected": False,
+                "unavailable_reason": "" if exists else "missing",
+            }
+        )
+
+    add("run_log", "logs/run.log", "run.log")
+    add("error_log", "logs/error.log", "error.log")
+    add("events_jsonl", "logs/events.jsonl", "events.jsonl")
+    add("cycle_summary", "cycle_summary.log", "cycle_summary.log")
+    add("backend_transcript", "telegram_runner_subprocess.log", "backend transcript", kind="transcript")
+    return sources
+
+
+def _resolve_log_tail_source_record(run_dir: Path | None, source_id: str = "") -> dict[str, Any] | None:
+    catalog = _log_tail_source_catalog(run_dir)
+    if not catalog:
+        return None
+    normalized_source_id = str(source_id or "").strip()
+    if normalized_source_id:
+        for source in catalog:
+            if str(source.get("id") or "").strip() == normalized_source_id:
+                return source
+    for source in catalog:
+        if bool(source.get("available")):
+            return source
+    return catalog[0]
+
+
+def _resolve_log_tail_source(run_dir: Path | None, source_id: str = "") -> Path | None:
+    source = _resolve_log_tail_source_record(run_dir, source_id)
+    if not source:
+        return None
+    source_path = str(source.get("path") or "").strip()
+    return Path(source_path) if source_path else None
 
 
 def _log_tail_entry_search_text(entry: dict[str, Any]) -> str:
@@ -4504,6 +4554,8 @@ def _log_tail_entry_matches(
 def _build_log_tail_payload(
     source_path: Path,
     *,
+    source: dict[str, Any] | None = None,
+    sources: list[dict[str, Any]] | None = None,
     cursor: int | None,
     max_lines: int,
     level: str = "",
@@ -4521,7 +4573,33 @@ def _build_log_tail_payload(
     cursor_mode = cursor is not None
     start_cursor = max(0, int(cursor or 0))
 
+    source_payload = deepcopy(source) if isinstance(source, dict) else {}
+    source_payload["path"] = source_file.as_posix()
+    source_payload["name"] = source_file.name
+    source_payload["exists"] = False
+    source_payload["available"] = False
+    source_payload["selected"] = True
+    if not source_payload.get("label"):
+        source_payload["label"] = source_file.name
+    if source_payload.get("kind") is None:
+        source_payload["kind"] = "log"
+
+    source_catalog: list[dict[str, Any]] = []
+    if isinstance(sources, list):
+        for item in sources:
+            if not isinstance(item, dict):
+                continue
+            item_copy = deepcopy(item)
+            item_copy["selected"] = bool(str(item_copy.get("id") or "").strip() == str(source_payload.get("id") or "").strip())
+            source_catalog.append(item_copy)
+    if not source_catalog and source_payload.get("id"):
+        source_catalog.append(deepcopy(source_payload))
+
     try:
+        source_exists = source_file.exists() and source_file.is_file()
+        source_payload["exists"] = source_exists
+        source_payload["available"] = source_exists
+        source_payload["unavailable_reason"] = "" if source_exists else str(source_payload.get("unavailable_reason") or "missing").strip() or "missing"
         with source_file.open("r", encoding="utf-8", errors="replace") as handle:
             if cursor_mode:
                 for line_number, raw_line in enumerate(handle, start=1):
@@ -4559,11 +4637,10 @@ def _build_log_tail_payload(
             "next_cursor": 0,
             "source_file": source_file.as_posix(),
             "source_path": source_file.as_posix(),
-            "source": {
-                "path": source_file.as_posix(),
-                "name": source_file.name,
-                "exists": False,
-            },
+            "source": source_payload,
+            "source_id": str(source_payload.get("id") or ""),
+            "selected_source_id": str(source_payload.get("id") or ""),
+            "sources": source_catalog,
             "malformed_lines": 0,
         }
     except Exception as ex:
@@ -4574,11 +4651,10 @@ def _build_log_tail_payload(
             "next_cursor": start_cursor,
             "source_file": source_file.as_posix(),
             "source_path": source_file.as_posix(),
-            "source": {
-                "path": source_file.as_posix(),
-                "name": source_file.name,
-                "exists": source_file.exists(),
-            },
+            "source": source_payload,
+            "source_id": str(source_payload.get("id") or ""),
+            "selected_source_id": str(source_payload.get("id") or ""),
+            "sources": source_catalog,
             "error": str(ex).strip() or ex.__class__.__name__,
             "malformed_lines": malformed_count,
         }
@@ -4597,11 +4673,10 @@ def _build_log_tail_payload(
         "next_cursor": next_cursor if cursor_mode else total_lines,
         "source_file": source_file.as_posix(),
         "source_path": source_file.as_posix(),
-        "source": {
-            "path": source_file.as_posix(),
-            "name": source_file.name,
-            "exists": source_file.exists(),
-        },
+        "source": source_payload,
+        "source_id": str(source_payload.get("id") or ""),
+        "selected_source_id": str(source_payload.get("id") or ""),
+        "sources": source_catalog,
         "cursor": start_cursor if cursor_mode else None,
         "max_lines": max_lines,
         "malformed_lines": malformed_count,
@@ -6079,11 +6154,10 @@ def build_snapshot(
     worktree = _build_worktree_payload(repo_root, latest_run_dir, branch=branch)
     worktree_diagnostics = scan_worktree_diagnostics(repo_root)
     log_tail = _tail_text((latest_run_dir / "cycle_summary.log") if latest_run_dir else Path(""), 80)
-    log_files = {
-        "cycle_summary": (latest_run_dir / "cycle_summary.log").as_posix() if latest_run_dir else "",
-        "run_log": (latest_run_dir / "logs" / "run.log").as_posix() if latest_run_dir else "",
-        "metrics": (latest_run_dir / "metrics.jsonl").as_posix() if latest_run_dir else "",
-    }
+    log_source_catalog = _log_tail_source_catalog(latest_run_dir)
+    log_files = {str(source.get("id") or "").strip(): str(source.get("path") or "") for source in log_source_catalog if str(source.get("id") or "").strip()}
+    if latest_run_dir:
+        log_files["metrics"] = (latest_run_dir / "metrics.jsonl").as_posix()
     live_state = _build_live_state_payload(
         controller_status,
         progress=progress,
@@ -6152,27 +6226,42 @@ def build_snapshot(
     runner_control = _web_apply_redaction(runner_control, active=redaction_active, redactor=lambda value: _redact_web_runner_control(value, redact_start_options=True))
     log_summary_payload: dict[str, Any] = {
         "source": {
+            "id": "",
+            "label": "",
             "path": "",
             "name": "",
             "exists": False,
+            "available": False,
+            "selected": False,
+            "kind": "log",
+            "unavailable_reason": "missing",
         },
+        "source_id": "",
+        "selected_source_id": "",
+        "sources": log_source_catalog,
         "cursor": 0,
         "nextCursor": 0,
         "state": "empty",
         "ok": False,
         "malformedLines": 0,
     }
-    log_source_path = _resolve_log_tail_source(latest_run_dir)
+    log_source_record = _resolve_log_tail_source_record(latest_run_dir)
+    log_source_path = Path(str(log_source_record.get("path") or "")) if log_source_record and str(log_source_record.get("path") or "").strip() else None
     if log_source_path is not None:
         try:
             log_tail_source_payload = _build_log_tail_payload(
                 log_source_path,
+                source=log_source_record,
+                sources=log_source_catalog,
                 cursor=None,
                 max_lines=1,
                 live=str(progress.get("run_status") or "idle").strip().lower() == "running",
             )
             log_summary_payload = {
                 "source": log_tail_source_payload.get("source", {}),
+                "source_id": str(log_tail_source_payload.get("source_id") or ""),
+                "selected_source_id": str(log_tail_source_payload.get("selected_source_id") or ""),
+                "sources": list(log_tail_source_payload.get("sources") or log_source_catalog),
                 "cursor": int(log_tail_source_payload.get("next_cursor") or 0),
                 "nextCursor": int(log_tail_source_payload.get("next_cursor") or 0),
                 "state": str(log_tail_source_payload.get("state") or "empty"),
@@ -6182,10 +6271,19 @@ def build_snapshot(
         except Exception:
             log_summary_payload = {
                 "source": {
+                    "id": str(log_source_record.get("id") or "") if log_source_record else "",
+                    "label": str(log_source_record.get("label") or "") if log_source_record else "",
                     "path": log_source_path.as_posix(),
                     "name": log_source_path.name,
                     "exists": False,
+                    "available": False,
+                    "selected": True,
+                    "kind": str(log_source_record.get("kind") or "log") if log_source_record else "log",
+                    "unavailable_reason": "read_error",
                 },
+                "source_id": str(log_source_record.get("id") or "") if log_source_record else "",
+                "selected_source_id": str(log_source_record.get("id") or "") if log_source_record else "",
+                "sources": list(log_source_catalog),
                 "cursor": 0,
                 "nextCursor": 0,
                 "state": "read_error",
@@ -6274,6 +6372,9 @@ def build_snapshot(
             "tail": log_tail,
             "files": log_files,
             "source": log_summary_payload.get("source", {}),
+            "source_id": log_summary_payload.get("source_id", ""),
+            "selected_source_id": log_summary_payload.get("selected_source_id", ""),
+            "sources": log_summary_payload.get("sources", []),
             "cursor": log_summary_payload.get("cursor", 0),
             "nextCursor": log_summary_payload.get("nextCursor", 0),
             "state": log_summary_payload.get("state", "empty"),
@@ -6303,6 +6404,10 @@ def build_snapshot(
             "entries": log_entries,
             "tail": log_tail,
             "files": log_files,
+            "source": log_summary_payload.get("source", {}),
+            "source_id": log_summary_payload.get("source_id", ""),
+            "selected_source_id": log_summary_payload.get("selected_source_id", ""),
+            "sources": log_summary_payload.get("sources", []),
             "redaction": logs_redaction,
         },
         "config": config_payload,
@@ -7717,6 +7822,7 @@ def create_app(
         query = request.query_params
         cursor_raw = query.get("cursor")
         max_lines_raw = query.get("max_lines") or query.get("lines")
+        source_id = str(query.get("source") or query.get("source_id") or query.get("sourceId") or "").strip()
         level = str(query.get("level") or "").strip()
         stage = str(query.get("stage") or "").strip()
         task_id = str(query.get("task_id") or query.get("taskId") or "").strip()
@@ -7734,9 +7840,9 @@ def create_app(
         try:
             controller_status = _controller_status_payload(controller)
             latest_run_dir = _resolve_latest_run_dir(repo_root, controller_status, controller)
-            source_path = _resolve_log_tail_source(latest_run_dir)
-            if source_path is None:
-                source_path = (latest_run_dir / "metrics.jsonl") if latest_run_dir is not None else None
+            source_catalog = _log_tail_source_catalog(latest_run_dir)
+            source_record = _resolve_log_tail_source_record(latest_run_dir, source_id=source_id)
+            source_path = Path(str(source_record.get("path") or "")) if source_record and str(source_record.get("path") or "").strip() else None
             if source_path is None:
                 payload = {
                     "ok": False,
@@ -7746,16 +7852,27 @@ def create_app(
                     "source_file": "",
                     "source_path": "",
                     "source": {
+                        "id": "",
+                        "label": "",
                         "path": "",
                         "name": "",
                         "exists": False,
+                        "available": False,
+                        "selected": False,
+                        "kind": "log",
+                        "unavailable_reason": "missing",
                     },
+                    "source_id": "",
+                    "selected_source_id": "",
+                    "sources": source_catalog,
                     "malformed_lines": 0,
                 }
                 return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_log_payload)
             live = bool(controller_status.get("running"))
             payload = _build_log_tail_payload(
                 source_path,
+                source=source_record,
+                sources=source_catalog,
                 cursor=cursor,
                 max_lines=max_lines,
                 level=level,
@@ -7767,10 +7884,14 @@ def create_app(
             return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_log_payload)
         except Exception as ex:
             source_text = ""
+            source_record: dict[str, Any] | None = None
+            source_catalog: list[dict[str, Any]] = []
             try:
                 controller_status = _controller_status_payload(controller)
                 latest_run_dir = _resolve_latest_run_dir(repo_root, controller_status, controller)
-                source_path = _resolve_log_tail_source(latest_run_dir)
+                source_catalog = _log_tail_source_catalog(latest_run_dir)
+                source_record = _resolve_log_tail_source_record(latest_run_dir, source_id=source_id)
+                source_path = Path(str(source_record.get("path") or "")) if source_record and str(source_record.get("path") or "").strip() else None
                 if source_path is not None:
                     source_text = source_path.as_posix()
             except Exception:
@@ -7783,10 +7904,19 @@ def create_app(
                 "source_file": source_text,
                 "source_path": source_text,
                 "source": {
+                    "id": str(source_record.get("id") or "") if source_record else "",
+                    "label": str(source_record.get("label") or "") if source_record else "",
                     "path": source_text,
                     "name": Path(source_text).name if source_text else "",
                     "exists": bool(source_text and Path(source_text).exists()),
+                    "available": bool(source_text and Path(source_text).exists()),
+                    "selected": bool(source_record),
+                    "kind": str(source_record.get("kind") or "log") if source_record else "log",
+                    "unavailable_reason": str(source_record.get("unavailable_reason") or "read_error") if source_record else "read_error",
                 },
+                "source_id": str(source_record.get("id") or "") if source_record else "",
+                "selected_source_id": str(source_record.get("id") or "") if source_record else "",
+                "sources": source_catalog,
                 "error": str(ex).strip() or ex.__class__.__name__,
                 "malformed_lines": 0,
             }

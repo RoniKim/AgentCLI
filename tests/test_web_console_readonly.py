@@ -74,6 +74,91 @@ def _make_log_entries(count):
     return entries
 
 
+def _write_log_source_files(run_dir: Path) -> None:
+    _write(
+        run_dir / "logs" / "run.log",
+        "2026-04-26 12:00:00 [INFO] cycle started\n2026-04-26 12:01:00 [WARN] build warning\n2026-04-26 12:02:00 [INFO] cycle finished\n",
+    )
+    _write(
+        run_dir / "logs" / "error.log",
+        "2026-04-26 12:01:30 [ERROR] build failed during attempt 1\n2026-04-26 12:01:45 [WARN] retry scheduled\n",
+    )
+    _write(
+        run_dir / "logs" / "events.jsonl",
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-04-26T12:00:00",
+                        "seq": 1,
+                        "level": "info",
+                        "event": "pm_start",
+                        "stage": "PM",
+                        "cycle": 1,
+                        "message": "pm start",
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-04-26T12:00:10",
+                        "seq": 2,
+                        "level": "warn",
+                        "event": "dev_retry",
+                        "stage": "Dev",
+                        "cycle": 1,
+                        "step": 2,
+                        "task_id": "T-020",
+                        "task_title": "API-backed observation path",
+                        "attempt": 1,
+                        "reason": "build_failed",
+                        "message": "retry after build failure",
+                    },
+                    ensure_ascii=False,
+                ),
+                "not json at all",
+                json.dumps(
+                    {
+                        "ts": "2026-04-26T12:00:20",
+                        "seq": 3,
+                        "level": "info",
+                        "event": "task_end",
+                        "stage": "Dev",
+                        "cycle": 1,
+                        "step": 2,
+                        "task_id": "T-020",
+                        "task_title": "API-backed observation path",
+                        "attempt": 2,
+                        "rc": 0,
+                        "reason": "completed",
+                        "message": "task end",
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-04-26T12:00:30",
+                        "seq": 4,
+                        "level": "info",
+                        "event": "qa_end",
+                        "stage": "QA",
+                        "cycle": 1,
+                        "task_id": "T-021",
+                        "task_title": "Polish logs",
+                        "message": "qa verified",
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        + "\n",
+    )
+    _write(
+        run_dir / "telegram_runner_subprocess.log",
+        "2026-04-26 12:00:05 [INFO] telegram runner subprocess started\n2026-04-26 12:00:50 [INFO] telegram runner subprocess finished\n",
+    )
+
+
 def _write_run_bundle(
     run_dir: Path,
     *,
@@ -256,6 +341,7 @@ def _write_run_bundle(
         + "\n",
     )
     _write(run_dir / "cycle_summary.log", f"2026-04-26T12:08:00 cycle=1 done={1 if status == 'success' else 0}/{task_count} failed={1 if status == 'failed' else 0} dt=480.0s\n")
+    _write_log_source_files(run_dir)
     if stop_file:
         _write(run_dir / "STOP", "")
 
@@ -1340,6 +1426,20 @@ class WebConsoleRedactionHelperTests(unittest.TestCase):
                 "name": "metrics.jsonl",
                 "exists": True,
             },
+            "sources": [
+                {
+                    "id": "run_log",
+                    "path": "D:/runs/latest/logs/run.log",
+                    "name": "run.log",
+                    "available": True,
+                },
+                {
+                    "id": "backend_transcript",
+                    "path": "D:/runs/latest/telegram_runner_subprocess.log",
+                    "name": "telegram_runner_subprocess.log",
+                    "available": False,
+                },
+            ],
         }
 
         redacted = _redact_web_log_payload(payload)
@@ -1351,7 +1451,13 @@ class WebConsoleRedactionHelperTests(unittest.TestCase):
         self.assertEqual("[redacted]", redacted["files"]["metrics"])
         self.assertEqual("[redacted]", redacted["source"]["path"])
         self.assertEqual("[redacted]", redacted["source"]["name"])
+        self.assertEqual("[redacted]", redacted["sources"][0]["path"])
+        self.assertEqual("[redacted]", redacted["sources"][0]["name"])
+        self.assertEqual("[redacted]", redacted["sources"][1]["path"])
+        self.assertEqual("[redacted]", redacted["sources"][1]["name"])
         self.assertIn("files.cycle_summary", redacted["redaction"]["fields"])
+        self.assertIn("sources.path", redacted["redaction"]["fields"])
+        self.assertIn("sources.name", redacted["redaction"]["fields"])
 
 
 class WebConsoleReadonlyTests(unittest.TestCase):
@@ -1727,10 +1833,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             self.run_dir / "cycle_summary.log",
             "2026-04-26T12:02:00 cycle=1 done=1/2 failed=0 dt=120.0s\n",
         )
-        _write(
-            self.run_dir / "logs" / "run.log",
-            "2026-04-26 12:00:00 [INFO] cycle started\n2026-04-26 12:01:00 [INFO] cycle finished\n",
-        )
+        _write_log_source_files(self.run_dir)
         _write(
             self.run_dir / "WORKTREE_MERGE_PENDING.json",
             json.dumps(
@@ -2207,6 +2310,13 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertFalse(payload["metrics"]["quota_available"])
         self.assertIsNone(payload["metrics"]["budget_used"])
         self.assertIsNone(payload["metrics"]["quota_used"])
+        self.assertIn("sources", payload["logs"])
+        self.assertEqual("run_log", payload["logs"]["source_id"])
+        self.assertEqual("run_log", payload["logs"]["selected_source_id"])
+        self.assertEqual("run_log", payload["logs"]["source"]["id"])
+        self.assertTrue(payload["logs"]["source"]["available"])
+        self.assertTrue(next(item["available"] for item in payload["logs"]["sources"] if item["id"] == "backend_transcript"))
+        self.assertTrue(next(item["available"] for item in payload["logs"]["sources"] if item["id"] == "error_log"))
 
         history_response = self.client.get("/api/history")
         self.assertEqual(200, history_response.status_code)
@@ -3364,6 +3474,10 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         logs = self.client.get("/api/logs").json()
         self.assertIn("entries", logs)
         self.assertGreaterEqual(len(logs["entries"]), 1)
+        self.assertIn("source", logs)
+        self.assertIn("source_id", logs)
+        self.assertIn("selected_source_id", logs)
+        self.assertIn("sources", logs)
 
         goals = self.client.get("/api/goals").json()
         for key in ("path", "exists", "mtime", "size", "raw_text", "items", "completion", "completion_level", "summary", "warnings"):
@@ -3955,96 +4069,55 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("prompt_template_variables_missing", partial_payload["validation"]["template_error_code"])
 
     def test_api_logs_tail_supports_incremental_cursor_reads_filters_and_malformed_state(self) -> None:
-        _write(
-            self.run_dir / "metrics.jsonl",
-            "\n".join(
-                [
-                    json.dumps(
-                        {
-                            "ts": "2026-04-26T12:00:00",
-                            "seq": 1,
-                            "level": "info",
-                            "event": "pm_start",
-                            "stage": "PM",
-                            "cycle": 1,
-                            "message": "pm start",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    json.dumps(
-                        {
-                            "ts": "2026-04-26T12:00:10",
-                            "seq": 2,
-                            "level": "warn",
-                            "event": "dev_retry",
-                            "stage": "Dev",
-                            "cycle": 1,
-                            "step": 2,
-                            "task_id": "T-020",
-                            "task_title": "API-backed observation path",
-                            "attempt": 1,
-                            "reason": "build_failed",
-                            "message": "retry after build failure",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    json.dumps(
-                        {
-                            "ts": "2026-04-26T12:00:20",
-                            "seq": 3,
-                            "level": "info",
-                            "event": "task_end",
-                            "stage": "Dev",
-                            "cycle": 1,
-                            "step": 2,
-                            "task_id": "T-020",
-                            "task_title": "API-backed observation path",
-                            "attempt": 2,
-                            "rc": 0,
-                            "reason": "completed",
-                            "message": "task end",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    "not json at all",
-                    json.dumps(
-                        {
-                            "ts": "2026-04-26T12:00:30",
-                            "seq": 4,
-                            "level": "info",
-                            "event": "qa_end",
-                            "stage": "QA",
-                            "cycle": 1,
-                            "task_id": "T-021",
-                            "task_title": "Polish logs",
-                            "message": "qa verified",
-                        },
-                        ensure_ascii=False,
-                    ),
-                ]
-            )
-            + "\n",
-        )
+        run_tail = self._api_log_tail(source="run_log", max_lines=1)
+        self.assertEqual("run.log", Path(str(run_tail["source_file"])).name)
+        self.assertEqual("run_log", run_tail["source_id"])
+        self.assertEqual("run.log", run_tail["source"]["name"])
+        self.assertTrue(run_tail["source"]["available"])
+        self.assertTrue(any(item["id"] == "backend_transcript" and item["available"] for item in run_tail["sources"]))
+        self.assertEqual("loading", run_tail["state"])
+        self.assertEqual(["cycle finished"], [entry["msg"] for entry in run_tail["entries"]])
 
-        tail = self._api_log_tail(max_lines=2)
-        self.assertEqual("metrics.jsonl", Path(str(tail["source_file"])).name)
+        error_tail = self._api_log_tail(source="error_log", level="err", max_lines=1)
+        self.assertEqual("error.log", Path(str(error_tail["source_file"])).name)
+        self.assertEqual("error_log", error_tail["source_id"])
+        self.assertEqual("loading", error_tail["state"])
+        self.assertEqual(["build failed during attempt 1"], [entry["msg"] for entry in error_tail["entries"]])
+        self.assertEqual(["err"], [entry["lvl"] for entry in error_tail["entries"]])
+
+        cycle_tail = self._api_log_tail(source="cycle_summary", max_lines=1)
+        self.assertEqual("cycle_summary.log", Path(str(cycle_tail["source_file"])).name)
+        self.assertEqual("cycle_summary", cycle_tail["source_id"])
+        self.assertEqual("loading", cycle_tail["state"])
+        self.assertIn("cycle=1 done=1/2 failed=0", cycle_tail["entries"][0]["msg"])
+
+        transcript_tail = self._api_log_tail(source="backend_transcript", max_lines=1)
+        self.assertEqual("telegram_runner_subprocess.log", Path(str(transcript_tail["source_file"])).name)
+        self.assertEqual("backend_transcript", transcript_tail["source_id"])
+        self.assertTrue(transcript_tail["source"]["available"])
+        self.assertIn("telegram runner subprocess", transcript_tail["entries"][0]["msg"])
+
+        tail = self._api_log_tail(source="events_jsonl", max_lines=2)
+        self.assertEqual("events.jsonl", Path(str(tail["source_file"])).name)
+        self.assertEqual("events_jsonl", tail["source_id"])
         self.assertEqual("malformed_line", tail["state"])
         self.assertEqual(5, tail["next_cursor"])
-        self.assertEqual([3, 5], [entry["line_number"] for entry in tail["entries"]])
+        self.assertEqual([4, 5], [entry["line_number"] for entry in tail["entries"]])
 
-        chunk_1 = self._api_log_tail(cursor=0, max_lines=2)
+        chunk_1 = self._api_log_tail(source="events_jsonl", cursor=0, max_lines=2)
         self.assertEqual("loading", chunk_1["state"])
         self.assertEqual(2, chunk_1["next_cursor"])
         self.assertEqual([1, 2], [entry["line_number"] for entry in chunk_1["entries"]])
         self.assertEqual(["info", "warn"], [entry["lvl"] for entry in chunk_1["entries"]])
 
-        chunk_2 = self._api_log_tail(cursor=2, max_lines=2)
+        chunk_2 = self._api_log_tail(source="events_jsonl", cursor=2, max_lines=2)
         self.assertEqual("malformed_line", chunk_2["state"])
         self.assertEqual(5, chunk_2["next_cursor"])
-        self.assertEqual([3, 5], [entry["line_number"] for entry in chunk_2["entries"]])
+        self.assertEqual([4, 5], [entry["line_number"] for entry in chunk_2["entries"]])
         self.assertEqual(["task end", "qa verified"], [entry["msg"] for entry in chunk_2["entries"]])
 
         filtered = self._api_log_tail(
+            source="events_jsonl",
             cursor=1,
             max_lines=1,
             level="warn",
@@ -4061,7 +4134,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("T-020", filtered["entries"][0]["task_id"])
         self.assertIn("build failure", filtered["entries"][0]["msg"])
 
-        no_match = self._api_log_tail(cursor=4, max_lines=1, level="trace")
+        no_match = self._api_log_tail(source="events_jsonl", cursor=4, max_lines=1, level="trace")
         self.assertEqual("loading", no_match["state"])
         self.assertEqual(5, no_match["next_cursor"])
         self.assertEqual([], no_match["entries"])
@@ -4078,27 +4151,54 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual([], payload["entries"])
         self.assertEqual(0, payload["next_cursor"])
         self.assertEqual("", payload["source_file"])
+        self.assertEqual([], payload["sources"])
+        self.assertEqual("", payload["source_id"])
+        self.assertFalse(payload["source"]["available"])
+        self.assertEqual("missing", payload["source"]["unavailable_reason"])
 
     def test_api_logs_tail_reports_empty_state_for_empty_log_file(self) -> None:
-        _write(self.run_dir / "metrics.jsonl", "")
+        _write(self.run_dir / "logs" / "error.log", "")
 
-        payload = self._api_log_tail(max_lines=5)
+        payload = self._api_log_tail(source="error_log", max_lines=5)
 
         self.assertTrue(payload["ok"])
         self.assertEqual("empty", payload["state"])
         self.assertEqual([], payload["entries"])
         self.assertEqual(0, payload["next_cursor"])
-        self.assertEqual("metrics.jsonl", Path(str(payload["source_file"])).name)
+        self.assertEqual("error.log", Path(str(payload["source_file"])).name)
+        self.assertEqual("error_log", payload["source_id"])
+        self.assertTrue(payload["source"]["available"])
 
     def test_api_logs_tail_reports_read_errors(self) -> None:
         with patch.object(Path, "open", side_effect=OSError("simulated read failure")):
-            payload = self._api_log_tail(max_lines=1)
+            payload = self._api_log_tail(source="events_jsonl", max_lines=1)
 
         self.assertFalse(payload["ok"])
         self.assertEqual("read_error", payload["state"])
         self.assertEqual([], payload["entries"])
         self.assertEqual(0, payload["next_cursor"])
-        self.assertTrue(payload["source_file"].endswith("metrics.jsonl"))
+        self.assertTrue(payload["source_file"].endswith("events.jsonl"))
+        self.assertEqual("events_jsonl", payload["source_id"])
+        self.assertTrue(payload["source"]["available"])
+
+    def test_api_logs_tail_reports_missing_source_catalog_entries(self) -> None:
+        transcript_path = self.run_dir / "telegram_runner_subprocess.log"
+        transcript_path.unlink()
+
+        payload = self._api_log_tail(source="backend_transcript", max_lines=1)
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual("missing_file", payload["state"])
+        self.assertEqual([], payload["entries"])
+        self.assertEqual(0, payload["next_cursor"])
+        self.assertTrue(payload["source_file"].endswith("telegram_runner_subprocess.log"))
+        self.assertEqual("backend_transcript", payload["source_id"])
+        self.assertEqual("backend_transcript", payload["source"]["id"])
+        self.assertFalse(payload["source"]["available"])
+        self.assertEqual("missing", payload["source"]["unavailable_reason"])
+        backend_source = next(item for item in payload["sources"] if item["id"] == "backend_transcript")
+        self.assertFalse(backend_source["available"])
+        self.assertEqual("missing", backend_source["unavailable_reason"])
 
     def test_config_redaction_masks_sensitive_values(self) -> None:
         from agent_runner.web import _redact_config
@@ -4370,17 +4470,17 @@ Another unsupported line.
                 {
                     "kind": "query",
                     "filters": {"level": "WARN", "stage": " Dev ", "taskId": "T-020", "search": " error path "},
-                    "options": {"cursor": 12, "maxLines": 25},
+                    "options": {"cursor": 12, "maxLines": 25, "sourceId": "run_log"},
                 }
             ]
         )[0]
 
         self.assertEqual(
-            {"max_lines": 25, "cursor": 12, "level": "warn", "stage": "Dev", "task_id": "T-020", "search": "error path"},
+            {"max_lines": 25, "cursor": 12, "source": "run_log", "level": "warn", "stage": "Dev", "task_id": "T-020", "search": "error path"},
             query_result["query"],
         )
         self.assertEqual(
-            "/api/logs/tail?max_lines=25&cursor=12&level=warn&stage=Dev&task_id=T-020&search=error%20path",
+            "/api/logs/tail?max_lines=25&cursor=12&source=run_log&level=warn&stage=Dev&task_id=T-020&search=error%20path",
             query_result["url"],
         )
 
@@ -4403,7 +4503,42 @@ Another unsupported line.
             "nextCursor": 5,
             "selected": [4],
             "filters": {"level": "warn", "stage": "Dev", "taskId": "T-020", "search": "error path"},
-            "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": True},
+            "sourceId": "run_log",
+            "source": {
+                "id": "run_log",
+                "label": "run.log",
+                "path": "C:/runs/run.log",
+                "name": "run.log",
+                "exists": True,
+                "available": True,
+                "selected": True,
+                "kind": "log",
+                "unavailableReason": "",
+            },
+            "sources": [
+                {
+                    "id": "run_log",
+                    "label": "run.log",
+                    "path": "C:/runs/run.log",
+                    "name": "run.log",
+                    "exists": True,
+                    "available": True,
+                    "selected": True,
+                    "kind": "log",
+                    "unavailableReason": "",
+                },
+                {
+                    "id": "error_log",
+                    "label": "error.log",
+                    "path": "C:/runs/error.log",
+                    "name": "error.log",
+                    "exists": True,
+                    "available": True,
+                    "selected": False,
+                    "kind": "log",
+                    "unavailableReason": "",
+                },
+            ],
         }
         first_payload = {
             "ok": True,
@@ -4420,7 +4555,20 @@ Another unsupported line.
             ],
             "next_cursor": 6,
             "cursor": 5,
-            "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": True},
+            "source_id": "run_log",
+            "selected_source_id": "run_log",
+            "source": {
+                "id": "run_log",
+                "label": "run.log",
+                "path": "C:/runs/run.log",
+                "name": "run.log",
+                "exists": True,
+                "available": True,
+                "selected": True,
+                "kind": "log",
+                "unavailableReason": "",
+            },
+            "sources": previous["sources"],
             "malformed_lines": 0,
         }
         applied_first = _run_log_tail_harness(
@@ -4441,7 +4589,20 @@ Another unsupported line.
             ],
             "next_cursor": 7,
             "cursor": 6,
-            "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": True},
+            "source_id": "run_log",
+            "selected_source_id": "run_log",
+            "source": {
+                "id": "run_log",
+                "label": "run.log",
+                "path": "C:/runs/run.log",
+                "name": "run.log",
+                "exists": True,
+                "available": True,
+                "selected": True,
+                "kind": "log",
+                "unavailableReason": "",
+            },
+            "sources": previous["sources"],
             "malformed_lines": 0,
         }
         applied_second = _run_log_tail_harness(
@@ -4451,10 +4612,14 @@ Another unsupported line.
         self.assertEqual(5, applied_first["cursor"])
         self.assertEqual(6, applied_first["nextCursor"])
         self.assertEqual([4], applied_first["selected"])
+        self.assertEqual("run_log", applied_first["sourceId"])
         self.assertEqual(2, len(applied_first["entries"]))
+        self.assertEqual("run_log", applied_first["source"]["id"])
+        self.assertEqual(2, len(applied_first["sources"]))
         self.assertEqual(6, applied_second["cursor"])
         self.assertEqual(7, applied_second["nextCursor"])
         self.assertEqual([4], applied_second["selected"])
+        self.assertEqual("run_log", applied_second["sourceId"])
         self.assertEqual(3, len(applied_second["entries"]))
 
         clipboard = _run_log_tail_harness(
@@ -4519,11 +4684,75 @@ Another unsupported line.
                                     "taskId": "T-020",
                                     "search": "build failure",
                                 },
+                                "sourceId": "run_log",
                                 "source": {
+                                    "id": "run_log",
+                                    "label": "run.log",
                                     "path": "C:/runs/run.log",
                                     "name": "run.log",
                                     "exists": True,
+                                    "available": True,
+                                    "selected": True,
+                                    "kind": "log",
+                                    "unavailableReason": "",
                                 },
+                                "sources": [
+                                    {
+                                        "id": "run_log",
+                                        "label": "run.log",
+                                        "path": "C:/runs/run.log",
+                                        "name": "run.log",
+                                        "exists": True,
+                                        "available": True,
+                                        "selected": True,
+                                        "kind": "log",
+                                        "unavailableReason": "",
+                                    },
+                                    {
+                                        "id": "error_log",
+                                        "label": "error.log",
+                                        "path": "C:/runs/error.log",
+                                        "name": "error.log",
+                                        "exists": True,
+                                        "available": True,
+                                        "selected": False,
+                                        "kind": "log",
+                                        "unavailableReason": "",
+                                    },
+                                    {
+                                        "id": "events_jsonl",
+                                        "label": "events.jsonl",
+                                        "path": "C:/runs/events.jsonl",
+                                        "name": "events.jsonl",
+                                        "exists": True,
+                                        "available": True,
+                                        "selected": False,
+                                        "kind": "log",
+                                        "unavailableReason": "",
+                                    },
+                                    {
+                                        "id": "cycle_summary",
+                                        "label": "cycle_summary.log",
+                                        "path": "C:/runs/cycle_summary.log",
+                                        "name": "cycle_summary.log",
+                                        "exists": True,
+                                        "available": True,
+                                        "selected": False,
+                                        "kind": "log",
+                                        "unavailableReason": "",
+                                    },
+                                    {
+                                        "id": "backend_transcript",
+                                        "label": "backend transcript",
+                                        "path": "C:/runs/telegram_runner_subprocess.log",
+                                        "name": "telegram_runner_subprocess.log",
+                                        "exists": True,
+                                        "available": True,
+                                        "selected": False,
+                                        "kind": "transcript",
+                                        "unavailableReason": "",
+                                    },
+                                ],
                             },
                         }
                     ],
@@ -4587,7 +4816,26 @@ Another unsupported line.
                         ],
                         "next_cursor": 7,
                         "cursor": 6,
-                        "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": True},
+                        "source_id": "run_log",
+                        "selected_source_id": "run_log",
+                        "source": {
+                            "id": "run_log",
+                            "label": "run.log",
+                            "path": "C:/runs/run.log",
+                            "name": "run.log",
+                            "exists": True,
+                            "available": True,
+                            "selected": True,
+                            "kind": "log",
+                            "unavailableReason": "",
+                        },
+                        "sources": [
+                            {"id": "run_log", "available": True, "selected": True},
+                            {"id": "error_log", "available": True, "selected": False},
+                            {"id": "events_jsonl", "available": True, "selected": False},
+                            {"id": "cycle_summary", "available": True, "selected": False},
+                            {"id": "backend_transcript", "available": True, "selected": False},
+                        ],
                         "malformed_lines": 0,
                     },
                 },
@@ -4608,7 +4856,26 @@ Another unsupported line.
                         ],
                         "next_cursor": 8,
                         "cursor": 7,
-                        "source": {"path": "C:/runs/run.log", "name": "run.log", "exists": True},
+                        "source_id": "run_log",
+                        "selected_source_id": "run_log",
+                        "source": {
+                            "id": "run_log",
+                            "label": "run.log",
+                            "path": "C:/runs/run.log",
+                            "name": "run.log",
+                            "exists": True,
+                            "available": True,
+                            "selected": True,
+                            "kind": "log",
+                            "unavailableReason": "",
+                        },
+                        "sources": [
+                            {"id": "run_log", "available": True, "selected": True},
+                            {"id": "error_log", "available": True, "selected": False},
+                            {"id": "events_jsonl", "available": True, "selected": False},
+                            {"id": "cycle_summary", "available": True, "selected": False},
+                            {"id": "backend_transcript", "available": True, "selected": False},
+                        ],
                         "malformed_lines": 0,
                     },
                 },
@@ -4619,11 +4886,11 @@ Another unsupported line.
         resumed = session["results"][8]
 
         self.assertEqual(
-            "/api/logs/tail?max_lines=120&cursor=6&level=warn&stage=Dev&task_id=T-020&search=build%20failure",
+            "/api/logs/tail?max_lines=120&cursor=6&source=run_log&level=warn&stage=Dev&task_id=T-020&search=build%20failure",
             session["fetchCalls"][0],
         )
         self.assertEqual(
-            "/api/logs/tail?max_lines=120&cursor=7&level=warn&stage=Dev&task_id=T-020&search=build%20failure",
+            "/api/logs/tail?max_lines=120&cursor=7&source=run_log&level=warn&stage=Dev&task_id=T-020&search=build%20failure",
             session["fetchCalls"][1],
         )
         self.assertEqual([{"id": 1, "delay": 2400}, {"id": 2, "delay": 2400}], session["intervals"])
@@ -4636,6 +4903,9 @@ Another unsupported line.
         self.assertEqual(2, len(started["entries"]))
         self.assertFalse(started["loading"])
         self.assertEqual([5], started["selected"])
+        self.assertEqual("run_log", started["sourceId"])
+        self.assertEqual("run_log", started["source"]["id"])
+        self.assertEqual(5, len(started["sources"]))
 
         self.assertTrue(paused["paused"])
         self.assertFalse(paused["loading"])
@@ -4654,7 +4924,161 @@ Another unsupported line.
         self.assertEqual(3, len(resumed["entries"]))
         self.assertEqual([5], resumed["selected"])
         self.assertEqual({"level": "warn", "stage": "Dev", "taskId": "T-020", "search": "build failure"}, resumed["filters"])
+        self.assertEqual("run_log", resumed["sourceId"])
         self.assertGreater(resumed["requestSeq"], paused["requestSeq"])
+
+    def test_log_tail_source_switch_preserves_pause_and_filters(self) -> None:
+        session = _run_log_tail_session_harness(
+            [
+                {
+                    "kind": "call",
+                    "name": "seedLogTailState",
+                    "args": [
+                        {
+                            "activeView": "logs",
+                            "sourceMode": "api",
+                            "runId": self.run_dir.name,
+                            "latestRunDir": self.run_dir.as_posix(),
+                            "logTail": {
+                                "status": "loading",
+                                "loading": False,
+                                "paused": False,
+                                "entries": [
+                                    {
+                                        "cursor": 5,
+                                        "line_number": 5,
+                                        "t": "12:05:00",
+                                        "stage": "Dev",
+                                        "lvl": "warn",
+                                        "msg": "existing warn line",
+                                    }
+                                ],
+                                "cursor": 5,
+                                "nextCursor": 6,
+                                "selected": [5],
+                                "filters": {
+                                    "level": "warn",
+                                    "stage": "Dev",
+                                    "taskId": "T-020",
+                                    "search": "build failure",
+                                },
+                                "sourceId": "run_log",
+                                "source": {
+                                    "id": "run_log",
+                                    "label": "run.log",
+                                    "path": "C:/runs/run.log",
+                                    "name": "run.log",
+                                    "exists": True,
+                                    "available": True,
+                                    "selected": True,
+                                    "kind": "log",
+                                    "unavailableReason": "",
+                                },
+                                "sources": [
+                                    {
+                                        "id": "run_log",
+                                        "label": "run.log",
+                                        "path": "C:/runs/run.log",
+                                        "name": "run.log",
+                                        "exists": True,
+                                        "available": True,
+                                        "selected": True,
+                                        "kind": "log",
+                                        "unavailableReason": "",
+                                    },
+                                    {
+                                        "id": "events_jsonl",
+                                        "label": "events.jsonl",
+                                        "path": "C:/runs/events.jsonl",
+                                        "name": "events.jsonl",
+                                        "exists": True,
+                                        "available": True,
+                                        "selected": False,
+                                        "kind": "log",
+                                        "unavailableReason": "",
+                                    },
+                                ],
+                            },
+                        }
+                    ],
+                },
+                {
+                    "kind": "call",
+                    "name": "setLiveTailPaused",
+                    "args": [True],
+                },
+                {
+                    "kind": "call",
+                    "name": "updateLogTailSource",
+                    "args": ["events_jsonl"],
+                },
+                {
+                    "kind": "call",
+                    "name": "inspectLogTailState",
+                    "args": [],
+                },
+            ],
+            fetch_responses=[
+                {
+                    "ok": True,
+                    "body": {
+                        "ok": True,
+                        "state": "malformed_line",
+                        "entries": [
+                            {
+                                "cursor": 2,
+                                "line_number": 2,
+                                "t": "12:00:10",
+                                "stage": "Dev",
+                                "lvl": "warn",
+                                "task_id": "T-020",
+                                "task_title": "API-backed observation path",
+                                "msg": "retry after build failure",
+                            }
+                        ],
+                        "next_cursor": 4,
+                        "cursor": None,
+                        "source_id": "events_jsonl",
+                        "selected_source_id": "events_jsonl",
+                        "source": {
+                            "id": "events_jsonl",
+                            "label": "events.jsonl",
+                            "path": "C:/runs/events.jsonl",
+                            "name": "events.jsonl",
+                            "exists": True,
+                            "available": True,
+                            "selected": True,
+                            "kind": "log",
+                            "unavailableReason": "",
+                        },
+                        "sources": [
+                            {"id": "run_log", "available": True, "selected": False},
+                            {"id": "error_log", "available": True, "selected": False},
+                            {"id": "events_jsonl", "available": True, "selected": True},
+                            {"id": "cycle_summary", "available": True, "selected": False},
+                            {"id": "backend_transcript", "available": True, "selected": False},
+                        ],
+                        "malformed_lines": 1,
+                    },
+                }
+            ],
+        )
+
+        switched = session["results"][3]
+
+        self.assertEqual(
+            "/api/logs/tail?max_lines=120&source=events_jsonl&level=warn&stage=Dev&task_id=T-020&search=build%20failure",
+            session["fetchCalls"][0],
+        )
+        self.assertTrue(switched["paused"])
+        self.assertEqual("events_jsonl", switched["sourceId"])
+        self.assertEqual("events_jsonl", switched["source"]["id"])
+        self.assertEqual("malformed_line", switched["status"])
+        self.assertEqual(1, switched["malformedLines"])
+        self.assertEqual({"level": "warn", "stage": "Dev", "taskId": "T-020", "search": "build failure"}, switched["filters"])
+        self.assertEqual([], switched["selected"])
+        self.assertEqual(1, len(switched["entries"]))
+        self.assertFalse(switched["timerActive"])
 
     def test_log_tail_state_banners_and_toolbar_rendering(self) -> None:
         blank = _run_log_tail_harness([{"kind": "state"}])[0]
@@ -4719,6 +5143,63 @@ Another unsupported line.
         self.assertIn('aria-busy="true"', loading_banner["filters"])
         self.assertIn("button--loading", loading_banner["filters"])
         self.assertIn("status-chip--loading", loading_banner["filters"])
+
+        source_selector_tail = {
+            **blank,
+            "status": "loading",
+            "loading": False,
+            "paused": False,
+            "entries": [],
+            "cursor": 0,
+            "nextCursor": 0,
+            "selected": [],
+            "sourceId": "run_log",
+            "source": {
+                "id": "run_log",
+                "label": "run.log",
+                "path": "C:/runs/run.log",
+                "name": "run.log",
+                "exists": True,
+                "available": True,
+                "selected": True,
+                "kind": "log",
+                "unavailableReason": "",
+            },
+            "sources": [
+                {
+                    "id": "run_log",
+                    "label": "run.log",
+                    "path": "C:/runs/run.log",
+                    "name": "run.log",
+                    "exists": True,
+                    "available": True,
+                    "selected": True,
+                    "kind": "log",
+                    "unavailableReason": "",
+                },
+                {
+                    "id": "backend_transcript",
+                    "label": "backend transcript",
+                    "path": "C:/runs/telegram_runner_subprocess.log",
+                    "name": "telegram_runner_subprocess.log",
+                    "exists": False,
+                    "available": False,
+                    "selected": False,
+                    "kind": "transcript",
+                    "unavailableReason": "missing",
+                },
+            ],
+        }
+        source_selector_banner = _run_log_tail_harness([{"kind": "banner", "tail": source_selector_tail}])[0]
+        self.assertIn('data-log-source="run_log"', source_selector_banner["filters"])
+        self.assertIn('data-log-source="backend_transcript"', source_selector_banner["filters"])
+        self.assertIn("log-tail-source--active", source_selector_banner["filters"])
+        self.assertIn("log-tail-source--unavailable", source_selector_banner["filters"])
+        self.assertIn("backend transcript", source_selector_banner["filters"])
+        self.assertIn("unavailable", source_selector_banner["filters"])
+
+        empty_sources_banner = _run_log_tail_harness([{"kind": "banner", "tail": blank}])[0]
+        self.assertIn("No log sources available.", empty_sources_banner["filters"])
 
         banner_result = _run_log_tail_harness([{"kind": "banner", "tail": paused_tail}])[0]
         self.assertIn("Live tail paused", banner_result["banner"])
