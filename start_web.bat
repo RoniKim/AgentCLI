@@ -34,8 +34,12 @@ echo [INFO] Repo: %ROOT%
 echo [INFO] URL:  http://%HOST%:%PORT%/
 echo.
 
+set "AGENTCLI_WEB_RESOLVED_REPO=%ROOT%"
+set "AGENTCLI_WEB_RESOLVED_HOST=%HOST%"
+set "AGENTCLI_WEB_RESOLVED_PORT=%PORT%"
+
 start "" "http://%HOST%:%PORT%/"
-python -m agent_runner.web --repo "%ROOT%" --host "%HOST%" --port "%PORT%" --enable-runner-controls
+python -c "import os; from agent_runner.web import serve; serve(repo=os.environ['AGENTCLI_WEB_RESOLVED_REPO'], host=os.environ['AGENTCLI_WEB_RESOLVED_HOST'], port=int(os.environ['AGENTCLI_WEB_RESOLVED_PORT']), enable_runner_controls=True)"
 set "WEB_RC=%ERRORLEVEL%"
 
 if not "%WEB_RC%"=="0" (
