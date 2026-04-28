@@ -593,6 +593,7 @@
         reviewChecklist: 'Review checklist',
         mergeActions: 'Merge actions',
         mergePreflight: 'Merge preflight',
+        splitMergeRecovery: 'Split-merge recovery',
         merging: 'Merging...',
         discarding: 'Discarding...',
         refreshingStatus: 'refreshing status',
@@ -617,6 +618,13 @@
         sourceHead: 'Source HEAD',
         expectedBaseRef: 'Expected base ref',
         patchHash: 'Patch hash',
+        fastForwardRef: 'Fast-forward ref',
+        dirtyPatchPath: 'Dirty patch path',
+        dirtyPatchHash: 'Dirty patch hash',
+        dirtyPatchCheck: 'Dirty patch check',
+        dirtyPatchApplied: 'Dirty patch applied',
+        dirtyPatchAppliedYes: 'Applied',
+        dirtyPatchAppliedNo: 'Not applied',
         gitApplyCheck: 'git apply --check',
         pendingMarkerPath: 'Pending marker path',
         failureDetails: 'Failure details',
@@ -1144,6 +1152,7 @@
         reviewChecklist: '검토 체크리스트',
         mergeActions: '병합/폐기 작업',
         mergePreflight: '병합 사전 점검',
+        splitMergeRecovery: '분할 병합 복구',
         confirmMergePhrase: 'MERGE WORKTREE',
         confirmDiscardPhrase: 'DISCARD WORKTREE',
         readOnlyMode: '읽기 전용 모드',
@@ -1165,6 +1174,13 @@
         sourceHead: '소스 HEAD',
         expectedBaseRef: '예상 기준 ref',
         patchHash: '패치 해시',
+        fastForwardRef: '빠른 전진 ref',
+        dirtyPatchPath: 'Dirty patch 경로',
+        dirtyPatchHash: 'Dirty patch 해시',
+        dirtyPatchCheck: 'Dirty patch 확인',
+        dirtyPatchApplied: 'Dirty patch 적용',
+        dirtyPatchAppliedYes: '적용됨',
+        dirtyPatchAppliedNo: '미적용',
         gitApplyCheck: 'git apply --check',
         pendingMarkerPath: '대기 마커 경로',
         failureDetails: '실패 세부 정보',
@@ -2792,6 +2808,16 @@
     if (value == null || value === '') return null;
     const num = Number(value);
     return Number.isFinite(num) ? num : null;
+  }
+
+  function toMaybeBoolean(value) {
+    if (value == null || value === '') return null;
+    if (typeof value === 'boolean') return value;
+    const text = String(value).trim().toLowerCase();
+    if (!text) return null;
+    if (text === '1' || text === 'true' || text === 'yes' || text === 'on') return true;
+    if (text === '0' || text === 'false' || text === 'no' || text === 'off') return false;
+    return null;
   }
 
   function toArray(value) {
@@ -5130,11 +5156,59 @@
     };
   }
 
+  function normalizeWorktreeSplitMerge(review) {
+    const raw = toObject(review);
+    const dirtyPatchCheckSource =
+      raw.dirtyPatchCheck && Object.keys(raw.dirtyPatchCheck).length > 0
+        ? raw.dirtyPatchCheck
+        : raw.dirty_patch_check;
+    const dirtyPatchCheckRaw = toObject(dirtyPatchCheckSource);
+    const dirtyPatchCheck = normalizeWorktreeApplyCheck(dirtyPatchCheckRaw);
+    const dirtyPatchCheckHasData = Boolean(
+      dirtyPatchCheckRaw.command ||
+        dirtyPatchCheckRaw.cmd ||
+        dirtyPatchCheckRaw.output ||
+        dirtyPatchCheckRaw.failedFiles ||
+        dirtyPatchCheckRaw.failed_files ||
+        dirtyPatchCheckRaw.failedHunks ||
+        dirtyPatchCheckRaw.failed_hunks ||
+        dirtyPatchCheckRaw.message ||
+        dirtyPatchCheckRaw.status ||
+        dirtyPatchCheckRaw.ok != null ||
+        dirtyPatchCheckRaw.rc != null ||
+        dirtyPatchCheckRaw.returnCode != null ||
+        dirtyPatchCheckRaw.return_code != null ||
+        dirtyPatchCheckRaw.exitCode != null ||
+        dirtyPatchCheckRaw.exit_code != null
+    );
+    const dirtyPatchApplied = toMaybeBoolean(raw.dirtyPatchApplied ?? raw.dirty_patch_applied);
+    const fastForwardRef = toText(raw.fastForwardRef || raw.fast_forward_ref, '');
+    const dirtyPatchPath = toText(raw.dirtyPatchPath || raw.dirty_patch_path, '');
+    const dirtyPatchHash = toText(raw.dirtyPatchHash || raw.dirty_patch_hash, '');
+    const hasData = Boolean(
+      fastForwardRef ||
+        dirtyPatchPath ||
+        dirtyPatchHash ||
+        dirtyPatchCheckHasData ||
+        dirtyPatchApplied !== null
+    );
+    return {
+      fastForwardRef,
+      dirtyPatchPath,
+      dirtyPatchHash,
+      dirtyPatchCheck: dirtyPatchCheckHasData ? dirtyPatchCheck : null,
+      dirtyPatchCheckHasData,
+      dirtyPatchApplied,
+      hasData,
+    };
+  }
+
   function normalizeWorktreeState(worktree) {
     const raw = toObject(worktree);
     const status = toText(raw.status, 'none');
     const changedFiles = toArray(raw.changedFiles || raw.changed_files).map(normalizeWorktreeDiffFile);
     const preflight = normalizeWorktreePreflight(raw.preflight || raw.mergePreflight);
+    const splitMerge = normalizeWorktreeSplitMerge(raw);
     const checklist = toArray(raw.checklist).map((item) => toText(item)).filter(Boolean);
     const sourceRepo = toText(raw.sourceRepo || raw.source_repo, '');
     const sourceBranch = toText(raw.sourceBranch || raw.source_branch || raw.branch, 'HEAD');
@@ -5162,6 +5236,11 @@
     const sourceHead = toText(raw.sourceHead || raw.source_head || preflight.sourceHead || headRef, '');
     const expectedBaseRef = toText(raw.expectedBaseRef || raw.expected_base_ref || preflight.expectedBaseRef || baseRef, '');
     const patchHash = toText(raw.patchHash || raw.patch_hash || preflight.patchHash, '');
+    const fastForwardRef = splitMerge.fastForwardRef;
+    const dirtyPatchPath = splitMerge.dirtyPatchPath;
+    const dirtyPatchHash = splitMerge.dirtyPatchHash;
+    const dirtyPatchCheck = splitMerge.dirtyPatchCheck;
+    const dirtyPatchApplied = splitMerge.dirtyPatchApplied;
     const pendingMarkerPath = toText(
       raw.pendingMarkerPath || raw.pending_marker_path || preflight.pendingMarkerPath || preflight.pendingFile || pendingFile,
       ''
@@ -5184,6 +5263,16 @@
       expectedBaseRef,
       expected_base_ref: expectedBaseRef,
       headRef,
+      fastForwardRef,
+      fast_forward_ref: fastForwardRef,
+      dirtyPatchPath,
+      dirty_patch_path: dirtyPatchPath,
+      dirtyPatchHash,
+      dirty_patch_hash: dirtyPatchHash,
+      dirtyPatchCheck,
+      dirty_patch_check: dirtyPatchCheck,
+      dirtyPatchApplied,
+      dirty_patch_applied: dirtyPatchApplied,
       worktreeDir,
       worktree: worktreeDir,
       patchPath,
@@ -6838,6 +6927,16 @@
         expected_base_ref: '',
         patchHash: '',
         patch_hash: '',
+        fastForwardRef: '',
+        fast_forward_ref: '',
+        dirtyPatchPath: '',
+        dirty_patch_path: '',
+        dirtyPatchHash: '',
+        dirty_patch_hash: '',
+        dirtyPatchCheck: null,
+        dirty_patch_check: null,
+        dirtyPatchApplied: null,
+        dirty_patch_applied: null,
         pendingMarkerPath: '',
         pending_marker_path: '',
         checklist: [
@@ -7272,6 +7371,16 @@
         expected_base_ref: '',
         patchHash: '',
         patch_hash: '',
+        fastForwardRef: '',
+        fast_forward_ref: '',
+        dirtyPatchPath: '',
+        dirty_patch_path: '',
+        dirtyPatchHash: '',
+        dirty_patch_hash: '',
+        dirtyPatchCheck: null,
+        dirty_patch_check: null,
+        dirtyPatchApplied: null,
+        dirty_patch_applied: null,
         pendingMarkerPath: '',
         pending_marker_path: '',
         checklist: [
@@ -8200,6 +8309,8 @@
     );
     const rawApplyCheck = toObject(raw.applyCheck || raw.apply_check || preflight.applyCheck || preflight.apply_check);
     const applyCheck = normalizeWorktreeFailureDetails(rawApplyCheck);
+    const splitMerge = normalizeWorktreeSplitMerge(raw);
+    const splitMergeCheck = splitMerge.dirtyPatchCheck;
     const applyCheckHasData = Boolean(
       rawApplyCheck.command ||
         rawApplyCheck.cmd ||
@@ -8223,7 +8334,8 @@
         applyCheck.message ||
         applyCheck.output ||
         applyCheck.failedFiles.length ||
-        applyCheck.failedHunks.length
+        applyCheck.failedHunks.length ||
+        splitMerge.hasData
     );
     if (!hasAnyPreflightData) {
       return '';
@@ -8274,12 +8386,70 @@
         valueClass: pendingMarkerPath ? 'runner-control__value--muted' : 'runner-control__value--muted',
       },
     ];
+    const splitMergeCheckValue = !splitMerge.dirtyPatchCheckHasData
+      ? t('common.unavailable')
+      : splitMergeCheck.ok
+        ? `${t('worktree.applyCheckPassed')} | rc=${String(splitMergeCheck.rc ?? 0)}`
+        : splitMergeCheck.status === 'missing'
+          ? t('worktree.applyCheckUnavailable')
+          : `${t('worktree.applyCheckFailed')} | rc=${String(splitMergeCheck.rc ?? 0)}`;
+    const splitMergeCards = [
+      {
+        label: t('worktree.fastForwardRef'),
+        value: splitMerge.fastForwardRef || '--',
+        valueClass: splitMerge.fastForwardRef ? 'runner-control__value--accent' : 'runner-control__value--muted',
+      },
+      {
+        label: t('worktree.dirtyPatchPath'),
+        value: splitMerge.dirtyPatchPath || '--',
+        valueClass: splitMerge.dirtyPatchPath ? 'runner-control__value--accent' : 'runner-control__value--muted',
+      },
+      {
+        label: t('worktree.dirtyPatchHash'),
+        value: splitMerge.dirtyPatchHash || '--',
+        valueClass: splitMerge.dirtyPatchHash ? 'runner-control__value--accent' : 'runner-control__value--muted',
+      },
+      {
+        label: t('worktree.dirtyPatchCheck'),
+        value: splitMergeCheckValue,
+        valueClass: !splitMerge.dirtyPatchCheckHasData
+          ? 'runner-control__value--muted'
+          : splitMergeCheck.ok
+            ? 'runner-control__value--accent'
+            : splitMergeCheck.status === 'missing'
+              ? 'runner-control__value--muted'
+              : 'runner-control__value--warn',
+      },
+      {
+        label: t('worktree.dirtyPatchApplied'),
+        value: splitMerge.dirtyPatchApplied == null
+          ? '--'
+          : splitMerge.dirtyPatchApplied
+            ? t('worktree.dirtyPatchAppliedYes')
+            : t('worktree.dirtyPatchAppliedNo'),
+        valueClass: splitMerge.dirtyPatchApplied == null
+          ? 'runner-control__value--muted'
+          : splitMerge.dirtyPatchApplied
+            ? 'runner-control__value--accent'
+            : 'runner-control__value--warn',
+      },
+    ];
 
     return `
       <div class="worktree-preflight">
         <div class="runner-control__details worktree-preflight__details">
           ${preflightCards.map((item) => detailCard(item.label, item.value, item.valueClass)).join('')}
         </div>
+        <div class="worktree-check">
+          <div class="worktree-check__head">
+            <div class="worktree-check__title">${escapeHTML(t('worktree.splitMergeRecovery'))}</div>
+            ${chip(splitMerge.hasData ? t('common.available') : t('common.unavailable'), splitMerge.hasData ? 'chip--accent' : 'chip--info')}
+          </div>
+          <div class="runner-control__details worktree-preflight__details">
+            ${splitMergeCards.map((item) => detailCard(item.label, item.value, item.valueClass)).join('')}
+          </div>
+        </div>
+        ${splitMergeCheck && !splitMergeCheck.ok ? renderWorktreeFailureDetails(splitMergeCheck, t('worktree.dirtyPatchCheck')) : ''}
         ${renderWorktreeFailureDetails(applyCheck, t('worktree.gitApplyCheck'))}
       </div>
     `;

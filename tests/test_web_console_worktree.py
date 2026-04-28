@@ -20,6 +20,7 @@ WEB_CONSOLE = ROOT / "web_console"
 
 
 from agent_runner.web import build_snapshot
+from agent_runner.gitops import sha256_text
 
 
 def _write(path: Path, text: str) -> None:
@@ -110,6 +111,118 @@ def _run_adapter_harness(fixtures: list[dict[str, object]]) -> list[dict[str, ob
     ).replace("__SOURCE_PATH__", json.dumps(str(WEB_CONSOLE / "app.js"))).replace(
         "__FIXTURES__", json.dumps(fixtures, ensure_ascii=False)
     )
+    completed = subprocess.run(
+        [node, "-"],
+        input=script,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def _run_worktree_render_harness(snapshot: dict[str, object], *, view: str = 'worktree') -> dict[str, str]:
+    node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
+    script = textwrap.dedent(
+        """
+        const fs = require('fs');
+        const vm = require('vm');
+        const sourcePath = __SOURCE_PATH__;
+        const source = fs.readFileSync(sourcePath, 'utf8');
+        const roots = {
+          app: { innerHTML: '' },
+          topbar: { innerHTML: '' },
+          sidebar: { innerHTML: '' },
+          main: {
+            innerHTML: '',
+            dataset: Object.create(null),
+            scrollTop: 0,
+            scrollHeight: 0,
+          },
+          'overlay-root': { innerHTML: '' },
+        };
+        const document = {
+          title: '',
+          body: {
+            appendChild() {},
+            removeChild() {},
+          },
+          createElement(tag) {
+            return {
+              tagName: String(tag).toUpperCase(),
+              style: {},
+              value: '',
+              setAttribute() {},
+              select() {},
+              focus() {},
+              setSelectionRange() {},
+            };
+          },
+          execCommand() { return true; },
+          getElementById(id) { return roots[id] || null; },
+          addEventListener() {},
+          querySelector() { return null; },
+        };
+        const context = {
+          console,
+          JSON,
+          Date,
+          Math,
+          Number,
+          String,
+          Boolean,
+          Array,
+          Object,
+          RegExp,
+          Error,
+          Promise,
+          setTimeout() { return 1; },
+          clearTimeout() {},
+          setInterval() { return 1; },
+          clearInterval() {},
+          fetch() { throw new Error('fetch should not run during render harness'); },
+          navigator: { clipboard: { writeText() { return Promise.resolve(); } } },
+          history: { replaceState() {} },
+          location: { hash: '' },
+          localStorage: {
+            _data: Object.create(null),
+            getItem(key) {
+              return Object.prototype.hasOwnProperty.call(this._data, key) ? this._data[key] : null;
+            },
+            setItem(key, value) {
+              this._data[key] = String(value);
+            },
+            removeItem(key) {
+              delete this._data[key];
+            },
+          },
+          document,
+          addEventListener() {},
+          removeEventListener() {},
+        };
+        context.window = context;
+        context.globalThis = context;
+        context.__AGENTCLI_SKIP_BOOTSTRAP__ = true;
+        vm.runInNewContext(source, context, { filename: sourcePath });
+        const adapters = context.__AGENTCLI_ADAPTERS__;
+        if (!adapters) {
+          throw new Error('Missing __AGENTCLI_ADAPTERS__ export');
+        }
+        const normalized = adapters.normalizeSnapshot(__SNAPSHOT__);
+        adapters.applySnapshotModel(normalized);
+        adapters.setView(__VIEW__);
+        adapters.renderShell({ force: true, preserveScroll: false });
+        process.stdout.write(JSON.stringify({
+          main: roots.main.innerHTML,
+          overlay: roots['overlay-root'].innerHTML,
+          title: document.title,
+        }));
+        """
+    ).replace("__SOURCE_PATH__", json.dumps(str(WEB_CONSOLE / "app.js"))).replace(
+        "__SNAPSHOT__", json.dumps(snapshot, ensure_ascii=False)
+    ).replace("__VIEW__", json.dumps(view))
     completed = subprocess.run(
         [node, "-"],
         input=script,
@@ -835,6 +948,112 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
                 expected_changed_files=False,
             )
             self.assertIn("stale", snapshot["worktree"]["reviewRequiredMessage"].lower())
+
+    def test_worktree_view_renders_split_merge_recovery_and_empty_states(self) -> None:
+        patch_text = "\n".join(
+            [
+                "diff --git a/agent_runner/web.py b/agent_runner/web.py",
+                "--- a/agent_runner/web.py",
+                "+++ b/agent_runner/web.py",
+                "@@ -1 +1 @@",
+                "-old",
+                "+new",
+                "",
+            ]
+        )
+
+        def write_status_artifact(name: str, payload: dict[str, object]) -> None:
+            _write(self.run_dir / name, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+        with self.subTest("split-merge-recovery"):
+            self._clear_worktree_artifacts()
+            _write(self.patch_path, patch_text)
+            split_patch_path = self.run_dir / "worktree_dirty_uncommitted.patch"
+            _write(self.run_dir / "worktree_dirty_uncommitted.patch", patch_text)
+            split_check = {
+                "command": "git apply --check --binary --whitespace=nowarn",
+                "rc": 0,
+                "ok": True,
+                "status": "ok",
+                "message": "git apply --check passed.",
+                "output": "",
+                "failed_files": [],
+                "failed_hunks": [],
+                "pending_file": "",
+            }
+            split_hash = sha256_text(split_patch_path.read_text(encoding="utf-8", errors="replace"))
+            write_status_artifact(
+                "WORKTREE_MERGE_APPLIED.json",
+                {
+                    "schema_version": 1,
+                    "status": "applied",
+                    "created_at": "2026-04-26T12:12:00",
+                    "source_repo": self.repo.as_posix(),
+                    "run_dir": self.run_dir.as_posix(),
+                    "worktree_dir": self.worktree_dir.as_posix(),
+                    "patch_path": self.patch_path.as_posix(),
+                    "base_ref": "main",
+                    "head_ref": "abc12345",
+                    "last_rc": 0,
+                    "fast_forward_ref": "fedcba98",
+                    "fastForwardRef": "fedcba98",
+                    "dirty_patch_path": split_patch_path.as_posix(),
+                    "dirtyPatchPath": split_patch_path.as_posix(),
+                    "dirty_patch_hash": split_hash,
+                    "dirtyPatchHash": split_hash,
+                    "dirty_patch_check": split_check,
+                    "dirtyPatchCheck": split_check,
+                    "dirty_patch_applied": True,
+                    "dirtyPatchApplied": True,
+                },
+            )
+
+            snapshot = self._build_snapshot()
+            rendered = _run_worktree_render_harness(snapshot)
+            main_html = rendered["main"]
+
+            self.assertIn("Split-merge recovery", main_html)
+            self.assertIn('chip--accent">available</span>', main_html)
+            self.assertIn("Fast-forward ref", main_html)
+            self.assertIn("fedcba98", main_html)
+            self.assertIn("Dirty patch path", main_html)
+            self.assertIn(split_patch_path.as_posix(), main_html)
+            self.assertIn("Dirty patch hash", main_html)
+            self.assertIn(split_hash, main_html)
+            self.assertIn("Dirty patch check", main_html)
+            self.assertIn("passed | rc=0", main_html)
+            self.assertIn("Dirty patch applied", main_html)
+            self.assertIn("Applied", main_html)
+
+        with self.subTest("plain-merge-unavailable"):
+            self._clear_worktree_artifacts()
+            _write(self.patch_path, patch_text)
+            write_status_artifact(
+                "WORKTREE_MERGE_APPLIED.json",
+                {
+                    "schema_version": 1,
+                    "status": "applied",
+                    "created_at": "2026-04-26T12:12:30",
+                    "source_repo": self.repo.as_posix(),
+                    "run_dir": self.run_dir.as_posix(),
+                    "worktree_dir": self.worktree_dir.as_posix(),
+                    "patch_path": self.patch_path.as_posix(),
+                    "base_ref": "main",
+                    "head_ref": "abc12345",
+                    "last_rc": 0,
+                },
+            )
+
+            snapshot = self._build_snapshot()
+            rendered = _run_worktree_render_harness(snapshot)
+            main_html = rendered["main"].lower()
+
+            self.assertIn("split-merge recovery", main_html)
+            self.assertIn('chip--info">unavailable</span>', main_html)
+            self.assertIn("fast-forward ref", main_html)
+            self.assertIn("dirty patch path", main_html)
+            self.assertIn("dirty patch hash", main_html)
+            self.assertIn("dirty patch applied", main_html)
 
 
 if __name__ == "__main__":

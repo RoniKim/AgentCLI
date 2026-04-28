@@ -2435,7 +2435,22 @@ def _apply_fast_forward_then_dirty_patch(
 
     dirty_patch_path = _worktree_split_patch_path(run_dir)
     export_worktree_patch(worktree_dir, dirty_patch_path, base_ref=resolved_head_ref)
+    dirty_patch_hash = sha256_text(dirty_patch_path.read_text(encoding="utf-8", errors="replace"))
     dirty_patch_has_changes = _patch_has_changes(dirty_patch_path)
+    split_merge_metadata: dict[str, object] = {
+        "merge_mode": "fast_forward_then_patch",
+        "mergeMode": "fast_forward_then_patch",
+        "fast_forward_ref": resolved_head_ref,
+        "fastForwardRef": resolved_head_ref,
+        "dirty_patch_path": dirty_patch_path.as_posix(),
+        "dirtyPatchPath": dirty_patch_path.as_posix(),
+        "dirty_patch_hash": dirty_patch_hash,
+        "dirtyPatchHash": dirty_patch_hash,
+        "dirty_patch_check": None,
+        "dirtyPatchCheck": None,
+        "dirty_patch_applied": False,
+        "dirtyPatchApplied": False,
+    }
 
     merge_rc, merge_out = run_cmd(["git", "merge", "--ff-only", resolved_head_ref], cwd=source_repo, timeout_sec=120)
     if merge_rc != 0:
@@ -2447,11 +2462,14 @@ def _apply_fast_forward_then_dirty_patch(
                 "head_ref": resolved_head_ref,
                 "source_repo": source_repo.as_posix(),
                 "output": merge_out,
+                **split_merge_metadata,
             },
         )
 
     if dirty_patch_has_changes:
         check_result = summarize_worktree_apply_check(source_repo, dirty_patch_path)
+        split_merge_metadata["dirty_patch_check"] = check_result
+        split_merge_metadata["dirtyPatchCheck"] = check_result
         if not bool(check_result.get("ok")):
             rollback_rc, rollback_out = run_cmd(["git", "reset", "--hard", resolved_base_ref], cwd=source_repo, timeout_sec=120)
             raise WorktreeSafetyError(
@@ -2465,21 +2483,22 @@ def _apply_fast_forward_then_dirty_patch(
                     "base_ref": resolved_base_ref,
                     "head_ref": resolved_head_ref,
                     "output": check_result.get("output", ""),
-                    "merge_mode": "fast_forward_then_patch",
+                    **split_merge_metadata,
                     "failed_files": check_result.get("failed_files", []),
                     "failed_hunks": check_result.get("failed_hunks", []),
                     "apply_check": check_result,
                     "rollback": {"rc": rollback_rc, "output": rollback_out},
                 },
             )
-        apply_patch_to_repo(source_repo, dirty_patch_path)
+        try:
+            apply_patch_to_repo(source_repo, dirty_patch_path)
+        except WorktreeSafetyError as ex:
+            ex.details.update(split_merge_metadata)
+            raise
+        split_merge_metadata["dirty_patch_applied"] = True
+        split_merge_metadata["dirtyPatchApplied"] = True
 
-    updates: dict[str, object] = {
-        "merge_mode": "fast_forward_then_patch",
-        "fast_forward_ref": resolved_head_ref,
-        "dirty_patch_path": dirty_patch_path.as_posix(),
-        "dirty_patch_applied": dirty_patch_has_changes,
-    }
+    updates = dict(split_merge_metadata)
     result_payload = dict(payload)
     result_payload.update(updates)
     try:

@@ -363,6 +363,16 @@ def _worktree_default_payload(repo_root: Path, run_dir: Path | None, branch: str
         "expected_base_ref": "",
         "patchHash": "",
         "patch_hash": "",
+        "fastForwardRef": "",
+        "fast_forward_ref": "",
+        "dirtyPatchPath": "",
+        "dirty_patch_path": "",
+        "dirtyPatchHash": "",
+        "dirty_patch_hash": "",
+        "dirtyPatchCheck": None,
+        "dirty_patch_check": None,
+        "dirtyPatchApplied": None,
+        "dirty_patch_applied": None,
         "pendingMarkerPath": "",
         "pending_marker_path": "",
         "checklist": list(WORKTREE_REVIEW_CHECKLIST),
@@ -541,6 +551,18 @@ def _worktree_status_payload(
     source_head = str(preflight.get("sourceHead") or raw.get("source_head") or raw.get("sourceHead") or raw.get("head_ref") or raw.get("headRef") or "")
     expected_base_ref = str(preflight.get("expectedBaseRef") or raw.get("expected_base_ref") or raw.get("expectedBaseRef") or base_ref).strip()
     patch_hash_value = str(preflight.get("patchHash") or raw.get("patch_hash") or raw.get("patchHash") or "").strip()
+    fast_forward_ref = str(raw.get("fast_forward_ref") or raw.get("fastForwardRef") or "").strip()
+    dirty_patch_path = str(raw.get("dirty_patch_path") or raw.get("dirtyPatchPath") or "").strip()
+    dirty_patch_hash = str(raw.get("dirty_patch_hash") or raw.get("dirtyPatchHash") or "").strip()
+    raw_dirty_patch_check_value = raw.get("dirty_patch_check")
+    if not (isinstance(raw_dirty_patch_check_value, dict) and raw_dirty_patch_check_value):
+        raw_dirty_patch_check_value = raw.get("dirtyPatchCheck")
+    dirty_patch_check = (
+        dict(raw_dirty_patch_check_value)
+        if isinstance(raw_dirty_patch_check_value, dict) and raw_dirty_patch_check_value
+        else None
+    )
+    dirty_patch_applied = _coerce_optional_bool(raw.get("dirty_patch_applied") if raw.get("dirty_patch_applied") is not None else raw.get("dirtyPatchApplied"))
     pending_marker_path = str(preflight.get("pendingMarkerPath") or preflight.get("pendingFile") or raw.get("pending_marker_path") or raw.get("pendingMarkerPath") or pending_file).strip()
     apply_check = preflight.get("applyCheck") if isinstance(preflight.get("applyCheck"), dict) else raw.get("applyCheck")
     if not isinstance(apply_check, dict):
@@ -656,6 +678,16 @@ def _worktree_status_payload(
         "patch": patch_path,
         "patchHash": patch_hash_value,
         "patch_hash": patch_hash_value,
+        "fastForwardRef": fast_forward_ref,
+        "fast_forward_ref": fast_forward_ref,
+        "dirtyPatchPath": dirty_patch_path,
+        "dirty_patch_path": dirty_patch_path,
+        "dirtyPatchHash": dirty_patch_hash,
+        "dirty_patch_hash": dirty_patch_hash,
+        "dirtyPatchCheck": dirty_patch_check,
+        "dirty_patch_check": dirty_patch_check,
+        "dirtyPatchApplied": dirty_patch_applied,
+        "dirty_patch_applied": dirty_patch_applied,
         "pendingFile": pending_file,
         "pendingMarkerPath": pending_marker_path,
         "pending_marker_path": pending_marker_path,
@@ -745,6 +777,21 @@ def _coerce_optional_int(value: Any) -> int | None:
         return int(float(raw))
     except Exception:
         return None
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    raw = str(value).strip().lower()
+    if not raw:
+        return None
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return None
 
 
 def _coerce_optional_float(value: Any) -> float | None:

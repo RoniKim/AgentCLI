@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from agent_runner.gitops import sha256_text
 from agent_runner.runtime_contract import BUILTIN_ROLE_SPECS, CODEX_MODEL_DEFAULTS, DEFAULT_ROLE_SPECS, PIPELINE_STAGE_ORDER
 
 
@@ -4163,6 +4164,81 @@ class WebConsoleReadonlyTests(unittest.TestCase):
                 self.assertTrue(worktree["changedFiles"])
                 self.assertEqual("agent_runner/web.py", worktree["changedFiles"][0]["path"])
                 self.assertIn(status_name.split("_")[0], worktree["summary"].lower())
+                self.assertEqual("", worktree["fastForwardRef"])
+                self.assertEqual("", worktree["dirtyPatchPath"])
+                self.assertEqual("", worktree["dirtyPatchHash"])
+                self.assertIsNone(worktree["dirtyPatchCheck"])
+                self.assertIsNone(worktree["dirtyPatchApplied"])
+
+        with self.subTest("split-merge-recovery"):
+            self._clear_worktree_artifacts()
+            write_patch()
+            split_patch_path = self.run_dir / "worktree_dirty_uncommitted.patch"
+            _write(
+                split_patch_path,
+                "\n".join(
+                    [
+                        "diff --git a/agent_runner/web.py b/agent_runner/web.py",
+                        "--- a/agent_runner/web.py",
+                        "+++ b/agent_runner/web.py",
+                        "@@ -1 +1 @@",
+                        "-old",
+                        "+new",
+                        "",
+                    ]
+                ),
+            )
+            split_check = {
+                "command": "git apply --check --binary --whitespace=nowarn",
+                "rc": 0,
+                "ok": True,
+                "status": "ok",
+                "message": "git apply --check passed.",
+                "output": "",
+                "failed_files": [],
+                "failed_hunks": [],
+                "pending_file": "",
+            }
+            split_hash = sha256_text(split_patch_path.read_text(encoding="utf-8", errors="replace"))
+            write_status_artifact(
+                "WORKTREE_MERGE_APPLIED.json",
+                {
+                    "schema_version": 1,
+                    "status": "applied",
+                    "created_at": "2026-04-26T12:03:30",
+                    "source_repo": self.repo.as_posix(),
+                    "run_dir": self.run_dir.as_posix(),
+                    "worktree_dir": (self.repo / "worktree").as_posix(),
+                    "patch_path": (self.run_dir / "worktree.patch").as_posix(),
+                    "base_ref": "main",
+                    "head_ref": "abc12345",
+                    "last_rc": 0,
+                    "fast_forward_ref": "fedcba98",
+                    "fastForwardRef": "fedcba98",
+                    "dirty_patch_path": split_patch_path.as_posix(),
+                    "dirtyPatchPath": split_patch_path.as_posix(),
+                    "dirty_patch_hash": split_hash,
+                    "dirtyPatchHash": split_hash,
+                    "dirty_patch_check": split_check,
+                    "dirtyPatchCheck": split_check,
+                    "dirty_patch_applied": True,
+                    "dirtyPatchApplied": True,
+                },
+            )
+
+            worktree = self.client.get("/api/worktree").json()
+            self.assertEqual("applied", worktree["status"])
+            self.assertFalse(worktree["reviewRequired"])
+            self.assertEqual("fedcba98", worktree["fastForwardRef"])
+            self.assertEqual("fedcba98", worktree["fast_forward_ref"])
+            self.assertEqual(split_patch_path.as_posix(), worktree["dirtyPatchPath"])
+            self.assertEqual(split_patch_path.as_posix(), worktree["dirty_patch_path"])
+            self.assertEqual(split_hash, worktree["dirtyPatchHash"])
+            self.assertEqual(split_hash, worktree["dirty_patch_hash"])
+            self.assertTrue(worktree["dirtyPatchApplied"])
+            self.assertTrue(worktree["dirty_patch_applied"])
+            self.assertEqual("ok", worktree["dirtyPatchCheck"]["status"])
+            self.assertEqual("ok", worktree["dirty_patch_check"]["status"])
 
         for status_name, artifact_name in [
             ("applied_cleanup_failed", "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json"),
