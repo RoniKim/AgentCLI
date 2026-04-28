@@ -1,5 +1,7 @@
 ← [README로 돌아가기](../README.md)
 
+> 최종 검증: 2026-04-28 (코드 기준)
+
 # 개발자 가이드 (확장)
 
 ## 커스텀 Stage 추가
@@ -87,14 +89,34 @@ def get_runner(backend: str) -> AbstractAgentRunner:
 | `REPO_INVENTORY.md` | 사람이 읽을 수 있는 파일 트리 |
 | `REPO_SNAPSHOT.json` | repo fingerprint (변경 감지용) |
 
-**변경 감지 (fingerprint)**:
+**PM 모드 결정 (cycle.py `run_pm_if_needed()`)**:
+
+PM 출력 스키마 `PMOutputV2.kind`는 다음 4개 값 중 하나입니다:
+- `bootstrap` — PROJECT_ANALYSIS.md 없음 → 전체 분석 + 초기 백로그 생성
+- `incremental` — 변경 파일 또는 working tree fingerprint 변동 감지 → 변경분만 업데이트
+- `refresh` — `pm_refresh_backlog=true` + `pm_refresh_every_cycles` 주기 도달 → 백로그 재구성
+- `skip` — 변경 없음 + refresh 주기 미도달 → 기존 백로그 재사용
+
 ```
-repo_fingerprint = git_head + working_tree_hash
-                    │
-├─ fingerprint 동일 → PM Skip (백로그 재사용)
-├─ fingerprint 다름 → PM Incremental (변경분만 업데이트)
-└─ PROJECT_ANALYSIS.md 없음 → PM Bootstrap (전체 분석)
+need_bootstrap   = not analysis_md.exists()
+need_incremental = (changed_files != []) or
+                   (pm_include_working_tree and repo_fp != last_pm_fp)
+force_refresh    = pm_refresh_backlog and (cycle_idx % pm_refresh_every_cycles == 0)
+
+         ┌─ analysis_md 없음 ───────────────► kind="bootstrap"
+         │
+run_pm ──┼─ need_incremental ───────────────► kind="incremental"
+         │
+         ├─ force_refresh ──────────────────► kind="refresh"
+         │
+         └─ 그 외 ──────────────────────────► kind="skip"  (백로그 재사용)
 ```
+
+**fingerprint 구성 요소** (`gitops.repo_fingerprint`):
+- `git_head` (HEAD SHA)
+- working tree hash (변경된 파일의 해시 합산, `pm_include_working_tree=true`일 때만)
+
+`REPO_SNAPSHOT.json`에 `{"fingerprint": "...", "updated_at": "..."}` 형태로 저장되어 다음 사이클의 변경 감지에 사용됩니다.
 
 **ChangeLog 자동 축적**:
 
@@ -158,7 +180,9 @@ run_dir/metrics.jsonl
 
 | 메서드 | 설명 |
 |--------|------|
+| `debug(msg)` | 디버그 로그 (`debug_enabled=true`일 때만 기록) |
 | `info(msg)` | 정보 로그 |
+| `warning(msg)` | 경고 로그 (events.jsonl에 `level=warning`으로 기록) |
 | `error(msg, exc=, context=)` | 에러 로그 (traceback 포함) |
 | `task_start(task_id, title, attempt)` | 태스크 시작 이벤트 |
 | `task_end(task_id, success, reason)` | 태스크 종료 이벤트 |
@@ -173,9 +197,9 @@ run_dir/metrics.jsonl
 
 # 프로세스 안전 (Process Guard)
 
-## 4-Layer 보호 체계
+## 5-Layer 보호 체계
 
-AgentCLI는 자식 프로세스(Codex CLI, Claude Code CLI 등)가 **부모 종료 후에도 남아있는 문제(orphan process)**를 방지하기 위해 4층 보호 체계를 사용합니다.
+AgentCLI는 자식 프로세스(Codex CLI, Claude Code CLI 등)가 **부모 종료 후에도 남아있는 문제(orphan process)**를 방지하기 위해 5층 보호 체계를 사용합니다.
 
 ```
 ┌─ Layer 1: Windows Job Object (KILL_ON_JOB_CLOSE) ─────────┐
@@ -194,22 +218,47 @@ AgentCLI는 자식 프로세스(Codex CLI, Claude Code CLI 등)가 **부모 종�
 │  이전 실행에서 남은 고아 프로세스 감지/정리                  │
 │  tasklist 기반 (signal handler에서는 호출되지 않음)          │
 └────────────────────────────────────────────────────────────┘
+┌─ Layer 5: Parent Watchdog (detached pythonw.exe) ──────────┐
+│  부모가 SIGKILL/크래시로 L1~L3를 우회해 죽어도 살아남는      │
+│  분리(detach)된 헬퍼 프로세스. Windows에서 pythonw.exe로     │
+│  실행되어 콘솔 없이 동작하며, 부모 PID + create_time을 추적. │
+│  부모 종료 감지 시 세션 PID 파일 기반으로 자식 정리.         │
+│  CREATE_BREAKAWAY_FROM_JOB 플래그로 부모 Job Object와 분리. │
+└────────────────────────────────────────────────────────────┘
 ```
 
 ## 주요 함수
 
 | 함수 | 설명 |
 |------|------|
-| `init_process_guard()` | Layer 1~4 초기화 (runner_entry.py에서 호출) |
+| `init_process_guard()` | Layer 1~5 초기화 (runner_entry.py에서 호출) |
 | `register_pid(pid)` | 자식 프로세스 PID 등록 |
 | `unregister_pid(pid)` | 자식 프로세스 PID 해제 |
 | `terminate_all_children()` | 등록된 모든 자식 프로세스 종료 |
+| `_start_parent_watchdog(session_dir)` | L5 watchdog 헬퍼 프로세스 분리 기동 (Windows 한정) |
 
 ## 스레드 안전성
 
 - 모든 변경 가능 상태는 `RLock`으로 보호 (재진입 안전)
 - Signal handler에서도 `terminate_all_children()` 안전 호출 가능
 - Job Object 핸들은 의도적으로 프로세스 수명 동안 열려있음 (조기 닫힘 방지)
+- L5 watchdog은 별도 프로세스(독립 메모리/시그널)로 동작하므로 부모 충돌과 무관하게 자식 정리 가능
+
+---
+
+# 추가 서브시스템 모듈
+
+CLAUDE.md에는 등재되어 있으나 본 가이드에 별도 항목으로 다루지 않은 모듈들입니다.
+
+| 모듈 | 라인 수 | 역할 |
+|------|---------|------|
+| `agent_runner/web.py` | ~8300 | FastAPI 기반 Web Console 진입점 (run 모니터링/제어, SSE 이벤트 스트리밍) |
+| `agent_runner/remote/controller.py` | ~1850 | HTTP 원격 제어 엔드포인트 (외부 트리거/상태 조회, 토큰 인증) |
+| `agent_runner/remote/telegram_service.py` | ~1490 | Telegram bot 연동 — 알림 송신 + 명령 수신 |
+| `agent_runner/stop_progress.py` | ~580 | Stop signal 단계별 진행 추적 (request → ack → drain → terminate) |
+| `agent_runner/pipeline/shared_runtime.py` | ~920 | 백엔드-비종속 Dev 루프 헬퍼 (Codex/Claude 양쪽에서 공유) |
+
+이 모듈들은 옵트인 기능이며, 기본 CLI 실행 경로(`--run-now` / interactive shell)는 모두 없이도 동작합니다.
 
 ---
 

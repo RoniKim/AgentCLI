@@ -1,5 +1,8 @@
 # Telegram Integration Worklog (2026-02-20)
 
+> 📦 **ARCHIVED — 2026-02-20 시점 작업 일지.**
+> 영구 가이드는 `docs/TELEGRAM.md` 참조. 본 문서는 당시 구현 작업 기록으로 보존.
+
 ## Scope
 - Goal: Remote monitor/control of AgentCLI via Telegram (status, stop, restart) with safe per-user token/chat registration.
 - Mode: Hybrid only (`--telegram`), local shell + Telegram control plane.

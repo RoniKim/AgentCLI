@@ -1,5 +1,7 @@
 ← [README로 돌아가기](../README.md)
 
+> 최종 검증: 2026-04-28 (코드 기준)
+
 # 프롬프트/문서/스킬
 
 ## 프롬프트 템플릿 커스터마이징
@@ -38,9 +40,9 @@ config 예시(핵심):
   "skills": {
     "enabled": true,
     "roots": [
+      "~/.codex/skills",
       "~/.agents/skills",
-      "~/.claude/skills",
-      "{repo}/Skills"
+      "~/.claude/skills"
     ],
     "snapshot_dir": ".AgentCLI/skills",
     "inline_mode": "qa",
@@ -48,6 +50,10 @@ config 예시(핵심):
   }
 }
 ```
+
+**기본 roots (cli.py DEFAULTS)**: 위 3개 경로(`~/.codex/skills`, `~/.agents/skills`, `~/.claude/skills`)가 디폴트입니다. `{repo}/Skills` 같은 프로젝트 내부 스킬 폴더는 디폴트가 아니며, 필요시 사용자가 직접 `roots`에 추가해야 합니다.
+
+**`inline_mode` 입력 정규화**: 사용자가 `"off"`로 입력하면 자동으로 `"none"`으로 정규화됩니다 (cli.py `_validate_skills_config()`). 허용 값은 `qa` | `pm` | `both` | `none`이며, 그 외 값은 모두 `"qa"`로 강제됩니다.
 
 ---
 
@@ -324,7 +330,7 @@ skill_id = "{relative_path}#{sha1(source_root::relative_path)[:10]}"
 PM이 존재하지 않는 skill_id를 참조하면:
 - `difflib.SequenceMatcher`로 유사도 비교 (skill_id, name, path 3가지 대상)
 - 상위 3개 후보를 자동 제안
-- `skill_match_autofix=true` + `skill_match_autofix_threshold` 초과 시 자동 교정
+- `skill_match_autofix=true` + `skill_match_autofix_threshold` 초과 시 자동 교정 (기본은 비활성)
 
 ## Config 참조
 
@@ -332,21 +338,32 @@ PM이 존재하지 않는 skill_id를 참조하면:
 {
   "skills": {
     "enabled": true,
-    "roots": ["~/.agents/skills", "{repo}/Skills"],
+    "roots": [
+      "~/.codex/skills",
+      "~/.agents/skills",
+      "~/.claude/skills"
+    ],
     "snapshot_dir": ".AgentCLI/skills",
     "inline_mode": "qa",
     "max_excerpt_lines": 12,
-    "pm_summary_max_items": 30,
-    "pm_summary_max_chars": 4000,
+    "pm_summary_max_items": 120,
+    "pm_summary_max_chars": 8000,
     "qa_max_total_chars": 8000,
-    "skill_match_autofix": true,
-    "skill_match_autofix_threshold": 0.5
+    "skill_match_autofix": false,
+    "skill_match_autofix_threshold": 0.9
   }
 }
 ```
 
 | 설정 | 기본값 | 설명 |
 |------|--------|------|
-| `inline_mode` | `"qa"` | 스킬 발췌 인라인 대상: `qa`, `pm`, `both`, `none` |
-| `max_excerpt_lines` | 12 | 스킬 발췌 최대 줄 수 |
-| `qa_max_total_chars` | 8000 | QA 스킬 컨텍스트 총 글자 수 상한 |
+| `enabled` | `false` | 스킬 시스템 활성화 |
+| `roots` | `["~/.codex/skills", "~/.agents/skills", "~/.claude/skills"]` | 스킬 검색 루트 (`{repo}/Skills`는 디폴트가 아님) |
+| `snapshot_dir` | `""` (비활성) | 스킬 스냅샷 저장 경로 |
+| `inline_mode` | `"qa"` | 스킬 발췌 인라인 대상: `qa`, `pm`, `both`, `none` (`"off"` → `"none"`으로 정규화) |
+| `max_excerpt_lines` | `12` | 스킬 발췌 최대 줄 수 |
+| `pm_summary_max_items` | `120` | PM 인덱스 요약 최대 항목 수 |
+| `pm_summary_max_chars` | `8000` | PM 인덱스 요약 총 글자 수 상한 |
+| `qa_max_total_chars` | `8000` | QA 스킬 컨텍스트 총 글자 수 상한 |
+| `skill_match_autofix` | `false` | 퍼지 매칭 자동 교정 활성화 (기본 비활성 — 제안만 출력) |
+| `skill_match_autofix_threshold` | `0.9` | 자동 교정 최소 유사도 임계값 |

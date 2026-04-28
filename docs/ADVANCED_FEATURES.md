@@ -1,5 +1,7 @@
 ← [README로 돌아가기](../README.md)
 
+> 최종 검증: 2026-04-28 (코드 기준)
+
 # TODO 기능 (사용자 우선순위 주입)
 
 ## 개요
@@ -83,7 +85,7 @@ User TODO (highest priority; if present, reflect into backlog tasks):
   "execution_backend": "claudecode",
   "continuous": true,
   "iterations": 3,
-  "pm_refresh_interval": 1,
+  "pm_refresh_every_cycles": 1,
   "qa_always": true
 }
 ```
@@ -92,7 +94,7 @@ User TODO (highest priority; if present, reflect into backlog tasks):
 |----|--------|------|
 | `iterations` | `1`~`5` | TODO 항목 수에 맞게 최소 Cycle만 실행 |
 | `continuous` | `true` | iterations 횟수만큼 자동 반복 |
-| `pm_refresh_interval` | `1` | 매 Cycle마다 PM이 TODO를 다시 읽어 반영 |
+| `pm_refresh_every_cycles` | `1` | 매 Cycle마다 PM이 TODO를 다시 읽어 반영 (`pm_refresh_backlog=true`도 함께 필요) |
 | `qa_always` | `true` | 매 Cycle QA 검증 실행 |
 
 **실행 예시:**
@@ -196,7 +198,7 @@ REPO/.doc/GOALS.md
   → - [x] 가계부 입출금 CRUD 동작  (자동 체크)
 ```
 
-매칭 방식: 3-Tier 전략 (정확 매칭 → 한국어 구문 → 키워드 퍼지 40% 임계값). 아래 "자동 체크박스 매칭 전략" 섹션 참조.
+매칭 방식: 3-Tier 전략 (정확 매칭 → 한국어 구문 80%/min 3 → 키워드 퍼지 80%/min 4). 아래 "자동 체크박스 매칭 전략" 섹션 참조.
 
 ## 완성 판단 (`project_complete`)
 
@@ -249,9 +251,11 @@ PM은 실패 태스크를 **반드시** 다른 접근법으로 재생성하거�
 
 태스크 완료 시 GOALS.md 항목과의 매칭은 3단계 전략으로 수행됩니다:
 
-1. **정확 매칭** (최고 신뢰도): 태스크 제목/프롬프트에 `GOALS: {항목텍스트}` 접두어가 있는 경우
-2. **한국어 구문 매칭**: GOALS 항목의 한국어 구문이 태스크 텍스트에 부분문자열로 포함
-3. **키워드 퍼지 매칭**: 40% 이상 키워드 일치 시 체크 (불용어 제외)
+1. **정확 매칭** (최고 신뢰도): 태스크 제목/프롬프트에 `GOALS: {항목텍스트}` 접두어가 있는 경우 (서브스트링 매치)
+2. **한국어 구문 매칭**: GOALS 항목에서 추출한 한국어 구문(2자 이상)이 **80% 이상** 매칭되고 **최소 3개 구문**이 일치 (`goals.py:594-598`)
+3. **키워드 퍼지 매칭**: 노이즈 단어 제외 후 **80% 이상** 키워드 일치 + **최소 4개 키워드** 매칭 (`goals.py:600-621`)
+
+> 이전 버전(60%/min 3, 40%) 대비 임계값을 강화하여 false-positive 자동 체크를 줄였습니다.
 
 ## Config 설정
 
@@ -453,13 +457,12 @@ QA 후속 태스크는 다음 사이클의 PM이 백로그를 생성할 때 자�
   │    └─ 토큰 소비 없이 즉시 생성 (항상 성공)
   │    └─ SHUTDOWN_REPORT.md에 기록
   │
-  ├─ 3) Reporter 에이전트로 보고서 작성 시도 (best-effort)
-  │    └─ 성공 시: 폴백 보고서 덮어쓰기
-  │    └─ 실패 시: 폴백 보고서 유지 (토큰 부족 등)
-  │
-  └─ 4) 중복 감지 (Fix 4)
-       └─ PM이 보고서를 반복 생성하는 경우, half-content 비교로 중복 제거
+  └─ 3) Reporter 에이전트로 보고서 작성 시도 (best-effort)
+       └─ 성공 시: 폴백 보고서 덮어쓰기
+       └─ 실패 시: 폴백 보고서 유지 (토큰 부족 등)
 ```
+
+> 이전 버전 문서에 있던 "Fix 4 — half-content 비교 중복 제거" 단계는 현재 코드에 존재하지 않습니다. 보고서 중복은 단일 SHUTDOWN_REPORT.md를 best-effort로 덮어쓰는 방식으로 자연스럽게 방지됩니다.
 
 ## SHUTDOWN_CONTEXT 수집 항목
 

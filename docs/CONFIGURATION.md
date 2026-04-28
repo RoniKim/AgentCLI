@@ -2,6 +2,8 @@
 
 # 설정(Config) 관리
 
+> 최종 검증: 2026-04-28 (코드 기준)
+
 ## config 저장 위치(기본)
 
 기본적으로 config는 **레포 내부가 아니라 AgentCLI 쪽**에 저장됩니다:
@@ -31,6 +33,9 @@
 | `/stop [--wait]` | STOP 파일 생성, 선택적 대기 |
 | `/status` | 러너 상태/실행시간/종료코드 확인 |
 | `/doctor` | 환경 진단 (Git, API 키, Backend, Skills, DB, Goals, Docs 등 15개 항목) |
+| `/worktree` (alias: `/worktree-list`, `/worktree-doctor`) | 읽기 전용 워크트리 진단 — `.AgentCLI/agent_runs`, pending marker, patch path, cleanup-failed artifact, generated worktree 디렉토리 점검 |
+| `/merge-worktree` | pending worktree 결과를 Y/N 확인 후 원본 repo에 적용 |
+| `/discard-worktree` | pending worktree 결과를 Y/N 확인 후 폐기 |
 | `/help` | 명령어 도움말 |
 | `/exit` | Shell 종료 |
 
@@ -75,12 +80,12 @@ python -m agent_runner.backends.claude_smoke_test --prompt "hi"
 
 | 설정 | 기본값 | 용도 |
 |------|--------|------|
-| `pm_model` | `gpt-5.1-codex-mini` | PM 백로그 생성 |
-| `dev_model` | `gpt-5.1-codex-mini` | Dev 코딩 (기본 티어) |
-| `dev_model_tier1` | `gpt-5.1-codex` | Dev 에스컬레이션 1단계 |
-| `dev_model_tier2` | `gpt-5.2-codex` | Dev 에스컬레이션 2단계 |
-| `qa_model` | `gpt-5.1-codex-mini` | QA 리뷰 |
-| `reporter_model` | `gpt-5.1-codex-mini` | 종료 보고서 |
+| `pm_model` | `gpt-5.5` | PM 백로그 생성 |
+| `dev_model` | `gpt-5.4-mini` | Dev 코딩 (기본 티어) |
+| `dev_model_tier1` | `gpt-5.4` | Dev 에스컬레이션 1단계 |
+| `dev_model_tier2` | `gpt-5.5` | Dev 에스컬레이션 2단계 |
+| `qa_model` | `gpt-5.5` | QA 리뷰 |
+| `reporter_model` | `gpt-5.4-mini` | 종료 보고서 |
 
 ## Claude 백엔드 (Claude 모델)
 
@@ -163,7 +168,7 @@ Claude 모델의 내부 추론(thinking) 토큰 예산을 설정합니다:
   "claudecode_user": "",
   "claudecode_fork_session": false,
   "claudecode_include_partial_messages": false,
-  "claudecode_setting_sources": "project,user,local"
+  "claudecode_setting_sources": "project"
 }
 ```
 
@@ -172,7 +177,7 @@ Claude 모델의 내부 추론(thinking) 토큰 예산을 설정합니다:
 | `claudecode_user` | `""` | Claude Code 사용자 식별자 |
 | `claudecode_fork_session` | `false` | resume 시 새 세션 ID로 포크 (best-effort) |
 | `claudecode_include_partial_messages` | `false` | 스트리밍 중간 메시지 이벤트 활성화 |
-| `claudecode_setting_sources` | `"project,user,local"` | Claude Code 설정 읽기 소스 |
+| `claudecode_setting_sources` | `"project"` | Claude Code 설정 읽기 소스 (예: `"project,user,local"`로 확장 가능) |
 
 ## 시스템 프롬프트 확장
 

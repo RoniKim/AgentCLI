@@ -1,5 +1,9 @@
 # Current State - AgentCLI Web Console Work
 
+> 📦 **ARCHIVED — 2026-04-27 시점 초기 셋업 스냅샷 (superseded).**
+> 본 문서가 말하는 "no production web app yet" 은 이미 무효 — `web_console/`, `agent_runner.web` 운영 중.
+> 현재 상태는 `.doc/GOALS.md` (P0-A~P0-L 거의 전부 [x]) 와 `docs/WEB_CONSOLE.md` 참조.
+
 ## Repository State
 
 - AgentCLI already has a mature Python CLI runner with Codex and Claude Code backends.

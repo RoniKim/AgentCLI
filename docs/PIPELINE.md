@@ -2,6 +2,8 @@
 
 # 파이프라인 상세 로직
 
+> 최종 검증: 2026-04-28 (코드 기준)
+
 ## 실행 디스패치 흐름 (Preflight → Backend)
 
 ```
@@ -84,7 +86,7 @@ budget_state = {
 |------|------|------|
 | **Bootstrap** | 첫 실행 (PROJECT_ANALYSIS.md 없음) | 프로젝트 분석 + 초기 백로그 생성 |
 | **Incremental** | HEAD 변경 또는 워킹 트리 dirty | 변경사항 반영한 백로그 업데이트 |
-| **Refresh** | `pm_refresh_every_cycles` 조건 충족 | 주기적 강제 재분석 |
+| **Refresh** | `pm_refresh_backlog=true` AND `pm_refresh_every_cycles>0` AND `cycle_idx % pm_refresh_every_cycles == 0` | 주기적 강제 재분석 |
 | **Skip** | repo fingerprint 동일 | 변경 없으면 기존 백로그 재사용 |
 
 **구조화 출력 강제:**
@@ -112,7 +114,8 @@ PM 호출 → JSON 응답 → parse_pm_output_with_errors() → 스키마 검증
       "files": ["Pages/LoginPage.razor"],
       "done_when": "빌드 통과, 수동 테스트 가능",
       "skills": ["skill_blazor_ui"],
-      "skills_rationale": "UI 작업"
+      "skills_rationale": "UI 작업",
+      "depends_on": []
     }
   ],
   "notes_md": "참고사항...",
@@ -219,11 +222,18 @@ Dev 실행 → MaxTurnsExceeded 예외 발생
 
 ## Reporter 단계 (종료 보고서)
 
-**트리거 조건:**
+**트리거 조건 (`utils.py`의 11개 stop_reason 어떤 것이든 가능):**
 - 할당량 소진 (`quota_exhausted`)
+- 할당량 활용률 한도 초과 (`quota_utilization`)
 - 모든 태스크 완료 (`all_tasks_done`)
+- 모든 태스크 시도 (`all_tasks_attempted`)
+- 프로젝트 완성 (`project_complete`)
+- 백로그 없음 (`no_tasks`)
+- PM refresh 후 백로그 없음 (`pm_refresh_no_backlog`)
+- prepared-only 모드 (`prepared_only`)
+- Idle exit (`idle_exit`)
 - STOP 파일 생성 (`stop_file`)
-- 치명적 에러 발생
+- 정상 종료 (`ok`) 또는 치명적 에러 발생
 
 **보고서 생성 흐름:**
 ```
@@ -299,22 +309,22 @@ python agent_cli.py --run-now --repo <path> --profile enterprise
 | **정책 스캔** | 비활성 | **자동 활성** |
 | **보안 스캔** | 비활성 | **자동 활성** |
 | **QA 항상 실행** | `qa_always=true` | `qa_always=true` |
-| **예산 가드레일** | 사용자 설정값 | 최소값 강제 적용 (아래 참고) |
+| **예산 가드레일** | 사용자 설정값 | **최소값 강제 적용** (아래 참고) |
 
 ## Enterprise 예산 가드레일 강제
 
-Enterprise 모드에서는 비용 폭주 방지를 위해 예산 한도에 **최소 상한**이 적용됩니다:
+Enterprise 모드에서는 안정적 운영을 보장하기 위해 예산 한도에 **최소값(floor)** 이 강제됩니다. 사용자가 더 낮은 값으로 설정하더라도 다음 최소값으로 끌어올려집니다 (`cli.py`):
 
 ```
-max_total_escalations_per_run    → min(사용자값, 5)
-max_total_continuations_per_run  → min(사용자값, 5)
-max_total_repair_attempts_per_run → min(사용자값, 3)
+max_total_escalations_per_run    → max(사용자값, 5)
+max_total_continuations_per_run  → max(사용자값, 5)
+max_total_repair_attempts_per_run → max(사용자값, 3)
 ```
 
-> 사용자가 더 높은 값을 설정하더라도 Enterprise 모드에서는 위 상한을 초과할 수 없습니다.
+> 사용자가 더 높은 값을 설정하면 그대로 사용되며, 더 낮게 설정한 경우에만 위 최소값으로 보정됩니다. (Enterprise 프로필에서 PM/Dev 작업이 예산 부족으로 조기 중단되는 것을 방지하기 위함.)
 
 ## 사용 시나리오
 
 - **팀 프로젝트**: Security Stage로 보안 취약점 자동 스캔
 - **CI/CD 통합**: 정책/보안 스캔 필수화로 배포 전 품질 보장
-- **비용 관리**: 강제 가드레일로 예상치 못한 API 비용 방지
+- **안정적 운영**: 강제 최소값 가드레일로 PM/Dev가 예산 부족으로 조기 중단되는 것을 방지

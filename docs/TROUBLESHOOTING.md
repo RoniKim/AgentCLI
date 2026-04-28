@@ -1,5 +1,7 @@
 ← [README로 돌아가기](../README.md)
 
+> 최종 검증: 2026-04-28 (코드 기준)
+
 # 트러블슈팅 (문제 상황 및 해결)
 
 ## 1. 인증/로그인 문제
@@ -25,7 +27,7 @@ claude auth login
 ## 2. 할당량 소진 (Quota Exhausted)
 
 **증상:** 실행 중 갑자기 중단, `SHUTDOWN_REPORT.md`에 `quota_exhausted` 기록
-**감지 키워드:** `insufficient_quota`, `exceeded your current quota`, `usage limit`, `billing hard limit`
+**감지 키워드 (대표):** `insufficient_quota`, `quota_exhausted`, `exceeded your current quota`, `usage limit`, `billing hard limit`, `you've hit your usage limit`, `purchase more credits`, `upgrade to pro`, `credit balance is too low`, `usage cap`, `token limit exceeded`, `api key limit`, `limit resets` (전체 목록은 `OPERATIONS.md` 또는 `agent_runner/utils.py:_has_quota_text` 참조)
 
 **해결:**
 ```
@@ -84,7 +86,7 @@ claude auth login
 {
   "dev_auto_escalate": true,
   "dev_max_escalations": 2,
-  "dev_escalate_on": ["no_diff", "build_failed", "test_failed"]
+  "dev_escalate_on": ["no_diff", "build_failed", "test_failed", "fast_regression_failed", "no_commits"]
 }
 ```
 
@@ -179,9 +181,9 @@ pip install -U claude-agent-sdk
 
 **원인:** 설정한 모델 이름이 API에서 지원하지 않는 이름
 **해결:**
-- Codex: `gpt-5-mini`, `gpt-5.1-codex-mini`, `gpt-5.1-codex`, `gpt-5.2-codex` 등 확인
+- Codex (현행 DEFAULTS, `cli.py`): `pm_model=gpt-5.5`, `dev_model=gpt-5.4-mini`, `qa_model=gpt-5.5`, `reporter_model=gpt-5.4-mini`, `dev_model_tier1=gpt-5.4`, `dev_model_tier2=gpt-5.5`
 - Claude: `sonnet`, `opus`, `haiku` 중 선택
-- 에스컬레이션이 활성화되어 있으면 다음 티어 모델로 자동 시도
+- 에스컬레이션이 활성화되어 있으면 `dev_model` → `dev_model_tier1` → `dev_model_tier2` 순서로 자동 승격
 
 ## 13. 예산 초과 (BudgetExceeded)
 
@@ -416,11 +418,57 @@ claude auth login
 
 ## 종료 사유 (Stop Reason) 우선순위
 
+`utils.py:STOP_REASON_PRIORITY` 기준 (낮을수록 우선):
+
 | 우선순위 | 사유 | 설명 |
 |----------|------|------|
-| 1 | `quota_exhausted` | API 할당량 소진 |
-| 2 | `stop_file` | STOP 파일 감지 |
-| 3 | `all_tasks_done` | 모든 백로그 태스크 완료 |
-| 4 | `prepared_only` | continuous 미설정, 백로그만 준비 |
-| 5 | `idle_exit` | loop 모드에서 유휴 타임아웃 |
-| 6 | `ok` | 정상 종료 |
+| 1 | `quota_exhausted` | API 할당량 소진 (failover 트리거) |
+| 2 | `quota_utilization` | OAuth 사용량 임계치 초과 (선제적 wait/stop) |
+| 3 | `stop_file` | STOP 파일 감지 (graceful stop) |
+| 4 | `project_complete` | GOALS.md P0(+P1) 모두 완료 |
+| 5 | `all_tasks_done` | 백로그 태스크 전부 done |
+| 6 | `all_tasks_attempted` | 모든 태스크 시도 완료 (실패 포함) |
+| 7 | `prepared_only` | continuous 미설정 — 백로그만 준비하고 종료 |
+| 8 | `idle_exit` | loop 모드 유휴 타임아웃 (`loop_idle_exit_after`) |
+| 9 | `ok` | 정상 종료 |
+
+**우선순위 표에 없는 보조 reason** (반환되지만 priority dict에는 없음 → `len(priority)`로 후순위 처리, 외부 루프에서 별도 dispatch):
+
+| 사유 | 처리 |
+|------|------|
+| `no_tasks` | `GOALS_REFRESH_RESCUABLE_REASONS`에 포함 — goals auto-refresh 시도 후 재진입 |
+| `pm_refresh_no_backlog` | 동일 — refresh 미가용/실패 시 idle/exit 폴백 |
+
+> `STOP_REASON_PRIORITY`에 직접 등장하지 않는 사유라도 `choose_stop_reason()` 호출 시 후순위로 평가됩니다. 새 reason 추가 시 `_PROPAGATE_STOP_REASONS` (manager.py)와 `GOALS_REFRESH_RESCUABLE_REASONS` (goals.py) 분류도 함께 검토하세요.
+
+## 23. Windows 핸들/메모리 누수 (재부팅 전까지 회복 불가)
+
+**증상:**
+- 장시간 운영 후 `agent_cli.py` 종료 시 `error.log` 파일 락이 풀리지 않음
+- Python 자식 프로세스가 좀비로 남아 작업 관리자에 누적
+- 재시작 시 로그 디렉토리 쓰기 실패 / `WinError 32: process cannot access the file`
+- 메모리 사용량이 비정상적으로 누적
+
+**원인 (확인된 사례):**
+- Windows에서 `process_guard.py` Job Object가 종료 경로를 모두 회수하지 못함
+- `_CodexAppServerClient`(또는 SDK 채널) 등 일부 구독이 명시적 `close()` 없이 GC에 위임됨
+- `StructuredLogger`의 파일 핸들이 닫히지 않은 채 프로세스가 종료
+- 한 번 누수가 발생하면 OS 레벨 핸들이 잠겨, **현 세션에서는 회복 불가능**
+
+**참조 인시던트:** `.doc/Docs/incidents/MEMORY_AND_HANDLE_LEAK_20260428.md`
+
+**임시 완화책 (재부팅 전까지의 차선책):**
+
+```text
+1. /stop --wait 후 충분한 wait 부여 (stop_wait_timeout_seconds=300+ 권장)
+2. process_guard Job Object 재초기화 — agent_cli.py 재진입 시 새 Job 생성
+3. _CodexAppServerClient.close() 명시 호출 — 종료 hook에서 정리 보장
+4. close_all_loggers() — StructuredLogger 핸들 일괄 close
+5. Codex CLI / Claude CLI 자식 프로세스 작업 관리자에서 수동 종료 (taskkill /F /IM codex.exe /T)
+```
+
+**근본 해결:**
+- **재부팅이 유일한 회복 경로**입니다. OS가 모든 좀비 핸들을 해제할 때까지 동일 디렉토리에서 재실행해도 락이 풀리지 않습니다.
+- 재부팅 후 `.AgentCLI/agent_runs/<old>/logs/` 잔존 핸들 정리 후 새 run_dir 시작을 권장합니다.
+
+> 장기 실행 환경에서는 `worktree-isolation` + 작은 `loop_max_cycles`로 분할 운영해 누수 노출을 줄이세요. 인시던트 재발 시 `.doc/Docs/incidents/`에 새 보고서를 추가하세요.

@@ -1,5 +1,7 @@
 ← [README로 돌아가기](../README.md)
 
+> 최종 검증: 2026-04-28 (코드 기준)
+
 # 안전/운영 옵션 (Git, Stop, No-diff)
 
 ## Stop file로 안전 종료
@@ -12,6 +14,14 @@ Shell:
 > /stop
 > /stop --wait
 ```
+
+**Stop 대기 타임아웃 (`stop_wait_timeout_seconds`)**
+
+| 키 | 기본값 | 설명 |
+|----|--------|------|
+| `stop_wait_timeout_seconds` | `180` (3분) | `/stop --wait` 또는 web stop이 러너 종료를 기다리는 최대 시간. 러너 자체는 STOP 신호를 계속 인식하지만, 이 값은 **운영자(쉘/웹)** 측 대기 윈도우만 제어. 초과 시 "Runner is still alive after Ns stop wait timeout." 메시지로 보고하고 컨트롤을 반환. |
+
+> 러너가 Reporter/디스크 플러시 등으로 길게 마무리하는 워크플로면 적당히 늘리는 것을 권장합니다 (예: 300-600). 강제 종료가 필요하면 `process_guard`가 별도로 처리합니다.
 
 ## "변경 없음(no diff)" 정책
 
@@ -79,12 +89,12 @@ API 비용 폭주를 방지하기 위해 에스컬레이션/continuation/repair 
 ```json
 {
   "budgets": {
-    "max_pm_structured_retries": 3,
+    "max_pm_structured_retries": 2,
     "max_dev_escalations_per_task": 2,
-    "max_dev_continuations_per_task": 3,
+    "max_dev_continuations_per_task": 2,
     "max_total_escalations_per_run": 10,
     "max_total_continuations_per_run": 10,
-    "max_total_repair_attempts_per_run": 6
+    "max_total_repair_attempts_per_run": 5
   }
 }
 ```
@@ -93,12 +103,12 @@ API 비용 폭주를 방지하기 위해 에스컬레이션/continuation/repair 
 
 | 항목 | 기본값 | 설명 |
 |------|--------|------|
-| `max_pm_structured_retries` | 3 | PM JSON 스키마 repair 최대 횟수 |
+| `max_pm_structured_retries` | 2 | PM JSON 스키마 repair 최대 횟수 |
 | `max_dev_escalations_per_task` | 2 | **태스크 1개**에서 모델 에스컬레이션 최대 횟수 |
-| `max_dev_continuations_per_task` | 3 | **태스크 1개**에서 continuation(턴 초과 이어서 실행) 최대 횟수 |
+| `max_dev_continuations_per_task` | 2 | **태스크 1개**에서 continuation(턴 초과 이어서 실행) 최대 횟수 |
 | `max_total_escalations_per_run` | 10 | **실행 전체**에서 에스컬레이션 총 횟수 |
 | `max_total_continuations_per_run` | 10 | **실행 전체**에서 continuation 총 횟수 |
-| `max_total_repair_attempts_per_run` | 6 | **실행 전체**에서 PM repair 총 횟수 |
+| `max_total_repair_attempts_per_run` | 5 | **실행 전체**에서 PM repair 총 횟수 |
 
 ## 예산 초과 시 동작
 
@@ -305,11 +315,10 @@ Backend #1 (codex) 실행
             → 최종 종료
 ```
 
-**할당량 소진 감지 키워드:**
-- `insufficient_quota`, `quota exceeded`, `exceeded your current quota`
-- `billing hard limit`, `hard limit`, `payment required`
-- `usage limit`, `plan and billing`, `spend limit`, `monthly spend limit`
-- Claude 특화: `usage cap`, `reached your`, `token limit exceeded`, `account limit`
+**할당량 소진 감지 키워드** (`utils.py:_has_quota_text` 단일 진실 공급원):
+- OpenAI / 일반 결제: `insufficient_quota`, `quota exceeded`, `exceeded your current quota`, `quota_exhausted`, `billing hard limit`, `hard limit`, `plan and billing`, `plans & billing`, `payment required`, `budgetexceeded`
+- Codex CLI 사용량 한도: `you've hit your usage limit`, `you've hit your limit`, `hit your limit`, `purchase more credits`, `upgrade to pro`, `codex/settings/usage`, `usage limit`, `user limit`, `user_limit`, `credit balance is too low`, `insufficient credits`, `purchase credits`, `spend limit`, `monthly spend limit`
+- Claude Code CLI 한도: `usage cap`, `reached your`, `token limit exceeded`, `account limit`, `api key limit`, `limit resets`
 
 > Failover는 **환경이 사전에 준비**되어야 성공합니다. 양쪽 백엔드 모두 `/doctor`로 점검하세요.
 
@@ -321,7 +330,7 @@ Shell에서 `/doctor`를 실행하면 run_dir에 진단 보고서(`DOCTOR.md`)�
 > /doctor
 ```
 
-**진단 항목 (14개):**
+**진단 항목 (15개):**
 
 | # | 카테고리 | 검사 내용 | 상세 |
 |---|----------|-----------|------|

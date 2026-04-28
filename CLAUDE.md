@@ -81,6 +81,11 @@ Subsystems:
 | `tracing.py` | OpenTelemetry-compatible trace context |
 | `wizard.py` | Interactive configuration wizard |
 | `version.py` | Version string (`__version__`) |
+| `web.py` | FastAPI Web Console entry point + read/save endpoints (~8300 lines, single largest module) |
+| `stop_progress.py` | Stop signal phase tracker (request → stop file → child term → runner wait → finalize) |
+| `pipeline/shared_runtime.py` | Backend-agnostic Dev loop helpers (`SharedCycleResult`, `SharedCycleDeps`, `process_qa_followups`, `select_next_task_with_dependency_checks`, ~640 lines) |
+| `remote/controller.py` | Remote control plane (HTTP/Telegram-driven start/stop/reload/restart) |
+| `remote/telegram_service.py` | Telegram bot service (status, run_start, run_stop, errors, events, grep, tail, notify) |
 | `backends/base.py` | `AbstractAgentRunner` interface |
 | `backends/factory.py` | Backend selection (codex vs claudecode) |
 | `backends/claude_smoke_test.py` | Claude backend connectivity test |
@@ -349,6 +354,30 @@ run_dir/
   ├─ skills/                   # Skills snapshot
   └─ agent_cli_history.txt     # CLI history (prompt_toolkit)
 ```
+
+## Web Console & Remote Control
+
+AgentCLI는 단순 CLI 외에 **Web Console** (FastAPI 기반)과 **Remote Control Plane** (HTTP/Telegram)도 제공합니다.
+
+### Web Console (`agent_runner/web.py`, ~8300 lines)
+- **프론트엔드**: `web_console/` (정적 HTML/JS/CSS, Direction A 시각 디자인)
+- **기본 바인딩**: `127.0.0.1` (localhost-only). LAN 노출은 명시적 opt-in
+- **Read-only 기본**: config/prompt/goals/runner/worktree mutating 작업은 환경변수 `AGENTCLI_WEB_RUNNER_CONTROLS=1` 또는 `--enable-runner-controls` 명시적 활성화 필요
+- **주요 화면 12개** (web_console/app.js): Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, Runner Controls, mobile view
+- **API 라우트 28개**: health, status, progress, config (read/save/backup), prompts (read/save/backup/restore), goals (read/save/backup), logs/tail, history, notifications, worktree (review/diagnostics/merge/discard), runner (start/stop/reload/restart)
+- **확인 문구**: 위험 작업은 명시적 phrase 필요 (`RESTART RUNNER`, `MERGE WORKTREE`, `DISCARD WORKTREE`)
+- **Locale**: en/ko 토글 (`web_console/app.js` locale state)
+- **시각 기준**: `docs/Design/project/AgentCLI Web - A.html` (canonical)
+
+### Remote Control (`agent_runner/remote/`)
+- `controller.py` — HTTP/원격 트리거 기반 start/stop/reload/restart
+- `telegram_service.py` — Telegram bot (status, run_start, run_stop, errors, events, grep, tail, notify)
+- 설정: `cli.py:312-336` `telegram` 객체 13개 키 + `--telegram*` CLI 11개
+
+### 보안/운영 원칙
+- 인증 미구현 — 신뢰된 사설망에서만 사용
+- 로그·GOALS raw text·task output·config·prompts·serialized runner args 모두 redaction 후 LAN 노출
+- Runner controls는 LAN 바인딩 시 기본 차단 (P0-K)
 
 ## Important Warnings
 

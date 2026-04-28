@@ -1,5 +1,9 @@
 # Web Console Review Notes - 2026-04-26
 
+> 📦 **ARCHIVED — 2026-04-26 시점 리뷰 노트 (superseded).**
+> 현재 Web Console 상태는 `docs/WEB_CONSOLE.md` 와 `.doc/GOALS.md` 참조.
+> 본 문서는 P0-G/P0-J/P0-L 미완 시점 기록으로, 그 이후 모두 [x] 완료됨.
+
 ## Review Method
 
 - Started the FastAPI console locally and inspected it with Playwright.

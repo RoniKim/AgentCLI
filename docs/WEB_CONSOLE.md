@@ -1,5 +1,7 @@
 # AgentCLI Web Console
 
+> Last verified: 2026-04-28 (against code).
+
 AgentCLI has an alpha FastAPI web console for browser-based monitoring. It is repo-owned code in `web_console/` served by `agent_runner.web`; the exported design files under `docs/Design/project/` are reference input only.
 
 This is not yet a complete operational web runner. Treat the current implementation as an alpha shell with read-only snapshots plus early runner-control plumbing.
@@ -25,10 +27,9 @@ Verified on 2026-04-26 with a local server and Playwright:
 
 Known blockers:
 
-- Goals and Prompts are not yet full edit/save workflows.
-- The Logs view still needs frontend live-tail fetch, pause/resume, filtering, copy, and download behavior.
-- Broader English/Korean locale coverage still needs more views and copy polish.
-- Runner controls need end-to-end validation against a real AgentCLI process before they should be considered usable.
+- Logs view live-tail, pause/resume, filtering, copy, and download are fully wired (see `web_console/app.js` `isLiveTailPaused`, level/stage/task/search filters in `web.py`); remaining work is broader UX polish.
+- Default English/Korean locale toggle is implemented (`setLocale` in `app.js`); a few views and copy strings still need translation polish.
+- Runner controls: T1/T2 durable runner-control events were merged 2026-04-28 (commits bc57841, c0557d1). The remaining gap is real-process end-to-end validation and stop-timeout edge-case coverage.
 - The UI still needs broader Playwright coverage beyond the checked-in smoke path.
 - There is no authentication layer. Treat LAN binds as trusted-network-only until authentication exists.
 

@@ -1,5 +1,9 @@
 # AgentCLI Web Console vs BlueKiwi 비교 보고서
 
+> 📦 **ARCHIVED — 2026-04-27 시점 비교 자료.**
+> 기준 커밋(`170083c`)은 이미 5+커밋 뒤로 밀려있고, 인용된 라우트 수(27→28)·테스트 수(77→104)도 stale.
+> 시점 자료로 보존하되 재인용 시 시점 명시 필수.
+
 작성일: 2026-04-27  
 AgentCLI 기준 커밋: `170083c` (`Stop PM and Dev promptly on manual stop`)  
 비교 기준: AgentCLI 현재 로컬 저장소, `.doc/GOALS.md`, `docs/WEB_CONSOLE.md`, BlueKiwi 공개 GitHub/README

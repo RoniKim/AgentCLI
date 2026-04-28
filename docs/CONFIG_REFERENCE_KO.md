@@ -2,6 +2,8 @@
 
 설정 파일 위치: `configs/<프로젝트명>.json`
 
+> 최종 검증: 2026-04-28 (코드 기준 — `agent_runner/cli.py` DEFAULTS와 일치)
+
 ---
 
 ## 1. 코어 / 경로
@@ -13,7 +15,6 @@
 | `config_version` | int | `2` | 설정 파일 버전. 마이그레이션 로직에서 사용. 수동 변경 불필요. |
 | `run_dir` | string | `""` | 실행 기록 디렉토리. 비어있으면 자동 생성. |
 | `resume_latest` | bool | `false` | `true`면 가장 최근 run_dir을 이어서 실행. |
-| `env_file` | string | `""` | `.env` 파일 경로. 비어있으면 AgentCLI 홈의 `.env` 자동 로드. |
 
 ---
 
@@ -139,6 +140,7 @@
 | 변수 | 타입 | 기본값 | 설명 |
 |------|------|--------|------|
 | `gitops.untracked_exclude_globs` | list | `[".doc/**", ".AgentCLI/**", ...]` | git untracked 파일 감지 시 제외할 glob 패턴. |
+| `gitops.worktree_merge_mode` | string | `"manual"` | worktree 격리 종료 시 병합 방식. `"manual"`이면 자동 병합하지 않고 수동 처리 안내. |
 
 ---
 
@@ -207,13 +209,14 @@
 
 | 변수 | 타입 | 기본값 | 설명 |
 |------|------|--------|------|
-| `pm_model` | string | `"gpt-5-mini"` | PM 단계 GPT 모델. |
-| `dev_model` | string | `"gpt-5.1-codex-mini"` | Dev 단계 GPT 모델 (기본 티어). |
-| `qa_model` | string | `"gpt-5-mini"` | QA 단계 GPT 모델. |
+| `pm_model` | string | `"gpt-5.5"` | PM 단계 GPT 모델. |
+| `dev_model` | string | `"gpt-5.4-mini"` | Dev 단계 GPT 모델 (기본 티어). |
+| `qa_model` | string | `"gpt-5.5"` | QA 단계 GPT 모델. |
+| `codex_reasoning_effort` | string | `""` | `codex exec`에 전달할 `model_reasoning_effort` 오버라이드. 비어있으면 Codex CLI/글로벌 설정 기본값 사용. |
 | `qa_always` | bool | `true` | `true`면 코드 변경 없어도 항상 QA 실행. enterprise 프로필에서는 항상 `true` 강제. |
 | `qa_to_backlog` | bool | `false` | `true`면 QA 결과를 백로그에 후속 태스크로 추가. |
 | `max_qa_followups` | int | `5` | QA에서 백로그에 추가할 최대 후속 태스크 수. |
-| `reporter_model` | string | `"gpt-5-nano"` | Reporter(종료 보고서) GPT 모델. |
+| `reporter_model` | string | `"gpt-5.4-mini"` | Reporter(종료 보고서) GPT 모델. |
 | `report_max_turns` | int | `8` | Reporter 최대 턴 수. |
 
 ---
@@ -224,9 +227,9 @@
 |------|------|--------|------|
 | `dev_auto_escalate` | bool | `true` | `true`면 빌드/테스트 실패 시 상위 모델로 자동 에스컬레이션. |
 | `dev_max_escalations` | int | `2` | 태스크당 최대 에스컬레이션 횟수. |
-| `dev_model_tier1` | string | `"gpt-5.1-codex"` | 1차 에스컬레이션 GPT 모델. |
-| `dev_model_tier2` | string | `"gpt-5.2-codex"` | 2차 에스컬레이션 GPT 모델. |
-| `dev_escalate_on` | list | `["no_diff", "build_failed", "test_failed"]` | 에스컬레이션 트리거 조건. |
+| `dev_model_tier1` | string | `"gpt-5.4"` | 1차 에스컬레이션 GPT 모델. |
+| `dev_model_tier2` | string | `"gpt-5.5"` | 2차 에스컬레이션 GPT 모델. |
+| `dev_escalate_on` | list | `["no_diff", "build_failed", "test_failed", "fast_regression_failed", "no_commits"]` | 에스컬레이션 트리거 조건. |
 
 **에스컬레이션 흐름:**
 ```
@@ -244,6 +247,7 @@ dev_model → dev_model_tier1 → dev_model_tier2
 | `dev_timeout_seconds` | int | `900` | Dev 단계 타임아웃 (15분). |
 | `mcp_timeout_seconds` | int | `120` | MCP 서버 통신 타임아웃 (2분). |
 | `test_timeout_seconds` | int | `3600` | 테스트 실행 타임아웃 (1시간). |
+| `stop_wait_timeout_seconds` | int | `180` | STOP 파일 감지 후 graceful 종료 대기 시간 (3분). 초과 시 강제 종료. |
 
 ---
 
@@ -341,9 +345,9 @@ dev_model → dev_model_tier1 → dev_model_tier2
 | 변수 | 타입 | 기본값 | 설명 |
 |------|------|--------|------|
 | `failover_enabled` | bool | `false` | 페일오버 활성화. |
-| `failover_backends` | list | `["codex"]` | 페일오버 체인. 예: `["codex", "claudecode"]` → codex 실패 시 claudecode로 전환. |
-| `failover_on` | list | `["quota_exhausted"]` | 페일오버 트리거 조건. `"quota_exhausted"` = API 할당량 소진 시. |
-| `failover_max_switches` | int | `1` | 한 실행에서 최대 백엔드 전환 횟수. |
+| `failover_backends` | list | `["codex", "claudecode"]` | 페일오버 체인. codex 실패 시 claudecode로 전환. |
+| `failover_on` | list | `["quota_exhausted", "quota_utilization"]` | 페일오버 트리거 조건. `"quota_exhausted"` = API 할당량 소진, `"quota_utilization"` = 사용률 한도(`quota_*_max_utilization`) 초과 시. |
+| `failover_max_switches` | int | `0` | 한 실행에서 최대 백엔드 전환 횟수. `0`이면 무제한. |
 
 ---
 
@@ -412,6 +416,53 @@ GOALS.md 기반 프로젝트 완료 추적 시스템. P0(필수)와 P1(선택) �
   - `no_tasks` — PM이 태스크 0개 생성 (빈 백로그)
   - `pm_refresh_no_backlog` — PM refresh 후에도 백로그 없음
 - 안전장치: `goals_refresh_max_per_run` (기본 3) 초과 시 강제 중단, GOALS 미완료 시 시도 안 함
+
+---
+
+## 24. 원격 제어 평면 (Telegram)
+
+Telegram 봇을 이용한 원격 모니터링/제어 평면. 로컬 셸과 병행하여 작동하는 하이브리드 모드를 지원합니다.
+자세한 운영 가이드는 `docs/TELEGRAM.md` 참조.
+
+| 변수 | 타입 | 기본값 | 설명 |
+|------|------|--------|------|
+| `telegram.enabled` | bool | `false` | Telegram 통합 활성화. `true`면 봇 폴링/푸시 시작. |
+| `telegram.bot_token` | string | `""` | Telegram 봇 토큰. 환경변수 `AGENTCLI_TELEGRAM_BOT_TOKEN`이 있으면 우선 사용. |
+| `telegram.allowed_chat_ids` | list | `[]` | 허용된 chat_id 목록 (정수). 비어있으면 페어링 코드만으로 등록. |
+| `telegram.pairing_code` | string | `""` | `/pair` 명령으로 chat_id를 등록할 때 쓰는 일회성 페어링 코드. |
+| `telegram.instance_name` | string | `""` | 알림 메시지에 표시되는 인스턴스 라벨. 다중 호스트 운영 시 식별용. |
+| `telegram.notify_events` | list | `["run_start", "run_stop", "task_done", "task_failed", "quota", "error", "stalled", "project_complete", "backend_failover"]` | 푸시할 이벤트 목록. |
+| `telegram.send_cycle_summary` | bool | `true` | `cycle_summary.log`의 신규 라인을 푸시할지 여부. |
+| `telegram.notify_poll_interval_seconds` | int | `8` | 푸시 폴링 주기 (초). |
+| `telegram.stalled_seconds` | int | `600` | stall 감지 임계 시간 (초). HEARTBEAT 갱신이 이 시간 동안 없으면 `stalled` 이벤트 발송. |
+| `telegram.tail_lines_default` | int | `50` | `/tail` 명령 기본 출력 라인 수. |
+| `telegram.runner_mode` | string | `"thread"` | 러너 실행 모드. `"thread"` (같은 프로세스) 또는 `"subprocess"` (별도 프로세스). |
+| `telegram.poll_timeout_seconds` | int | `30` | Telegram long-poll 타임아웃 (초). |
+
+### 24-1. CLI 플래그
+
+설정 파일 값을 CLI에서 일시 오버라이드할 수 있습니다.
+
+| 플래그 | 대응 키 / 동작 |
+|--------|---------------|
+| `--telegram` | 하이브리드 모드 활성화 (로컬 셸 + Telegram 제어 평면). |
+| `--telegram-bot-token <TOKEN>` | `telegram.bot_token` 오버라이드. |
+| `--telegram-pairing-code <CODE>` | `telegram.pairing_code` 오버라이드. |
+| `--telegram-runner-mode {thread,subprocess}` | `telegram.runner_mode` 오버라이드. |
+| `--telegram-allowed-chat-id <ID>` | `telegram.allowed_chat_ids`에 추가 (반복 가능). |
+| `--telegram-instance-name <NAME>` | `telegram.instance_name` 오버라이드. |
+| `--telegram-notify-events <CSV>` | `telegram.notify_events` 오버라이드. 쉼표 구분 (예: `run_start,task_done,quota`). |
+| `--telegram-send-cycle-summary / --no-telegram-send-cycle-summary` | `telegram.send_cycle_summary` 토글. |
+| `--telegram-notify-interval <SEC>` | `telegram.notify_poll_interval_seconds` 오버라이드. |
+| `--telegram-stalled-seconds <SEC>` | `telegram.stalled_seconds` 오버라이드. |
+| `--telegram-tail-lines <N>` | `telegram.tail_lines_default` 오버라이드. |
+| `--telegram-poll-timeout <SEC>` | `telegram.poll_timeout_seconds` 오버라이드. |
+
+### 24-2. 환경변수
+
+| 변수 | 우선순위 / 용도 |
+|------|---------------|
+| `AGENTCLI_TELEGRAM_BOT_TOKEN` | `telegram.bot_token`보다 우선 적용. 토큰을 설정 파일에 기록하지 않고 안전하게 주입할 때 사용. |
 
 ---
 

@@ -1,5 +1,9 @@
 # Windows 핸들/프로세스 누수로 인한 시스템 슬로우다운 문제
 
+> 🔧 **OPEN INCIDENT** — 본 문서는 `.doc/Docs/incidents/`로 이동 (2026-04-28).
+> 인용된 9개 file:line 모두 코드와 일치 검증 완료. Fix A/B/C/D/E 모두 미적용 상태 유지.
+> 후속 조치는 `.doc/Docs/UNATTENDED_OPS_AUDIT_AND_FOLLOWUP.md`와 함께 추적.
+
 **작성일**: 2026-04-28
 **상태**: 분석 완료, 수정 미적용
 **영향**: HIGH — 재부팅 전까지 회복 불가, 사용자 워크플로우 차단

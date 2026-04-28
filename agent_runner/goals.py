@@ -577,8 +577,8 @@ def _goal_match_detail(goal_item: str, corpus: str) -> tuple[bool, str]:
 
     Strategy:
     1. Check for GOALS: prefix exact match (highest confidence)
-    2. Check Korean substring matches (phrase-level, >=60% threshold)
-    3. Fuzzy keyword matching (word-level, 60% threshold, min 3)
+    2. Check Korean substring matches (phrase-level, >=80% threshold, min 3 phrases)
+    3. Fuzzy keyword matching (word-level, 80% threshold, min 4 keywords)
     """
     goal_lower = goal_item.lower().strip()
     corpus_lower = corpus.lower()

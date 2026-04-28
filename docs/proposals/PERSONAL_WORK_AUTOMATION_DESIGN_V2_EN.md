@@ -1,8 +1,15 @@
 # Personal Work Automation Design v2
 
+> ⚠️ **PROPOSAL — NOT YET IMPLEMENTED.** This document defines future design for AgentCLI Web.
+> The artifacts/features below (`INSTANCE_LOCK.json`, `WORK_SUMMARY.md`, `WEB_ACTION_AUDIT.jsonl`,
+> `WEB_SNAPSHOT.json`, Personal Runbook panel, Local Automation Start Presets, Long-running task health,
+> Retention policy, Config backup/restore, Command Palette, etc.) do **not** exist in the current codebase.
+> Use this only as a forward-looking design reference; do not assume any feature here is available.
+> Verified against codebase on 2026-04-28.
+
 > Date: 2026-04-28  
 > Scope: AgentCLI Web as a local, single-operator cockpit for one active repository.  
-> Status: Updated design proposal. Safety-first revision based on current AgentCLI project direction.  
+> Status: Future design proposal (not yet implemented). Safety-first revision based on current AgentCLI project direction.  
 > Primary goal: make AgentCLI Web safe enough for daily personal work before expanding convenience features.
 
 ---

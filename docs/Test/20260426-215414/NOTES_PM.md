@@ -1,1 +1,0 @@
-Created `D:/.agentcli_worktrees/999.AgentCLI/20260426-215414/.AgentCLI/PM_CACHE/PROJECT_ANALYSIS.md`. FastAPI and uvicorn are present in `requirements.txt`. No `package.json` is tracked, so browser smoke work must handle Playwright as an optional/pre-existing dependency unless a later task explicitly declares it.
