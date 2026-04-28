@@ -3245,6 +3245,15 @@
     `;
   }
 
+  function runnerControlLiveStateRows(liveState = currentLiveRunLiveState()) {
+    const current = normalizeLiveState(liveState);
+    return toArray(current.items).map((entry) => ({
+      label: entry.label,
+      value: entry.statusLabel,
+      className: liveStateToneClass(entry.kind, entry.status, entry.available),
+    }));
+  }
+
   function runnerControlValueClass(tone) {
     const normalized = toText(tone, '').toLowerCase();
     if (normalized === 'err') {
@@ -3261,8 +3270,10 @@
 
   function runnerControlDetailRows(control = currentLiveRunRunnerControl(), display) {
     const current = toObject(control);
+    const stateInfo = display || runnerControlStateInfo(current);
     const status = toObject(current.status);
     const stopProgress = normalizeStopProgress(status.stopProgress);
+    const liveStateRows = runnerControlLiveStateRows(current.liveState || current.live_state || status.liveState || status.live_state);
     const statusConfigPath = redactionAwareText(status.configPath, t('common.unknown'));
     const sourceValue = current.source && current.source !== 'default' ? current.source : t('common.unknown');
     const runStatusValue = current.runStatus
@@ -3296,15 +3307,16 @@
       {
         label: t('runner.controller'),
         value: current.controllerAvailable ? t('runner.available') : t('runner.unavailable'),
-        className: current.controllerAvailable ? (display.chipTone === 'err' ? 'runner-control__value--err' : 'runner-control__value--accent') : runnerControlValueClass(display.chipTone),
+        className: current.controllerAvailable ? (stateInfo.chipTone === 'err' ? 'runner-control__value--err' : 'runner-control__value--accent') : runnerControlValueClass(stateInfo.chipTone),
       },
-      { label: t('runner.state'), value: display.label, className: runnerControlValueClass(display.chipTone) },
+      { label: t('runner.state'), value: stateInfo.label, className: runnerControlValueClass(stateInfo.chipTone) },
       { label: t('runner.runMode'), value: status.runnerMode || t('common.unknown'), className: 'runner-control__value--muted' },
       {
         label: t('runner.runStatus'),
         value: runStatusValue,
         className: status.running ? 'runner-control__value--accent' : 'runner-control__value--muted',
       },
+      ...liveStateRows,
     ];
     if (stopProgress.phase) {
       const stopPhaseValue = stopProgress.currentPhase?.phaseLabel || stopProgress.phase || t('common.unknown');
@@ -3316,7 +3328,6 @@
       const trackedChildProcesses = stopProgressProcessSummary(stopProgress.trackedChildProcesses);
       const currentSignalParts = [stopProgressSignalSummary(stopProgress.lastArtifactSignal), stopProgressSignalSummary(stopProgress.lastLogSignal)].filter(Boolean);
       const timeoutSummary = stopProgress.timeoutGuidance?.summary || '';
-      const runnerAliveValue = stopProgress.runnerAlive ? t('runner.running') : t('runner.stopped');
       rows.push({
         label: t('runner.currentStopPhase'),
         value: `${stopPhaseValue}${stopProgress.elapsedSeconds ? ` ${stopProgress.elapsedSeconds}s` : ''}`,
@@ -3333,19 +3344,10 @@
           className: stopProgress.phase === 'timeout'
             ? 'runner-control__value--warn'
             : stopProgress.active
-              ? 'runner-control__value--accent'
-              : 'runner-control__value--muted',
+            ? 'runner-control__value--accent'
+            : 'runner-control__value--muted',
         });
       }
-      rows.push({
-        label: t('runner.runnerAlive'),
-        value: runnerAliveValue,
-        className: stopProgress.runnerAlive
-          ? 'runner-control__value--accent'
-          : timeoutActive
-            ? 'runner-control__value--warn'
-            : 'runner-control__value--muted',
-      });
       if (trackedChildPids || trackedChildProcesses) {
         rows.push({
           label: trackedPidsLabel,
@@ -3915,22 +3917,10 @@
     const availableValue = item.available ?? item.present ?? item.known;
     const aliveValue = item.alive ?? item.running ?? item.active;
     const flushingValue = item.flushing ?? item.writing;
-    let status = toText(item.status, '').trim().toLowerCase();
-    const hasAvailable = availableValue == null
-      ? aliveValue != null || flushingValue != null || Boolean(status)
-      : Boolean(availableValue);
-    if (!status) {
-      if (!hasAvailable) {
-        status = 'unavailable';
-      } else if (canonicalKind === 'artifactWriter') {
-        status = flushingValue ? 'flushing' : 'idle';
-      } else if (canonicalKind === 'taskBackend') {
-        status = aliveValue ? 'alive' : 'idle';
-      } else {
-        status = aliveValue ? 'alive' : 'stopped';
-      }
-    }
-    const available = hasAvailable && status !== 'unavailable';
+    const statusText = toText(item.status, '').trim().toLowerCase();
+    const statusLabelText = toText(item.statusLabel || item.status_label, '').trim();
+    const status = statusText || toText(statusLabelText, '').trim().toLowerCase() || 'unavailable';
+    const available = availableValue == null ? status !== 'unavailable' : Boolean(availableValue);
     const count = toMaybeNumber(item.count ?? item.total ?? item.trackedCount ?? item.tracked_count);
     const aliveCount = toMaybeNumber(item.aliveCount ?? item.alive_count);
     const normalized = {
@@ -3938,7 +3928,7 @@
       label: liveStateKindLabel(canonicalKind || kind),
       available: Boolean(available),
       status: status || 'unavailable',
-      statusLabel: liveStateStatusLabel(status || 'unavailable'),
+      statusLabel: statusLabelText || liveStateStatusLabel(status || 'unavailable'),
       source: toText(item.source, ''),
       alive: aliveValue == null ? null : Boolean(aliveValue),
       flushing: flushingValue == null ? null : Boolean(flushingValue),
@@ -3984,8 +3974,8 @@
     );
     const items = [runnerProcess, taskBackend, trackedChildren, artifactWriter];
     const normalized = {
-      available: Boolean(item.available ?? items.some((entry) => entry.available)),
-      source: toText(item.source, items.some((entry) => entry.available) ? 'api' : 'unavailable'),
+      available: Boolean(item.available),
+      source: toText(item.source, Boolean(item.available) ? 'api' : 'unavailable'),
       runnerProcess,
       runner_process: runnerProcess,
       taskBackend,

@@ -2246,6 +2246,198 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIn("Flushing", live_state_html[1])
         self.assertIn("unavailable", live_state_html[2])
 
+    def test_api_status_live_state_contract_keeps_runner_backend_children_and_artifact_states_separate(self) -> None:
+        from agent_runner.web import _build_live_state_payload
+
+        base_controller_status = {
+            "runner_mode": "thread",
+            "repo": self.repo.as_posix(),
+            "config_path": self.config_path.as_posix(),
+            "run_dir": self.run_dir.as_posix(),
+            "stage": "Dev",
+            "branch": "main",
+        }
+
+        no_run = _build_live_state_payload(None, controller_available=False)
+        backend_only = _build_live_state_payload(
+            {**base_controller_status, "running": False},
+            progress={"run_status": "running"},
+            active_run={"status": "running"},
+            controller_available=True,
+        )
+        child_only = _build_live_state_payload(
+            {
+                **base_controller_status,
+                "running": False,
+                "stop_progress": {
+                    "phase": "runner_wait",
+                    "tracked_child_pids": [321],
+                    "tracked_child_processes": [
+                        {
+                            "pid": 321,
+                            "alive": True,
+                            "session_file": "C:/temp/session_321.json",
+                            "session_exists": True,
+                        }
+                    ],
+                },
+            },
+            progress={"run_status": "idle"},
+            active_run={"status": "idle"},
+            controller_available=True,
+        )
+        artifact_flushing = _build_live_state_payload(
+            {
+                **base_controller_status,
+                "running": True,
+                "stop_progress": {
+                    "phase": "final_artifact_collection",
+                    "last_artifact_signal": {
+                        "path": "C:/temp/run_summary.json",
+                        "updated_at": "2026-04-28T00:00:10",
+                    },
+                },
+            },
+            progress={"run_status": "running"},
+            active_run={"status": "running"},
+            controller_available=True,
+        )
+
+        self.assertEqual("unavailable", no_run["runnerProcess"]["status"])
+        self.assertEqual("unavailable", no_run["taskBackend"]["status"])
+        self.assertEqual("unavailable", no_run["trackedChildren"]["status"])
+        self.assertEqual("unavailable", no_run["artifactWriter"]["status"])
+
+        self.assertEqual("stopped", backend_only["runnerProcess"]["status"])
+        self.assertEqual("alive", backend_only["taskBackend"]["status"])
+        self.assertEqual("unavailable", backend_only["trackedChildren"]["status"])
+        self.assertEqual("unavailable", backend_only["artifactWriter"]["status"])
+
+        self.assertEqual("stopped", child_only["runnerProcess"]["status"])
+        self.assertEqual("idle", child_only["taskBackend"]["status"])
+        self.assertEqual("alive", child_only["trackedChildren"]["status"])
+        self.assertEqual("idle", child_only["artifactWriter"]["status"])
+
+        self.assertEqual("alive", artifact_flushing["runnerProcess"]["status"])
+        self.assertEqual("alive", artifact_flushing["taskBackend"]["status"])
+        self.assertEqual("stopped", artifact_flushing["trackedChildren"]["status"])
+        self.assertEqual("flushing", artifact_flushing["artifactWriter"]["status"])
+
+        raw_legacy_live_state = {
+            "available": True,
+            "source": "api",
+            "runnerProcess": {
+                "kind": "runnerProcess",
+                "available": True,
+                "alive": True,
+            },
+            "taskBackend": {
+                "kind": "taskBackend",
+                "available": True,
+                "alive": True,
+            },
+            "trackedChildren": {
+                "kind": "trackedChildren",
+                "available": True,
+                "alive": True,
+            },
+            "artifactWriter": {
+                "kind": "artifactWriter",
+                "available": True,
+                "flushing": True,
+            },
+            "items": [
+                {
+                    "kind": "runnerProcess",
+                    "available": True,
+                    "alive": True,
+                },
+                {
+                    "kind": "taskBackend",
+                    "available": True,
+                    "alive": True,
+                },
+                {
+                    "kind": "trackedChildren",
+                    "available": True,
+                    "alive": True,
+                },
+                {
+                    "kind": "artifactWriter",
+                    "available": True,
+                    "flushing": True,
+                },
+            ],
+        }
+
+        def make_control(live_state: dict[str, object], *, running: bool, run_status: str, controller_available: bool = True) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "source": "api",
+                "controllerAvailable": controller_available,
+                "busy": False,
+                "message": "Runner snapshot.",
+                "lastAction": "",
+                "lastMessage": "",
+                "lastError": "",
+                "runStatus": run_status,
+                "status": {
+                    "running": running,
+                    "runnerMode": "thread",
+                    "repo": self.repo.as_posix(),
+                    "configPath": self.config_path.as_posix(),
+                    "runDir": self.run_dir.as_posix(),
+                    "stopProgress": {},
+                    "reason": "",
+                    "lastEvent": "2026-04-26T12:08:00 cycle_end",
+                },
+                "liveState": live_state,
+            }
+
+        results = _run_adapter_harness(
+            [
+                {"kind": "call", "name": "normalizeLiveState", "args": [raw_legacy_live_state]},
+                {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(no_run, running=False, run_status="idle", controller_available=False), {"chipTone": "paused", "label": "Unavailable"}]},
+                {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(backend_only, running=False, run_status="running"), {"chipTone": "running", "label": "Running"}]},
+                {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(child_only, running=False, run_status="idle"), {"chipTone": "idle", "label": "Idle"}]},
+                {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(artifact_flushing, running=True, run_status="running"), {"chipTone": "loading", "label": "Flushing"}]},
+            ]
+        )
+
+        normalized_legacy = results[0]
+        self.assertEqual("unavailable", normalized_legacy["runnerProcess"]["status"])
+        self.assertEqual("unavailable", normalized_legacy["runnerProcess"]["statusLabel"])
+        self.assertEqual("unavailable", normalized_legacy["taskBackend"]["status"])
+        self.assertEqual("unavailable", normalized_legacy["taskBackend"]["statusLabel"])
+        self.assertEqual("unavailable", normalized_legacy["trackedChildren"]["status"])
+        self.assertEqual("unavailable", normalized_legacy["trackedChildren"]["statusLabel"])
+        self.assertEqual("unavailable", normalized_legacy["artifactWriter"]["status"])
+        self.assertEqual("unavailable", normalized_legacy["artifactWriter"]["statusLabel"])
+
+        no_run_rows = {row["label"]: row["value"] for row in results[1]}
+        self.assertEqual("unavailable", no_run_rows["Runner process"])
+        self.assertEqual("unavailable", no_run_rows["Task backend"])
+        self.assertEqual("unavailable", no_run_rows["Tracked children"])
+        self.assertEqual("unavailable", no_run_rows["Artifact writer"])
+
+        backend_rows = {row["label"]: row["value"] for row in results[2]}
+        self.assertEqual("Stopped", backend_rows["Runner process"])
+        self.assertEqual("Alive", backend_rows["Task backend"])
+        self.assertEqual("unavailable", backend_rows["Tracked children"])
+        self.assertEqual("unavailable", backend_rows["Artifact writer"])
+
+        child_rows = {row["label"]: row["value"] for row in results[3]}
+        self.assertEqual("Stopped", child_rows["Runner process"])
+        self.assertEqual("Idle", child_rows["Task backend"])
+        self.assertEqual("Alive", child_rows["Tracked children"])
+        self.assertEqual("Idle", child_rows["Artifact writer"])
+
+        artifact_rows = {row["label"]: row["value"] for row in results[4]}
+        self.assertEqual("Alive", artifact_rows["Runner process"])
+        self.assertEqual("Alive", artifact_rows["Task backend"])
+        self.assertEqual("Stopped", artifact_rows["Tracked children"])
+        self.assertEqual("Flushing", artifact_rows["Artifact writer"])
+
     def test_api_status_prefers_active_run_quota_over_metrics_when_both_are_real(self) -> None:
         from agent_runner import web as web_module
         from agent_runner.web import create_app
@@ -5630,7 +5822,7 @@ Another unsupported line.
         timeout_labels = {row["label"] for row in timeout_rows}
         self.assertIn("Current phase", timeout_labels)
         self.assertIn("Phase history", timeout_labels)
-        self.assertIn("Runner alive", timeout_labels)
+        self.assertIn("Runner process", timeout_labels)
         self.assertIn("Remaining tracked PIDs", timeout_labels)
         self.assertIn("Stop file paths", timeout_labels)
         self.assertIn("Last artifact write", timeout_labels)

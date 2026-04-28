@@ -60,7 +60,7 @@ from .remote.controller import (
     read_runner_control_event,
     write_runner_control_event,
 )
-from .stop_progress import normalize_stop_progress_payload
+from .stop_progress import normalize_stop_progress_payload, summarize_stop_progress_liveness
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, load_state, parse_backlog_md
 from .utils import atomic_write_json, atomic_write_text, now_iso, run_cmd
 
@@ -2193,6 +2193,7 @@ def _build_live_state_payload(
         stop_progress = {}
     else:
         stop_progress = normalize_stop_progress_payload(stop_progress)
+    stop_progress_liveness = summarize_stop_progress_liveness(stop_progress)
 
     run_status = _pick_text(
         progress_data.get("run_status"),
@@ -2206,28 +2207,17 @@ def _build_live_state_payload(
     backend_alive = backend_available and run_status == "running"
     backend_status = "unavailable" if not backend_available else ("alive" if backend_alive else "idle")
 
-    tracked_child_processes = stop_progress.get("tracked_child_processes")
-    if not isinstance(tracked_child_processes, list):
-        tracked_child_processes = []
-    tracked_child_pids = stop_progress.get("tracked_child_pids")
-    if not isinstance(tracked_child_pids, list):
-        tracked_child_pids = []
+    tracked_child_processes = stop_progress_liveness["tracked_child_processes"]
+    tracked_child_pids = stop_progress_liveness["tracked_child_pids"]
     tracked_available = controller_live_available and bool(stop_progress)
-    tracked_alive_count = 0
-    for record in tracked_child_processes:
-        if isinstance(record, dict) and bool(record.get("alive")):
-            tracked_alive_count += 1
-    tracked_count = len(tracked_child_processes) if tracked_child_processes else len(tracked_child_pids)
+    tracked_alive_count = int(stop_progress_liveness["tracked_alive_count"])
+    tracked_count = int(stop_progress_liveness["tracked_count"])
     tracked_alive = tracked_available and tracked_alive_count > 0
     tracked_status = "unavailable" if not tracked_available else ("alive" if tracked_alive else "stopped")
 
-    current_phase = stop_progress.get("current_phase") if isinstance(stop_progress.get("current_phase"), dict) else {}
-    artifact_phase = _pick_text(stop_progress.get("phase"), current_phase.get("phase")).strip().lower()
+    artifact_phase = stop_progress_liveness["artifact_phase"]
     artifact_available = controller_live_available and bool(stop_progress)
-    artifact_flushing = artifact_available and (
-        artifact_phase == "final_artifact_collection"
-        or (artifact_phase in {"runner_wait", "timeout"} and bool(stop_progress.get("last_artifact_signal")))
-    )
+    artifact_flushing = artifact_available and bool(stop_progress_liveness["artifact_flushing"])
     artifact_status = "unavailable" if not artifact_available else ("flushing" if artifact_flushing else "idle")
 
     runner_process = _live_state_entry(

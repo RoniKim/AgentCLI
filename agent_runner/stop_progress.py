@@ -473,6 +473,43 @@ def normalize_stop_progress_payload(payload: dict[str, Any] | None) -> dict[str,
     return normalized
 
 
+def summarize_stop_progress_liveness(payload: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = normalize_stop_progress_payload(payload)
+    current_phase = normalized.get("current_phase") if isinstance(normalized.get("current_phase"), dict) else {}
+    tracked_child_processes = normalized.get("tracked_child_processes")
+    if not isinstance(tracked_child_processes, list):
+        tracked_child_processes = []
+    tracked_child_pids = normalized.get("tracked_child_pids")
+    if not isinstance(tracked_child_pids, list):
+        tracked_child_pids = []
+    tracked_alive_count = 0
+    for record in tracked_child_processes:
+        if isinstance(record, dict) and bool(record.get("alive")):
+            tracked_alive_count += 1
+    tracked_count = len(tracked_child_processes) if tracked_child_processes else len(tracked_child_pids)
+    artifact_phase = str(normalized.get("phase") or current_phase.get("phase") or "").strip().lower()
+    artifact_flushing = bool(
+        artifact_phase == "final_artifact_collection"
+        or (artifact_phase in {"runner_wait", "timeout"} and bool(normalized.get("last_artifact_signal")))
+    )
+    return {
+        "phase": artifact_phase,
+        "runner_alive": bool(normalized.get("runner_alive")),
+        "tracked_child_pids": list(tracked_child_pids),
+        "tracked_child_processes": list(tracked_child_processes),
+        "tracked_count": max(0, int(tracked_count)),
+        "tracked_alive_count": max(0, int(tracked_alive_count)),
+        "artifact_phase": artifact_phase,
+        "artifact_flushing": artifact_flushing,
+        "stop_file_paths": dict(normalized.get("stop_file_paths") or {}),
+        "last_artifact_signal": dict(normalized.get("last_artifact_signal") or {}),
+        "last_log_signal": dict(normalized.get("last_log_signal") or {}),
+        "timeout_guidance": dict(normalized.get("timeout_guidance") or {}),
+        "current_phase": current_phase,
+        "active": bool(normalized.get("active")),
+    }
+
+
 def read_stop_progress(run_dir: Path | None) -> dict[str, Any]:
     if run_dir is None:
         return {}
