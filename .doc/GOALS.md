@@ -182,14 +182,14 @@
 
 ### P0-Q. Safe Self-Development Automation
 
-- [ ] PM task generation consumes `.doc/GOALS.md` directly and refuses to create irrelevant backlog tasks when GOALS has unmet P0 items.
-- [ ] Generated task branches include the GOALS item id or exact text they satisfy, and completion can be traced from commit to GOALS checkbox.
-- [ ] AgentCLI self-runs cannot stop early with `reason=ok` while any required GOALS completion level remains unmet.
-- [ ] Task completion requires compile checks plus the fast regression suite relevant to touched files, with failures persisted in run artifacts.
-- [ ] QA stage records the validation commands, return codes, artifacts, and skipped-test rationale in a browser-readable report.
-- [ ] Reporter stage writes a concise final run report that the Web UI can render without reading raw terminal scrollback.
-- [ ] Failed tasks are carried into the next PM prompt through a structured failed-tasks block and are visible in Web History.
-- [ ] The browser can show "what changed this cycle" from git commits, changed files, tests, GOALS updates, and pending worktree state.
+- [x] PM task generation consumes `.doc/GOALS.md` directly and refuses to create irrelevant backlog tasks when GOALS has unmet P0 items.
+- [x] Generated task branches include the GOALS item id or exact text they satisfy, and completion can be traced from commit to GOALS checkbox.
+- [x] AgentCLI self-runs cannot stop early with `reason=ok` while any required GOALS completion level remains unmet.
+- [x] Task completion requires compile checks plus the fast regression suite relevant to touched files, with failures persisted in run artifacts.
+- [x] QA stage records the validation commands, return codes, artifacts, and skipped-test rationale in a browser-readable report.
+- [x] Reporter stage writes a concise final run report that the Web UI can render without reading raw terminal scrollback.
+- [x] Failed tasks are carried into the next PM prompt through a structured failed-tasks block and are visible in Web History.
+- [x] The browser can show "what changed this cycle" from git commits, changed files, tests, GOALS updates, and pending worktree state.
 
 ### P0-R. Web UI Production Polish And Accessibility
 

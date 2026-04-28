@@ -3146,6 +3146,108 @@ a {
   grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
 }
 
+.mobile-workflow {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.mobile-workflow__grid {
+  align-items: start;
+}
+
+.mobile-workflow__panel .panel__body {
+  display: grid;
+  gap: 10px;
+}
+
+.mobile-workflow__copy {
+  margin-top: 0;
+}
+
+.mobile-workflow__route-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.mobile-workflow__route-grid .nav-item {
+  min-height: 60px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  background: var(--surface-2);
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 4px;
+}
+
+.mobile-workflow__route-grid .nav-item--active {
+  border-color: var(--accent);
+  background: rgba(126, 227, 138, 0.08);
+}
+
+.mobile-workflow__route-grid .nav-item__label {
+  font-size: 12.5px;
+  line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.mobile-workflow__route-grid .nav-item__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.mobile-workflow__action-grid,
+.mobile-workflow__confirm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.mobile-workflow__action-grid .button,
+.mobile-workflow__confirm-grid .button {
+  width: 100%;
+  justify-content: center;
+  text-align: center;
+  white-space: normal;
+  min-height: 34px;
+}
+
+.mobile-workflow .runner-control__buttons {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.mobile-workflow .runner-control__buttons .button {
+  width: 100%;
+  justify-content: center;
+  white-space: normal;
+  min-height: 34px;
+}
+
+.mobile-workflow__notification-list {
+  display: grid;
+  gap: 8px;
+}
+
+.mobile-workflow__notification {
+  min-width: 0;
+}
+
+.mobile-workflow__notification .compact-list__body,
+.mobile-workflow__notification .compact-list__meta {
+  overflow-wrap: anywhere;
+}
+
 .landing-card {
   border: 1px solid var(--border);
   border-radius: var(--radius-2);
@@ -4550,6 +4652,13 @@ a {
     margin-left: 0;
     white-space: normal;
     overflow-wrap: anywhere;
+  }
+
+  .history-table__head,
+  .history-table__row {
+    grid-template-columns: 72px minmax(0, 1fr) 56px 68px;
+    gap: 8px;
+    padding: 8px 10px;
   }
 
   .log-tail-fields {

@@ -92,7 +92,7 @@
         runHistory: 'Run History',
         notifications: 'Notifications',
         landingPreview: 'Landing preview',
-        mobilePreview: 'Mobile preview',
+        mobilePreview: 'Mobile workflow',
       },
       topbar: {
         refresh: 'Refresh',
@@ -185,7 +185,7 @@
         pauseLiveTail: 'Pause live tail',
         resumeLiveTail: 'Resume live tail',
         openWorktreeReview: 'Open Worktree Review',
-        openMobilePreview: 'Open Mobile preview',
+        openMobilePreview: 'Open mobile workflow',
         openLandingPreview: 'Open Landing preview',
       },
       shortcuts: {
@@ -813,16 +813,18 @@
         compactShellCopy: 'Thin borders, tight density, and live-running accents aligned to Direction A.',
       },
       mobile: {
-        title: 'Mobile preview',
-        telegramStyleStatusView: 'Telegram-style status view',
-        mobilePreviewNotes: 'Mobile preview notes',
-        telegramStyleRemoteView: 'Telegram-style remote view',
-        compactRemoteStatusSurface: 'Compact remote status surface for run monitoring.',
-        narrowWidths: 'Designed to stay readable at narrow widths',
-        mirrorsMock: 'Mirrors the Direction A mobile mock without external runtime deps.',
-        staticPreviewShell: 'Static preview shell',
-        openNotifications: 'Open Notifications',
-        openDashboard: 'Open Dashboard',
+        title: 'Mobile workflow',
+        workflowSummary: 'Dense mobile surface for navigation, filters, editors, and confirmations.',
+        routesTitle: 'Routes',
+        routesCopy: 'Jump to the primary console routes from a narrow screen.',
+        filtersTitle: 'Live filters',
+        filtersCopy: 'Adjust the live tail without leaving mobile.',
+        editorsTitle: 'Editors',
+        editorsCopy: 'Open Goals, Config, and Prompts directly.',
+        confirmationsTitle: 'Confirmations',
+        confirmationsCopy: 'Trigger runner and worktree confirmations from mobile.',
+        notificationsTitle: 'Notifications',
+        notificationsCopy: 'Recent alerts and control-plane activity.',
         pipeline: 'Pipeline',
         notifications: 'Notifications',
         taskUnavailable: 'task unavailable',
@@ -853,7 +855,7 @@
         runHistory: '실행 기록',
         notifications: '알림',
         landingPreview: '랜딩 미리보기',
-        mobilePreview: '모바일 미리보기',
+        mobilePreview: '모바일 워크플로',
       },
       topbar: {
         refresh: '새로고침',
@@ -925,7 +927,7 @@
         pauseLiveTail: '라이브 tail 일시정지',
         resumeLiveTail: '라이브 tail 재개',
         openWorktreeReview: '워크트리 검토 열기',
-        openMobilePreview: '모바일 미리보기 열기',
+        openMobilePreview: '모바일 워크플로 열기',
         openLandingPreview: '랜딩 미리보기 열기',
       },
       shortcuts: {
@@ -1366,16 +1368,18 @@
         compactShellCopy: '얇은 테두리, 촘촘한 밀도, 라이브 실행 강조를 Direction A에 맞췄습니다.',
       },
       mobile: {
-        title: '모바일 미리보기',
-        telegramStyleStatusView: '텔레그램 스타일 상태 보기',
-        mobilePreviewNotes: '모바일 미리보기 메모',
-        telegramStyleRemoteView: '텔레그램 스타일 원격 뷰',
-        compactRemoteStatusSurface: '실행 모니터링용 컴팩트 원격 상태 화면입니다.',
-        narrowWidths: '좁은 폭에서도 읽기 쉽도록 설계되었습니다.',
-        mirrorsMock: '외부 런타임 의존성 없이 Direction A 모바일 목업을 따릅니다.',
-        staticPreviewShell: '정적 미리보기 쉘',
-        openNotifications: '알림 열기',
-        openDashboard: '대시보드 열기',
+        title: '모바일 워크플로',
+        workflowSummary: '내비게이션, 필터, 편집기, 확인 흐름을 한 화면에 압축합니다.',
+        routesTitle: '라우트',
+        routesCopy: '좁은 화면에서 주요 콘솔 라우트를 엽니다.',
+        filtersTitle: '라이브 필터',
+        filtersCopy: '모바일을 벗어나지 않고 live tail을 조정합니다.',
+        editorsTitle: '편집기',
+        editorsCopy: '목표, 설정, 프롬프트를 바로 엽니다.',
+        confirmationsTitle: '확인',
+        confirmationsCopy: '모바일에서 실행기와 워크트리 확인을 수행합니다.',
+        notificationsTitle: '알림',
+        notificationsCopy: '최근 알림과 제어 평면 상태입니다.',
         pipeline: '파이프라인',
         notifications: '알림',
         taskUnavailable: '작업 없음',
@@ -16169,84 +16173,105 @@
   }
 
   function renderMobile() {
-    const latestNotifications = state.notifications.slice(0, 4);
-    const body = `
-      <div class="preview-layout">
-        <div class="phone-frame">
-          <div class="phone-frame__screen">
-            <div class="phone-top">
-              <span>${escapeHTML(fmtTime(state.activeRun.startedAt))}</span>
-              <span>LTE | 94%</span>
-            </div>
-            <div class="phone-head">
-              <div class="phone-head__row">
-                <span class="dot dot--pulse"></span>
-                <div class="phone-head__title">${escapeHTML(state.activeRun.repoLabel)}</div>
-                <span class="status-chip" style="margin-left:auto;">${escapeHTML(runStatusLabel(state.activeRun.status, state.activeRun.finalReason))}</span>
-              </div>
-              <div class="summary-note" style="margin-top:4px;">${escapeHTML(state.activeRun.id)} | ${escapeHTML(fmtDuration(state.activeRun.elapsedSec))} ${escapeHTML(t('topbar.elapsed'))}</div>
-            </div>
-            <div class="phone-section">
-              <div class="phone-section__title">${escapeHTML(t('mobile.pipeline'))}</div>
-              <div class="phone-list">
-                ${state.stages.length ? state.stages.map((stage) => `
-                  <div class="phone-item">
-                    <span class="${lifecycleStageIconClass(stage.status)}">${escapeHTML(lifecycleStageIconText(stage.status))}</span>
-                    <div class="phone-item__body">
-                      <div class="phone-item__title">${escapeHTML(stage.label)} | <span class="muted">${escapeHTML(stage.taskTitle || stage.title || t('pipeline.lifecycleRecord'))}</span></div>
-                      <div class="phone-item__meta">${escapeHTML([lifecycleStageStatusLabel(stage.status), stage.taskId || t('mobile.taskUnavailable'), stage.attempt != null ? t('backlog.attemptText', { attempt: stage.attempt }) : t('backlog.attemptUnavailable'), stage.cycle != null ? t('backlog.cycleText', { cycle: stage.cycle }) : t('backlog.cycleUnavailable')].join(' | '))}</div>
-                      <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(redactionAwareText(stage.recentOutput, ''), 120) || t('pipeline.recentOutputUnavailable'))}</div>
-                    </div>
-                  </div>
-                `).join('') : `<div class="summary-note">${escapeHTML(t('pipeline.noLifecycleRecords'))}</div>`}
-              </div>
-            </div>
-            <div class="phone-section" style="flex: 1 1 auto;">
-              <div class="phone-section__title">${escapeHTML(t('mobile.notifications'))}</div>
-              <div class="phone-list">
-                ${latestNotifications.length ? latestNotifications.map((item) => `
-                  <div class="phone-item">
-                    <span class="dot" style="background:${kindColor(item.kind)}; margin-top:5px;"></span>
-                    <div class="phone-item__body">
-                      <div class="phone-item__title">${escapeHTML(redactionAwareText(item.text, t('notifications.noRecorded')))}</div>
-                      <div class="phone-item__meta">${escapeHTML(item.kind)} | ${escapeHTML(fmtRelative(item.t))}</div>
-                    </div>
-                  </div>
-                `).join('') : `<div class="summary-note">${escapeHTML(t('dashboard.noNotificationsYet'))}</div>`}
-              </div>
-            </div>
-            <div class="phone-actions">
-              <span class="chip">/status</span>
-              <span class="chip">/detail</span>
-              <span class="chip">/stop</span>
-              <span class="chip">/tail</span>
+    const liveTail = ensureLogTailState();
+    const latestNotifications = toArray(state.notifications).slice(0, 4);
+    const routeButtons = VIEW_ORDER
+      .map((view) => navButton({
+        view,
+        label: viewLabel(view),
+        shortcut: VIEW_SHORTCUTS[view] || '',
+        badge: state.activeView === view ? t('common.selected') : '',
+      }, state.activeView === view))
+      .join('');
+    const editorButtons = [
+      button(t('common.openGoals'), 'nav-goals', 'button--primary'),
+      button(t('common.openConfig'), 'nav-config', 'button--quiet'),
+      button(t('common.openPrompts'), 'nav-prompts', 'button--quiet'),
+    ].join('');
+    const confirmationButtons = [
+      button(isLiveTailPaused() ? t('logs.resumeLiveTail') : t('logs.pauseLiveTail'), 'toggle-logs', isLiveTailPaused() ? 'button--paused' : 'button--quiet'),
+      button(t('runner.stop'), 'runner-stop', 'button--danger'),
+      button(t('runner.reload'), 'runner-reload', 'button--quiet'),
+      button(t('runner.restart'), 'runner-restart', 'button--quiet'),
+      button(t('worktree.applyMerge'), 'worktree-apply', 'button--primary'),
+      button(t('worktree.discardMerge'), 'worktree-discard', 'button--danger'),
+      button(t('topbar.refresh'), 'refresh-status', 'button--quiet'),
+    ].join('');
+    const notificationItems = latestNotifications.length
+      ? latestNotifications.map((item) => `
+          <div class="compact-list__item mobile-workflow__notification">
+            <span class="compact-list__bullet" style="background:${kindColor(item.kind)}"></span>
+            <div>
+              <div class="compact-list__body">${escapeHTML(redactionAwareText(item.text, t('notifications.noRecorded')))}</div>
+              <div class="compact-list__meta">${escapeHTML(`${notificationKindLabel(item.kind)} | ${fmtRelative(item.t)}`)}</div>
             </div>
           </div>
-        </div>
+        `).join('')
+      : `<div class="summary-note">${escapeHTML(t('dashboard.noNotificationsYet'))}</div>`;
+    const body = `
+      <div class="mobile-workflow" data-mobile-workflow-root>
+        <div class="view-grid view-grid--two mobile-workflow__grid">
+          <div class="view-grid">
+            ${panel(
+              t('mobile.routesTitle'),
+              t('mobile.workflowSummary'),
+              `
+                <div class="mobile-workflow__route-grid" data-mobile-route-grid>
+                  ${routeButtons}
+                </div>
+              `,
+              'mobile-workflow__panel'
+            )}
 
-        <div class="view-grid">
-          ${panel(
-            t('mobile.mobilePreviewNotes'),
-            t('mobile.telegramStyleRemoteView'),
-            `
-              <div class="compact-list">
-                <div class="compact-list__item">
-                  <span class="compact-list__bullet"></span>
-                  <div>
-                    <div class="compact-list__body">${escapeHTML(t('mobile.compactRemoteStatusSurface'))}</div>
-                    <div class="compact-list__meta">${escapeHTML(t('mobile.narrowWidths'))}</div>
-                  </div>
+            ${renderRunnerControlsPanel()}
+
+            ${panel(
+              t('mobile.editorsTitle'),
+              t('mobile.editorsCopy'),
+              `
+                <div class="mobile-workflow__action-grid" data-mobile-editor-panel>
+                  ${editorButtons}
                 </div>
-                <div class="compact-list__item">
-                  <span class="compact-list__bullet"></span>
-                  <div>
-                    <div class="compact-list__body">${escapeHTML(t('mobile.mirrorsMock'))}</div>
-                    <div class="compact-list__meta">${escapeHTML(t('mobile.staticPreviewShell'))}</div>
-                  </div>
+              `,
+              'mobile-workflow__panel'
+            )}
+          </div>
+
+          <div class="view-grid">
+            ${panel(
+              t('mobile.filtersTitle'),
+              t('mobile.filtersCopy'),
+              `
+                <div data-mobile-filter-panel>
+                  ${renderLogTailBanner(liveTail)}
+                  ${renderLogTailFilters(liveTail)}
                 </div>
-              </div>
-            `
-          )}
+              `,
+              'mobile-workflow__panel'
+            )}
+
+            ${panel(
+              t('mobile.confirmationsTitle'),
+              t('mobile.confirmationsCopy'),
+              `
+                <div class="mobile-workflow__confirm-grid" data-mobile-confirmation-panel>
+                  ${confirmationButtons}
+                </div>
+              `,
+              'mobile-workflow__panel'
+            )}
+
+            ${panel(
+              t('mobile.notificationsTitle'),
+              `${escapeHTML(latestNotifications.length)} ${escapeHTML(t('notifications.visibleItems'))}`,
+              `
+                <div class="compact-list mobile-workflow__notification-list" data-mobile-notification-panel>
+                  ${notificationItems}
+                </div>
+              `,
+              'mobile-workflow__panel'
+            )}
+          </div>
         </div>
       </div>
     `;
@@ -16254,10 +16279,10 @@
     return viewShell(
       'mobile',
       t('mobile.title'),
-      t('mobile.telegramStyleStatusView'),
+      t('mobile.workflowSummary'),
       `
-        ${button(t('common.openNotifications'), 'nav-notifications', 'button--quiet')}
-        ${button(t('common.openDashboard'), 'nav-dashboard', 'button--quiet')}
+        ${button(t('common.openDashboard'), 'nav-dashboard', 'button--primary')}
+        ${button(t('common.openLogs'), 'nav-logs', 'button--quiet')}
       `,
       body
     );

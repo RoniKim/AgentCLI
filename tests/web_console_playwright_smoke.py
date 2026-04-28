@@ -503,20 +503,73 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(page.locator("html")).to_have_attribute("lang", "en")
 
             self._open_view(page, "nav-landing", "landing", "Direction A")
-            self._open_view(page, "nav-mobile", "mobile", "Telegram-style remote view")
-
             page.set_viewport_size({"width": 390, "height": 844})
-            page.locator('#sidebar [data-action="nav-dashboard"]').click()
-            self.expect(page.locator("#main")).to_have_attribute("data-view", "dashboard")
-            self.expect(page.locator(".topbar__status")).to_be_hidden()
+            self._open_view(page, "nav-mobile", "mobile", "Mobile workflow")
+
+            mobile_root = page.locator("[data-mobile-workflow-root]")
+            self.expect(mobile_root).to_be_visible()
+            self.expect(mobile_root.locator(".runner-control-panel")).to_be_visible()
+            self.expect(mobile_root.locator("[data-mobile-route-grid]")).to_be_visible()
+            self.expect(mobile_root.locator("[data-mobile-filter-panel]")).to_be_visible()
+            self.expect(mobile_root.locator("[data-mobile-editor-panel]")).to_be_visible()
+            self.expect(mobile_root.locator("[data-mobile-confirmation-panel]")).to_be_visible()
+            self.expect(mobile_root.locator("[data-mobile-notification-panel]")).to_be_visible()
+            self.assertGreaterEqual(mobile_root.locator("[data-mobile-route-grid] [data-nav]").count(), 10)
+
+            mobile_root.locator('[data-mobile-route-grid] [data-nav="logs"]').click()
+            self.expect(page.locator("#main")).to_have_attribute("data-view", "logs")
+            self.expect(page.locator("#main h2")).to_have_text("Logs")
+
+            page.locator('#sidebar [data-nav="mobile"]').click()
+            self.expect(page.locator("#main")).to_have_attribute("data-view", "mobile")
+            mobile_root = page.locator("[data-mobile-workflow-root]")
+
+            route_heights = mobile_root.locator("[data-mobile-route-grid] [data-nav]").evaluate_all(
+                """(els) => els.map((el) => el.getBoundingClientRect().height)"""
+            )
+            self.assertTrue(route_heights)
+            self.assertGreaterEqual(min(route_heights), 58)
+
+            mobile_root.locator('[data-mobile-editor-panel] [data-action="nav-goals"]').click()
+            self.expect(page.locator("#main")).to_have_attribute("data-view", "goals")
+            self.expect(page.locator("#main h2")).to_have_text("Goals")
+
+            page.locator('#sidebar [data-nav="mobile"]').click()
+            self.expect(page.locator("#main")).to_have_attribute("data-view", "mobile")
+            mobile_root = page.locator("[data-mobile-workflow-root]")
+
+            filter_input = mobile_root.locator('[data-mobile-filter-panel] [data-log-filter-field="search"]')
+            self.expect(filter_input).to_be_visible()
+            filter_input.fill("smoke")
+            self.expect(filter_input).to_have_value("smoke")
+
+            mobile_root.locator('[data-mobile-confirmation-panel] [data-action="runner-stop"]').click()
+            stop_overlay = page.locator("[data-overlay='stop']")
+            self.expect(stop_overlay).to_be_visible()
+            self.expect(stop_overlay).to_contain_text('STOP RUNNER')
+            page.keyboard.press("Escape")
+            self.expect(stop_overlay).to_be_hidden()
+
+            mobile_root.locator('[data-mobile-confirmation-panel] [data-action="worktree-apply"]').click()
+            worktree_overlay = page.locator("[data-overlay='worktree-action']")
+            self.expect(worktree_overlay).to_be_visible()
+            self.expect(worktree_overlay).to_contain_text('MERGE WORKTREE')
+            page.keyboard.press("Escape")
+            self.expect(worktree_overlay).to_be_hidden()
 
             dimensions = page.evaluate(
                 """() => ({
                     innerWidth: window.innerWidth,
                     scrollWidth: document.documentElement.scrollWidth,
+                    confirmHeights: Array.from(document.querySelectorAll('[data-mobile-confirmation-panel] .button')).map((el) => el.getBoundingClientRect().height),
                 })"""
             )
             self.assertLessEqual(dimensions["scrollWidth"], dimensions["innerWidth"])
+            self.assertGreaterEqual(min(dimensions["confirmHeights"]), 34)
+
+            page.locator('#sidebar [data-nav="dashboard"]').click()
+            self.expect(page.locator("#main")).to_have_attribute("data-view", "dashboard")
+            self.expect(page.locator(".topbar__status")).to_be_hidden()
         finally:
             manager.__exit__(None, None, None)
 
