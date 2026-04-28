@@ -9071,8 +9071,12 @@ def create_app(
         return _section("worktree")
 
     @app.get("/api/worktree/diagnostics")
-    def api_worktree_diagnostics() -> dict[str, Any]:
-        return scan_worktree_diagnostics(repo_root)
+    def api_worktree_diagnostics(request: Request) -> dict[str, Any]:
+        categories = request.query_params.getlist("categories")
+        if not categories:
+            raw_categories = str(request.query_params.get("categories", "") or "").strip()
+            categories = [raw_categories] if raw_categories else []
+        return scan_worktree_diagnostics(repo_root, categories=categories)
 
     def _serve_static_file(request_path: str = "") -> Any:
         clean = request_path.strip().lstrip("/").replace("\\", "/")

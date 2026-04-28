@@ -71,6 +71,61 @@ class WorktreeCleanupError(RuntimeError):
         self.status = str(status)
 
 
+WORKTREE_DIAGNOSTIC_CATEGORY_ORDER = (
+    "active",
+    "pending",
+    "stale",
+    "orphaned",
+    "cleanup_failed",
+    "missing_patch",
+)
+
+
+def _worktree_normalize_diagnostic_category(value: object) -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if text == "cleanupfailed":
+        text = "cleanup_failed"
+    elif text == "missingpatch":
+        text = "missing_patch"
+    return text
+
+
+def _worktree_normalize_diagnostic_categories(value: object) -> list[str]:
+    raw_values: list[object]
+    if value is None:
+        raw_values = []
+    elif isinstance(value, str):
+        raw_values = [part for part in re.split(r"[\s,]+", value) if part]
+    else:
+        try:
+            raw_values = list(value)  # type: ignore[arg-type]
+        except TypeError:
+            raw_values = [value]
+    requested = {
+        _worktree_normalize_diagnostic_category(item)
+        for item in raw_values
+        if _worktree_normalize_diagnostic_category(item) in WORKTREE_DIAGNOSTIC_CATEGORY_ORDER
+    }
+    return [category for category in WORKTREE_DIAGNOSTIC_CATEGORY_ORDER if category in requested]
+
+
+def _worktree_diagnostic_category_counts(*collections: Sequence[dict[str, object]]) -> dict[str, int]:
+    counts = {category: 0 for category in WORKTREE_DIAGNOSTIC_CATEGORY_ORDER}
+    for collection in collections:
+        for item in collection:
+            item_categories = _worktree_normalize_diagnostic_categories(item.get("categories"))
+            for category in item_categories:
+                counts[category] += 1
+    return counts
+
+
+def _worktree_diagnostic_matches_categories(item: dict[str, object], selected_categories: set[str]) -> bool:
+    if not selected_categories:
+        return True
+    item_categories = set(_worktree_normalize_diagnostic_categories(item.get("categories")))
+    return bool(item_categories & selected_categories)
+
+
 def check_and_remove_stale_git_lock(repo: Path, max_age_seconds: int = 300) -> bool:
     """Remove stale .git/index.lock if older than *max_age_seconds*.
 
@@ -1699,6 +1754,7 @@ def _worktree_diagnostics_issue(
     *,
     severity: str = "warn",
     path: str = "",
+    categories: Sequence[str] | None = None,
     details: dict[str, object] | None = None,
 ) -> dict[str, object]:
     issue: dict[str, object] = {
@@ -1708,12 +1764,71 @@ def _worktree_diagnostics_issue(
     }
     if path:
         issue["path"] = str(path)
+    normalized_categories = _worktree_normalize_diagnostic_categories(categories or [])
+    if normalized_categories:
+        issue["categories"] = normalized_categories
     if details:
         issue["details"] = dict(details)
     return issue
 
 
-def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
+def _worktree_filter_diagnostics_result(
+    diagnostics: dict[str, object],
+    categories: Sequence[str] | None = None,
+) -> dict[str, object]:
+    selected_categories = _worktree_normalize_diagnostic_categories(categories or [])
+    pending_markers = [dict(item) for item in diagnostics.get("pending_markers", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
+    cleanup_failed = [dict(item) for item in diagnostics.get("cleanup_failed", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
+    generated_worktrees = [dict(item) for item in diagnostics.get("generated_worktrees", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
+    issues = [dict(item) for item in diagnostics.get("issues", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
+    issues_sorted = sorted(
+        issues,
+        key=lambda item: (
+            0 if item.get("severity") == "error" else 1,
+            str(item.get("kind") or ""),
+            str(item.get("path") or ""),
+        ),
+    )
+    severity_order = [str(issue.get("severity") or "warn") for issue in issues_sorted]
+    if any(severity == "error" for severity in severity_order):
+        status = "error"
+    elif issues_sorted:
+        status = "warning"
+    else:
+        status = "ok"
+    summary = dict(diagnostics.get("summary") or {})
+    summary.update(
+        {
+            "pending_markers": len(pending_markers),
+            "stale_pending_markers": sum(1 for marker in pending_markers if "stale" in _worktree_normalize_diagnostic_categories(marker.get("categories"))),
+            "missing_patches": sum(1 for issue in issues_sorted if issue.get("kind") == "missing_patch"),
+            "cleanup_failed": len(cleanup_failed),
+            "generated_worktrees": len(generated_worktrees),
+            "orphaned_worktrees": sum(1 for worktree in generated_worktrees if "orphaned" in _worktree_normalize_diagnostic_categories(worktree.get("categories"))),
+            "issue_count": len(issues_sorted),
+            "healthy": not issues_sorted,
+            "category_counts": _worktree_diagnostic_category_counts(pending_markers, cleanup_failed, generated_worktrees, issues_sorted),
+        }
+    )
+    summary["categoryCounts"] = summary["category_counts"]
+    filtered = {
+        **dict(diagnostics),
+        "status": status,
+        "summary": summary,
+        "issues": issues_sorted,
+        "pending_markers": pending_markers,
+        "cleanup_failed": cleanup_failed,
+        "generated_worktrees": generated_worktrees,
+        "filters": {
+            "categories": selected_categories,
+            "available_categories": list(WORKTREE_DIAGNOSTIC_CATEGORY_ORDER),
+            "availableCategories": list(WORKTREE_DIAGNOSTIC_CATEGORY_ORDER),
+        },
+    }
+    return filtered
+
+
+def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None = None) -> dict[str, object]:
     repo_resolved = repo.expanduser().resolve()
     source_root = git_show_toplevel(repo_resolved) or repo_resolved.as_posix()
     scanned_at = now_iso()
@@ -1733,15 +1848,33 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
         *,
         severity: str = "warn",
         path: str = "",
+        categories: Sequence[str] | None = None,
         details: dict[str, object] | None = None,
     ) -> None:
-        issues.append(_worktree_diagnostics_issue(kind, message, severity=severity, path=path, details=details))
+        issues.append(
+            _worktree_diagnostics_issue(
+                kind,
+                message,
+                severity=severity,
+                path=path,
+                categories=categories,
+                details=details,
+            )
+        )
 
     def register_reference(worktree_dir: str) -> None:
         if worktree_dir:
             referenced_worktrees.add(_worktree_text_path(worktree_dir))
 
-    def register_missing_patch(patch_path: str, *, reason: str, marker_path: str, run_dir: str, scope: str) -> None:
+    def register_missing_patch(
+        patch_path: str,
+        *,
+        reason: str,
+        marker_path: str,
+        run_dir: str,
+        scope: str,
+        categories: Sequence[str] | None = None,
+    ) -> None:
         patch_path_text = _worktree_text_path(patch_path)
         if not patch_path_text or patch_path_text in seen_missing_patch_paths:
             return
@@ -1751,6 +1884,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
             f"Pending worktree patch is missing: {reason}",
             severity="warn",
             path=patch_path_text,
+            categories=categories,
             details={
                 "marker": marker_path,
                 "run_dir": run_dir,
@@ -1769,6 +1903,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                 raise TypeError("Pending merge payload must be a JSON object.")
         except Exception as ex:
             reason = str(ex).strip() or ex.__class__.__name__
+            marker_categories = ["pending", "stale"]
             pending_markers.append(
                 {
                     "path": marker_path,
@@ -1783,6 +1918,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                     "head_ref": "",
                     "exists": True,
                     "stale": True,
+                    "categories": marker_categories,
                 }
             )
             add_issue(
@@ -1790,6 +1926,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                 f"Pending worktree marker is malformed: {reason}",
                 severity="warn",
                 path=marker_path,
+                categories=marker_categories,
                 details={"scope": scope, "run_dir": run_dir_text, "reason": reason},
             )
             return
@@ -1802,6 +1939,13 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
         payload_head_ref = _payload_text(payload, "head_ref", "headRef")
         reason = _worktree_pending_stale_reason(payload, path)
         is_stale = bool(reason)
+        marker_categories = ["pending"]
+        if is_stale:
+            marker_categories.append("stale")
+        else:
+            marker_categories.append("active")
+        if payload_patch_path and not Path(payload_patch_path).exists():
+            marker_categories.append("missing_patch")
         pending_markers.append(
             {
                 "path": marker_path,
@@ -1816,6 +1960,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                 "head_ref": payload_head_ref,
                 "exists": True,
                 "stale": is_stale,
+                "categories": marker_categories,
             }
         )
         register_reference(payload_worktree_dir)
@@ -1825,6 +1970,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                 f"Pending worktree marker is stale: {reason}",
                 severity="warn",
                 path=marker_path,
+                categories=[category for category in marker_categories if category != "active"],
                 details={
                     "scope": scope,
                     "run_dir": payload_run_dir,
@@ -1840,6 +1986,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                 marker_path=marker_path,
                 run_dir=payload_run_dir,
                 scope=scope,
+                categories=marker_categories,
             )
 
     scan_pending_marker(central_pending, scope="central", run_dir_text="")
@@ -1854,6 +2001,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                 payload = _read_json_payload(artifact_path)
             except Exception as ex:
                 reason = str(ex).strip() or ex.__class__.__name__
+                artifact_categories = ["cleanup_failed", "active"]
                 cleanup_failed.append(
                     {
                         "path": artifact_path.resolve().as_posix(),
@@ -1866,6 +2014,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                         "cleanup_message": reason,
                         "cleanup_details": {},
                         "cleanup_attempts": [],
+                        "categories": artifact_categories,
                     }
                 )
                 add_issue(
@@ -1873,6 +2022,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                     f"Cleanup-failed artifact is malformed: {reason}",
                     severity="error",
                     path=artifact_path.resolve().as_posix(),
+                    categories=[category for category in artifact_categories if category != "active"],
                     details={"run_dir": run_dir.resolve().as_posix(), "reason": reason},
                 )
                 continue
@@ -1888,6 +2038,9 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
             if not isinstance(payload_cleanup_attempts, list):
                 payload_cleanup_attempts = []
             status = _payload_text(payload, "status").lower() or "cleanup_failed"
+            cleanup_categories = ["cleanup_failed", "active"]
+            if payload_patch_path and not Path(payload_patch_path).exists():
+                cleanup_categories.append("missing_patch")
             cleanup_failed.append(
                 {
                     "path": artifact_path.resolve().as_posix(),
@@ -1900,6 +2053,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                     "cleanup_message": payload_cleanup_message,
                     "cleanup_details": payload_cleanup_details,
                     "cleanup_attempts": payload_cleanup_attempts,
+                    "categories": cleanup_categories,
                 }
             )
             register_reference(payload_worktree_dir)
@@ -1908,6 +2062,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                 f"Cleanup failed for {payload_cleanup_path or payload_worktree_dir or artifact_path.as_posix()}: {payload_cleanup_message or status}",
                 severity="error",
                 path=artifact_path.resolve().as_posix(),
+                categories=[category for category in cleanup_categories if category != "active"],
                 details={
                     "run_dir": run_dir.resolve().as_posix(),
                     "worktree_dir": payload_worktree_dir,
@@ -1924,6 +2079,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                     marker_path=artifact_path.resolve().as_posix(),
                     run_dir=run_dir.resolve().as_posix(),
                     scope="cleanup_failed",
+                    categories=cleanup_categories,
                 )
 
     generated_root_entries: list[Path] = []
@@ -1984,6 +2140,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
             (contract and contract_status == "orphaned")
             or (not contract and not active_reference)
         )
+        worktree_categories = ["orphaned"] if is_orphaned else ["active"]
 
         generated_worktrees.append(
             {
@@ -1996,6 +2153,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                 "tracked": contract_status == "tracked" and active_reference,
                 "orphaned": is_orphaned,
                 "referenced": active_reference,
+                "categories": worktree_categories,
             }
         )
         if is_orphaned:
@@ -2004,6 +2162,7 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
                 f"Generated worktree is orphaned: {reason}",
                 severity="warn",
                 path=worktree_path,
+                categories=worktree_categories,
                 details={
                     "contract_path": contract_path,
                     "run_dir": contract_run_dir,
@@ -2037,21 +2196,26 @@ def scan_worktree_diagnostics(repo: Path) -> dict[str, object]:
         "orphaned_worktrees": sum(1 for worktree in generated_worktrees if worktree.get("orphaned")),
         "issue_count": len(issues_sorted),
         "healthy": not issues_sorted,
+        "category_counts": _worktree_diagnostic_category_counts(pending_markers, cleanup_failed, generated_worktrees, issues_sorted),
     }
+    summary["categoryCounts"] = summary["category_counts"]
 
-    return {
-        "schema_version": 1,
-        "status": status,
-        "source_repo": repo_resolved.as_posix(),
-        "source_repo_root": source_root,
-        "generated_worktree_home": generated_root.as_posix(),
-        "scanned_at": scanned_at,
-        "summary": summary,
-        "issues": issues_sorted,
-        "pending_markers": pending_markers,
-        "cleanup_failed": cleanup_failed,
-        "generated_worktrees": generated_worktrees,
-    }
+    return _worktree_filter_diagnostics_result(
+        {
+            "schema_version": 1,
+            "status": status,
+            "source_repo": repo_resolved.as_posix(),
+            "source_repo_root": source_root,
+            "generated_worktree_home": generated_root.as_posix(),
+            "scanned_at": scanned_at,
+            "summary": summary,
+            "issues": issues_sorted,
+            "pending_markers": pending_markers,
+            "cleanup_failed": cleanup_failed,
+            "generated_worktrees": generated_worktrees,
+        },
+        categories=categories,
+    )
 
 
 def _worktree_contract_path(run_dir: Path) -> Path:

@@ -2564,6 +2564,83 @@ a {
   grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
 }
 
+.worktree-diagnostics {
+  display: grid;
+  gap: 12px;
+}
+
+.worktree-diagnostics__toolbar {
+  display: grid;
+  gap: 8px;
+}
+
+.worktree-diagnostics__filters {
+  margin-left: 0;
+}
+
+.worktree-diagnostics__list {
+  display: grid;
+  gap: 10px;
+}
+
+.worktree-diagnostics__entry {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-1);
+  background: var(--surface-3);
+  align-items: flex-start;
+}
+
+.worktree-diagnostics__entry-body {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  flex: 1 1 auto;
+}
+
+.worktree-diagnostics__entry-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.worktree-diagnostics__entry-categories {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.worktree-diagnostics__entry-summary {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.worktree-diagnostics__entry-meta {
+  color: var(--text-sub);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.worktree-diagnostics__empty {
+  padding: 12px 14px;
+  border: 1px dashed var(--border-hi);
+  border-radius: var(--radius-1);
+  background: var(--surface-3);
+}
+
+.worktree-diagnostics__empty-copy {
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
 .review-panel {
   border: 1px solid var(--border);
   border-radius: var(--radius-2);

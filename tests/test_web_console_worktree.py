@@ -20,7 +20,7 @@ WEB_CONSOLE = ROOT / "web_console"
 
 
 from agent_runner.web import build_snapshot
-from agent_runner.gitops import sha256_text
+from agent_runner.gitops import scan_worktree_diagnostics, sha256_text
 
 
 def _write(path: Path, text: str) -> None:
@@ -123,7 +123,13 @@ def _run_adapter_harness(fixtures: list[dict[str, object]]) -> list[dict[str, ob
     return json.loads(completed.stdout)
 
 
-def _run_worktree_render_harness(snapshot: dict[str, object], *, view: str = 'worktree') -> dict[str, str]:
+def _run_worktree_render_harness(
+    snapshot: dict[str, object],
+    *,
+    view: str = 'worktree',
+    locale: str | None = None,
+    actions: list[dict[str, object]] | None = None,
+) -> dict[str, str]:
     node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
     script = textwrap.dedent(
         """
@@ -202,6 +208,10 @@ def _run_worktree_render_harness(snapshot: dict[str, object], *, view: str = 'wo
           addEventListener() {},
           removeEventListener() {},
         };
+        const presetLocale = __LOCALE__;
+        if (presetLocale) {
+          context.localStorage._data['agentcli.console.locale.v1'] = JSON.stringify(presetLocale);
+        }
         context.window = context;
         context.globalThis = context;
         context.__AGENTCLI_SKIP_BOOTSTRAP__ = true;
@@ -213,6 +223,17 @@ def _run_worktree_render_harness(snapshot: dict[str, object], *, view: str = 'wo
         const normalized = adapters.normalizeSnapshot(__SNAPSHOT__);
         adapters.applySnapshotModel(normalized);
         adapters.setView(__VIEW__);
+        const actions = __ACTIONS__;
+        for (const action of actions) {
+          if (!action || action.kind !== 'call') {
+            throw new Error('Unsupported render harness action');
+          }
+          const fn = adapters[action.name];
+          if (typeof fn !== 'function') {
+            throw new Error(`Missing adapter function: ${action.name}`);
+          }
+          fn(...(Array.isArray(action.args) ? action.args : []));
+        }
         adapters.renderShell({ force: true, preserveScroll: false });
         process.stdout.write(JSON.stringify({
           main: roots.main.innerHTML,
@@ -222,7 +243,7 @@ def _run_worktree_render_harness(snapshot: dict[str, object], *, view: str = 'wo
         """
     ).replace("__SOURCE_PATH__", json.dumps(str(WEB_CONSOLE / "app.js"))).replace(
         "__SNAPSHOT__", json.dumps(snapshot, ensure_ascii=False)
-    ).replace("__VIEW__", json.dumps(view))
+    ).replace("__VIEW__", json.dumps(view)).replace("__LOCALE__", json.dumps(locale)).replace("__ACTIONS__", json.dumps(actions or [], ensure_ascii=False))
     completed = subprocess.run(
         [node, "-"],
         input=script,
@@ -277,6 +298,107 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
         generated_root = self._tmp / ".agentcli_worktrees"
         if generated_root.exists():
             shutil.rmtree(generated_root, ignore_errors=True)
+
+    def _seed_worktree_diagnostics_fixture(self) -> dict[str, Path]:
+        self._clear_worktree_artifacts()
+
+        generated_root = self._tmp / ".agentcli_worktrees" / self.repo.name
+        active_worktree = generated_root / "active"
+        cleanup_worktree = generated_root / "cleanup"
+        orphaned_worktree = generated_root / "orphaned"
+        stale_worktree = self._tmp / "stale-worktree"
+        for worktree in (active_worktree, cleanup_worktree, orphaned_worktree):
+            worktree.mkdir(parents=True, exist_ok=True)
+            _write(worktree / ".git", f"gitdir: ../.git/worktrees/{worktree.name}\n")
+
+        self._write_pending_payload(
+            patch_text="diff --git a/active.txt b/active.txt\n",
+            base_ref="main",
+            expected_head="abc12345",
+            branch="main",
+            source_repo_state="clean",
+            worktree_state="clean",
+            head_ref="abc12345",
+        )
+
+        central_patch = self.run_dir / "central-stale.patch"
+        _write(central_patch, "diff --git a/stale.txt b/stale.txt\n")
+        _write(
+            self.repo / ".AgentCLI" / "WORKTREE_MERGE_PENDING.json",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "pending",
+                    "created_at": "2026-04-26T12:03:00",
+                    "source_repo": self.repo.as_posix(),
+                    "run_dir": self.run_dir.as_posix(),
+                    "worktree_dir": stale_worktree.as_posix(),
+                    "patch_path": central_patch.as_posix(),
+                    "base_ref": "main",
+                    "head_ref": "abc12345",
+                    "last_rc": 0,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        central_patch.unlink()
+
+        cleanup_patch = self.run_dir / "cleanup.patch"
+        _write(cleanup_patch, "diff --git a/cleanup.txt b/cleanup.txt\n")
+        self._write_status_artifact(
+            "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json",
+            {
+                "schema_version": 1,
+                "status": "applied_cleanup_failed",
+                "created_at": "2026-04-26T12:04:00",
+                "source_repo": self.repo.as_posix(),
+                "run_dir": self.run_dir.as_posix(),
+                "worktree_dir": cleanup_worktree.as_posix(),
+                "patch_path": cleanup_patch.as_posix(),
+                "cleanup_path": cleanup_worktree.as_posix(),
+                "cleanup_message": "cleanup failed",
+                "base_ref": "main",
+                "head_ref": "abc12345",
+                "last_rc": 0,
+            },
+        )
+
+        return {
+            "active_marker": self.pending_path,
+            "central_marker": self.repo / ".AgentCLI" / "WORKTREE_MERGE_PENDING.json",
+            "cleanup_artifact": self.run_dir / "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json",
+            "active_patch": self.patch_path,
+            "cleanup_patch": cleanup_patch,
+            "central_patch": central_patch,
+            "generated_root": generated_root,
+            "active_worktree": active_worktree,
+            "cleanup_worktree": cleanup_worktree,
+            "orphaned_worktree": orphaned_worktree,
+            "stale_worktree": stale_worktree,
+        }
+
+    def _worktree_diagnostics_artifact_state(self, paths: dict[str, Path]) -> dict[str, object]:
+        def read_text(path: Path) -> str | None:
+            return path.read_text(encoding="utf-8") if path.exists() else None
+
+        def list_dir(path: Path) -> list[str]:
+            return sorted(child.name for child in path.iterdir()) if path.exists() else []
+
+        return {
+            "active_marker": read_text(paths["active_marker"]),
+            "central_marker": read_text(paths["central_marker"]),
+            "cleanup_artifact": read_text(paths["cleanup_artifact"]),
+            "active_patch": read_text(paths["active_patch"]),
+            "cleanup_patch": read_text(paths["cleanup_patch"]),
+            "central_patch_exists": paths["central_patch"].exists(),
+            "generated_root_entries": list_dir(paths["generated_root"]),
+            "active_worktree_entries": list_dir(paths["active_worktree"]),
+            "cleanup_worktree_entries": list_dir(paths["cleanup_worktree"]),
+            "orphaned_worktree_entries": list_dir(paths["orphaned_worktree"]),
+            "stale_worktree_exists": paths["stale_worktree"].exists(),
+        }
 
     def _write_status_artifact(self, relative: str, payload: dict[str, object]) -> Path:
         path = self.run_dir / relative
@@ -470,6 +592,167 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             self.assertEqual("warning", diagnostics["status"])
             self.assertIn("orphaned_worktree", issue_kinds)
             self.assertTrue(any(item["orphaned"] for item in diagnostics["generated_worktrees"]))
+
+    def test_worktree_diagnostics_api_filters_are_read_only_and_category_scoped(self) -> None:
+        try:
+            from agent_runner.web import create_app
+            from fastapi.testclient import TestClient
+        except Exception as exc:
+            self.skipTest(f"FastAPI test client is unavailable: {exc}")
+
+        paths = self._seed_worktree_diagnostics_fixture()
+        before = self._worktree_diagnostics_artifact_state(paths)
+        client = TestClient(create_app(self.repo, web_dir=WEB_CONSOLE))
+
+        for category in ("active", "pending", "stale", "orphaned", "cleanup_failed", "missing_patch"):
+            with self.subTest(category=category):
+                payload = client.get("/api/worktree/diagnostics", params=[("categories", category)]).json()
+                selected_entries = [
+                    *payload["pending_markers"],
+                    *payload["cleanup_failed"],
+                    *payload["generated_worktrees"],
+                    *payload["issues"],
+                ]
+
+                self.assertEqual([category], payload["filters"]["categories"])
+                self.assertEqual(
+                    ["active", "pending", "stale", "orphaned", "cleanup_failed", "missing_patch"],
+                    payload["filters"]["availableCategories"],
+                )
+                self.assertTrue(selected_entries)
+                for entry in selected_entries:
+                    self.assertIn(category, entry["categories"])
+
+        after = self._worktree_diagnostics_artifact_state(paths)
+        self.assertEqual(before, after)
+
+    def test_worktree_diagnostics_panel_filters_and_localizes_labels(self) -> None:
+        self._seed_worktree_diagnostics_fixture()
+        snapshot = self._build_snapshot()
+        snapshot["worktree_diagnostics"] = scan_worktree_diagnostics(self.repo)
+
+        diagnostics = snapshot["worktree_diagnostics"]
+        entries = [
+            *diagnostics["pending_markers"],
+            *diagnostics["cleanup_failed"],
+            *diagnostics["generated_worktrees"],
+            *diagnostics["issues"],
+        ]
+        expected_total = len(entries)
+        expected_visible = sum(1 for item in entries if "missing_patch" in item["categories"])
+        selected_paths = [item["path"] for item in entries if "missing_patch" in item["categories"]]
+        hidden_paths = [item["path"] for item in diagnostics["generated_worktrees"] if item["path"]]
+
+        rendered = _run_worktree_render_harness(
+            snapshot,
+            locale="en",
+            actions=[{"kind": "call", "name": "setWorktreeDiagnosticsFilter", "args": [["missing_patch"]]}],
+        )
+        html = rendered["main"]
+
+        self.assertIn("All (11)", html)
+        self.assertIn(f"{expected_visible} visible | {expected_total} total", html)
+        for path in selected_paths:
+            self.assertIn(path, html)
+        for path in hidden_paths:
+            self.assertNotIn(path, html)
+
+        pruned_snapshot = json.loads(json.dumps(snapshot))
+        pruned_snapshot["worktree_diagnostics"] = {
+            "status": "warning",
+            "source_repo": self.repo.as_posix(),
+            "source_repo_root": self.repo.as_posix(),
+            "generated_worktree_home": (self._tmp / ".agentcli_worktrees" / self.repo.name).as_posix(),
+            "scanned_at": "2026-04-26T12:05:00",
+            "summary": {
+                "run_dirs_scanned": 1,
+                "pending_markers": 1,
+                "stale_pending_markers": 0,
+                "missing_patches": 0,
+                "cleanup_failed": 1,
+                "generated_worktrees": 1,
+                "orphaned_worktrees": 0,
+                "issue_count": 0,
+                "healthy": True,
+                "category_counts": {
+                    "active": 3,
+                    "pending": 1,
+                    "stale": 0,
+                    "orphaned": 0,
+                    "cleanup_failed": 1,
+                    "missing_patch": 0,
+                },
+            },
+            "filters": {
+                "categories": [],
+                "available_categories": ["active", "pending", "stale", "orphaned", "cleanup_failed", "missing_patch"],
+            },
+            "pending_markers": [
+                {
+                    "path": self.pending_path.as_posix(),
+                    "scope": "run",
+                    "status": "pending",
+                    "reason": "",
+                    "run_dir": self.run_dir.as_posix(),
+                    "source_repo": self.repo.as_posix(),
+                    "worktree_dir": self.worktree_dir.as_posix(),
+                    "patch_path": self.patch_path.as_posix(),
+                    "base_ref": "main",
+                    "head_ref": "abc12345",
+                    "exists": True,
+                    "stale": False,
+                    "categories": ["pending", "active"],
+                }
+            ],
+            "cleanup_failed": [
+                {
+                    "path": (self.run_dir / "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json").as_posix(),
+                    "status": "applied_cleanup_failed",
+                    "run_dir": self.run_dir.as_posix(),
+                    "source_repo": self.repo.as_posix(),
+                    "worktree_dir": "",
+                    "patch_path": self.patch_path.as_posix(),
+                    "cleanup_path": self.worktree_dir.as_posix(),
+                    "cleanup_message": "cleanup failed",
+                    "cleanup_details": {},
+                    "cleanup_attempts": [],
+                    "categories": ["cleanup_failed", "active"],
+                }
+            ],
+            "generated_worktrees": [
+                {
+                    "path": (self._tmp / ".agentcli_worktrees" / self.repo.name / "cleanup").as_posix(),
+                    "exists": True,
+                    "contract_path": "",
+                    "contract_run_dir": "",
+                    "contract_status": "missing_contract",
+                    "reason": "missing reuse contract",
+                    "tracked": False,
+                    "orphaned": False,
+                    "referenced": True,
+                    "categories": ["active"],
+                }
+            ],
+            "issues": [],
+        }
+
+        empty_rendered = _run_worktree_render_harness(
+            pruned_snapshot,
+            locale="ko",
+            actions=[
+                {"kind": "call", "name": "setWorktreeDiagnosticsFilter", "args": [["orphaned"]]},
+            ],
+        )
+        empty_html = empty_rendered["main"]
+
+        self.assertIn("진단", empty_html)
+        self.assertIn("읽기 전용 진단입니다. 필터링은 파일을 변경하지 않습니다.", empty_html)
+        self.assertIn("안정적인 진단 분류로 필터링합니다.", empty_html)
+        self.assertIn("선택한 필터와 일치하는 진단이 없습니다.", empty_html)
+        self.assertIn("활성", empty_html)
+        self.assertIn("대기", empty_html)
+        self.assertIn("정리 실패", empty_html)
+        self.assertIn("패치 없음", empty_html)
 
     def test_valid_pending_file_surfaces_review_required_fields(self) -> None:
         changed_files = [

@@ -6504,6 +6504,79 @@ Another unsupported line.
         self.assertFalse(normalized["config"]["telegram"]["enabled"])
         self.assertEqual(7, normalized["config"]["budgets"]["max_dev_continuations_per_task"])
 
+    def test_adapter_normalizes_worktree_diagnostics_filter_metadata(self) -> None:
+        snapshot = _make_no_run_snapshot()
+        snapshot["worktree_diagnostics"] = {
+            "status": "warning",
+            "source_repo": self.repo.as_posix(),
+            "source_repo_root": self.repo.as_posix(),
+            "generated_worktree_home": (self.repo / ".agentcli_worktrees" / self.repo.name).as_posix(),
+            "scanned_at": "2026-04-26T12:05:00",
+            "summary": {
+                "run_dirs_scanned": 1,
+                "pending_markers": 1,
+                "stale_pending_markers": 1,
+                "missing_patches": 1,
+                "cleanup_failed": 0,
+                "generated_worktrees": 0,
+                "orphaned_worktrees": 0,
+                "issue_count": 1,
+                "healthy": False,
+                "category_counts": {
+                    "active": 0,
+                    "pending": 1,
+                    "stale": 1,
+                    "orphaned": 0,
+                    "cleanup_failed": 0,
+                    "missing_patch": 1,
+                },
+            },
+            "filters": {
+                "categories": ["pending"],
+                "available_categories": ["active", "pending", "stale", "orphaned", "cleanup_failed", "missing_patch"],
+            },
+            "pending_markers": [
+                {
+                    "path": (self.repo / ".AgentCLI" / "WORKTREE_MERGE_PENDING.json").as_posix(),
+                    "scope": "central",
+                    "status": "stale",
+                    "reason": "patch missing",
+                    "run_dir": "",
+                    "source_repo": self.repo.as_posix(),
+                    "worktree_dir": (self.repo / "worktree").as_posix(),
+                    "patch_path": (self.repo / ".AgentCLI" / "agent_runs" / "20260426-120000" / "worktree.patch").as_posix(),
+                    "base_ref": "main",
+                    "head_ref": "abc12345",
+                    "exists": True,
+                    "stale": True,
+                    "categories": ["pending", "stale", "missing_patch"],
+                }
+            ],
+            "cleanup_failed": [],
+            "generated_worktrees": [],
+            "issues": [
+                {
+                    "kind": "missing_patch",
+                    "severity": "warn",
+                    "message": "Pending worktree patch is missing.",
+                    "path": (self.repo / ".AgentCLI" / "agent_runs" / "20260426-120000" / "worktree.patch").as_posix(),
+                    "details": {"scope": "central"},
+                    "categories": ["pending", "stale", "missing_patch"],
+                }
+            ],
+        }
+
+        normalized = _run_adapter_harness([{"kind": "snapshot", "data": snapshot}])[0]
+        diagnostics = normalized["worktreeDiagnostics"]
+
+        self.assertEqual(["pending"], diagnostics["filters"]["categories"])
+        self.assertEqual(
+            ["active", "pending", "stale", "orphaned", "cleanup_failed", "missing_patch"],
+            diagnostics["filters"]["availableCategories"],
+        )
+        self.assertEqual(["pending", "stale", "missing_patch"], diagnostics["pendingMarkers"][0]["categories"])
+        self.assertEqual(diagnostics["summary"]["categoryCounts"], diagnostics["summary"]["category_counts"])
+
     def test_goal_save_helpers_round_trip_notes_and_required_sections(self) -> None:
         from agent_runner.web import _goal_save_has_required_sections, _goal_save_serialize_draft, _parse_goal_items_and_warnings
 

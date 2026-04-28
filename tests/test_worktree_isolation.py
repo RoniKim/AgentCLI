@@ -283,6 +283,123 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertIn("orphaned_worktree", issue_kinds)
         self.assertTrue(any(item["orphaned"] for item in diagnostics["generated_worktrees"]))
 
+    def test_scan_worktree_diagnostics_filters_are_read_only_and_category_scoped(self) -> None:
+        active_worktree = self.fixture_root / ".agentcli_worktrees" / self.repo.name / "active"
+        cleanup_worktree = self.fixture_root / ".agentcli_worktrees" / self.repo.name / "cleanup"
+        orphaned_worktree = self.fixture_root / ".agentcli_worktrees" / self.repo.name / "orphaned"
+        stale_worktree = self.fixture_root / "stale-worktree"
+        for worktree in (active_worktree, cleanup_worktree, orphaned_worktree):
+            worktree.mkdir(parents=True, exist_ok=True)
+            (worktree / ".git").write_text(f"gitdir: ../.git/worktrees/{worktree.name}\n", encoding="utf-8")
+
+        active_patch = self.patch_path
+        active_patch.write_text("diff --git a/active.txt b/active.txt\n", encoding="utf-8")
+        active_marker = {
+            "schema_version": 1,
+            "status": "pending",
+            "created_at": "2026-04-27T12:00:00",
+            "source_repo": self.repo.resolve().as_posix(),
+            "run_dir": self.run_dir.resolve().as_posix(),
+            "worktree_dir": self.worktree.resolve().as_posix(),
+            "patch_path": active_patch.resolve().as_posix(),
+            "base_ref": "main",
+            "head_ref": "abc12345",
+            "last_rc": 0,
+        }
+        self.run_dir.joinpath(WORKTREE_MERGE_PENDING).write_text(
+            json.dumps(active_marker, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        central_patch = self.run_dir / "stale.patch"
+        central_patch.write_text("diff --git a/stale.txt b/stale.txt\n", encoding="utf-8")
+        self.repo.joinpath(".AgentCLI", WORKTREE_MERGE_PENDING).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "pending",
+                    "created_at": "2026-04-27T12:01:00",
+                    "source_repo": self.repo.resolve().as_posix(),
+                    "run_dir": self.run_dir.resolve().as_posix(),
+                    "worktree_dir": stale_worktree.resolve().as_posix(),
+                    "patch_path": central_patch.resolve().as_posix(),
+                    "base_ref": "main",
+                    "head_ref": "abc12345",
+                    "last_rc": 0,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        central_patch.unlink()
+
+        cleanup_patch = self.run_dir / "cleanup.patch"
+        cleanup_patch.write_text("diff --git a/cleanup.txt b/cleanup.txt\n", encoding="utf-8")
+        self.run_dir.joinpath("WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "applied_cleanup_failed",
+                    "created_at": "2026-04-27T12:02:00",
+                    "source_repo": self.repo.resolve().as_posix(),
+                    "run_dir": self.run_dir.resolve().as_posix(),
+                    "worktree_dir": cleanup_worktree.resolve().as_posix(),
+                    "patch_path": cleanup_patch.resolve().as_posix(),
+                    "cleanup_path": cleanup_worktree.resolve().as_posix(),
+                    "cleanup_message": "cleanup failed",
+                    "base_ref": "main",
+                    "head_ref": "abc12345",
+                    "last_rc": 0,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        before = {
+            "active_marker": self.run_dir.joinpath(WORKTREE_MERGE_PENDING).read_text(encoding="utf-8"),
+            "central_marker": self.repo.joinpath(".AgentCLI", WORKTREE_MERGE_PENDING).read_text(encoding="utf-8"),
+            "cleanup_artifact": self.run_dir.joinpath("WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json").read_text(encoding="utf-8"),
+            "active_patch": active_patch.read_text(encoding="utf-8"),
+            "cleanup_patch": cleanup_patch.read_text(encoding="utf-8"),
+            "central_patch_exists": central_patch.exists(),
+            "generated_root_entries": sorted(child.name for child in (self.fixture_root / ".agentcli_worktrees" / self.repo.name).iterdir()),
+        }
+
+        for category in ("active", "pending", "stale", "orphaned", "cleanup_failed", "missing_patch"):
+            diagnostics = scan_worktree_diagnostics(self.repo, categories=[category])
+            selected_entries = [
+                *diagnostics["pending_markers"],
+                *diagnostics["cleanup_failed"],
+                *diagnostics["generated_worktrees"],
+                *diagnostics["issues"],
+            ]
+
+            self.assertEqual([category], diagnostics["filters"]["categories"])
+            self.assertEqual(
+                ["active", "pending", "stale", "orphaned", "cleanup_failed", "missing_patch"],
+                diagnostics["filters"]["availableCategories"],
+            )
+            self.assertTrue(selected_entries)
+            for entry in selected_entries:
+                self.assertIn(category, entry["categories"])
+
+        after = {
+            "active_marker": self.run_dir.joinpath(WORKTREE_MERGE_PENDING).read_text(encoding="utf-8"),
+            "central_marker": self.repo.joinpath(".AgentCLI", WORKTREE_MERGE_PENDING).read_text(encoding="utf-8"),
+            "cleanup_artifact": self.run_dir.joinpath("WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json").read_text(encoding="utf-8"),
+            "active_patch": active_patch.read_text(encoding="utf-8"),
+            "cleanup_patch": cleanup_patch.read_text(encoding="utf-8"),
+            "central_patch_exists": central_patch.exists(),
+            "generated_root_entries": sorted(child.name for child in (self.fixture_root / ".agentcli_worktrees" / self.repo.name).iterdir()),
+        }
+
+        self.assertEqual(before, after)
+
     def test_shell_worktree_command_prints_diagnostics_without_mutation(self) -> None:
         shell = RunnerShell()
         shell.set_repo(self.repo.as_posix())
