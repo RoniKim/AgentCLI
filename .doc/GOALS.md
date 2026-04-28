@@ -2,7 +2,7 @@
 
 > Product target: make AgentCLI fully usable from a browser for monitoring, configuration, prompt review/editing, logs, goals, worktree review, and safe runner operations.
 > Design source: `docs/Design/`, especially `docs/Design/project/AgentCLI Web - A.html`.
-> This file is the target backlog, not a status report. Current implementation notes belong in `docs/WEB_CONSOLE_STATUS.md`.
+> This file is the target backlog, not a status report. Current implementation notes belong in `docs/WEB_CONSOLE.md`, `docs/MASTER_INDEX.md`, or archived incident/design notes.
 > Do not downgrade, remove, or merge unmet P0 goals to make progress look complete; implement them until they are true.
 > Task sizing rule: each unchecked P0 item should be small enough for one focused AgentCLI task branch.
 > Last reviewed: 2026-04-28.
@@ -204,6 +204,19 @@
 - [ ] Accessibility checks cover focus visibility, labels, contrast, reduced motion, and screen-reader names for icon-only controls.
 - [ ] Playwright screenshots validate Dashboard, Pipeline, Logs, Goals, Config, Prompts, History, Notifications, Worktree Review, Runner Controls, and mobile in both locales.
 
+### P0-S. Documentation And Personal Automation Readiness
+
+- [ ] `.doc/DOCS_DIGEST.md` and `docs/MASTER_INDEX.md` are generated or validated from real files so moved, archived, or case-mismatched paths cannot mislead PM/Dev/QA runs.
+- [ ] User-facing docs for config, CLI flags, model defaults, Telegram options, stop reasons, and worktree merge behavior are checked against the live parser/defaults and fail validation on stale claims.
+- [ ] Web console docs are checked against the live FastAPI route inventory and do not claim nonexistent backup, config, prompt, goals, or runner endpoints.
+- [ ] Documentation for shutdown reports, duplicate-report handling, and artifact writers matches the current implementation instead of preserving obsolete incident assumptions.
+- [ ] Web documentation defines the current one-repo-one-web operating model and explicitly defers multi-repo dashboard scope to a later phase.
+- [ ] A visible identity header shows active repo, branch, run id, run dir, port, mode, runner-control status, and redaction status on every primary route.
+- [ ] A repo-level web instance lock prevents accidental duplicate local-operator control of the same repo.
+- [ ] Reload/restart while stopped behaves as start-only or no-op and does not write STOP or stop-progress artifacts into historical runs.
+- [ ] Web runner start rejects `run_dir` values outside the active repo's approved AgentCLI run root and rejects `config_path` values outside approved config roots.
+- [ ] LAN mode blocks raw prompt reads and keeps mutating actions disabled until authentication exists or a stronger trusted-operator gate is implemented.
+
 ## P1 (Should-Have)
 
 - [ ] Run History supports comparing two runs side-by-side with commits, task outcomes, token/quota usage, validation results, and worktree outcomes.
@@ -214,6 +227,10 @@
 - [ ] Web console exposes diagnostics for missing FastAPI/uvicorn dependencies and broken virtual environments.
 - [x] UI state clearly distinguishes fallback/demo data from real API data.
 - [ ] Authentication plan exists before use outside trusted private networks.
+- [ ] A personal Runbook panel renders venv activation, shell start, web serve, status, stop, merge, discard, diagnostics, and recommended long-run commands for the active repo.
+- [ ] Each run writes a concise `WORK_SUMMARY.md` suitable for daily work logs without exposing raw secrets or long transcripts.
+- [ ] Web action audit artifacts record local start, stop, restart, config, prompt, goals, and worktree actions with timestamps and results.
+- [ ] Local retention settings and dry-run prune reports manage run directories, logs, diagnostics, and backups without deleting pending worktree review state.
 
 ## Completion Criteria
 
