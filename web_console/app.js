@@ -443,6 +443,11 @@
         restart: 'restart',
         invalid: 'invalid',
         default: 'default',
+        rejectedFields: 'Rejected fields',
+        securityRoleTitle: 'Security stage',
+        securityRoleRequirement: 'Security stage requires Security in roles and security.enabled = true.',
+        securityRoleMissingEnabled: 'Security is selected in roles, but security.enabled is off.',
+        securityRoleMissingRole: 'security.enabled is on, but Security is missing from roles.',
         mustBeBoolean: 'must be a boolean',
         mustBeNumber: 'must be a number',
         mustBeAtLeast: 'must be >= {min}',
@@ -1317,6 +1322,11 @@
     savesDisabledUntilRunnerEnabled: '러너 제어가 활성화될 때까지 구성 저장이 비활성화됩니다.',
     noConfigChanges: '저장할 구성 변경 사항이 없습니다.',
     fixInvalidChangesBeforeSaving: '저장하기 전에 잘못된 변경 {count}개를 수정하세요.',
+    rejectedFields: '거부된 필드',
+    securityRoleTitle: 'Security 단계',
+    securityRoleRequirement: 'Security 단계에는 roles의 Security와 security.enabled=true가 필요합니다.',
+    securityRoleMissingEnabled: 'roles에 Security가 있지만 security.enabled가 꺼져 있습니다.',
+    securityRoleMissingRole: 'security.enabled가 켜져 있지만 roles에 Security가 없습니다.',
   });
   Object.assign(LOCALE_TEXT.ko.common, {
     select: '선택',
@@ -2292,6 +2302,49 @@
       return 'plugin';
     }
     return 'invalid';
+  }
+
+  function configSecurityRoleStatus(config = state.configDraft, schema = state.configSchema) {
+    const raw = toObject(config);
+    const schemaObject = toObject(schema);
+    const roleOptions = toArray(schemaObject.roles?.options || []);
+    const securitySchema = toObject(schemaObject['security.enabled'] || { kind: 'bool' });
+    const roles = normalizeRoleSpecs(getAt(raw, 'roles'), roleOptions);
+    const securityEnabled = Boolean(normalizeConfigValue(getAt(raw, 'security.enabled'), securitySchema, 'security.enabled'));
+    const securitySelected = roles.some((role) => String(role).trim().toLowerCase() === 'security');
+    const requirement = t('config.securityRoleRequirement');
+    const warning = securitySelected && !securityEnabled
+      ? t('config.securityRoleMissingEnabled')
+      : securityEnabled && !securitySelected
+        ? t('config.securityRoleMissingRole')
+        : '';
+    return {
+      roles,
+      securityEnabled,
+      securitySelected,
+      requirement,
+      warning,
+    };
+  }
+
+  function renderConfigSecurityRoleBanner(config = state.configDraft, schema = state.configSchema, selectedPath = currentConfigSelection()) {
+    const status = configSecurityRoleStatus(config, schema);
+    const path = toText(selectedPath, '');
+    const show = path === 'roles' || path === 'security.enabled' || Boolean(status.warning);
+    if (!show) {
+      return '';
+    }
+    const tone = status.warning ? 'warn' : 'info';
+    return `
+      <div class="modal-banner section-banner section-banner--${tone}">
+        <span class="dot" style="background: currentColor;"></span>
+        <div>
+          <div class="section-banner__title">${escapeHTML(t('config.securityRoleTitle'))}</div>
+          <div class="section-banner__copy">${escapeHTML(status.requirement)}</div>
+          ${status.warning ? `<div class="section-banner__copy">${escapeHTML(status.warning)}</div>` : ''}
+        </div>
+      </div>
+    `;
   }
 
   function renderConfigRolesControl({
@@ -5092,7 +5145,7 @@
 
   function legacyConfigGroups() {
     return [
-      { id: 'project', title: t('config.groupProject'), paths: ['repo', 'profile', 'execution_backend', 'roles'] },
+      { id: 'project', title: t('config.groupProject'), paths: ['repo', 'profile', 'execution_backend', 'roles', 'security.enabled'] },
       { id: 'runner', title: t('config.groupRunner'), paths: ['autopilot', 'continuous', 'iterations', 'max_turns_per_task', 'loop', 'loop_sleep_seconds', 'loop_max_cycles', 'loop_idle_exit_after', 'idle_exit_cycles', 'max_consecutive_failed_cycles', 'run_tests', 'budget_reset_per_cycle'] },
       { id: 'quota', title: t('config.groupQuota'), paths: ['quota_check_enabled', 'quota_five_hour_max_utilization', 'quota_seven_day_max_utilization', 'quota_wait_for_reset'] },
       { id: 'worktree', title: t('config.groupWorktree'), paths: ['worktree_isolation', 'isolate_task', 'gitops.worktree_merge_mode', 'gitops.untracked_exclude_globs'] },
@@ -5973,6 +6026,9 @@
       profile: 'personal',
       execution_backend: 'codex',
       roles: [...DEFAULT_ROLE_SPECS],
+      security: {
+        enabled: false,
+      },
       autopilot: true,
       continuous: true,
       iterations: 1,
@@ -6069,6 +6125,12 @@
         restart: false,
         desc: 'Stages enabled in the pipeline.',
         hint: 'Built-in order: PM, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.',
+      },
+      'security.enabled': {
+        kind: 'bool',
+        restart: false,
+        desc: 'Enable the Security stage in the pipeline.',
+        hint: 'Security stage requires Security in roles.',
       },
       autopilot: {
         kind: 'bool',
@@ -7041,6 +7103,8 @@
     normalizeRoleSpec,
     normalizeRoleSpecs,
     classifyRoleSpec,
+    configSecurityRoleStatus,
+    renderConfigSecurityRoleBanner,
     renderConfigRolesControl,
     adaptPrompts,
     adaptLogs,
@@ -8159,6 +8223,7 @@
     const saveState = toObject(state.configSave || {});
     const changedPaths = toArray(saveState.changedPaths);
     const reloadRequiredPaths = toArray(saveState.reloadRequiredPaths);
+    const validationErrors = toArray(saveState.validationErrors).map((error) => toObject(error));
     const diffPaths = diffs.map((diff) => diff.path);
     const restartPaths = diffs.filter((diff) => diff.restart).map((diff) => diff.path);
     const bannerTitle = saveState.status === 'saving'
@@ -8226,6 +8291,23 @@
           </div>
         `);
       }
+      if (validationErrors.length) {
+        metaRows.push(`
+          <div>
+            <div class="config-save-state__label">${escapeHTML(t('config.rejectedFields'))}</div>
+            ${validationErrors
+              .map((error) => {
+                const field = toText(error.field || error.path || error.name || '', '');
+                const code = toText(error.code || '', '');
+                const message = toText(error.message || '', '');
+                const detail = field ? `<strong>${escapeHTML(field)}</strong>` : (code ? `<strong>${escapeHTML(code)}</strong>` : '');
+                const suffix = message ? `: ${escapeHTML(message)}` : '';
+                return `<div class="field-error">${detail}${suffix}</div>`;
+              })
+              .join('')}
+          </div>
+        `);
+      }
     } else if (saveState.status === 'error') {
       if (saveState.backupPath) {
         metaRows.push(`
@@ -8254,6 +8336,23 @@
             <div class="config-save-state__paths">
               ${failedPaths.map((path) => `<span class="config-save-state__path">${escapeHTML(path)}</span>`).join('')}
             </div>
+          </div>
+        `);
+      }
+      if (validationErrors.length) {
+        metaRows.push(`
+          <div>
+            <div class="config-save-state__label">${escapeHTML(t('config.rejectedFields'))}</div>
+            ${validationErrors
+              .map((error) => {
+                const field = toText(error.field || error.path || error.name || '', '');
+                const code = toText(error.code || '', '');
+                const message = toText(error.message || '', '');
+                const detail = field ? `<strong>${escapeHTML(field)}</strong>` : (code ? `<strong>${escapeHTML(code)}</strong>` : '');
+                const suffix = message ? `: ${escapeHTML(message)}` : '';
+                return `<div class="field-error">${detail}${suffix}</div>`;
+              })
+              .join('')}
           </div>
         `);
       }
@@ -8376,12 +8475,14 @@
       if (!response.ok || payload.ok === false) {
         const error = toObject(payload.error);
         const details = toObject(error.details);
+        const validationDetails = toObject(details.validation);
         const saveError = new Error(toText(error.message || payload.message || `Config save failed (HTTP ${response.status}).`, 'Config save failed.'));
         saveError.code = toText(error.code || payload.code || 'config_save_failed', 'config_save_failed');
         saveError.backupPath = toText(
           details.backup_path || details.backupPath || payload.backup_path || payload.backupPath || '',
           ''
         );
+        saveError.validationErrors = toArray(validationDetails.errors || details.errors || payload.validation?.errors || []);
         saveError.changedPaths = toArray(
           details.changed_paths || details.changedPaths || payload.changed_paths || payload.changedPaths || diffs.map((diff) => diff.path)
         );
@@ -8417,6 +8518,9 @@
       const message = error instanceof Error ? error.message : t('config.saveFailed');
       const errorCode = error instanceof Error && typeof error.code === 'string' && error.code ? error.code : 'config_save_failed';
       const backupPath = error instanceof Error ? toText(error.backupPath || error.backup_path || '', '') : '';
+      const validationErrors = error instanceof Error && error.validationErrors
+        ? toArray(error.validationErrors).map((item) => toObject(item))
+        : [];
       const changedPaths = error instanceof Error && error.changedPaths ? toArray(error.changedPaths) : diffs.map((diff) => diff.path);
       const reloadRequiredPaths = error instanceof Error && error.reloadRequiredPaths
         ? toArray(error.reloadRequiredPaths)
@@ -8429,6 +8533,7 @@
         backupPath,
         changedPaths,
         reloadRequiredPaths,
+        validationErrors,
         requestPath,
         savedAt: nowMs(),
       };
@@ -12658,6 +12763,7 @@
     const saveLocked = configSaveInFlight();
     const saveDisabledReason = configSaveDisabledReason(diffs, invalidDiffs);
     const saveBannerHTML = renderConfigSaveBanner(diffs, invalidDiffs);
+    const securityRoleBannerHTML = renderConfigSecurityRoleBanner(state.configDraft, state.configSchema, selectedPath);
     const configRedaction = toObject(state.redaction);
     // restart required
     const saveButtonAttrs = saveDisabledReason ? `disabled title="${escapeHTML(saveDisabledReason)}"` : '';
@@ -12764,6 +12870,7 @@
         <div class="config-detail__body">
           ${configRedaction.active ? `<div class="summary-note">${escapeHTML(t('config.redactedHidden'))}</div>` : ''}
           ${saveBannerHTML}
+          ${securityRoleBannerHTML}
           ${invalidDiffs.length ? `
             <div class="modal-banner section-banner section-banner--err">
               <span class="dot" style="background: currentColor;"></span>
@@ -14606,6 +14713,7 @@
       backupPath: '',
       changedPaths: [],
       reloadRequiredPaths: [],
+      validationErrors: [],
       savedAt: 0,
       requestPath: '/api/config/save',
     };

@@ -21,6 +21,8 @@ from .config import (
     legacy_default_config_path,
     load_config,
     builtin_roles,
+    normalize_config_value,
+    normalize_config_list_value,
     resolve_config_path,
     resolve_prompts_dir,
     normalize_roles_value,
@@ -52,6 +54,7 @@ from .prompts import (
 )
 from .process_guard import init_process_guard, terminate_all_children
 from .run_dir import find_latest_run_dir
+from .shared import coerce_roles_arg
 from .remote.controller import (
     RUNNER_CONTROL_EVENT_FILE,
     RunnerController,
@@ -1375,7 +1378,7 @@ CONFIG_CONTRACT_GROUPS: list[dict[str, Any]] = [
     {
         "id": "project",
         "title": "Project",
-        "paths": ["repo", "profile", "execution_backend", "roles"],
+        "paths": ["repo", "profile", "execution_backend", "roles", "security.enabled"],
     },
     {
         "id": "runner",
@@ -1486,6 +1489,7 @@ CONFIG_CONTRACT_FIELDS: list[dict[str, Any]] = [
     {"path": "profile", "group": "project", "kind": "enum", "label": "Profile", "restart": True, "options": ["personal", "enterprise"], "allow_empty": False, "desc": "Default safety profile used to derive runner limits.", "hint": "Enterprise raises several guardrails."},
     {"path": "execution_backend", "group": "project", "kind": "enum", "label": "Execution backend", "restart": True, "options": ["codex", "claudecode"], "allow_empty": False, "desc": "Backend used for Dev and QA stages.", "hint": "codex = OpenAI Codex CLI, claudecode = Claude Code."},
     PIPELINE_ROLE_FIELD_SPEC,
+    {"path": "security.enabled", "group": "project", "kind": "bool", "label": "Security enabled", "allow_empty": True, "desc": "Enable the Security stage in the pipeline.", "hint": "Security stage requires Security in roles."},
     {"path": "autopilot", "group": "runner", "kind": "bool", "label": "Autopilot", "allow_empty": True, "desc": "Skip interactive confirmation prompts.", "hint": "When off, the runner pauses between stages."},
     {"path": "continuous", "group": "runner", "kind": "bool", "label": "Continuous", "allow_empty": True, "desc": "Keep chaining cycles without manual stopping.", "hint": "Best paired with autopilot for unattended runs."},
     {"path": "iterations", "group": "runner", "kind": "number", "label": "Iterations", "min": 1, "allow_empty": False, "desc": "Maximum run iterations.", "hint": "One iteration equals one PM -> Dev -> QA cycle."},
@@ -1577,66 +1581,39 @@ def _merge_config_tree(base: Any, overlay: Any) -> Any:
 
 
 def _normalize_config_list(value: Any, *, item_kind: str = "text") -> list[Any]:
-    if isinstance(value, list):
-        raw_items = value
-    elif isinstance(value, str):
-        raw_items = [item.strip() for item in re.split(r"[,\n]", value) if item.strip()]
-    elif value in (None, ""):
-        raw_items = []
-    else:
-        raw_items = [value]
-
-    items: list[Any] = []
-    for item in raw_items:
-        if item_kind in {"int", "number"}:
-            try:
-                items.append(int(str(item).strip()))
-                continue
-            except Exception:
-                pass
-        text = str(item).strip()
-        if text:
-            items.append(text)
-    return items
+    return normalize_config_list_value(value, item_kind=item_kind)
 
 
 def _normalize_config_contract_value(value: Any, spec: dict[str, Any]) -> Any:
-    kind = str(spec.get("kind") or "text")
-    path = str(spec.get("path") or "")
-    if kind == "bool":
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "yes", "on", "enabled"}:
-                return True
-            if normalized in {"0", "false", "no", "off", "disabled"}:
-                return False
-        return bool(value)
-    if kind == "number":
-        if value in (None, ""):
-            return None
-        try:
-            number = int(str(value).strip())
-        except Exception:
-            try:
-                number = int(float(str(value).strip()))
-            except Exception:
-                return value
-        return number
-    if kind in {"multienum", "list"}:
-        if kind == "multienum" and path == "roles":
-            return normalize_roles_value(value)
-        items = _normalize_config_list(value, item_kind=str(spec.get("item_kind") or "text"))
-        options = spec.get("options")
-        if kind == "multienum" and isinstance(options, list) and options:
-            return [item for item in items if item in options]
-        return items
-    if kind in {"enum", "text"}:
-        if value is None:
-            return ""
-        return str(value)
-    return deepcopy(value)
+    return normalize_config_value(value, spec, str(spec.get("path") or ""))
+
+
+def _normalize_config_for_launch(cfg: dict[str, Any]) -> dict[str, Any]:
+    normalized = _merge_config_tree(CLI_DEFAULTS, cfg)
+    if not isinstance(normalized, dict):
+        normalized = {}
+    for spec in CONFIG_CONTRACT_FIELDS:
+        path = str(spec.get("path") or "")
+        if not path:
+            continue
+        _config_path_set(normalized, path, normalize_config_value(_config_path_get(normalized, path), spec, path))
+    for path in (
+        "gitops.untracked_exclude_globs",
+        "plugins_allowlist",
+        "policy.ignore_paths",
+        "policy.allow_patterns",
+        "scan_ignore_globs",
+        "scan_ignore_paths",
+        "failover_backends",
+        "failover_on",
+        "dev_escalate_on",
+    ):
+        current = _config_path_get(normalized, path)
+        if current is None:
+            continue
+        _config_path_set(normalized, path, normalize_config_list_value(current, item_kind="text"))
+    normalized["roles"] = coerce_roles_arg(normalized.get("roles"))
+    return normalized
 
 
 def _build_config_contract(
@@ -2931,10 +2908,14 @@ def _runner_control_start_options_contract(
 
 
 def _build_runner_base_args(repo: Path, cfg: dict[str, Any], cfg_path: Path) -> argparse.Namespace:
-    payload = _strip_run_dir_intent(cfg)
+    payload = _normalize_config_for_launch(_strip_run_dir_intent(cfg))
     payload["repo"] = _path_text(repo)
     payload["config"] = _path_text(cfg_path)
     payload["config_path"] = _path_text(cfg_path)
+    try:
+        payload["prompts_dir"] = resolve_prompts_dir(repo, str(payload.get("prompts_dir") or "")).as_posix()
+    except Exception:
+        payload["prompts_dir"] = str(payload.get("prompts_dir") or "")
     return argparse.Namespace(**payload)
 
 
@@ -7981,18 +7962,51 @@ def create_app(
             updated_raw = deepcopy(current_raw)
             changed_paths: list[str] = []
             reload_required_paths: list[str] = []
+            validation_errors: list[dict[str, Any]] = []
 
-            for entry in raw_changes:
+            for index, entry in enumerate(raw_changes):
                 if not isinstance(entry, dict):
-                    return _config_save_error(400, "config_change_invalid", "Each config change must be an object.")
+                    validation_errors.append(
+                        {
+                            "field": "changes",
+                            "code": "config_change_invalid",
+                            "message": "Each config change must be an object.",
+                            "details": {"index": index},
+                        }
+                    )
+                    continue
                 path = str(entry.get("path") or entry.get("field") or entry.get("name") or "").strip()
                 if not path:
-                    return _config_save_error(400, "config_path_required", "Each config change must include a path.")
+                    validation_errors.append(
+                        {
+                            "field": "changes",
+                            "code": "config_path_required",
+                            "message": "Each config change must include a path.",
+                            "details": {"index": index},
+                        }
+                    )
+                    continue
                 field_schema = schema.get(path)
                 if not isinstance(field_schema, dict):
-                    return _config_save_error(400, "config_unknown_path", "Config field is not part of the save schema.", path=path)
+                    validation_errors.append(
+                        {
+                            "field": path,
+                            "code": "config_unknown_path",
+                            "message": "Config field is not part of the save schema.",
+                            "details": {"path": path},
+                        }
+                    )
+                    continue
                 if not bool(field_schema.get("editable", True)):
-                    return _config_save_error(400, "config_field_not_editable", "Config field cannot be edited.", path=path)
+                    validation_errors.append(
+                        {
+                            "field": path,
+                            "code": "config_field_not_editable",
+                            "message": "Config field cannot be edited.",
+                            "details": {"path": path},
+                        }
+                    )
+                    continue
 
                 raw_value = entry.get("value")
                 if "value" not in entry and "to" in entry:
@@ -8003,18 +8017,44 @@ def create_app(
                 current_value = _config_path_get(current_raw, path)
                 normalized_value, error_code, error_details = _config_save_validate_change(path, raw_value, field_schema, current_value)
                 if error_code:
-                    return _config_save_error(
-                        400,
-                        error_code,
-                        "Config save payload is not valid for this field.",
-                        **error_details,
+                    validation_errors.append(
+                        {
+                            "field": path,
+                            "code": error_code,
+                            "message": "Config save payload is not valid for this field.",
+                            "details": error_details,
+                        }
                     )
+                    continue
                 if normalized_value == current_value:
                     continue
                 _config_path_set(updated_raw, path, normalized_value)
                 changed_paths.append(path)
                 if path in restart_required_paths or bool(field_schema.get("restart", False)):
                     reload_required_paths.append(path)
+
+            if validation_errors:
+                validation_payload = {
+                    "error_count": len(validation_errors),
+                    "errors": validation_errors,
+                }
+                if len(validation_errors) == 1:
+                    first_error = validation_errors[0]
+                    details = dict(first_error.get("details") or {})
+                    details["field"] = first_error.get("field")
+                    details["validation"] = validation_payload
+                    return _config_save_error(
+                        400,
+                        str(first_error.get("code") or "config_validation_failed"),
+                        str(first_error.get("message") or "Config save payload is not valid for this field."),
+                        **details,
+                    )
+                return _config_save_error(
+                    400,
+                    "config_validation_failed",
+                    "One or more config changes were rejected.",
+                    validation=validation_payload,
+                )
 
             changed_paths = list(dict.fromkeys(changed_paths))
             reload_required_paths = list(dict.fromkeys(reload_required_paths))

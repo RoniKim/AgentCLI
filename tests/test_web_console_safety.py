@@ -1826,6 +1826,41 @@ class WebConsoleSafetyTests(unittest.TestCase):
         status_payload = client.get("/api/status").json()
         self.assertEqual(["PM", "pkg.mod:Class", "QA"], status_payload["config"]["data"]["roles"])
 
+    def test_config_save_normalizes_launch_fields_before_runner_start(self) -> None:
+        _write_config(
+            self.config_path,
+            self.repo,
+            roles=["PM", "Security", "Dev", "QA"],
+            prompts_dir="prompts/agentcli",
+            gitops={"untracked_exclude_globs": "*.log, .AgentCLI/**"},
+            plugins_allowlist="plugin.alpha, plugin.beta",
+            policy={"ignore_paths": "docs/**, tmp/**", "allow_patterns": "src/**, tests/**"},
+            scan_ignore_paths="build/tmp, build/logs",
+            failover_backends="codex, claudecode",
+            failover_on="quota_exhausted, quota_utilization",
+            dev_escalate_on="no_diff, build_failed",
+            telegram={
+                "enabled": True,
+                "allowed_chat_ids": "101, 202",
+                "notify_events": "run_start, task_done",
+            },
+        )
+        client, app = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        controller = app.state.runner_controller
+        self.assertEqual("PM,Security,Dev,QA", controller.base_args.roles)
+        self.assertEqual(["*.log", ".AgentCLI/**"], controller.base_args.gitops["untracked_exclude_globs"])
+        self.assertEqual(["plugin.alpha", "plugin.beta"], controller.base_args.plugins_allowlist)
+        self.assertEqual(["docs/**", "tmp/**"], controller.base_args.policy["ignore_paths"])
+        self.assertEqual(["src/**", "tests/**"], controller.base_args.policy["allow_patterns"])
+        self.assertEqual(["build/tmp", "build/logs"], controller.base_args.scan_ignore_paths)
+        self.assertEqual(["codex", "claudecode"], controller.base_args.failover_backends)
+        self.assertEqual(["quota_exhausted", "quota_utilization"], controller.base_args.failover_on)
+        self.assertEqual(["no_diff", "build_failed"], controller.base_args.dev_escalate_on)
+        self.assertEqual([101, 202], controller.base_args.telegram["allowed_chat_ids"])
+        self.assertEqual(["run_start", "task_done"], controller.base_args.telegram["notify_events"])
+        self.assertEqual((self.home / "prompts" / "agentcli").resolve().as_posix(), controller.base_args.prompts_dir)
+
     def test_config_save_rejects_unsafe_or_redacted_payloads(self) -> None:
         _write_config(self.config_path, self.repo)
         client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
@@ -1843,6 +1878,34 @@ class WebConsoleSafetyTests(unittest.TestCase):
         redacted_payload = redacted.json()
         self.assertFalse(redacted_payload["ok"])
         self.assertEqual("config_redacted_placeholder", redacted_payload["error"]["code"])
+        self.assertEqual(before, self.config_path.read_text(encoding="utf-8"))
+        backups = list(self.config_path.parent.glob(f"{self.config_path.stem}.*.bak{self.config_path.suffix}"))
+        self.assertEqual([], backups)
+
+    def test_config_save_reports_all_validation_errors(self) -> None:
+        _write_config(self.config_path, self.repo)
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        before = self.config_path.read_text(encoding="utf-8")
+        response = client.post(
+            "/api/config/save",
+            json={
+                "changes": [
+                    {"path": "iterations", "value": 0},
+                    {"path": "telegram.bot_token", "value": "[redacted]"},
+                ]
+            },
+        )
+        self.assertEqual(400, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("config_validation_failed", payload["error"]["code"])
+        validation = payload["error"]["details"]["validation"]
+        self.assertEqual(2, validation["error_count"])
+        self.assertEqual(2, len(validation["errors"]))
+        self.assertEqual({"iterations", "telegram.bot_token"}, {error["field"] for error in validation["errors"]})
+        self.assertIn("config_value_out_of_range", {error["code"] for error in validation["errors"]})
+        self.assertIn("config_redacted_placeholder", {error["code"] for error in validation["errors"]})
         self.assertEqual(before, self.config_path.read_text(encoding="utf-8"))
         backups = list(self.config_path.parent.glob(f"{self.config_path.stem}.*.bak{self.config_path.suffix}"))
         self.assertEqual([], backups)

@@ -356,6 +356,112 @@ def validate_roles_value(value: Any, *, default: List[str] | None = None) -> tup
     return items, invalid
 
 
+def normalize_config_list_value(value: Any, *, item_kind: str = "text") -> List[Any]:
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, tuple):
+        raw_items = list(value)
+    elif isinstance(value, str):
+        raw_items = [item.strip() for item in re.split(r"[,\n]", value) if item.strip()]
+    elif value in (None, ""):
+        raw_items = []
+    else:
+        raw_items = [value]
+
+    items: List[Any] = []
+    for item in raw_items:
+        if item_kind in {"int", "number"}:
+            try:
+                items.append(int(str(item).strip()))
+                continue
+            except Exception:
+                pass
+        text = str(item).strip()
+        if text:
+            items.append(text)
+    return items
+
+
+def normalize_config_value(value: Any, schema: Dict[str, Any], path: str = "") -> Any:
+    kind = str(schema.get("kind") or "text")
+    if kind == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "enabled"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "disabled"}:
+                return False
+        return bool(value)
+
+    if kind == "number":
+        if value in (None, ""):
+            return None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number: int | float = value
+        elif isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                number = int(text)
+            except Exception:
+                try:
+                    number = float(text)
+                except Exception:
+                    return value
+        else:
+            return value
+        if isinstance(number, float) and number.is_integer():
+            return int(number)
+        return number
+
+    if kind == "multienum":
+        if path == "roles":
+            return normalize_roles_value(value)
+        return normalize_config_list_value(value, item_kind="text")
+
+    if kind == "list":
+        item_kind = str(schema.get("item_kind") or schema.get("itemKind") or "text")
+        items = normalize_config_list_value(value, item_kind=item_kind)
+        if item_kind in {"int", "number"}:
+            normalized_items: list[Any] = []
+            for item in items:
+                if isinstance(item, bool):
+                    normalized_items.append(int(item))
+                    continue
+                if isinstance(item, (int, float)):
+                    number = int(item) if float(item).is_integer() else item
+                elif isinstance(item, str):
+                    text = item.strip()
+                    if not text:
+                        continue
+                    try:
+                        number = int(text)
+                    except Exception:
+                        try:
+                            number = float(text)
+                        except Exception:
+                            normalized_items.append(item)
+                            continue
+                else:
+                    normalized_items.append(item)
+                    continue
+                if isinstance(number, float) and number.is_integer():
+                    number = int(number)
+                normalized_items.append(number)
+            return normalized_items
+        return items
+
+    if kind in {"enum", "text"}:
+        if value is None:
+            return ""
+        return str(value)
+
+    return value
+
+
 def builtin_roles() -> List[str]:
     return _builtin_role_specs()
 

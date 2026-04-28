@@ -3994,6 +3994,14 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(self.repo.as_posix(), config["values"]["repo"])
         self.assertEqual(list(BUILTIN_ROLE_SPECS), config["schema"]["roles"]["options"])
         self.assertEqual("Built-in order: PM, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.", config["schema"]["roles"]["hint"])
+        self.assertIn("security.enabled", config["schema"])
+        self.assertEqual("Security enabled", config["schema"]["security.enabled"]["label"])
+        self.assertEqual("project", config["schema"]["security.enabled"]["group"])
+        self.assertEqual("Security stage requires Security in roles.", config["schema"]["security.enabled"]["hint"])
+        self.assertFalse(config["values"]["security"]["enabled"])
+        self.assertFalse(config["defaults"]["security"]["enabled"])
+        project_group = next(group for group in config["groups"] if group["id"] == "project")
+        self.assertIn("security.enabled", project_group["paths"])
         self.assertIn("pm_model", config["values"])
         self.assertIn("pm_model", config["schema"])
         self.assertIn("prompts_dir", config["defaults"])
@@ -6843,6 +6851,60 @@ Another unsupported line.
         self.assertEqual(["prompts_dir"], normalized["configContract"]["groups"][0]["paths"])
         self.assertIn("telegram.bot_token", normalized["configContract"]["redaction"]["paths"])
         self.assertIn("telegram.bot_token", normalized["configContract"]["restart_required_paths"])
+
+    def test_adapter_reports_security_role_requirements_and_warnings(self) -> None:
+        schema = {
+            "roles": {"options": list(BUILTIN_ROLE_SPECS)},
+            "security.enabled": {"kind": "bool"},
+        }
+        security_enabled_missing = {
+            "roles": ["PM", "Security", "Dev", "QA"],
+            "security": {"enabled": False},
+        }
+        security_role_missing = {
+            "roles": ["PM", "Dev", "QA"],
+            "security": {"enabled": True},
+        }
+        security_role_aligned = {
+            "roles": ["PM", "Security", "Dev", "QA"],
+            "security": {"enabled": True},
+        }
+
+        status_missing_enabled, status_missing_role, status_aligned, banner_missing_enabled, banner_missing_role, banner_aligned = _run_adapter_harness(
+            [
+                {"kind": "call", "name": "configSecurityRoleStatus", "args": [security_enabled_missing, schema]},
+                {"kind": "call", "name": "configSecurityRoleStatus", "args": [security_role_missing, schema]},
+                {"kind": "call", "name": "configSecurityRoleStatus", "args": [security_role_aligned, schema]},
+                {"kind": "call", "name": "renderConfigSecurityRoleBanner", "args": [security_enabled_missing, schema, "roles"]},
+                {"kind": "call", "name": "renderConfigSecurityRoleBanner", "args": [security_role_missing, schema, "security.enabled"]},
+                {"kind": "call", "name": "renderConfigSecurityRoleBanner", "args": [security_role_aligned, schema, "roles"]},
+            ]
+        )
+
+        self.assertTrue(status_missing_enabled["securitySelected"])
+        self.assertFalse(status_missing_enabled["securityEnabled"])
+        self.assertEqual("Security stage requires Security in roles and security.enabled = true.", status_missing_enabled["requirement"])
+        self.assertEqual("Security is selected in roles, but security.enabled is off.", status_missing_enabled["warning"])
+
+        self.assertFalse(status_missing_role["securitySelected"])
+        self.assertTrue(status_missing_role["securityEnabled"])
+        self.assertEqual("security.enabled is on, but Security is missing from roles.", status_missing_role["warning"])
+
+        self.assertTrue(status_aligned["securitySelected"])
+        self.assertTrue(status_aligned["securityEnabled"])
+        self.assertEqual("", status_aligned["warning"])
+
+        self.assertIn("section-banner--warn", banner_missing_enabled)
+        self.assertIn("Security stage requires Security in roles and security.enabled = true.", banner_missing_enabled)
+        self.assertIn("Security is selected in roles, but security.enabled is off.", banner_missing_enabled)
+
+        self.assertIn("section-banner--warn", banner_missing_role)
+        self.assertIn("security.enabled is on, but Security is missing from roles.", banner_missing_role)
+
+        self.assertIn("section-banner--info", banner_aligned)
+        self.assertNotIn("section-banner--warn", banner_aligned)
+        self.assertNotIn("Security is selected in roles, but security.enabled is off.", banner_aligned)
+        self.assertNotIn("security.enabled is on, but Security is missing from roles.", banner_aligned)
 
     def test_adapter_preserves_plugin_role_specs_as_editable_controls(self) -> None:
         options = list(BUILTIN_ROLE_SPECS)
