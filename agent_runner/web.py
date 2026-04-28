@@ -53,9 +53,12 @@ from .prompts import (
 from .process_guard import init_process_guard, terminate_all_children
 from .run_dir import find_latest_run_dir
 from .remote.controller import (
+    RUNNER_CONTROL_EVENT_FILE,
     RunnerController,
     build_runner_start_options_contract,
     normalize_runner_start_options,
+    read_runner_control_event,
+    write_runner_control_event,
 )
 from .stop_progress import normalize_stop_progress_payload
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, load_state, parse_backlog_md
@@ -150,6 +153,7 @@ RUN_DIR_ARTIFACT_NAMES = {
     "cycle_summary.log",
     "last_run_summary.json",
     "metrics.jsonl",
+    RUNNER_CONTROL_EVENT_FILE,
     "run_summary.json",
     "WORKTREE_APPLY_FAILURE.md",
     "WORKTREE_MERGE_APPLIED.json",
@@ -1988,6 +1992,12 @@ def _runner_control_status_payload(
 ) -> dict[str, Any]:
     base_args = getattr(controller, "base_args", None)
     fallback_config_path = _path_text(config_path or getattr(base_args, "config_path", getattr(base_args, "config", "")) or "")
+    control_event: dict[str, Any] = {}
+    if str(current_run_dir or "").strip():
+        try:
+            control_event = read_runner_control_event(Path(current_run_dir))
+        except Exception:
+            control_event = {}
     start_options_contract = _runner_control_start_options_contract(
         controller,
         repo=repo,
@@ -2015,6 +2025,12 @@ def _runner_control_status_payload(
             "state_counts": {"done": 0, "failed": 0, "warnings": 0},
             "reason": "",
             "last_event": "",
+            "last_action": str(control_event.get("last_action") or control_event.get("action") or ""),
+            "lastAction": str(control_event.get("last_action") or control_event.get("action") or ""),
+            "last_message": str(control_event.get("last_message") or control_event.get("message") or ""),
+            "lastMessage": str(control_event.get("last_message") or control_event.get("message") or ""),
+            "last_error": str(control_event.get("last_error") or control_event.get("error") or ""),
+            "lastError": str(control_event.get("last_error") or control_event.get("error") or ""),
             "stop_progress": {},
             "stopProgress": {},
             "start_options": start_options_contract,
@@ -2046,6 +2062,12 @@ def _runner_control_status_payload(
             "state_counts": {"done": 0, "failed": 0, "warnings": 0},
             "reason": REDACTED_VALUE if redact_sensitive else f"status_error: {ex}",
             "last_event": "",
+            "last_action": str(control_event.get("last_action") or control_event.get("action") or ""),
+            "lastAction": str(control_event.get("last_action") or control_event.get("action") or ""),
+            "last_message": str(control_event.get("last_message") or control_event.get("message") or ""),
+            "lastMessage": str(control_event.get("last_message") or control_event.get("message") or ""),
+            "last_error": REDACTED_VALUE if redact_sensitive else str(control_event.get("last_error") or control_event.get("error") or f"status_error: {ex}"),
+            "lastError": REDACTED_VALUE if redact_sensitive else str(control_event.get("last_error") or control_event.get("error") or f"status_error: {ex}"),
             "stop_progress": {},
             "stopProgress": {},
             "start_options": start_options_contract,
@@ -2089,6 +2111,12 @@ def _runner_control_status_payload(
         },
         "reason": str(status.get("reason") or "").strip(),
         "last_event": str(status.get("last_event") or "").strip(),
+        "last_action": str(status.get("last_action") or status.get("lastAction") or control_event.get("last_action") or control_event.get("action") or "").strip(),
+        "lastAction": str(status.get("last_action") or status.get("lastAction") or control_event.get("last_action") or control_event.get("action") or "").strip(),
+        "last_message": str(status.get("last_message") or status.get("lastMessage") or control_event.get("last_message") or control_event.get("message") or "").strip(),
+        "lastMessage": str(status.get("last_message") or status.get("lastMessage") or control_event.get("last_message") or control_event.get("message") or "").strip(),
+        "last_error": str(status.get("last_error") or status.get("lastError") or control_event.get("last_error") or control_event.get("error") or "").strip(),
+        "lastError": str(status.get("last_error") or status.get("lastError") or control_event.get("last_error") or control_event.get("error") or "").strip(),
         "stop_progress": stop_progress,
         "stopProgress": stop_progress,
         "start_options": start_options,
@@ -2380,6 +2408,9 @@ def _runner_control_payload(
     )
     controller_available = controller is not None
     actions = _runner_control_actions(enabled, status_payload, controller_available=controller_available, busy=busy)
+    status_last_action = _pick_text(last_action, status_payload.get("last_action"), status_payload.get("lastAction"))
+    status_last_message = _pick_text(last_message, status_payload.get("last_message"), status_payload.get("lastMessage"))
+    status_last_error = _pick_text(last_error, status_payload.get("last_error"), status_payload.get("lastError"))
     message = _runner_control_message(
         enabled=enabled,
         source=source,
@@ -2389,8 +2420,8 @@ def _runner_control_payload(
     )
     status_reason = str(status_payload.get("reason") or "").strip()
     message_sensitive = False
-    if last_error:
-        message = last_error
+    if status_last_error:
+        message = status_last_error
         message_sensitive = True
     elif status_reason.startswith("status_error:"):
         message = status_reason
@@ -2403,8 +2434,8 @@ def _runner_control_payload(
             controller_available=controller_available,
             disabled_reason=disabled_reason,
         )
-    elif last_message and enabled:
-        message = last_message
+    elif status_last_message and enabled:
+        message = status_last_message
     elif not enabled and disabled_reason:
         message = disabled_reason
     if redact_sensitive and message_sensitive:
@@ -2438,9 +2469,12 @@ def _runner_control_payload(
         "confirmation": dict(RUNNER_CONTROL_CONFIRMATIONS),
         "live_state": live_state if isinstance(live_state, dict) else {},
         "liveState": live_state if isinstance(live_state, dict) else {},
-        "last_action": last_action,
-        "last_message": last_message,
-        "last_error": last_error,
+        "last_action": status_last_action,
+        "lastAction": status_last_action,
+        "last_message": status_last_message,
+        "lastMessage": status_last_message,
+        "last_error": status_last_error,
+        "lastError": status_last_error,
         "busy": bool(busy),
     }
 
@@ -6359,6 +6393,20 @@ def create_app(
     def _runner_control_disabled(action: str) -> Any:
         control = _runner_control_snapshot().get("runner_control", {})
         message = str(control.get("message") or "Runner controls are disabled.")
+        _record_runner_control_event(
+            action,
+            status="disabled",
+            message="",
+            error=message,
+            details={
+                "enabled": bool(control.get("enabled")),
+                "source": control.get("source", ""),
+                "bind_host": bind_host,
+                "trusted_network": bool(trusted_network),
+                "reason": str(control.get("message") or controls_disabled_reason or ""),
+            },
+            controller_status=control.get("status") if isinstance(control.get("status"), dict) else None,
+        )
         return _runner_control_response(
             action=action,
             status_code=403,
@@ -6376,6 +6424,12 @@ def create_app(
         )
 
     def _runner_control_unavailable(action: str) -> Any:
+        _record_runner_control_event(
+            action,
+            status="controller_error",
+            message="",
+            error="Runner controller is unavailable.",
+        )
         return _runner_control_response(
             action=action,
             status_code=503,
@@ -6383,6 +6437,61 @@ def create_app(
             status="error",
             message="Runner controller is unavailable.",
             error_code="runner_controller_unavailable",
+        )
+
+    def _runner_control_artifact_run_dir(controller_status: dict[str, Any] | None = None) -> Path | None:
+        status_data = controller_status if isinstance(controller_status, dict) else _controller_status_payload(controller)
+        try:
+            run_dir = _resolve_latest_run_dir(repo_root, status_data, controller)
+        except Exception:
+            run_dir = None
+        if run_dir is not None:
+            return run_dir
+        run_dir_text = str(
+            status_data.get("run_dir")
+            or status_data.get("runDir")
+            or getattr(controller, "run_dir", "")
+            or ""
+        ).strip()
+        if not run_dir_text:
+            return None
+        try:
+            return Path(run_dir_text).expanduser().resolve()
+        except Exception:
+            try:
+                return Path(run_dir_text).expanduser()
+            except Exception:
+                return None
+
+    def _record_runner_control_event(
+        action: str,
+        *,
+        status: str,
+        message: str = "",
+        error: str = "",
+        details: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+        controller_status: dict[str, Any] | None = None,
+    ) -> None:
+        run_dir = _runner_control_artifact_run_dir(controller_status)
+        if run_dir is None:
+            return
+        status_key = str(status or "").strip().lower()
+        ok = status_key in {"started", "stopped", "reloaded", "restarted", "stopping"}
+        write_runner_control_event(
+            run_dir,
+            action=action,
+            status=status_key,
+            message=message if ok else "",
+            error="" if ok else error or message,
+            ok=ok,
+            source="web",
+            repo=repo_root.as_posix(),
+            config_path=cfg_path.as_posix(),
+            controller_available=bool(controller is not None),
+            running=bool(controller_status.get("running")) if isinstance(controller_status, dict) else None,
+            details=details or {},
+            result=result or {},
         )
 
     async def _runner_control_body(request: Request) -> dict[str, Any] | None:
@@ -6420,6 +6529,22 @@ def create_app(
                 error_code="runner_controls_busy",
             )
 
+        def _invoke_runner_start(start_overrides: dict[str, Any], *, control_action: str) -> dict[str, Any]:
+            try:
+                return controller.start(start_overrides, control_action=control_action)
+            except TypeError as ex:
+                if "control_action" not in str(ex):
+                    raise
+            return controller.start(start_overrides)
+
+        def _invoke_runner_stop(*, wait: bool, control_action: str) -> dict[str, Any]:
+            try:
+                return controller.stop(wait=wait, control_action=control_action)
+            except TypeError as ex:
+                if "control_action" not in str(ex):
+                    raise
+            return controller.stop(wait=wait)
+
         try:
             body = await _runner_control_body(request)
             if body is None:
@@ -6432,9 +6557,25 @@ def create_app(
                     error_code="invalid_json",
                     busy_override=False,
                 )
+            current_status = _runner_control_status_payload(
+                controller,
+                repo=repo_root,
+                config_path=cfg_path.as_posix(),
+                current_run_dir=str(getattr(controller, "run_dir", "") or ""),
+                cfg=cfg,
+                cfg_path=cfg_path,
+            )
             provided = _runner_control_confirmation_value(body)
             expected = _runner_control_confirmation(normalized_action)
             if not provided:
+                _record_runner_control_event(
+                    normalized_action,
+                    status="confirmation_mismatch",
+                    message="",
+                    error=f'Type "{expected}" to confirm this action.',
+                    details={"expected": expected},
+                    controller_status=current_status,
+                )
                 return _runner_control_response(
                     action=normalized_action,
                     status_code=400,
@@ -6446,6 +6587,14 @@ def create_app(
                     busy_override=False,
                 )
             if provided != expected:
+                _record_runner_control_event(
+                    normalized_action,
+                    status="confirmation_mismatch",
+                    message="",
+                    error=f'Confirmation phrase must be "{expected}".',
+                    details={"expected": expected},
+                    controller_status=current_status,
+                )
                 return _runner_control_response(
                     action=normalized_action,
                     status_code=400,
@@ -6484,21 +6633,20 @@ def create_app(
                         busy_override=False,
                     )
                 start_overrides["repo"] = repo_root.as_posix()
-
-            current_status = _runner_control_status_payload(
-                controller,
-                repo=repo_root,
-                config_path=cfg_path.as_posix(),
-                current_run_dir=str(getattr(controller, "run_dir", "") or ""),
-                cfg=cfg,
-                cfg_path=cfg_path,
-            )
             status_reason = str(current_status.get("reason") or "").strip()
             if status_reason.startswith("status_error:"):
                 message = status_reason
                 control_state["last_action"] = normalized_action
                 control_state["last_message"] = ""
                 control_state["last_error"] = message
+                _record_runner_control_event(
+                    normalized_action,
+                    status="controller_error",
+                    message="",
+                    error=message,
+                    details={"reason": status_reason},
+                    controller_status=current_status,
+                )
                 return _runner_control_response(
                     action=normalized_action,
                     status_code=503,
@@ -6511,12 +6659,21 @@ def create_app(
                 )
 
             if normalized_action == "start":
-                result = controller.start(start_overrides)
+                result = _invoke_runner_start(start_overrides, control_action=normalized_action)
                 if not bool(result.get("ok")):
                     message = str(result.get("message") or "Runner start failed.")
                     control_state["last_action"] = normalized_action
                     control_state["last_message"] = ""
                     control_state["last_error"] = message
+                    _record_runner_control_event(
+                        normalized_action,
+                        status="error",
+                        message="",
+                        error=message,
+                        details={"result": result},
+                        result=result if isinstance(result, dict) else None,
+                        controller_status=current_status,
+                    )
                     return _runner_control_response(
                         action=normalized_action,
                         status_code=409,
@@ -6542,7 +6699,7 @@ def create_app(
                 )
 
             if normalized_action == "stop":
-                result = controller.stop(wait=True)
+                result = _invoke_runner_stop(wait=True, control_action=normalized_action)
                 if not bool(result.get("ok")):
                     message = str(result.get("message") or "Runner stop failed.")
                     stop_progress = result.get("stop_progress")
@@ -6556,6 +6713,15 @@ def create_app(
                     control_state["last_action"] = normalized_action
                     control_state["last_message"] = ""
                     control_state["last_error"] = message
+                    _record_runner_control_event(
+                        normalized_action,
+                        status="timeout" if stop_phase == "timeout" else "error",
+                        message="",
+                        error=message,
+                        details={"stop_progress": stop_progress} if stop_phase == "timeout" else {"result": result},
+                        result=result if isinstance(result, dict) else None,
+                        controller_status=current_status,
+                    )
                     error_code = "runner_stop_timeout" if stop_phase == "timeout" else "runner_stop_failed"
                     return _runner_control_response(
                         action=normalized_action,
@@ -6573,6 +6739,15 @@ def create_app(
                     control_state["last_action"] = normalized_action
                     control_state["last_message"] = ""
                     control_state["last_error"] = message
+                    _record_runner_control_event(
+                        normalized_action,
+                        status="timeout",
+                        message="",
+                        error=message,
+                        details={"stop_progress": result.get("stop_progress") if isinstance(result.get("stop_progress"), dict) else {}},
+                        result=result if isinstance(result, dict) else None,
+                        controller_status=current_status,
+                    )
                     return _runner_control_response(
                         action=normalized_action,
                         status_code=409,
@@ -6601,12 +6776,21 @@ def create_app(
             should_stop = bool(current_status.get("running")) or bool(str(current_status.get("run_dir") or "").strip())
             stop_result: dict[str, Any] = {}
             if should_stop:
-                stop_result = controller.stop(wait=False)
+                stop_result = _invoke_runner_stop(wait=False, control_action=normalized_action)
                 if not bool(stop_result.get("ok")):
                     message = str(stop_result.get("message") or f"Runner {flow_name} stop failed.")
                     control_state["last_action"] = normalized_action
                     control_state["last_message"] = ""
                     control_state["last_error"] = message
+                    _record_runner_control_event(
+                        normalized_action,
+                        status="error",
+                        message="",
+                        error=message,
+                        details={"stop": stop_result},
+                        result={"stop": stop_result},
+                        controller_status=current_status,
+                    )
                     return _runner_control_response(
                         action=normalized_action,
                         status_code=409,
@@ -6622,6 +6806,15 @@ def create_app(
                     control_state["last_action"] = normalized_action
                     control_state["last_message"] = ""
                     control_state["last_error"] = message
+                    _record_runner_control_event(
+                        normalized_action,
+                        status="timeout",
+                        message="",
+                        error=message,
+                        details={"stop": stop_result},
+                        result={"stop": stop_result},
+                        controller_status=current_status,
+                    )
                     return _runner_control_response(
                         action=normalized_action,
                         status_code=409,
@@ -6633,12 +6826,21 @@ def create_app(
                         busy_override=False,
                     )
 
-            result = controller.start(start_overrides)
+            result = _invoke_runner_start(start_overrides, control_action=normalized_action)
             if not bool(result.get("ok")):
                 message = str(result.get("message") or f"Runner {flow_name} failed.")
                 control_state["last_action"] = normalized_action
                 control_state["last_message"] = ""
                 control_state["last_error"] = message
+                _record_runner_control_event(
+                    normalized_action,
+                    status="error",
+                    message="",
+                    error=message,
+                    details={"stop": stop_result, "start": result},
+                    result={"stop": stop_result, "start": result},
+                    controller_status=current_status,
+                )
                 return _runner_control_response(
                     action=normalized_action,
                     status_code=409,
@@ -6669,6 +6871,14 @@ def create_app(
             control_state["last_action"] = normalized_action
             control_state["last_message"] = ""
             control_state["last_error"] = message
+            _record_runner_control_event(
+                normalized_action,
+                status="controller_error",
+                message="",
+                error=message,
+                details={"exception": str(ex)},
+                controller_status=current_status if "current_status" in locals() and isinstance(current_status, dict) else None,
+            )
             return _runner_control_response(
                 action=normalized_action,
                 status_code=500,

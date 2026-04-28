@@ -1288,6 +1288,71 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual(3, action_app.state.runner_controller.start_calls)
         self.assertEqual([True], action_app.state.runner_controller.stop_calls)
 
+    def test_runner_control_artifact_hydrates_controller_web_and_shell_views(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from agent_runner.remote.controller import RunnerController, write_runner_control_event
+        from agent_runner.shell import RunnerShell
+
+        write_runner_control_event(
+            self.run_dir,
+            action="reload",
+            status="reloaded",
+            message="Runner reloaded.",
+            error="",
+            ok=True,
+            source="controller",
+            repo=self.repo.as_posix(),
+            config_path=self.config_path.as_posix(),
+            running=False,
+            runner_mode="thread",
+        )
+
+        controller = RunnerController(
+            repo=self.repo,
+            base_args=SimpleNamespace(
+                config_path=self.config_path.as_posix(),
+                config=self.config_path.as_posix(),
+                run_dir=self.run_dir.as_posix(),
+            ),
+            runner_mode="thread",
+        )
+        controller_status = controller.status()
+        self.assertEqual("reload", controller_status["last_action"])
+        self.assertEqual("Runner reloaded.", controller_status["last_message"])
+        self.assertEqual("", controller_status["last_error"])
+
+        client, _ = _create_client(
+            self.repo,
+            enable_runner_controls=True,
+            config_path=self.config_path,
+            host="0.0.0.0",
+            trusted_network=True,
+            runner_controller=controller,
+        )
+        response = client.get("/api/runner/status")
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertEqual("reload", payload["runner_control"]["status"]["last_action"])
+        self.assertEqual("Runner reloaded.", payload["runner_control"]["status"]["last_message"])
+        self.assertEqual("", payload["runner_control"]["status"]["last_error"])
+        self.assertEqual("[redacted]", payload["runner_control"]["status"]["config_path"])
+        self.assertEqual("reload", payload["runner_control"]["last_action"])
+        self.assertEqual("Runner reloaded.", payload["runner_control"]["last_message"])
+        self.assertEqual("Runner reloaded.", payload["runner_control"]["message"])
+
+        shell = RunnerShell([], controller=None)
+        shell.set_repo(self.repo.as_posix())
+        shell.set_config_path(self.config_path.as_posix())
+        shell.run_dir = self.run_dir
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            shell.status()
+        rendered = stdout.getvalue()
+        self.assertIn("last_action: reload", rendered)
+        self.assertIn("last_message: Runner reloaded.", rendered)
+
     def test_worktree_actions_require_opt_in_and_report_pending_state(self) -> None:
         from agent_runner.web import build_snapshot
 

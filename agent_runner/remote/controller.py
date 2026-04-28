@@ -27,7 +27,7 @@ from ..stop_progress import (
     write_stop_progress,
 )
 from ..state import count_state_task_ids, load_backlog_task_ids, load_state
-from ..utils import STOP_REASON_STOP_FILE, detect_stop_reason, rotate_log_file
+from ..utils import STOP_REASON_STOP_FILE, atomic_write_json, detect_stop_reason, now_iso, rotate_log_file
 
 
 RUNNER_START_MODE_CHOICES = ("one-shot", "continuous", "loop")
@@ -37,6 +37,251 @@ RUNNER_START_BOOL_CHOICES = (True, False)
 RUNNER_START_TRUTHY = {"1", "true", "yes", "on", "enabled"}
 RUNNER_START_FALSY = {"0", "false", "no", "off", "disabled"}
 REDACTED_VALUE = "[redacted]"
+RUNNER_CONTROL_EVENT_FILE = "RUNNER_CONTROL.json"
+RUNNER_CONTROL_EVENT_HISTORY_LIMIT = 25
+
+
+def _runner_control_path_text(value: Path | str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return Path(raw).expanduser().resolve().as_posix()
+    except Exception:
+        return raw.replace("\\", "/")
+
+
+def _runner_control_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return bool(value)
+    raw = str(value).strip().lower()
+    if not raw:
+        return None
+    if raw in {"1", "true", "yes", "on", "enabled", "alive", "running"}:
+        return True
+    if raw in {"0", "false", "no", "off", "disabled", "stopped", "dead"}:
+        return False
+    return None
+
+
+def _runner_control_event_path(run_dir: Path) -> Path:
+    return run_dir / RUNNER_CONTROL_EVENT_FILE
+
+
+def _runner_control_event_item(raw: dict[str, Any] | None, *, fallback_action: str = "") -> dict[str, Any]:
+    payload = dict(raw or {})
+    action = str(payload.get("action") or payload.get("last_action") or fallback_action or "").strip().lower()
+    status = str(payload.get("status") or payload.get("outcome") or payload.get("phase") or "").strip().lower()
+    message = str(payload.get("message") or payload.get("last_message") or "").strip()
+    error = str(payload.get("error") or payload.get("last_error") or "").strip()
+    if not status and error:
+        status = "error"
+    ok = _runner_control_bool(payload.get("ok"))
+    if ok is None:
+        ok = status in {"started", "stopped", "reloaded", "restarted"}
+        if status in {"disabled", "confirmation_mismatch", "timeout", "controller_error", "error"}:
+            ok = False
+    updated_at = str(payload.get("updated_at") or payload.get("updatedAt") or "").strip()
+    if not updated_at:
+        updated_at = now_iso()
+    try:
+        updated_at_epoch = float(payload.get("updated_at_epoch") or payload.get("updatedAtEpoch") or time.time())
+    except Exception:
+        updated_at_epoch = time.time()
+
+    item = dict(payload)
+    item["action"] = action
+    item["status"] = status
+    item["message"] = message
+    item["error"] = error
+    item["ok"] = bool(ok)
+    item["last_action"] = action
+    item["lastAction"] = action
+    item["last_message"] = message
+    item["lastMessage"] = message
+    item["last_error"] = error
+    item["lastError"] = error
+    item["updated_at"] = updated_at
+    item["updatedAt"] = updated_at
+    item["updated_at_epoch"] = float(updated_at_epoch)
+    item["updatedAtEpoch"] = float(updated_at_epoch)
+    if item.get("run_dir") not in (None, "", False):
+        item["run_dir"] = _runner_control_path_text(item["run_dir"])
+        item["runDir"] = item["run_dir"]
+    if item.get("repo") not in (None, "", False):
+        item["repo"] = _runner_control_path_text(item["repo"])
+    if item.get("config_path") not in (None, "", False):
+        item["config_path"] = _runner_control_path_text(item["config_path"])
+        item["configPath"] = item["config_path"]
+    return item
+
+
+def normalize_runner_control_event(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict) or not payload:
+        return {}
+
+    raw = dict(payload)
+    history_source = raw.get("history")
+    if not isinstance(history_source, list):
+        history_source = raw.get("event_history")
+    if not isinstance(history_source, list):
+        history_source = raw.get("eventHistory")
+
+    history: list[dict[str, Any]] = []
+    if isinstance(history_source, list):
+        for raw_item in history_source:
+            if not isinstance(raw_item, dict):
+                continue
+            item = _runner_control_event_item(raw_item)
+            if item["action"] or item["status"] or item["message"] or item["error"]:
+                history.append(item)
+
+    current_raw = raw.get("current_event")
+    if not isinstance(current_raw, dict):
+        current_raw = raw.get("currentEvent")
+    if not isinstance(current_raw, dict):
+        current_raw = history[-1] if history else raw
+
+    current = _runner_control_event_item(current_raw)
+    if not history or history[-1] != current:
+        history.append(current)
+    if len(history) > RUNNER_CONTROL_EVENT_HISTORY_LIMIT:
+        history = history[-RUNNER_CONTROL_EVENT_HISTORY_LIMIT:]
+
+    normalized = dict(raw)
+    normalized.update(current)
+    normalized["current_event"] = current
+    normalized["currentEvent"] = current
+    normalized["history"] = history
+    normalized["event_history"] = history
+    normalized["eventHistory"] = history
+    normalized["event_count"] = len(history)
+    normalized["eventCount"] = len(history)
+    normalized["action"] = current["action"]
+    normalized["status"] = current["status"]
+    normalized["message"] = current["message"]
+    normalized["error"] = current["error"]
+    normalized["ok"] = bool(current["ok"])
+    normalized["last_action"] = current["last_action"]
+    normalized["lastAction"] = current["last_action"]
+    normalized["last_message"] = current["last_message"]
+    normalized["lastMessage"] = current["last_message"]
+    normalized["last_error"] = current["last_error"]
+    normalized["lastError"] = current["last_error"]
+    normalized["updated_at"] = current["updated_at"]
+    normalized["updatedAt"] = current["updated_at"]
+    normalized["updated_at_epoch"] = current["updated_at_epoch"]
+    normalized["updatedAtEpoch"] = current["updated_at_epoch"]
+    normalized["source"] = str(current.get("source") or raw.get("source") or "").strip()
+    normalized["run_dir"] = str(current.get("run_dir") or raw.get("run_dir") or "").strip()
+    normalized["runDir"] = normalized["run_dir"]
+    normalized["repo"] = str(current.get("repo") or raw.get("repo") or "").strip()
+    normalized["config_path"] = str(current.get("config_path") or raw.get("config_path") or "").strip()
+    normalized["configPath"] = normalized["config_path"]
+    return normalized
+
+
+def read_runner_control_event(run_dir: Path | None) -> dict[str, Any]:
+    if run_dir is None:
+        return {}
+    path = _runner_control_event_path(run_dir)
+    try:
+        if not path.exists() or not path.is_file():
+            return {}
+        raw = path.read_text(encoding="utf-8", errors="replace").strip()
+        if not raw:
+            return {}
+        payload = json.loads(raw)
+        return normalize_runner_control_event(payload if isinstance(payload, dict) else {})
+    except Exception:
+        return {}
+
+
+def write_runner_control_event(
+    run_dir: Path | None,
+    *,
+    action: str,
+    status: str,
+    message: str = "",
+    error: str = "",
+    ok: bool | None = None,
+    source: str = "",
+    **fields: Any,
+) -> dict[str, Any]:
+    if run_dir is None:
+        return {}
+
+    previous = read_runner_control_event(run_dir)
+    current: dict[str, Any] = dict(fields)
+    current.update(
+        {
+            "action": str(action or "").strip().lower(),
+            "status": str(status or "").strip().lower(),
+            "message": str(message or "").strip(),
+            "error": str(error or "").strip(),
+            "ok": bool(ok if ok is not None else str(status or "").strip().lower() in {"started", "stopped", "reloaded", "restarted"}),
+            "source": str(source or "").strip(),
+            "updated_at": now_iso(),
+            "updated_at_epoch": time.time(),
+        }
+    )
+    if current.get("run_dir") not in (None, "", False):
+        current["run_dir"] = _runner_control_path_text(current["run_dir"])
+        current["runDir"] = current["run_dir"]
+    else:
+        current["run_dir"] = _runner_control_path_text(run_dir)
+        current["runDir"] = current["run_dir"]
+    if current.get("repo") not in (None, "", False):
+        current["repo"] = _runner_control_path_text(current["repo"])
+    if current.get("config_path") not in (None, "", False):
+        current["config_path"] = _runner_control_path_text(current["config_path"])
+        current["configPath"] = current["config_path"]
+
+    current["last_action"] = current["action"]
+    current["lastAction"] = current["action"]
+    current["last_message"] = current["message"]
+    current["lastMessage"] = current["message"]
+    current["last_error"] = current["error"]
+    current["lastError"] = current["error"]
+
+    history = list(previous.get("history") or [])
+    if history and history[-1] == current:
+        pass
+    else:
+        history.append(current)
+    if len(history) > RUNNER_CONTROL_EVENT_HISTORY_LIMIT:
+        history = history[-RUNNER_CONTROL_EVENT_HISTORY_LIMIT:]
+
+    payload = dict(previous)
+    payload.update(current)
+    payload["current_event"] = current
+    payload["currentEvent"] = current
+    payload["history"] = history
+    payload["event_history"] = history
+    payload["eventHistory"] = history
+    payload["event_count"] = len(history)
+    payload["eventCount"] = len(history)
+
+    try:
+        atomic_write_json(_runner_control_event_path(run_dir), payload)
+    except Exception:
+        pass
+    return normalize_runner_control_event(payload)
+
+
+def _runner_control_success_status(action: str) -> str:
+    normalized = str(action or "").strip().lower()
+    if normalized == "reload":
+        return "reloaded"
+    if normalized == "restart":
+        return "restarted"
+    if normalized == "stop":
+        return "stopped"
+    return "started"
 
 
 def _runner_start_path_text(value: Path | str | None) -> str:
@@ -989,7 +1234,7 @@ class RunnerController:
             self._runner_process = None
             raise
 
-    def start(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    def start(self, overrides: dict[str, Any] | None = None, *, control_action: str = "start") -> dict[str, Any]:
         normalized_overrides, validation_error = normalize_runner_start_options(
             self.repo,
             overrides,
@@ -1037,6 +1282,31 @@ class RunnerController:
                 self._start_subprocess(args, run_dir)
             else:
                 self._start_thread(args)
+
+            event_message = "Runner started."
+            if str(control_action or "").strip().lower() == "reload":
+                event_message = "Runner reloaded."
+            elif str(control_action or "").strip().lower() == "restart":
+                event_message = "Runner restarted."
+
+            write_runner_control_event(
+                run_dir,
+                action=control_action,
+                status=_runner_control_success_status(control_action),
+                message=event_message,
+                error="",
+                ok=True,
+                source="controller",
+                repo=self.repo.as_posix(),
+                config_path=context["config_path"],
+                running=True,
+                runner_mode=self.runner_mode,
+                result={
+                    "ok": True,
+                    "runner_mode": self.runner_mode,
+                    "run_dir": run_dir.as_posix(),
+                },
+            )
 
             updated_base = dict(eff)
             updated_base["run_dir"] = str(normalized_overrides.get("run_dir") or base_run_dir_intent)
@@ -1099,6 +1369,7 @@ class RunnerController:
         *,
         wait: bool = False,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        control_action: str = "stop",
     ) -> dict[str, Any]:
         context = {"repo": self.repo.as_posix(), "config_path": self._config_path_name()}
         run_dir = self.run_dir or find_latest_run_dir(self.repo)
@@ -1249,6 +1520,29 @@ class RunnerController:
             )
 
         final_progress = read_stop_progress(run_dir)
+        event_status = "timeout" if (wait and running) else ("stopping" if running else "stopped")
+        event_message = final_message
+        event_error = final_message if event_status == "timeout" else ""
+        write_runner_control_event(
+            run_dir,
+            action=control_action,
+            status=event_status,
+            message=event_message if event_status != "timeout" else "",
+            error=event_error,
+            ok=not (wait and running),
+            source="controller",
+            repo=self.repo.as_posix(),
+            config_path=context["config_path"],
+            running=running,
+            runner_mode=self.runner_mode,
+            stop_progress=final_progress,
+            result={
+                "ok": not (wait and running),
+                "message": final_message if wait and running else f"\uc911\uc9c0 \uc694\uccad\ub428: {stop_path.as_posix()}",
+                "running": running,
+                "run_dir": run_dir.as_posix(),
+            },
+        )
 
         return {
             "ok": not (wait and running),
@@ -1520,6 +1814,9 @@ class RunnerController:
             "state_counts": {"done": 0, "failed": 0, "warnings": 0},
             "reason": "",
             "last_event": "",
+            "last_action": "",
+            "last_message": "",
+            "last_error": "",
             "stop_progress": {},
             "start_options": start_options,
             "startOptions": start_options,
@@ -1537,6 +1834,18 @@ class RunnerController:
         status["reason"] = self._stop_reason(run_dir)
         status["last_event"] = self._latest_event(run_dir)
         status["stop_progress"] = read_stop_progress(run_dir)
+        control_event = read_runner_control_event(run_dir)
+        if control_event:
+            status["last_action"] = str(control_event.get("last_action") or control_event.get("action") or "").strip()
+            status["last_message"] = str(control_event.get("last_message") or control_event.get("message") or "").strip()
+            status["last_error"] = str(control_event.get("last_error") or control_event.get("error") or "").strip()
+        else:
+            status["last_action"] = ""
+            status["last_message"] = ""
+            status["last_error"] = ""
+        status["lastAction"] = status["last_action"]
+        status["lastMessage"] = status["last_message"]
+        status["lastError"] = status["last_error"]
         status["start_options"] = start_options
         status["startOptions"] = start_options
         return status

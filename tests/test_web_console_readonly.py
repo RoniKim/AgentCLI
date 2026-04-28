@@ -2687,6 +2687,54 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("status_error: controller unavailable", payload["runner_control"]["status"]["reason"])
         self.assertEqual(self.config_path.as_posix(), payload["runner_control"]["status"]["config_path"])
 
+    def test_api_status_hydrates_runner_control_from_artifact_when_controller_status_fails(self) -> None:
+        from agent_runner.remote.controller import write_runner_control_event
+        from agent_runner import web as web_module
+        from fastapi.testclient import TestClient
+
+        write_runner_control_event(
+            self.run_dir,
+            action="restart",
+            status="controller_error",
+            message="",
+            error="Runner control failed: controller offline",
+            ok=False,
+            source="controller",
+            repo=self.repo.as_posix(),
+            config_path=self.config_path.as_posix(),
+            running=False,
+            runner_mode="thread",
+        )
+
+        controller = FakeRunnerController(
+            self._controller_status(
+                self.run_dir,
+                running=False,
+                reason="",
+                exit_code=0,
+                current_task_id="T-ERROR-2",
+                current_task_title="Disconnected controller",
+                branch="main",
+                attempt=1,
+                worktree_mode="manual",
+                stage="Dev",
+                startedAt=1714137600000,
+                elapsedSec=120,
+            ),
+            status_error="controller offline",
+        )
+
+        with patch.object(web_module, "_build_runner_controller", return_value=controller):
+            client = TestClient(self._create_app(self.repo))
+
+        payload = client.get("/api/status").json()
+        self.assertEqual("restart", payload["runner_control"]["status"]["last_action"])
+        self.assertEqual("", payload["runner_control"]["status"]["last_message"])
+        self.assertEqual("Runner control failed: controller offline", payload["runner_control"]["status"]["last_error"])
+        self.assertEqual("Runner control failed: controller offline", payload["runner_control"]["message"])
+        self.assertEqual("status_error: controller offline", payload["runner_control"]["status"]["reason"])
+        self.assertEqual(self.config_path.as_posix(), payload["runner_control"]["status"]["config_path"])
+
     def test_section_endpoints_return_stable_shapes(self) -> None:
         progress = self.client.get("/api/progress").json()
         for key in ("active_run", "stages", "backlog", "goals", "logs", "config", "prompts", "history", "metrics", "notifications", "worktree", "state"):

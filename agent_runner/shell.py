@@ -31,6 +31,11 @@ from .preflight import run_preflight
 from .process_guard import init_process_guard, terminate_all_children
 from .stop_progress import clear_stop_progress, read_stop_progress, write_stop_progress
 from .utils import STOP_REASON_STOP_FILE
+from .remote.controller import (
+    RUNNER_CONTROL_EVENT_FILE,
+    read_runner_control_event,
+    write_runner_control_event,
+)
 from .gitops import (
     apply_pending_worktree_merge,
     discard_pending_worktree_merge,
@@ -63,6 +68,7 @@ SHELL_STOP_ARTIFACT_NAMES = {
     "BACKLOG.md",
     "STATE.json",
     "cycle_summary.log",
+    RUNNER_CONTROL_EVENT_FILE,
     "last_run_summary.json",
     "metrics.jsonl",
     "run_summary.json",
@@ -160,6 +166,7 @@ class RunnerShell:
         self.overrides: Dict[str, Any] = {}
         self.run_dir: Optional[Path] = None
         self._controller = controller
+        self.runner_mode = "thread"
 
         self._runner_thread: Optional[threading.Thread] = None
         self._runner_exit_code: Optional[int] = None
@@ -240,6 +247,17 @@ class RunnerShell:
         else:
             self.config_path = resolve_config_path(self.repo, path_str)
         self._ensure_config_loaded()
+
+    def _config_path_name(self) -> str:
+        path = self.config_path
+        if path is None and self.repo is not None:
+            path = default_config_path(self.repo)
+        if path is None:
+            return ""
+        try:
+            return path.expanduser().resolve().as_posix()
+        except Exception:
+            return str(path).replace("\\", "/")
 
     def effective(self) -> Dict[str, Any]:
         eff: Dict[str, Any] = dict(DEFAULTS)
@@ -566,6 +584,21 @@ class RunnerShell:
         self._runner_thread = threading.Thread(target=_target, name="agentcli-runner", daemon=True)
         self._runner_thread.start()
 
+        write_runner_control_event(
+            run_dir,
+            action="start",
+            status="started",
+            message="Runner started.",
+            error="",
+            ok=True,
+            source="shell",
+            repo=self.repo.as_posix(),
+            config_path=self._config_path_name(),
+            running=True,
+            runner_mode=self.runner_mode,
+            result={"ok": True, "runner_mode": self.runner_mode, "run_dir": run_dir.as_posix()},
+        )
+
         print("[OK] Runner started in background.")
         print(f" - run_dir: {run_dir}")
         print(f" - stop:   /stop  (creates {stop_file})")
@@ -610,6 +643,10 @@ class RunnerShell:
         if not self._runner_thread:
             print("[INFO] Runner is not started yet.")
             return
+        if not self.run_dir:
+            latest_run_dir = find_latest_run_dir(self.repo) if self.repo else None
+            if latest_run_dir is not None:
+                self.run_dir = latest_run_dir
         if not self.run_dir:
             print("[WARN] run_dir is unknown; cannot create stop file.")
             return
@@ -726,6 +763,36 @@ class RunnerShell:
             )
             self.status()
 
+        alive = bool(self._runner_thread and self._runner_thread.is_alive())
+        final_status = "timeout" if (wait and alive) else ("stopping" if alive else "stopped")
+        final_message = (
+            f"Runner is still alive after {wait_timeout}s stop wait timeout."
+            if (wait and alive)
+            else ("Stop requested; runner is still shutting down." if alive else "Runner stop sequence finished.")
+        )
+        write_runner_control_event(
+            self.run_dir,
+            action="stop",
+            status=final_status,
+            message="" if final_status == "timeout" else final_message,
+            error=final_message if final_status == "timeout" else "",
+            ok=final_status != "timeout",
+            source="shell",
+            repo=self.repo.as_posix(),
+            config_path=self._config_path_name(),
+            running=alive,
+            runner_mode=self.runner_mode,
+            stop_progress=read_stop_progress(self.run_dir),
+            result={
+                "ok": final_status != "timeout",
+                "message": final_message if final_status == "timeout" else (
+                    f"중지 요청됨: {stop_path.as_posix()}" if self.run_dir else "Runner stop requested."
+                ),
+                "running": alive,
+                "run_dir": self.run_dir.as_posix(),
+            },
+        )
+
     def status(self) -> None:
         eff = self.effective()
         if self._controller is not None:
@@ -753,6 +820,15 @@ class RunnerShell:
             last_event = str(data.get("last_event") or "").strip()
             if last_event:
                 print(f"last_event: {last_event}")
+            last_action = str(data.get("last_action") or data.get("lastAction") or "").strip()
+            last_message = str(data.get("last_message") or data.get("lastMessage") or "").strip()
+            last_error = str(data.get("last_error") or data.get("lastError") or "").strip()
+            if last_action:
+                print(f"last_action: {last_action}")
+            if last_message:
+                print(f"last_message: {last_message}")
+            if last_error:
+                print(f"last_error: {last_error}")
             stop_progress = data.get("stop_progress") if isinstance(data.get("stop_progress"), dict) else {}
             if stop_progress:
                 print(
@@ -765,17 +841,30 @@ class RunnerShell:
             self._print_pending_worktree_merge_hint()
             return
 
+        run_dir = self.run_dir or (find_latest_run_dir(self.repo) if self.repo else None)
+        if run_dir is not None:
+            self.run_dir = run_dir
         alive = self._runner_is_alive()
         started = self._runner_started_at
         dur = "-" if not started else f"{int(time.time() - started)}s"
 
         print("\n=== Runner Status ===")
         print(f"running: {alive}")
-        print(f"run_dir: {_shorten(self.run_dir)}")
+        print(f"run_dir: {_shorten(run_dir)}")
         print(f"goals_completion_level: {eff.get('goals_completion_level')}")
         print(f"uptime:  {dur}")
         print(f"exit:    {self._runner_exit_code if (not alive) else '(running)'}")
-        stop_progress = read_stop_progress(self.run_dir)
+        control_event = read_runner_control_event(run_dir)
+        last_action = str(control_event.get("last_action") or control_event.get("lastAction") or "").strip()
+        last_message = str(control_event.get("last_message") or control_event.get("lastMessage") or "").strip()
+        last_error = str(control_event.get("last_error") or control_event.get("lastError") or "").strip()
+        if last_action:
+            print(f"last_action: {last_action}")
+        if last_message:
+            print(f"last_message: {last_message}")
+        if last_error:
+            print(f"last_error: {last_error}")
+        stop_progress = read_stop_progress(run_dir)
         if stop_progress:
             print(
                 "stop:    "
