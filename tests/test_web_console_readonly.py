@@ -951,6 +951,451 @@ def _make_normal_snapshot():
     }
 
 
+def _clone_fixture(value):
+    return json.loads(json.dumps(value, ensure_ascii=False))
+
+
+def _make_web_console_live_run_fixtures():
+    base = _clone_fixture(_make_normal_snapshot())
+    repo_path = str(base["repo"]["path"])
+    config_path = str(base["config"]["path"])
+    run_dir = str(base["progress"]["latest_run_dir"])
+    run_id = str(base["history"]["items"][0]["id"])
+    task_id = str(base["progress"]["current_task_id"])
+    task_title = str(base["progress"]["current_task_title"])
+
+    def make_runner_control(
+        *,
+        run_status: str,
+        running: bool,
+        message: str,
+        last_action: str = "",
+        last_message: str = "",
+        stop_progress: dict[str, object] | None = None,
+        busy: bool = False,
+    ) -> dict[str, object]:
+        stop_progress_payload = _clone_fixture(stop_progress or {})
+        return {
+            "enabled": True,
+            "controller_available": True,
+            "busy": busy,
+            "message": message,
+            "run_status": run_status,
+            "status": {
+                "running": running,
+                "runner_mode": "thread",
+                "repo": repo_path,
+                "config_path": config_path,
+                "run_dir": run_dir,
+                "uptime_seconds": 1680,
+                "exit_code": None,
+                "stop_file": "STOP",
+                "stop_file_exists": False,
+                "stop_progress": stop_progress_payload,
+                "done": 1,
+                "failed": 0,
+                "warnings": 0,
+                "reason": "",
+                "last_event": last_message or message,
+                "current_event": {
+                    "action": last_action or ("stop" if stop_progress_payload else "refresh"),
+                    "status": run_status,
+                    "message": last_message or message,
+                    "task_id": task_id,
+                    "task_title": task_title,
+                },
+                "history": [],
+                "event_count": 1,
+            },
+            "actions": {
+                "start": {"enabled": True, "disabledReason": "", "busy": False},
+                "stop": {"enabled": True, "disabledReason": "", "busy": False},
+                "reload": {"enabled": True, "disabledReason": "", "busy": False},
+                "restart": {"enabled": True, "disabledReason": "", "busy": False},
+            },
+            "confirmation": {
+                "start": "START RUNNER",
+                "stop": "STOP RUNNER",
+                "reload": "RELOAD RUNNER",
+                "restart": "RESTART RUNNER",
+            },
+            "last_action": last_action,
+            "last_message": last_message,
+            "last_error": "",
+        }
+
+    def make_snapshot(
+        *,
+        name: str,
+        run_status: str,
+        execution_status: str,
+        runner_run_status: str,
+        runner_running: bool,
+        runner_message: str,
+        stage_status: str,
+        recent_output: str,
+        latest_log_line: str,
+        latest_backend_event: str,
+        log_tail: str,
+        notifications: list[dict[str, object]],
+        stop_progress: dict[str, object] | None = None,
+        last_action: str = "",
+        last_message: str = "",
+        completion: bool = False,
+        output_stalled: bool = False,
+        no_output_minutes: int | None = None,
+    ) -> dict[str, object]:
+        snapshot = _clone_fixture(base)
+        snapshot["active_run"]["status"] = run_status
+        snapshot["active_run"]["executionStatus"] = execution_status
+        snapshot["active_run"]["finalReason"] = "project_complete" if completion else ""
+        snapshot["progress"]["run_status"] = run_status
+        snapshot["progress"]["execution_status"] = execution_status
+        snapshot["progress"]["final_reason"] = "project_complete" if completion else ""
+        snapshot["progress"]["tasks_done"] = 2 if completion else 1
+        snapshot["progress"]["tasks_total"] = 2
+        snapshot["progress"]["tasks_failed"] = 0
+        snapshot["progress"]["progress"] = 1 if completion else 0.5
+        snapshot["stages"][1]["status"] = stage_status
+        snapshot["stages"][1]["recentOutput"] = recent_output
+        snapshot["stages"][1]["latestLogLine"] = latest_log_line
+        snapshot["stages"][1]["latestBackendEvent"] = latest_backend_event
+        snapshot["stages"][1]["outputStalled"] = bool(output_stalled)
+        if no_output_minutes is not None:
+            snapshot["stages"][1]["noOutputMinutes"] = no_output_minutes
+        else:
+            snapshot["stages"][1].pop("noOutputMinutes", None)
+        snapshot["stages"][2]["status"] = "done" if completion else "pending"
+        snapshot["stages"][2]["recentOutput"] = "QA verification completed." if completion else "QA has not started yet."
+        snapshot["stages"][2]["latestLogLine"] = "QA verification completed." if completion else "QA has not started yet."
+        snapshot["stages"][2]["latestBackendEvent"] = "QA verification completed." if completion else "QA has not started yet."
+        snapshot["notifications"] = _clone_fixture(notifications)
+        snapshot["logs"]["tail"] = log_tail
+        if snapshot["logs"]["entries"]:
+            snapshot["logs"]["entries"][-1]["msg"] = latest_log_line
+        snapshot["runner_control"] = make_runner_control(
+            run_status=runner_run_status,
+            running=runner_running,
+            message=runner_message,
+            last_action=last_action,
+            last_message=last_message,
+            stop_progress=_clone_fixture(stop_progress or {}),
+        )
+        if completion:
+            snapshot["backlog"]["items"][0]["status"] = "done"
+            if len(snapshot["backlog"]["items"]) > 1:
+                snapshot["backlog"]["items"][1]["status"] = "done"
+            snapshot["backlog"]["counts"] = {"pending": 0, "in_progress": 0, "done": 2, "failed": 0}
+            history_item = snapshot["history"]["items"][0]
+            history_item["status"] = "success"
+            history_item["executionStatus"] = "completed"
+            history_item["finalReason"] = "project_complete"
+            history_item["shutdownReason"] = "project_complete"
+            history_item["stopReason"] = "project_complete"
+            history_item["tasksDone"] = 2
+            history_item["tasksTotal"] = 2
+            history_item["tasksFailed"] = 0
+            if "taskCounts" in history_item and isinstance(history_item["taskCounts"], dict):
+                history_item["taskCounts"]["done"] = 2
+                history_item["taskCounts"]["total"] = 2
+                history_item["taskCounts"]["failed"] = 0
+            history_summary = snapshot["history"].setdefault("summary", {})
+            history_summary["tasksDone"] = 2
+            history_summary["tasksTotal"] = 2
+            history_summary["tasksFailed"] = 0
+            history_summary["runs"] = 1
+            history_summary["successes"] = 1
+            history_summary["failures"] = 0
+            history_summary["stopped"] = 0
+        snapshot["name"] = name
+        return snapshot
+
+    return [
+        make_snapshot(
+            name="running-long",
+            run_status="running",
+            execution_status="running",
+            runner_run_status="running",
+            runner_running=True,
+            runner_message="Runner online.",
+            stage_status="running",
+            recent_output="Dev stage still active.",
+            latest_log_line="Dev stage still active.",
+            latest_backend_event="Dev backend event recorded.",
+            log_tail="Dev stage still active.",
+            notifications=[
+                {
+                    "ts": 1714132860000,
+                    "kind": "run_start",
+                    "text": "Run started | main",
+                    "run": run_id,
+                },
+                {
+                    "ts": 1714132920000,
+                    "kind": "stalled",
+                    "text": "No output for 20 minutes.",
+                    "run": run_id,
+                },
+            ],
+            output_stalled=True,
+            no_output_minutes=20,
+        ),
+        make_snapshot(
+            name="stop-requested",
+            run_status="stopping",
+            execution_status="stopping",
+            runner_run_status="stopping",
+            runner_running=True,
+            runner_message="Stop requested. Waiting for the runner to drain.",
+            stage_status="running",
+            recent_output="Stop requested; draining child processes.",
+            latest_log_line="Stop requested; draining child processes.",
+            latest_backend_event="Stop signal written.",
+            log_tail="Stop requested; draining child processes.",
+            notifications=[
+                {
+                    "ts": 1714132980000,
+                    "kind": "run_stop",
+                    "text": "Stop requested | draining children",
+                    "run": run_id,
+                },
+                {
+                    "ts": 1714132920000,
+                    "kind": "stalled",
+                    "text": "No output for 20 minutes.",
+                    "run": run_id,
+                },
+                {
+                    "ts": 1714132860000,
+                    "kind": "run_start",
+                    "text": "Run started | main",
+                    "run": run_id,
+                },
+            ],
+            stop_progress={
+                "phase": "requested",
+                "phase_label": "Requested",
+                "message": "Stop requested. Waiting for the runner to drain.",
+                "elapsed_seconds": 4,
+                "updated_at": "2026-04-26T12:03:04",
+                "runner_alive": True,
+                "running": True,
+                "history": [
+                    {
+                        "phase": "requested",
+                        "phase_label": "Requested",
+                        "message": "Stop requested.",
+                        "elapsed_seconds": 4,
+                        "updated_at": "2026-04-26T12:03:04",
+                        "runner_alive": True,
+                        "running": True,
+                    }
+                ],
+            },
+            last_action="stop",
+            last_message="Stop requested.",
+            output_stalled=True,
+            no_output_minutes=20,
+        ),
+        make_snapshot(
+            name="stop-finalized",
+            run_status="stopped",
+            execution_status="stopped",
+            runner_run_status="stopped",
+            runner_running=False,
+            runner_message="Runner stopped.",
+            stage_status="stopped",
+            recent_output="Runner stopped cleanly.",
+            latest_log_line="Runner stopped cleanly.",
+            latest_backend_event="Stop finalized.",
+            log_tail="Runner stopped cleanly.",
+            notifications=[
+                {
+                    "ts": 1714133040000,
+                    "kind": "run_stop",
+                    "text": "Runner stopped cleanly.",
+                    "run": run_id,
+                },
+                {
+                    "ts": 1714132980000,
+                    "kind": "stalled",
+                    "text": "No output for 20 minutes.",
+                    "run": run_id,
+                },
+                {
+                    "ts": 1714132860000,
+                    "kind": "run_start",
+                    "text": "Run started | main",
+                    "run": run_id,
+                },
+            ],
+            stop_progress={
+                "phase": "finalized",
+                "phase_label": "Finalized",
+                "message": "Runner stopped cleanly.",
+                "elapsed_seconds": 9,
+                "updated_at": "2026-04-26T12:03:09",
+                "runner_alive": False,
+                "running": False,
+                "history": [
+                    {
+                        "phase": "requested",
+                        "phase_label": "Requested",
+                        "message": "Stop requested.",
+                        "elapsed_seconds": 4,
+                        "updated_at": "2026-04-26T12:03:04",
+                        "runner_alive": True,
+                        "running": True,
+                    },
+                    {
+                        "phase": "flushing",
+                        "phase_label": "Flushing",
+                        "message": "Flushing buffered output.",
+                        "elapsed_seconds": 7,
+                        "updated_at": "2026-04-26T12:03:07",
+                        "runner_alive": True,
+                        "running": True,
+                    },
+                    {
+                        "phase": "finalized",
+                        "phase_label": "Finalized",
+                        "message": "Runner stopped cleanly.",
+                        "elapsed_seconds": 9,
+                        "updated_at": "2026-04-26T12:03:09",
+                        "runner_alive": False,
+                        "running": False,
+                    },
+                ],
+            },
+            last_action="stop",
+            last_message="Runner stopped.",
+            output_stalled=True,
+            no_output_minutes=20,
+        ),
+        {
+            "name": "reconnect-error",
+            "kind": "error",
+            "status": 503,
+            "body": {
+                "ok": False,
+                "message": "Snapshot temporarily unavailable.",
+            },
+        },
+        make_snapshot(
+            name="stale-reconnect",
+            run_status="stopped",
+            execution_status="stopped",
+            runner_run_status="stopped",
+            runner_running=True,
+            runner_message="Runner snapshot is stale.",
+            stage_status="stopped",
+            recent_output="Controller snapshot is stale.",
+            latest_log_line="Controller snapshot is stale.",
+            latest_backend_event="Waiting for reconnect.",
+            log_tail="Controller snapshot is stale.",
+            notifications=[
+                {
+                    "ts": 1714133100000,
+                    "kind": "stalled",
+                    "text": "Snapshot reconnecting after a stale controller response.",
+                    "run": run_id,
+                },
+                {
+                    "ts": 1714133040000,
+                    "kind": "run_stop",
+                    "text": "Runner stopped cleanly.",
+                    "run": run_id,
+                },
+                {
+                    "ts": 1714132860000,
+                    "kind": "run_start",
+                    "text": "Run started | main",
+                    "run": run_id,
+                },
+            ],
+            stop_progress={
+                "phase": "finalized",
+                "phase_label": "Finalized",
+                "message": "Runner stopped cleanly.",
+                "elapsed_seconds": 9,
+                "updated_at": "2026-04-26T12:03:09",
+                "runner_alive": True,
+                "running": True,
+                "history": [
+                    {
+                        "phase": "requested",
+                        "phase_label": "Requested",
+                        "message": "Stop requested.",
+                        "elapsed_seconds": 4,
+                        "updated_at": "2026-04-26T12:03:04",
+                        "runner_alive": True,
+                        "running": True,
+                    },
+                    {
+                        "phase": "flushing",
+                        "phase_label": "Flushing",
+                        "message": "Flushing buffered output.",
+                        "elapsed_seconds": 7,
+                        "updated_at": "2026-04-26T12:03:07",
+                        "runner_alive": True,
+                        "running": True,
+                    },
+                    {
+                        "phase": "finalized",
+                        "phase_label": "Finalized",
+                        "message": "Runner stopped cleanly.",
+                        "elapsed_seconds": 9,
+                        "updated_at": "2026-04-26T12:03:09",
+                        "runner_alive": True,
+                        "running": True,
+                    },
+                ],
+            },
+            last_action="stop",
+            last_message="Runner snapshot is stale.",
+            output_stalled=True,
+            no_output_minutes=21,
+        ),
+        make_snapshot(
+            name="completed-run",
+            run_status="completed",
+            execution_status="completed",
+            runner_run_status="idle",
+            runner_running=False,
+            runner_message="Runner idle.",
+            stage_status="done",
+            recent_output="QA verification completed.",
+            latest_log_line="Run completed successfully.",
+            latest_backend_event="Run completed successfully.",
+            log_tail="Run completed successfully.",
+            notifications=[
+                {
+                    "ts": 1714133160000,
+                    "kind": "task_done",
+                    "text": "T-020 | QA verification completed",
+                    "run": run_id,
+                },
+                {
+                    "ts": 1714133040000,
+                    "kind": "run_stop",
+                    "text": "Runner stopped cleanly.",
+                    "run": run_id,
+                },
+                {
+                    "ts": 1714132860000,
+                    "kind": "run_start",
+                    "text": "Run started | main",
+                    "run": run_id,
+                },
+            ],
+            stop_progress={},
+            completion=True,
+            output_stalled=False,
+            no_output_minutes=None,
+        ),
+    ]
+
+
 def _run_adapter_harness(fixtures):
     node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
     script = textwrap.dedent(
@@ -3588,6 +4033,40 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("agent_runner/web.py", worktree["changedFiles"][0]["path"])
         self.assertIn("merge-worktree", worktree["reviewRequiredMessage"])
         self.assertIn("discard-worktree", worktree["reviewRequiredMessage"])
+
+    def test_web_console_live_run_fixture_sequence_covers_stop_reconnect_and_completion(self) -> None:
+        fixtures = _make_web_console_live_run_fixtures()
+        self.assertEqual(
+            [
+                "running-long",
+                "stop-requested",
+                "stop-finalized",
+                "reconnect-error",
+                "stale-reconnect",
+                "completed-run",
+            ],
+            [fixture["name"] for fixture in fixtures],
+        )
+
+        running, stop_requested, stop_finalized, reconnect_error, stale_reconnect, completed = fixtures
+
+        self.assertEqual("running", running["progress"]["run_status"])
+        self.assertTrue(running["stages"][1]["outputStalled"])
+        self.assertEqual(20, running["stages"][1]["noOutputMinutes"])
+        self.assertEqual("stopping", stop_requested["progress"]["run_status"])
+        self.assertEqual("requested", stop_requested["runner_control"]["status"]["stop_progress"]["phase"])
+        self.assertEqual("stopped", stop_finalized["progress"]["run_status"])
+        self.assertEqual("finalized", stop_finalized["runner_control"]["status"]["stop_progress"]["phase"])
+        self.assertEqual("error", reconnect_error["kind"])
+        self.assertEqual(503, reconnect_error["status"])
+        self.assertEqual("stopped", stale_reconnect["progress"]["run_status"])
+        self.assertTrue(stale_reconnect["runner_control"]["status"]["running"])
+        self.assertEqual("completed", completed["progress"]["run_status"])
+        self.assertEqual("completed", completed["active_run"]["status"])
+        self.assertEqual("idle", completed["runner_control"]["run_status"])
+        self.assertEqual("task_done", completed["notifications"][0]["kind"])
+        self.assertEqual("done", completed["stages"][1]["status"])
+        self.assertEqual(2, completed["backlog"]["counts"]["done"])
 
     def test_api_worktree_normalizes_empty_malformed_applied_and_failed_states(self) -> None:
         patch_text = "\n".join(

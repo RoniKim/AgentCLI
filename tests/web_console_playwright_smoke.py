@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import json
 import asyncio
 import os
@@ -77,10 +78,15 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
         cls.sync_playwright = staticmethod(sync_playwright)
 
         try:
-            from tests.test_web_console_readonly import _write_config, _write_run_bundle
+            from tests.test_web_console_readonly import (
+                _make_web_console_live_run_fixtures,
+                _write_config,
+                _write_run_bundle,
+            )
         except Exception as exc:  # pragma: no cover - import failure is environment-specific
             raise RuntimeError(f"Smoke fixture helpers are unavailable: {exc}") from exc
 
+        cls._make_web_console_live_run_fixtures = staticmethod(_make_web_console_live_run_fixtures)
         cls._write_config = staticmethod(_write_config)
         cls._write_run_bundle = staticmethod(_write_run_bundle)
 
@@ -313,7 +319,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             f"Output:\n{self._server_log()}"
         )
 
-    def _open_page(self, playwright):
+    def _open_page(self, playwright, before_goto=None):
         browser = playwright.chromium.launch(headless=True)
         self.addCleanup(browser.close)
         context = browser.new_context(
@@ -322,6 +328,8 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
         )
         self.addCleanup(context.close)
         page = context.new_page()
+        if before_goto is not None:
+            before_goto(context, page)
         page.goto(self.server_url, wait_until="domcontentloaded")
         return page
 
@@ -505,6 +513,116 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
                 })"""
             )
             self.assertLessEqual(dimensions["scrollWidth"], dimensions["innerWidth"])
+        finally:
+            manager.__exit__(None, None, None)
+
+    def test_live_run_sequence_covers_stop_reconnect_and_completion(self) -> None:
+        self._start_server()
+
+        manager = self.sync_playwright()
+        try:
+            playwright = manager.__enter__()
+        except Exception as exc:
+            raise unittest.SkipTest(
+                "Playwright runtime is unavailable. Optional setup: "
+                f'"{sys.executable}" -m pip install playwright && '
+                f'"{sys.executable}" -m playwright install chromium'
+            ) from exc
+        try:
+            fixtures = deque(self._make_web_console_live_run_fixtures())
+            observed_names: list[str] = []
+
+            def before_goto(context, page) -> None:
+                context.add_init_script(
+                    "globalThis.__AGENTCLI_TEST_HOOKS__ = {"
+                    " snapshotPollMs: 120000,"
+                    " snapshotMaxBackoffMs: 240000,"
+                    " snapshotStaleAfterMs: 240000"
+                    " };"
+                )
+
+                def handle_status(route) -> None:
+                    if not fixtures:
+                        raise AssertionError("Unexpected /api/status request")
+                    fixture = fixtures.popleft()
+                    observed_names.append(str(fixture["name"]))
+                    if fixture.get("kind") == "error":
+                        route.fulfill(status=int(fixture["status"]), json=fixture["body"])
+                        return
+                    route.fulfill(json=fixture)
+
+                context.route("**/api/status", handle_status)
+
+            try:
+                page = self._open_page(playwright, before_goto=before_goto)
+            except Exception as exc:
+                raise unittest.SkipTest(
+                    "Playwright Chromium is unavailable. Optional setup: "
+                    f'"{sys.executable}" -m pip install playwright && '
+                    f'"{sys.executable}" -m playwright install chromium'
+                ) from exc
+
+            self.expect(page.locator("#main")).to_have_attribute("data-view", "dashboard")
+            self.expect(page.locator(".topbar__status")).to_contain_text("API snapshot")
+            self.expect(page.locator("#main")).to_contain_text("No output for 20 minutes.")
+            self.expect(page.locator("#main")).to_contain_text("Runner controls")
+            self.expect(page.locator("#main")).to_contain_text("Running")
+
+            page.evaluate("window.__AGENTCLI_ADAPTERS__.stopSnapshotPolling()")
+
+            page.evaluate("window.__AGENTCLI_ADAPTERS__.refreshSnapshot()")
+            self.expect(page.locator("#main")).to_contain_text("Stopping")
+            self.expect(page.locator("#main")).to_contain_text("Current phase")
+            self.expect(page.locator("#main")).to_contain_text("Requested")
+            self.expect(page.locator("#main")).to_contain_text("Phase history")
+            self.expect(page.locator("#main")).to_contain_text("Stop requested; draining child processes.")
+
+            page.evaluate("window.__AGENTCLI_ADAPTERS__.refreshSnapshot()")
+            self._open_view(page, "nav-pipeline", "pipeline", "Stage lane")
+            self.expect(page.locator("#main")).to_contain_text("Stopped")
+            self.expect(page.locator("#main")).to_contain_text("Runner stopped cleanly.")
+            self.expect(page.locator("#main")).to_contain_text("Stop requested; draining child processes.")
+
+            page.evaluate("window.__AGENTCLI_ADAPTERS__.refreshSnapshot()")
+            reconnect_state = page.evaluate("window.__AGENTCLI_ADAPTERS__.inspectSnapshotRefreshState()")
+            self.assertEqual("reconnecting", reconnect_state["status"])
+            self.assertEqual(503, reconnect_state["lastErrorStatus"])
+            self.assertIn("HTTP 503", reconnect_state["lastError"])
+            self.assertEqual(240000, reconnect_state["retryDelayMs"])
+            self.expect(page.locator(".topbar__status")).to_contain_text("Reconnecting")
+
+            page.evaluate("window.__AGENTCLI_ADAPTERS__.refreshSnapshot()")
+            stale_state = page.evaluate("window.__AGENTCLI_ADAPTERS__.inspectSnapshotRefreshState()")
+            self.assertTrue(stale_state["stale"])
+            self.expect(page.locator(".topbar__status")).to_contain_text("Stale snapshot")
+            self._open_view(page, "nav-logs", "logs", "Live tail")
+            self.expect(page.locator("#main")).to_contain_text("Stale snapshot")
+            self.expect(page.locator("#main")).to_contain_text("Controller snapshot is stale.")
+
+            page.evaluate("window.__AGENTCLI_ADAPTERS__.refreshSnapshot()")
+            self._open_view(page, "nav-dashboard", "dashboard", "Complete")
+            self.expect(page.locator("#main")).to_contain_text("Complete")
+            self.expect(page.locator("#main")).to_contain_text("Runner idle.")
+            self.expect(page.locator("#main")).to_contain_text("Run completed successfully.")
+
+            self._open_view(page, "nav-pipeline", "pipeline", "Stage lane")
+            self.expect(page.locator("#main")).to_contain_text("Completed")
+            self.expect(page.locator("#main")).to_contain_text("QA verification completed.")
+
+            self._open_view(page, "nav-notifications", "notifications", "Task done")
+            self.expect(page.locator("#main")).to_contain_text("Task done")
+            self.expect(page.locator("#main")).to_contain_text("T-020 | QA verification completed")
+            self.assertEqual(
+                [
+                    "running-long",
+                    "stop-requested",
+                    "stop-finalized",
+                    "reconnect-error",
+                    "stale-reconnect",
+                    "completed-run",
+                ],
+                observed_names,
+            )
         finally:
             manager.__exit__(None, None, None)
 
