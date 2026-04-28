@@ -58,6 +58,15 @@ except Exception:  # pragma: no cover
 
 BOOL_TRUE = {"1", "true", "t", "yes", "y", "on"}
 BOOL_FALSE = {"0", "false", "f", "no", "n", "off"}
+SHELL_STOP_ARTIFACT_NAMES = {
+    "BACKLOG.json",
+    "BACKLOG.md",
+    "STATE.json",
+    "cycle_summary.log",
+    "last_run_summary.json",
+    "metrics.jsonl",
+    "run_summary.json",
+}
 
 
 def _coerce_value(key: str, raw: str, default: Any) -> Any:
@@ -335,6 +344,52 @@ class RunnerShell:
                 return False
         return bool(self._runner_thread and self._runner_thread.is_alive())
 
+    def _run_dir_has_shell_stop_artifacts(self, run_dir: Path | None) -> bool:
+        if run_dir is None:
+            return False
+        try:
+            if not run_dir.exists() or not run_dir.is_dir():
+                return False
+            if any((run_dir / name).exists() for name in SHELL_STOP_ARTIFACT_NAMES):
+                return True
+            logs_dir = run_dir / "logs"
+            return bool(logs_dir.exists() and logs_dir.is_dir() and any(item.is_file() for item in logs_dir.iterdir()))
+        except OSError:
+            return False
+
+    def _shell_stop_target_run_dirs(self) -> list[Path]:
+        targets: list[Path] = []
+        if self.run_dir is not None:
+            try:
+                targets.append(self.run_dir.expanduser().resolve())
+            except Exception:
+                targets.append(self.run_dir)
+        if self.repo and self.run_dir is not None:
+            try:
+                latest = find_latest_run_dir(self.repo)
+            except Exception:
+                latest = None
+            if latest is not None:
+                try:
+                    latest_resolved = latest.expanduser().resolve()
+                except Exception:
+                    latest_resolved = latest
+                seen = {str(path) for path in targets}
+                if str(latest_resolved) not in seen:
+                    base_name = self.run_dir.name
+                    if latest_resolved.name.startswith(f"{base_name}-") or self._run_dir_has_shell_stop_artifacts(latest_resolved):
+                        targets.append(latest_resolved)
+        return targets
+
+    def _shell_stop_file_paths(self, run_dirs: list[Path], stop_file: str) -> dict[str, str]:
+        paths: dict[str, str] = {}
+        for idx, run_dir in enumerate(run_dirs):
+            suffix = "" if idx == 0 else f"_{idx + 1}"
+            paths[f"stop_file_path{suffix}"] = (run_dir / stop_file).as_posix()
+            paths[f"stop_progress_path{suffix}"] = (run_dir / "STOP_PROGRESS.json").as_posix()
+            paths[f"stop_progress_log_path{suffix}"] = (run_dir / "stop_progress.log").as_posix()
+        return paths
+
     def _sync_controller_args(self) -> None:
         if self._controller is None:
             return
@@ -486,6 +541,7 @@ class RunnerShell:
         # NOTE: DEFAULTS includes "repo" so passing repo twice will crash.
         args_dict = {k: eff.get(k) for k in DEFAULTS.keys()}
         args_dict["repo"] = str(self.repo)
+        args_dict["run_dir"] = str(run_dir)
 
         # Ensure prompts_dir is always a python-side absolute path (avoid empty => repo root)
         try:
@@ -559,7 +615,12 @@ class RunnerShell:
             return
 
         stop_file = str(self.effective().get("stop_file") or "STOP")
-        stop_path = self.run_dir / stop_file
+        target_run_dirs = self._shell_stop_target_run_dirs()
+        if not target_run_dirs:
+            print("[WARN] run_dir is unknown; cannot create stop file.")
+            return
+        stop_path = target_run_dirs[0] / stop_file
+        stop_file_paths = self._shell_stop_file_paths(target_run_dirs, stop_file)
         requested_at = time.monotonic()
         self._print_stop_progress(
             write_stop_progress(
@@ -568,11 +629,20 @@ class RunnerShell:
                 message="Stop requested.",
                 requested_at_monotonic=requested_at,
                 running=self._runner_is_alive(),
+                runner_alive=self._runner_is_alive(),
+                stop_file_paths=stop_file_paths,
             )
         )
         try:
-            stop_path.write_text(STOP_REASON_STOP_FILE + "\n", encoding="utf-8", errors="replace")
+            written_stop_paths: list[Path] = []
+            for target_run_dir in target_run_dirs:
+                target_stop_path = target_run_dir / stop_file
+                target_stop_path.parent.mkdir(parents=True, exist_ok=True)
+                target_stop_path.write_text(STOP_REASON_STOP_FILE + "\n", encoding="utf-8", errors="replace")
+                written_stop_paths.append(target_stop_path)
             print(f"[OK] Stop requested via: {stop_path}")
+            for alternate_stop_path in written_stop_paths[1:]:
+                print(f"[INFO] Also wrote stop file: {alternate_stop_path}")
             self._print_stop_progress(
                 write_stop_progress(
                     self.run_dir,
@@ -580,6 +650,8 @@ class RunnerShell:
                     message=f"Stop file written: {stop_path}",
                     requested_at_monotonic=requested_at,
                     running=self._runner_is_alive(),
+                    runner_alive=self._runner_is_alive(),
+                    stop_file_paths=stop_file_paths,
                 )
             )
         except Exception as ex:
@@ -590,6 +662,8 @@ class RunnerShell:
                     message=f"Failed to create stop file: {ex}",
                     requested_at_monotonic=requested_at,
                     running=self._runner_is_alive(),
+                    runner_alive=self._runner_is_alive(),
+                    stop_file_paths=stop_file_paths,
                 )
             )
             print(f"[ERR] Failed to create stop file: {ex}")
@@ -604,6 +678,8 @@ class RunnerShell:
                     message="Terminating tracked child processes.",
                     requested_at_monotonic=requested_at,
                     running=self._runner_is_alive(),
+                    runner_alive=self._runner_is_alive(),
+                    stop_file_paths=stop_file_paths,
                 )
             )
             terminate_all_children()
@@ -625,6 +701,8 @@ class RunnerShell:
                         message="Waiting for runner shutdown and final artifacts.",
                         requested_at_monotonic=requested_at,
                         running=True,
+                        runner_alive=True,
+                        stop_file_paths=stop_file_paths,
                     )
                 )
                 try:
@@ -641,7 +719,9 @@ class RunnerShell:
                     message=f"Runner is still alive after {wait_timeout}s stop wait timeout." if alive else "Runner stop sequence finished.",
                     requested_at_monotonic=requested_at,
                     running=alive,
+                    runner_alive=alive,
                     exit_code=self._runner_exit_code,
+                    stop_file_paths=stop_file_paths,
                 )
             )
             self.status()

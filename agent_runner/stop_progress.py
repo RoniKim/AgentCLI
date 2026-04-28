@@ -195,6 +195,7 @@ def _normalize_timeout_guidance(raw: object) -> dict[str, Any]:
         recoverable = _normalize_bool(guidance.get("retryable"))
     guidance["recoverable"] = bool(recoverable)
     guidance["can_retry"] = bool(guidance["recoverable"])
+    guidance["canRetry"] = bool(guidance["recoverable"])
     return guidance
 
 

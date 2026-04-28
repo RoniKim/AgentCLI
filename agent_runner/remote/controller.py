@@ -1012,6 +1012,8 @@ class RunnerController:
             if self._runner_is_alive():
                 return {"ok": False, "message": "\ub7ec\ub108\uac00 \uc774\ubbf8 \uc2e4\ud589 \uc911\uc785\ub2c8\ub2e4.", **context}
 
+            base_run_dir_intent = str(getattr(self.base_args, "run_dir", "") or "").strip()
+            base_resume_latest_intent = bool(getattr(self.base_args, "resume_latest", False))
             eff = self._effective_dict(normalized_overrides)
             run_dir = self._ensure_run_dir(eff)
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -1037,6 +1039,8 @@ class RunnerController:
                 self._start_thread(args)
 
             updated_base = dict(eff)
+            updated_base["run_dir"] = str(normalized_overrides.get("run_dir") or base_run_dir_intent)
+            updated_base["resume_latest"] = base_resume_latest_intent
             self.base_args = argparse.Namespace(**updated_base)
 
             return {

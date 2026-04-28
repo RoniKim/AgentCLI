@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -27,6 +28,7 @@ from agent_runner.gitops import (
     scan_worktree_diagnostics,
 )
 from agent_runner.shell import RunnerShell
+from agent_runner.stop_progress import read_stop_progress
 from agent_runner.utils import run_cmd
 
 
@@ -307,10 +309,15 @@ class WorktreeIsolationTests(unittest.TestCase):
     def test_shell_start_creates_fresh_run_dir_by_default_and_resumes_latest_explicitly(self) -> None:
         shell = RunnerShell()
         shell.set_repo(self.repo.as_posix())
+        captured_run_dirs: list[Path] = []
+
+        def fake_run_runner(args: object) -> int:
+            captured_run_dirs.append(Path(str(getattr(args, "run_dir", ""))).expanduser().resolve())
+            return 0
 
         with (
             patch("agent_runner.shell.init_process_guard", return_value=None),
-            patch("agent_runner.shell.run_runner", return_value=0),
+            patch("agent_runner.shell.run_runner", side_effect=fake_run_runner),
         ):
             shell.start([])
             if shell._runner_thread is not None:
@@ -334,6 +341,33 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertTrue(first_run_dir.exists())
         self.assertTrue(second_run_dir.exists())
         self.assertTrue(resumed_run_dir.exists())
+        self.assertEqual([first_run_dir.resolve(), second_run_dir.resolve(), second_run_dir.resolve()], captured_run_dirs)
+
+    def test_shell_stop_writes_stop_to_suffixed_actual_run_dir_when_start_state_is_split(self) -> None:
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        shell.run_dir = self.repo / ".AgentCLI" / "agent_runs" / "20260428-092144"
+        actual_run_dir = self.repo / ".AgentCLI" / "agent_runs" / "20260428-092144-0001"
+        shell.run_dir.mkdir(parents=True, exist_ok=True)
+        actual_run_dir.mkdir(parents=True, exist_ok=True)
+        (actual_run_dir / "BACKLOG.json").write_text('{"tasks":[]}\n', encoding="utf-8")
+
+        release = threading.Event()
+        shell._runner_thread = threading.Thread(target=lambda: release.wait(5), daemon=True)
+        shell._runner_thread.start()
+
+        try:
+            with patch("agent_runner.shell.terminate_all_children", return_value=None):
+                shell.stop(wait=False)
+        finally:
+            release.set()
+            shell._runner_thread.join(timeout=2)
+
+        self.assertTrue((shell.run_dir / "STOP").exists())
+        self.assertTrue((actual_run_dir / "STOP").exists())
+        progress = read_stop_progress(shell.run_dir)
+        self.assertEqual((shell.run_dir / "STOP").as_posix(), progress["stop_file_paths"]["stop_file_path"])
+        self.assertEqual((actual_run_dir / "STOP").as_posix(), progress["stop_file_paths"]["stop_file_path_2"])
 
     def test_shell_save_drops_transient_run_dir_intent(self) -> None:
         home = self.fixture_root / "home"
