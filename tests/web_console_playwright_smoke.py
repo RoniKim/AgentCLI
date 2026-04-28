@@ -338,6 +338,10 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
         self.expect(page.locator("#main")).to_have_attribute("data-view", view)
         self.expect(page.locator("#main")).to_contain_text(marker)
 
+    def _read_snapshot(self) -> dict[str, object]:
+        with urlopen(f"{self.server_url}/api/status", timeout=5) as response:
+            return json.loads(response.read().decode("utf-8"))
+
     def test_primary_views_locale_and_mobile_width(self) -> None:
         self._start_server()
 
@@ -513,6 +517,299 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
                 })"""
             )
             self.assertLessEqual(dimensions["scrollWidth"], dimensions["innerWidth"])
+        finally:
+            manager.__exit__(None, None, None)
+
+    def test_worktree_review_smoke_surfaces_cleanup_and_diagnostic_states(self) -> None:
+        self._start_server()
+
+        manager = self.sync_playwright()
+        try:
+            playwright = manager.__enter__()
+        except Exception as exc:
+            raise unittest.SkipTest(
+                "Playwright runtime is unavailable. Optional setup: "
+                f'"{sys.executable}" -m pip install playwright && '
+                f'"{sys.executable}" -m playwright install chromium'
+            ) from exc
+        try:
+            try:
+                page = self._open_page(playwright)
+            except Exception as exc:
+                raise unittest.SkipTest(
+                    "Playwright Chromium is unavailable. Optional setup: "
+                    f'"{sys.executable}" -m pip install playwright && '
+                    f'"{sys.executable}" -m playwright install chromium'
+                ) from exc
+
+            snapshot = self._read_snapshot()
+            cleanup_worktree = self._tmp / "cleanup-failed-smoke"
+            orphaned_worktree = self._tmp / "orphaned-smoke"
+            locked_path = (cleanup_worktree / "nested" / "locked.txt").as_posix()
+            run_dir_text = self.latest_run_dir.as_posix()
+            patch_path = (self.latest_run_dir / "worktree.patch").as_posix()
+            status_file = (self.latest_run_dir / "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json").as_posix()
+            pending_file = (self.latest_run_dir / "WORKTREE_MERGE_PENDING.json").as_posix()
+
+            snapshot["worktree"] = {
+                "status": "applied_cleanup_failed",
+                "mode": "manual",
+                "reviewRequired": True,
+                "reviewRequiredMessage": "Patch applied, but worktree cleanup failed.",
+                "sourceRepo": self.repo.as_posix(),
+                "sourceBranch": "main",
+                "branch": "main",
+                "baseRef": "main",
+                "headRef": "abc12345",
+                "worktreeDir": cleanup_worktree.as_posix(),
+                "patchPath": patch_path,
+                "pendingFile": pending_file,
+                "statusFile": status_file,
+                "cleanupPath": locked_path,
+                "cleanupMessage": "Permission denied while removing the generated worktree.",
+                "cleanupDetails": {
+                    "path": locked_path,
+                    "lockingPath": locked_path,
+                    "affectedArtifact": cleanup_worktree.as_posix(),
+                    "retrySchedule": [0.05, 0.1, 0.2],
+                    "rebootGuidance": "Close the locking process or reboot Windows before retrying cleanup.",
+                },
+                "cleanupAttempts": [
+                    {
+                        "attempt": 1,
+                        "lockingPath": locked_path,
+                        "affectedArtifact": cleanup_worktree.as_posix(),
+                    }
+                ],
+                "cleanupReconciliation": {
+                    "artifactPath": status_file,
+                    "artifactStatus": "applied_cleanup_failed",
+                    "finalStatus": "applied",
+                    "worktreeDir": cleanup_worktree.as_posix(),
+                    "worktreeExists": True,
+                    "cleanupPath": locked_path,
+                    "cleanupPathExists": False,
+                    "pendingMarkerPaths": [],
+                    "existingPendingMarkers": [],
+                    "markerState": "reconciled",
+                    "worktreeState": "present",
+                    "blockingPaths": [cleanup_worktree.as_posix()],
+                    "reconciled": False,
+                    "reconciledFrom": "",
+                },
+                "cleanupState": "failed",
+                "resolutionActions": [
+                    {
+                        "kind": "generated_worktree_remove",
+                        "status": "failed",
+                        "path": cleanup_worktree.as_posix(),
+                        "detail": "Permission denied while removing the generated worktree.",
+                    },
+                    {
+                        "kind": "stale_marker_prune",
+                        "status": "done",
+                        "path": pending_file,
+                        "detail": "Pending marker paths were cleared after the worktree result was finalized.",
+                    },
+                    {
+                        "kind": "cleanup_failed_reconcile",
+                        "status": "required",
+                        "path": status_file,
+                        "detail": f"Still blocked by: {cleanup_worktree.as_posix()}",
+                    },
+                ],
+                "summary": "Patch applied, but worktree cleanup failed.",
+                "risk": "The source repository was updated, but the isolated worktree still needs cleanup.",
+                "changedFiles": [
+                    {
+                        "path": "web_console/app.js",
+                        "summary": "Updated worktree cleanup review details.",
+                        "kind": "modified",
+                        "hunks": [],
+                        "lineCount": 0,
+                    }
+                ],
+                "preflight": {},
+                "applyCheck": {},
+                "sourceRepoDirty": False,
+                "checklist": ["Inspect patch hunks", "Verify no secret leakage"],
+                "runDir": run_dir_text,
+                "runnerRc": 0,
+                "lastRc": 0,
+            }
+            snapshot["worktree_diagnostics"] = {
+                "status": "error",
+                "source_repo": self.repo.as_posix(),
+                "source_repo_root": self.repo.as_posix(),
+                "generated_worktree_home": (self._tmp / ".agentcli_worktrees" / self.repo.name).as_posix(),
+                "scanned_at": "2026-04-26T12:05:00",
+                "summary": {
+                    "run_dirs_scanned": 1,
+                    "pending_markers": 1,
+                    "stale_pending_markers": 1,
+                    "missing_patches": 0,
+                    "cleanup_failed": 1,
+                    "generated_worktrees": 1,
+                    "orphaned_worktrees": 1,
+                    "issue_count": 3,
+                    "healthy": False,
+                    "category_counts": {
+                        "active": 2,
+                        "pending": 1,
+                        "stale": 1,
+                        "orphaned": 1,
+                        "cleanup_failed": 1,
+                        "missing_patch": 0,
+                    },
+                },
+                "filters": {
+                    "categories": [],
+                    "available_categories": ["active", "pending", "stale", "orphaned", "cleanup_failed", "missing_patch"],
+                },
+                "pending_markers": [
+                    {
+                        "path": pending_file,
+                        "scope": "repo",
+                        "status": "pending",
+                        "reason": "Central pending marker has no matching run-local marker.",
+                        "run_dir": run_dir_text,
+                        "source_repo": self.repo.as_posix(),
+                        "worktree_dir": cleanup_worktree.as_posix(),
+                        "patch_path": patch_path,
+                        "base_ref": "main",
+                        "head_ref": "abc12345",
+                        "exists": True,
+                        "stale": True,
+                        "resolutionActions": [
+                            {
+                                "kind": "stale_marker_prune",
+                                "status": "required",
+                                "path": pending_file,
+                                "detail": "Remove or repair the stale pending marker only after verifying the patch metadata.",
+                            }
+                        ],
+                        "categories": ["pending", "stale"],
+                    }
+                ],
+                "cleanup_failed": [
+                    {
+                        "path": status_file,
+                        "status": "applied_cleanup_failed",
+                        "run_dir": run_dir_text,
+                        "source_repo": self.repo.as_posix(),
+                        "worktree_dir": cleanup_worktree.as_posix(),
+                        "patch_path": patch_path,
+                        "cleanup_path": locked_path,
+                        "cleanup_message": "Permission denied while removing the generated worktree.",
+                        "cleanup_details": {
+                            "locking_path": locked_path,
+                            "affected_artifact": cleanup_worktree.as_posix(),
+                            "retry_schedule": [0.05, 0.1, 0.2],
+                            "reboot_guidance": "Close the locking process or reboot Windows before retrying cleanup.",
+                        },
+                        "cleanup_attempts": [],
+                        "reconciliation": {
+                            "artifact_path": status_file,
+                            "artifact_status": "applied_cleanup_failed",
+                            "final_status": "applied",
+                            "blocking_paths": [cleanup_worktree.as_posix()],
+                            "reconciled": False,
+                        },
+                        "resolutionActions": [
+                            {
+                                "kind": "generated_worktree_remove",
+                                "status": "failed",
+                                "path": cleanup_worktree.as_posix(),
+                                "detail": "Permission denied while removing the generated worktree.",
+                            },
+                            {
+                                "kind": "stale_marker_prune",
+                                "status": "done",
+                                "path": pending_file,
+                                "detail": "Pending marker paths were cleared after the worktree result was finalized.",
+                            },
+                            {
+                                "kind": "cleanup_failed_reconcile",
+                                "status": "required",
+                                "path": status_file,
+                                "detail": f"Still blocked by: {cleanup_worktree.as_posix()}",
+                            },
+                        ],
+                        "categories": ["cleanup_failed", "active"],
+                    }
+                ],
+                "generated_worktrees": [
+                    {
+                        "path": orphaned_worktree.as_posix(),
+                        "exists": True,
+                        "contract_path": "",
+                        "contract_run_dir": "",
+                        "contract_status": "missing_contract",
+                        "reason": "missing reuse contract",
+                        "tracked": False,
+                        "orphaned": True,
+                        "referenced": False,
+                        "resolutionActions": [
+                            {
+                                "kind": "generated_worktree_remove",
+                                "status": "required",
+                                "path": orphaned_worktree.as_posix(),
+                                "detail": "Remove the orphaned generated worktree after verifying no active marker still references it.",
+                            }
+                        ],
+                        "categories": ["orphaned"],
+                    }
+                ],
+                "issues": [
+                    {
+                        "kind": "stale_pending_marker",
+                        "severity": "warn",
+                        "message": "Central pending marker has no matching run-local marker.",
+                        "path": pending_file,
+                        "categories": ["pending", "stale"],
+                    },
+                    {
+                        "kind": "cleanup_failed",
+                        "severity": "error",
+                        "message": "Cleanup failed after the worktree result was finalized.",
+                        "path": status_file,
+                        "categories": ["cleanup_failed", "active"],
+                    },
+                    {
+                        "kind": "orphaned_worktree",
+                        "severity": "warn",
+                        "message": "Generated worktree is no longer referenced by an active contract or pending marker.",
+                        "path": orphaned_worktree.as_posix(),
+                        "categories": ["orphaned"],
+                    },
+                ],
+            }
+
+            page.evaluate(
+                """(snapshot) => {
+                    const adapters = window.__AGENTCLI_ADAPTERS__;
+                    const normalized = adapters.normalizeSnapshot(snapshot);
+                    adapters.applySnapshotModel(normalized);
+                    adapters.setView('worktree');
+                    adapters.renderShell({ force: true, preserveScroll: false });
+                }""",
+                snapshot,
+            )
+
+            self.expect(page.locator("#main")).to_have_attribute("data-view", "worktree")
+            self.expect(page.locator("#main")).to_contain_text("Worktree Review")
+            self.expect(page.locator("#main")).to_contain_text("Cleanup actions")
+            self.expect(page.locator("#main")).to_contain_text("Generated worktree removal")
+            self.expect(page.locator("#main")).to_contain_text("Cleanup-failed reconciliation")
+            self.expect(page.locator("#main")).to_contain_text("Stale marker pruning")
+            self.expect(page.locator("#main")).to_contain_text("Locking path")
+            self.expect(page.locator("#main")).to_contain_text(locked_path)
+            self.expect(page.locator("#main")).to_contain_text("Affected artifact")
+            self.expect(page.locator("#main")).to_contain_text(cleanup_worktree.as_posix())
+            self.expect(page.locator("#main")).to_contain_text("Retry schedule")
+            self.expect(page.locator("#main")).to_contain_text("0.05s, 0.10s, 0.2s")
+            self.expect(page.locator("#main")).to_contain_text("Reboot guidance")
+            self.expect(page.locator("#main")).to_contain_text("orphaned-smoke")
         finally:
             manager.__exit__(None, None, None)
 

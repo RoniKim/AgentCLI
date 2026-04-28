@@ -238,6 +238,38 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertIn("missing_patch", issue_kinds)
         self.assertTrue(diagnostics["pending_markers"][0]["stale"])
         self.assertIn("patch", diagnostics["pending_markers"][0]["reason"])
+        self.assertEqual("stale_marker_prune", diagnostics["pending_markers"][0]["resolution_actions"][0]["kind"])
+        self.assertEqual("required", diagnostics["pending_markers"][0]["resolution_actions"][0]["status"])
+
+    def test_scan_worktree_diagnostics_recovers_after_stale_marker_repair(self) -> None:
+        self.worktree.mkdir(parents=True, exist_ok=True)
+        marker = {
+            "schema_version": 1,
+            "status": "pending",
+            "created_at": "2026-04-27T12:00:00",
+            "source_repo": self.repo.resolve().as_posix(),
+            "run_dir": self.run_dir.resolve().as_posix(),
+            "worktree_dir": self.worktree.resolve().as_posix(),
+            "patch_path": self.patch_path.resolve().as_posix(),
+            "base_ref": "main",
+            "head_ref": "abc12345",
+            "last_rc": 0,
+        }
+        self.patch_path.write_text("diff --git a/a b/a\n", encoding="utf-8")
+        central_pending = self.repo / ".AgentCLI" / WORKTREE_MERGE_PENDING
+        central_pending.parent.mkdir(parents=True, exist_ok=True)
+        central_pending.write_text(json.dumps(marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        stale = scan_worktree_diagnostics(self.repo)
+        self.assertEqual("warning", stale["status"])
+        self.assertTrue(stale["pending_markers"][0]["stale"])
+
+        self.run_dir.joinpath(WORKTREE_MERGE_PENDING).write_text(json.dumps(marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        repaired = scan_worktree_diagnostics(self.repo)
+        self.assertEqual("ok", repaired["status"])
+        self.assertFalse(repaired["pending_markers"][0]["stale"])
+        self.assertEqual([], repaired["issues"])
 
     def test_scan_worktree_diagnostics_reports_cleanup_failed_artifact(self) -> None:
         generated_worktree = self.fixture_root / ".agentcli_worktrees" / self.repo.name / "cleanup-failed"
@@ -270,6 +302,44 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertIn("cleanup_failed", issue_kinds)
         self.assertTrue(diagnostics["cleanup_failed"])
         self.assertFalse(diagnostics["generated_worktrees"][0]["orphaned"])
+        self.assertFalse(diagnostics["cleanup_failed"][0]["reconciliation"]["reconciled"])
+        self.assertEqual(generated_worktree.resolve().as_posix(), diagnostics["cleanup_failed"][0]["reconciliation"]["blocking_paths"][0])
+        self.assertEqual("generated_worktree_remove", diagnostics["cleanup_failed"][0]["resolution_actions"][0]["kind"])
+        self.assertEqual("failed", diagnostics["cleanup_failed"][0]["resolution_actions"][0]["status"])
+        self.assertEqual("cleanup_failed_reconcile", diagnostics["cleanup_failed"][0]["resolution_actions"][2]["kind"])
+
+    def test_scan_worktree_diagnostics_reconciles_cleanup_failed_artifact_after_cleanup_finishes(self) -> None:
+        self.patch_path.write_text("diff --git a/a b/a\n", encoding="utf-8")
+        payload = {
+            "schema_version": 1,
+            "status": "applied_cleanup_failed",
+            "created_at": "2026-04-27T12:01:00",
+            "source_repo": self.repo.resolve().as_posix(),
+            "run_dir": self.run_dir.resolve().as_posix(),
+            "worktree_dir": self.worktree.resolve().as_posix(),
+            "patch_path": self.patch_path.resolve().as_posix(),
+            "cleanup_path": self.worktree.resolve().as_posix(),
+            "cleanup_message": "cleanup failed",
+            "base_ref": "main",
+            "head_ref": "abc12345",
+            "last_rc": 0,
+        }
+        artifact_path = self.run_dir / "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json"
+        artifact_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        diagnostics = scan_worktree_diagnostics(self.repo)
+
+        self.assertEqual("ok", diagnostics["status"])
+        self.assertEqual([], diagnostics["cleanup_failed"])
+        self.assertFalse(artifact_path.exists())
+        reconciled_artifact = self.run_dir / "WORKTREE_MERGE_APPLIED.json"
+        self.assertTrue(reconciled_artifact.exists())
+        reconciled_payload = json.loads(reconciled_artifact.read_text(encoding="utf-8"))
+        self.assertEqual("applied", reconciled_payload["status"])
+        self.assertEqual("applied_cleanup_failed", reconciled_payload["cleanup_reconciled_from"])
+        self.assertTrue(reconciled_payload["cleanup_reconciliation"]["reconciled"])
+        self.assertEqual("cleanup_failed_reconcile", reconciled_payload["resolution_actions"][-1]["kind"])
+        self.assertEqual("done", reconciled_payload["resolution_actions"][-1]["status"])
 
     def test_scan_worktree_diagnostics_reports_orphaned_generated_worktree(self) -> None:
         generated_worktree = self.fixture_root / ".agentcli_worktrees" / self.repo.name / "orphaned"
@@ -282,6 +352,9 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertEqual("warning", diagnostics["status"])
         self.assertIn("orphaned_worktree", issue_kinds)
         self.assertTrue(any(item["orphaned"] for item in diagnostics["generated_worktrees"]))
+        orphaned_entry = next(item for item in diagnostics["generated_worktrees"] if item["orphaned"])
+        self.assertEqual("generated_worktree_remove", orphaned_entry["resolution_actions"][0]["kind"])
+        self.assertEqual("required", orphaned_entry["resolution_actions"][0]["status"])
 
     def test_scan_worktree_diagnostics_filters_are_read_only_and_category_scoped(self) -> None:
         active_worktree = self.fixture_root / ".agentcli_worktrees" / self.repo.name / "active"

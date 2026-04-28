@@ -542,6 +542,8 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             self.assertIn("stale_pending_marker", issue_kinds)
             self.assertIn("missing_patch", issue_kinds)
             self.assertTrue(diagnostics["pending_markers"][0]["stale"])
+            self.assertEqual("stale_marker_prune", diagnostics["pending_markers"][0]["resolution_actions"][0]["kind"])
+            self.assertEqual("required", diagnostics["pending_markers"][0]["resolution_actions"][0]["status"])
 
         with self.subTest("cleanup-failed"):
             self._clear_worktree_artifacts()
@@ -579,6 +581,11 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             self.assertIn("cleanup_failed", issue_kinds)
             self.assertTrue(diagnostics["cleanup_failed"])
             self.assertFalse(diagnostics["generated_worktrees"][0]["orphaned"])
+            self.assertFalse(diagnostics["cleanup_failed"][0]["reconciliation"]["reconciled"])
+            self.assertEqual("generated_worktree_remove", diagnostics["cleanup_failed"][0]["resolution_actions"][0]["kind"])
+            self.assertEqual("failed", diagnostics["cleanup_failed"][0]["resolution_actions"][0]["status"])
+            self.assertEqual("cleanup_failed_reconcile", diagnostics["cleanup_failed"][0]["resolution_actions"][-1]["kind"])
+            self.assertEqual("required", diagnostics["cleanup_failed"][0]["resolution_actions"][-1]["status"])
 
         with self.subTest("orphaned"):
             self._clear_worktree_artifacts()
@@ -649,6 +656,8 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             actions=[{"kind": "call", "name": "setWorktreeDiagnosticsFilter", "args": [["missing_patch"]]}],
         )
         html = rendered["main"]
+        full_rendered = _run_worktree_render_harness(snapshot, locale="en")
+        full_html = full_rendered["main"]
 
         self.assertIn("All (11)", html)
         self.assertIn(f"{expected_visible} visible | {expected_total} total", html)
@@ -656,6 +665,9 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             self.assertIn(path, html)
         for path in hidden_paths:
             self.assertNotIn(path, html)
+        self.assertIn("Stale marker pruning", full_html)
+        self.assertIn("Generated worktree removal", full_html)
+        self.assertIn("cleanup failed", full_html.lower())
 
         pruned_snapshot = json.loads(json.dumps(snapshot))
         pruned_snapshot["worktree_diagnostics"] = {
@@ -1013,10 +1025,12 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             name: str,
             status: str,
             *,
+            worktree_dir: str | None = None,
             cleanup_message: str = "",
             cleanup_path: str = "",
             cleanup_details: dict[str, object] | None = None,
             cleanup_attempts: list[dict[str, object]] | None = None,
+            cleanup_reconciliation: dict[str, object] | None = None,
         ) -> Path:
             payload: dict[str, object] = {
                 "schema_version": 1,
@@ -1024,7 +1038,7 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
                 "created_at": "2026-04-26T12:10:00",
                 "source_repo": self.repo.as_posix(),
                 "run_dir": self.run_dir.as_posix(),
-                "worktree_dir": self.worktree_dir.as_posix(),
+                "worktree_dir": worktree_dir or self.worktree_dir.as_posix(),
                 "patch_path": self.patch_path.as_posix(),
                 "base_ref": "main",
                 "head_ref": "abc12345",
@@ -1038,6 +1052,8 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
                 payload["cleanup_details"] = cleanup_details
             if cleanup_attempts is not None:
                 payload["cleanup_attempts"] = cleanup_attempts
+            if cleanup_reconciliation is not None:
+                payload["cleanup_reconciliation"] = cleanup_reconciliation
             path = self.run_dir / name
             _write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
             return path
@@ -1101,18 +1117,27 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
         locked_message = str(PermissionError(13, "Permission denied", locked_path))
         locked_details = {
             "path": locked_path,
+            "locking_path": locked_path,
             "worktree_dir": self.worktree_dir.as_posix(),
+            "affected_artifact": self.worktree_dir.as_posix(),
             "attempts": [
                 {
                     "attempt": 1,
                     "operation": "shutil.rmtree",
                     "path": locked_path,
+                    "locking_path": locked_path,
+                    "affected_artifact": self.worktree_dir.as_posix(),
                     "worktree_dir": self.worktree_dir.as_posix(),
                     "error_type": "PermissionError",
                     "message": locked_message,
                     "errno": 13,
+                    "next_retry_seconds": 0.05,
                 }
             ],
+            "retry_schedule_seconds": [0.05, 0.1, 0.2],
+            "retry_schedule": [0.05, 0.1, 0.2],
+            "reboot_required": True,
+            "reboot_guidance": "Close the locking process or reboot Windows before retrying cleanup.",
             "operation": "shutil.rmtree",
             "error_type": "PermissionError",
             "message": locked_message,
@@ -1157,6 +1182,21 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
                     cleanup_path=locked_path,
                     cleanup_details=locked_details,
                     cleanup_attempts=locked_details["attempts"],
+                    cleanup_reconciliation={
+                        "artifact_status": status_name,
+                        "final_status": "applied" if status_name == "applied_cleanup_failed" else "discarded",
+                        "worktree_dir": self.worktree_dir.as_posix(),
+                        "worktree_exists": True,
+                        "cleanup_path": locked_path,
+                        "cleanup_path_exists": False,
+                        "pending_marker_paths": [],
+                        "existing_pending_markers": [],
+                        "marker_state": "reconciled",
+                        "worktree_state": "present",
+                        "blocking_paths": [self.worktree_dir.as_posix()],
+                        "reconciled": False,
+                        "reconciled_from": "",
+                    },
                 )
                 snapshot = assert_snapshot(
                     label=status_name,
@@ -1171,32 +1211,72 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
                 self.assertEqual(locked_path, snapshot["worktree"]["cleanupPath"])
                 self.assertEqual(locked_message, snapshot["worktree"]["cleanupMessage"])
                 self.assertEqual(locked_path, snapshot["worktree"]["cleanupDetails"]["path"])
+                self.assertEqual(locked_path, snapshot["worktree"]["cleanupDetails"]["locking_path"])
+                self.assertEqual(self.worktree_dir.as_posix(), snapshot["worktree"]["cleanupDetails"]["affected_artifact"])
+                self.assertEqual([0.05, 0.1, 0.2], snapshot["worktree"]["cleanupDetails"]["retry_schedule"])
+                self.assertTrue(snapshot["worktree"]["cleanupDetails"]["reboot_required"])
+                self.assertIn("reboot", snapshot["worktree"]["cleanupDetails"]["reboot_guidance"].lower())
                 self.assertEqual(locked_path, snapshot["worktree"]["cleanupDetails"]["attempts"][0]["path"])
+                adapted = _run_adapter_harness([snapshot])[0]["worktreeMerge"]
+                self.assertEqual(locked_path, adapted["cleanupDetails"]["locking_path"])
+                self.assertEqual(self.worktree_dir.as_posix(), adapted["cleanupDetails"]["affected_artifact"])
+                self.assertFalse(snapshot["worktree"]["cleanupReconciliation"]["reconciled"])
+                if status_name == "discard_cleanup_failed":
+                    self.assertEqual("source_safe_discard", snapshot["worktree"]["resolutionActions"][0]["kind"])
+                    self.assertEqual("done", snapshot["worktree"]["resolutionActions"][0]["status"])
+                    self.assertEqual("generated_worktree_remove", snapshot["worktree"]["resolutionActions"][1]["kind"])
+                    self.assertEqual("failed", snapshot["worktree"]["resolutionActions"][1]["status"])
+                else:
+                    self.assertEqual("generated_worktree_remove", snapshot["worktree"]["resolutionActions"][0]["kind"])
+                    self.assertEqual("failed", snapshot["worktree"]["resolutionActions"][0]["status"])
+                self.assertEqual("cleanup_failed_reconcile", snapshot["worktree"]["resolutionActions"][-1]["kind"])
+                self.assertEqual("required", snapshot["worktree"]["resolutionActions"][-1]["status"])
 
         with self.subTest("reconciled-after-cleanup-failure"):
             self._clear_worktree_artifacts()
             write_patch()
+            missing_worktree = self._tmp / "cleanup-reconciled-missing"
             failure_path = write_artifact(
                 "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json",
                 "applied_cleanup_failed",
+                worktree_dir=missing_worktree.as_posix(),
                 cleanup_message=locked_message,
-                cleanup_path=locked_path,
+                cleanup_path=missing_worktree.as_posix(),
                 cleanup_details=locked_details,
                 cleanup_attempts=locked_details["attempts"],
+                cleanup_reconciliation={
+                    "artifact_status": "applied_cleanup_failed",
+                    "final_status": "applied",
+                    "worktree_dir": missing_worktree.as_posix(),
+                    "worktree_exists": False,
+                    "cleanup_path": missing_worktree.as_posix(),
+                    "cleanup_path_exists": False,
+                    "pending_marker_paths": [],
+                    "existing_pending_markers": [],
+                    "marker_state": "reconciled",
+                    "worktree_state": "reconciled",
+                    "blocking_paths": [],
+                    "reconciled": True,
+                    "reconciled_from": "applied_cleanup_failed",
+                },
             )
             self.assertTrue(failure_path.exists())
-            success_path = write_artifact("WORKTREE_MERGE_APPLIED.json", "applied")
-            os.utime(success_path, (success_path.stat().st_atime, success_path.stat().st_mtime + 10))
             snapshot = assert_snapshot(
                 label="reconciled-after-cleanup-failure",
                 expected_status="applied",
                 expected_section_status="ready",
                 expected_review_required=False,
                 expected_cleanup_state="done",
-                expected_status_file=success_path.as_posix(),
+                expected_status_file=(self.run_dir / "WORKTREE_MERGE_APPLIED.json").as_posix(),
                 expected_changed_files=True,
             )
             self.assertEqual("Patch applied to the source repository.", snapshot["worktree"]["reviewRequiredMessage"])
+            self.assertFalse(failure_path.exists())
+            self.assertTrue((self.run_dir / "WORKTREE_MERGE_APPLIED.json").exists())
+            self.assertTrue(snapshot["worktree"]["cleanupReconciliation"]["reconciled"])
+            self.assertEqual("applied_cleanup_failed", snapshot["worktree"]["cleanupReconciliation"]["reconciled_from"])
+            self.assertEqual("cleanup_failed_reconcile", snapshot["worktree"]["resolutionActions"][-1]["kind"])
+            self.assertEqual("done", snapshot["worktree"]["resolutionActions"][-1]["status"])
 
         with self.subTest("stale-central-marker"):
             self._clear_worktree_artifacts()
@@ -1337,6 +1417,94 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             self.assertIn("dirty patch path", main_html)
             self.assertIn("dirty patch hash", main_html)
             self.assertIn("dirty patch applied", main_html)
+
+        with self.subTest("cleanup-failed-review"):
+            self._clear_worktree_artifacts()
+            _write(self.patch_path, patch_text)
+            locked_path = (self.worktree_dir / "nested" / "locked.txt").as_posix()
+            locked_message = str(PermissionError(13, "Permission denied", locked_path))
+            write_status_artifact(
+                "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json",
+                {
+                    "schema_version": 1,
+                    "status": "applied_cleanup_failed",
+                    "created_at": "2026-04-26T12:13:00",
+                    "source_repo": self.repo.as_posix(),
+                    "run_dir": self.run_dir.as_posix(),
+                    "worktree_dir": self.worktree_dir.as_posix(),
+                    "patch_path": self.patch_path.as_posix(),
+                    "cleanup_path": locked_path,
+                    "cleanup_message": locked_message,
+                    "cleanup_details": {
+                        "path": locked_path,
+                        "locking_path": locked_path,
+                        "affected_artifact": self.worktree_dir.as_posix(),
+                        "retry_schedule": [0.05, 0.1, 0.2],
+                        "reboot_guidance": "Close the locking process or reboot Windows before retrying cleanup.",
+                    },
+                    "cleanup_attempts": [
+                        {
+                            "attempt": 1,
+                            "locking_path": locked_path,
+                            "affected_artifact": self.worktree_dir.as_posix(),
+                        }
+                    ],
+                    "cleanup_reconciliation": {
+                        "artifact_status": "applied_cleanup_failed",
+                        "final_status": "applied",
+                        "worktree_dir": self.worktree_dir.as_posix(),
+                        "worktree_exists": True,
+                        "cleanup_path": locked_path,
+                        "cleanup_path_exists": False,
+                        "pending_marker_paths": [],
+                        "existing_pending_markers": [],
+                        "marker_state": "reconciled",
+                        "worktree_state": "present",
+                        "blocking_paths": [self.worktree_dir.as_posix()],
+                        "reconciled": False,
+                        "reconciled_from": "",
+                    },
+                    "resolution_actions": [
+                        {
+                            "kind": "generated_worktree_remove",
+                            "status": "failed",
+                            "path": self.worktree_dir.as_posix(),
+                            "detail": locked_message,
+                        },
+                        {
+                            "kind": "stale_marker_prune",
+                            "status": "done",
+                            "path": (self.run_dir / "WORKTREE_MERGE_PENDING.json").as_posix(),
+                            "detail": "Pending marker paths were cleared after the worktree result was finalized.",
+                        },
+                        {
+                            "kind": "cleanup_failed_reconcile",
+                            "status": "required",
+                            "path": (self.run_dir / "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json").as_posix(),
+                            "detail": f"Still blocked by: {self.worktree_dir.as_posix()}",
+                        },
+                    ],
+                    "base_ref": "main",
+                    "head_ref": "abc12345",
+                    "last_rc": 0,
+                },
+            )
+
+            snapshot = self._build_snapshot()
+            rendered = _run_worktree_render_harness(snapshot)
+            main_html = rendered["main"]
+
+            self.assertIn("Cleanup actions", main_html)
+            self.assertIn("Generated worktree removal", main_html)
+            self.assertIn("Cleanup-failed reconciliation", main_html)
+            self.assertIn("Locking path", main_html)
+            self.assertIn(locked_path, main_html)
+            self.assertIn("Affected artifact", main_html)
+            self.assertIn(self.worktree_dir.as_posix(), main_html)
+            self.assertIn("Retry schedule", main_html)
+            self.assertIn("0.05s, 0.1s, 0.2s", main_html)
+            self.assertIn("Reboot guidance", main_html)
+            self.assertIn("reboot Windows before retrying cleanup", main_html)
 
 
 if __name__ == "__main__":

@@ -4247,6 +4247,8 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             with self.subTest(status_name):
                 self._clear_worktree_artifacts()
                 write_patch()
+                cleanup_worktree = self._tmp / f"{status_name}-worktree"
+                cleanup_worktree.mkdir(parents=True, exist_ok=True)
                 write_status_artifact(
                     artifact_name,
                     {
@@ -4255,12 +4257,27 @@ class WebConsoleReadonlyTests(unittest.TestCase):
                         "created_at": "2026-04-26T12:04:00",
                         "source_repo": self.repo.as_posix(),
                         "run_dir": self.run_dir.as_posix(),
-                        "worktree_dir": (self.repo / "worktree").as_posix(),
+                        "worktree_dir": cleanup_worktree.as_posix(),
                         "patch_path": (self.run_dir / "worktree.patch").as_posix(),
+                        "cleanup_path": cleanup_worktree.as_posix(),
                         "base_ref": "main",
                         "head_ref": "abc12345",
                         "last_rc": 0,
                         "cleanup_message": f"{status_name} cleanup failed",
+                        "cleanup_reconciliation": {
+                            "artifact_status": status_name,
+                            "worktree_dir": cleanup_worktree.as_posix(),
+                            "worktree_exists": True,
+                            "cleanup_path": cleanup_worktree.as_posix(),
+                            "cleanup_path_exists": True,
+                            "pending_marker_paths": [],
+                            "existing_pending_markers": [],
+                            "marker_state": "reconciled",
+                            "worktree_state": "present",
+                            "blocking_paths": [cleanup_worktree.as_posix()],
+                            "reconciled": False,
+                            "reconciled_from": "",
+                        },
                     },
                 )
                 worktree = self.client.get("/api/worktree").json()
@@ -4270,28 +4287,83 @@ class WebConsoleReadonlyTests(unittest.TestCase):
                 self.assertEqual("failed", worktree["cleanupState"])
                 self.assertIn("cleanup failed", worktree["cleanupMessage"].lower())
                 self.assertTrue(worktree["changedFiles"])
+                self.assertFalse(worktree["cleanupReconciliation"]["reconciled"])
+                self.assertEqual(cleanup_worktree.as_posix(), worktree["cleanupReconciliation"]["blocking_paths"][0])
+                if status_name == "discard_cleanup_failed":
+                    self.assertEqual("source_safe_discard", worktree["resolutionActions"][0]["kind"])
+                    self.assertEqual("done", worktree["resolutionActions"][0]["status"])
+                    self.assertEqual("generated_worktree_remove", worktree["resolutionActions"][1]["kind"])
+                    self.assertEqual("failed", worktree["resolutionActions"][1]["status"])
+                else:
+                    self.assertEqual("generated_worktree_remove", worktree["resolutionActions"][0]["kind"])
+                    self.assertEqual("failed", worktree["resolutionActions"][0]["status"])
+                self.assertEqual("cleanup_failed_reconcile", worktree["resolutionActions"][-1]["kind"])
+                self.assertEqual("required", worktree["resolutionActions"][-1]["status"])
 
-        with self.subTest("stale-central-marker"):
-            self._clear_worktree_artifacts()
-            _write(
-                self.repo / ".AgentCLI" / "WORKTREE_MERGE_PENDING.json",
-                json.dumps(
+        for failed_status, failed_artifact, final_status, final_artifact in [
+            (
+                "applied_cleanup_failed",
+                "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json",
+                "applied",
+                "WORKTREE_MERGE_APPLIED.json",
+            ),
+            (
+                "discard_cleanup_failed",
+                "WORKTREE_MERGE_DISCARD_CLEANUP_FAILED.json",
+                "discarded",
+                "WORKTREE_MERGE_DISCARDED.json",
+            ),
+        ]:
+            with self.subTest(f"reconciled-{failed_status}"):
+                self._clear_worktree_artifacts()
+                write_patch()
+                missing_worktree = self._tmp / f"{failed_status}-missing-worktree"
+                write_status_artifact(
+                    failed_artifact,
                     {
                         "schema_version": 1,
-                        "status": "pending",
-                        "created_at": "2026-04-26T12:05:00",
+                        "status": failed_status,
+                        "created_at": "2026-04-26T12:04:30",
                         "source_repo": self.repo.as_posix(),
                         "run_dir": self.run_dir.as_posix(),
-                        "worktree_dir": (self.repo / "worktree").as_posix(),
+                        "worktree_dir": missing_worktree.as_posix(),
                         "patch_path": (self.run_dir / "worktree.patch").as_posix(),
+                        "cleanup_path": missing_worktree.as_posix(),
                         "base_ref": "main",
                         "head_ref": "abc12345",
                         "last_rc": 0,
+                        "cleanup_message": f"{failed_status} cleanup failed",
                     },
-                    ensure_ascii=False,
-                    indent=2,
                 )
-                + "\n",
+                worktree = self.client.get("/api/worktree").json()
+                self.assertEqual(final_status, worktree["status"])
+                self.assertFalse(worktree["reviewRequired"])
+                self.assertEqual(self.run_dir / final_artifact, Path(worktree["statusFile"]))
+                self.assertEqual("done", worktree["cleanupState"])
+                self.assertTrue(worktree["cleanupReconciliation"]["reconciled"])
+                self.assertEqual(failed_status, worktree["cleanupReconciliation"]["reconciled_from"])
+                self.assertEqual("cleanup_failed_reconcile", worktree["resolutionActions"][-1]["kind"])
+                self.assertEqual("done", worktree["resolutionActions"][-1]["status"])
+                self.assertFalse((self.run_dir / failed_artifact).exists())
+                self.assertTrue((self.run_dir / final_artifact).exists())
+
+        with self.subTest("stale-central-marker"):
+            self._clear_worktree_artifacts()
+            stale_payload = {
+                "schema_version": 1,
+                "status": "pending",
+                "created_at": "2026-04-26T12:05:00",
+                "source_repo": self.repo.as_posix(),
+                "run_dir": self.run_dir.as_posix(),
+                "worktree_dir": (self.repo / "worktree").as_posix(),
+                "patch_path": (self.run_dir / "worktree.patch").as_posix(),
+                "base_ref": "main",
+                "head_ref": "abc12345",
+                "last_rc": 0,
+            }
+            _write(
+                self.repo / ".AgentCLI" / "WORKTREE_MERGE_PENDING.json",
+                json.dumps(stale_payload, ensure_ascii=False, indent=2) + "\n",
             )
             write_patch()
             worktree = self.client.get("/api/worktree").json()
@@ -4300,6 +4372,19 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             self.assertIn("stale", worktree["reviewRequiredMessage"].lower())
             self.assertTrue(worktree["statusFile"].endswith("WORKTREE_MERGE_PENDING.json"))
             self.assertEqual([], worktree["changedFiles"])
+            self.assertEqual("stale_marker_prune", worktree["resolutionActions"][0]["kind"])
+            self.assertEqual("required", worktree["resolutionActions"][0]["status"])
+
+            self._write_worktree_artifact(
+                "WORKTREE_MERGE_PENDING.json",
+                json.dumps(stale_payload, ensure_ascii=False, indent=2) + "\n",
+            )
+            repaired = self.client.get("/api/worktree").json()
+            self.assertEqual("pending review", repaired["status"])
+            self.assertTrue(repaired["reviewRequired"])
+            self.assertEqual(self.run_dir / "WORKTREE_MERGE_PENDING.json", Path(repaired["statusFile"]))
+            self.assertEqual("pending", repaired["cleanupState"])
+            self.assertTrue(repaired["changedFiles"])
 
     def test_prompt_inventory_is_redacted_and_profile_aware(self) -> None:
         prompts = self.client.get("/api/prompts").json()

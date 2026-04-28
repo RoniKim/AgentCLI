@@ -690,6 +690,15 @@
         cleanupState: 'Cleanup state',
         cleanupPath: 'Cleanup path',
         cleanupMessage: 'Cleanup message',
+        cleanupActions: 'Cleanup actions',
+        cleanupActionSourceSafeDiscard: 'Source-safe discard',
+        cleanupActionGeneratedWorktreeRemove: 'Generated worktree removal',
+        cleanupActionStaleMarkerPrune: 'Stale marker pruning',
+        cleanupActionCleanupFailedReconcile: 'Cleanup-failed reconciliation',
+        lockingPath: 'Locking path',
+        affectedArtifact: 'Affected artifact',
+        retrySchedule: 'Retry schedule',
+        rebootGuidance: 'Reboot guidance',
         cleanupStateUnavailable: 'No cleanup state is available.',
         runnerRc: 'Runner rc',
         reviewBeforeMerge: 'Review before merge',
@@ -1904,6 +1913,15 @@
       status: '상태',
       statusFile: '상태 파일',
       sourceBranch: '소스 브랜치',
+      cleanupActions: '정리 작업',
+      cleanupActionSourceSafeDiscard: '소스 안전 폐기',
+      cleanupActionGeneratedWorktreeRemove: '생성된 워크트리 제거',
+      cleanupActionStaleMarkerPrune: '오래된 마커 정리',
+      cleanupActionCleanupFailedReconcile: '정리 실패 조정',
+      lockingPath: '잠금 경로',
+      affectedArtifact: '영향 아티팩트',
+      retrySchedule: '재시도 일정',
+      rebootGuidance: '재부팅 안내',
       manualCleanupRequired: '결정이 기록된 후 정리가 실패했습니다.',
       noPendingMergeAvailable: '대기 중인 작업트리 병합이 없습니다.',
       reviewRequiredBeforeChanges: '소스 저장소 변경 전에 검토가 필요합니다',
@@ -5243,6 +5261,20 @@
     };
   }
 
+  function normalizeWorktreeResolutionAction(raw) {
+    const item = toObject(raw);
+    return {
+      kind: toText(item.kind, ''),
+      status: toText(item.status, ''),
+      path: toText(item.path, ''),
+      detail: toText(item.detail, ''),
+    };
+  }
+
+  function normalizeWorktreeResolutionActions(raw) {
+    return toArray(raw).map(normalizeWorktreeResolutionAction).filter((item) => item.kind);
+  }
+
   function normalizeWorktreeState(worktree) {
     const raw = toObject(worktree);
     const status = toText(raw.status, 'none');
@@ -5261,6 +5293,10 @@
     const cleanupPath = toText(raw.cleanupPath || raw.cleanup_path || worktreeDir, '');
     const cleanupMessage = toText(raw.cleanupMessage || raw.cleanup_message || raw.message || '', '');
     const cleanupState = toText(raw.cleanupState || raw.cleanup_state, 'none');
+    const cleanupDetails = toObject(raw.cleanupDetails || raw.cleanup_details);
+    const cleanupAttempts = toArray(raw.cleanupAttempts || raw.cleanup_attempts);
+    const cleanupReconciliation = toObject(raw.cleanupReconciliation || raw.cleanup_reconciliation);
+    const resolutionActions = normalizeWorktreeResolutionActions(raw.resolutionActions || raw.resolution_actions);
     const runDir = toText(raw.runDir || raw.run_dir, '');
     const runnerRc = toNumber(raw.runnerRc ?? raw.runner_rc ?? raw.lastRc ?? raw.last_rc ?? 0, 0);
     const reviewRequiredValue = raw.reviewRequired ?? raw.review_required;
@@ -5326,6 +5362,14 @@
       cleanupPath,
       cleanupMessage,
       cleanupState,
+      cleanupDetails,
+      cleanup_details: cleanupDetails,
+      cleanupAttempts,
+      cleanup_attempts: cleanupAttempts,
+      cleanupReconciliation,
+      cleanup_reconciliation: cleanupReconciliation,
+      resolutionActions,
+      resolution_actions: resolutionActions,
       summary: toText(raw.summary, ''),
       risk: toText(raw.risk, ''),
       changedFiles,
@@ -5386,6 +5430,7 @@
     const headRef = toText(item.headRef || item.head_ref, '');
     const stale = Boolean(item.stale ?? (status === 'stale' || status === 'malformed' || reason));
     const categories = normalizeWorktreeDiagnosticCategoriesFromItem(item, stale ? ['pending', 'stale'] : ['pending', 'active']);
+    const resolutionActions = normalizeWorktreeResolutionActions(item.resolutionActions || item.resolution_actions);
     return {
       kind: 'pending_marker',
       path,
@@ -5407,6 +5452,8 @@
       exists: Boolean(item.exists ?? true),
       stale,
       categories,
+      resolutionActions,
+      resolution_actions: resolutionActions,
     };
   }
 
@@ -5422,7 +5469,9 @@
     const cleanupMessage = toText(item.cleanupMessage || item.cleanup_message || item.message || item.cleanup_error, '');
     const cleanupDetails = toObject(item.cleanupDetails || item.cleanup_details);
     const cleanupAttempts = toArray(item.cleanupAttempts || item.cleanup_attempts);
+    const reconciliation = toObject(item.reconciliation);
     const categories = normalizeWorktreeDiagnosticCategoriesFromItem(item, ['cleanup_failed', 'active']);
+    const resolutionActions = normalizeWorktreeResolutionActions(item.resolutionActions || item.resolution_actions);
     return {
       kind: 'cleanup_failed',
       path,
@@ -5443,7 +5492,10 @@
       cleanup_details: cleanupDetails,
       cleanupAttempts,
       cleanup_attempts: cleanupAttempts,
+      reconciliation,
       categories,
+      resolutionActions,
+      resolution_actions: resolutionActions,
     };
   }
 
@@ -5458,6 +5510,7 @@
     const referenced = Boolean(item.referenced ?? item.tracked ?? false);
     const orphaned = Boolean(item.orphaned ?? contractStatus === 'orphaned');
     const categories = normalizeWorktreeDiagnosticCategoriesFromItem(item, orphaned ? ['orphaned'] : ['active']);
+    const resolutionActions = normalizeWorktreeResolutionActions(item.resolutionActions || item.resolution_actions);
     return {
       kind: 'generated_worktree',
       path,
@@ -5473,6 +5526,8 @@
       orphaned,
       referenced,
       categories,
+      resolutionActions,
+      resolution_actions: resolutionActions,
     };
   }
 
@@ -5589,6 +5644,25 @@
     return t(map[category] || 'common.unknown');
   }
 
+  function worktreeResolutionActionLabel(kind) {
+    const map = {
+      source_safe_discard: 'worktree.cleanupActionSourceSafeDiscard',
+      generated_worktree_remove: 'worktree.cleanupActionGeneratedWorktreeRemove',
+      stale_marker_prune: 'worktree.cleanupActionStaleMarkerPrune',
+      cleanup_failed_reconcile: 'worktree.cleanupActionCleanupFailedReconcile',
+    };
+    return t(map[kind] || 'worktree.cleanupActions');
+  }
+
+  function worktreeResolutionActionStatusLabel(status) {
+    const normalized = toText(status, '').toLowerCase();
+    if (normalized === 'done') return t('common.complete');
+    if (normalized === 'failed') return t('common.failed');
+    if (normalized === 'pending') return t('pipeline.pending');
+    if (normalized === 'required') return t('worktree.cleanupRequired');
+    return status || t('common.none');
+  }
+
   function worktreeDiagnosticsEntryKindLabel(kind) {
     const map = {
       pending_marker: 'worktree.pendingMarker',
@@ -5604,41 +5678,65 @@
     const entries = [];
     for (const marker of toArray(data.pending_markers || data.pendingMarkers)) {
       const item = normalizeWorktreeDiagnosticMarker(marker);
+      const primaryAction = item.resolutionActions[0] || null;
       entries.push({
         kind: 'pending_marker',
         kindLabel: worktreeDiagnosticsEntryKindLabel('pending_marker'),
-        title: worktreeDiagnosticsEntryKindLabel('pending_marker'),
+        title: primaryAction ? worktreeResolutionActionLabel(primaryAction.kind) : worktreeDiagnosticsEntryKindLabel('pending_marker'),
         summary: item.reason || item.status || t('common.none'),
-        meta: [item.path, item.runDir, item.worktreeDir, item.patchPath].filter(Boolean).join(' | '),
+        meta: [
+          primaryAction ? `${worktreeResolutionActionLabel(primaryAction.kind)} | ${worktreeResolutionActionStatusLabel(primaryAction.status)}` : '',
+          item.path,
+          item.runDir,
+          item.worktreeDir,
+          item.patchPath,
+        ].filter(Boolean).join(' | '),
         path: item.path || item.patchPath || item.worktreeDir || '',
         categories: item.categories,
         tone: item.stale ? 'warn' : 'info',
+        resolutionActions: item.resolutionActions,
       });
     }
     for (const artifact of toArray(data.cleanup_failed || data.cleanupFailed)) {
       const item = normalizeWorktreeDiagnosticCleanupFailed(artifact);
+      const primaryAction = item.resolutionActions[0] || null;
       entries.push({
         kind: 'cleanup_failed',
         kindLabel: worktreeDiagnosticsEntryKindLabel('cleanup_failed'),
-        title: worktreeDiagnosticsEntryKindLabel('cleanup_failed'),
+        title: primaryAction ? worktreeResolutionActionLabel(primaryAction.kind) : worktreeDiagnosticsEntryKindLabel('cleanup_failed'),
         summary: item.cleanupMessage || item.status || t('common.none'),
-        meta: [item.path, item.runDir, item.cleanupPath, item.worktreeDir, item.patchPath].filter(Boolean).join(' | '),
+        meta: [
+          primaryAction ? `${worktreeResolutionActionLabel(primaryAction.kind)} | ${worktreeResolutionActionStatusLabel(primaryAction.status)}` : '',
+          item.path,
+          item.runDir,
+          item.cleanupPath,
+          item.worktreeDir,
+          item.patchPath,
+        ].filter(Boolean).join(' | '),
         path: item.path || item.cleanupPath || item.worktreeDir || '',
         categories: item.categories,
         tone: item.status === 'malformed' ? 'err' : 'warn',
+        resolutionActions: item.resolutionActions,
       });
     }
     for (const worktree of toArray(data.generated_worktrees || data.generatedWorktrees)) {
       const item = normalizeWorktreeDiagnosticGeneratedWorktree(worktree);
+      const primaryAction = item.resolutionActions[0] || null;
       entries.push({
         kind: 'generated_worktree',
         kindLabel: worktreeDiagnosticsEntryKindLabel('generated_worktree'),
-        title: worktreeDiagnosticsEntryKindLabel('generated_worktree'),
+        title: primaryAction ? worktreeResolutionActionLabel(primaryAction.kind) : worktreeDiagnosticsEntryKindLabel('generated_worktree'),
         summary: item.reason || (item.orphaned ? t('worktree.filterOrphaned') : t('worktree.filterActive')),
-        meta: [item.path, item.contractPath, item.contractRunDir].filter(Boolean).join(' | '),
+        meta: [
+          primaryAction ? `${worktreeResolutionActionLabel(primaryAction.kind)} | ${worktreeResolutionActionStatusLabel(primaryAction.status)}` : '',
+          item.path,
+          item.contractPath,
+          item.contractRunDir,
+        ].filter(Boolean).join(' | '),
         path: item.path || item.contractPath || '',
         categories: item.categories,
         tone: item.orphaned ? 'warn' : 'info',
+        resolutionActions: item.resolutionActions,
       });
     }
     for (const issue of toArray(data.issues)) {
@@ -8338,6 +8436,42 @@
           <div class="section-banner__title">${escapeHTML(label)}</div>
           <div class="section-banner__copy">${escapeHTML(message)}</div>
         </div>
+      </div>
+    `;
+  }
+
+  function worktreeResolutionActionToneClass(status) {
+    const normalized = toText(status, '').toLowerCase();
+    if (normalized === 'done') return 'chip--accent';
+    if (normalized === 'failed') return 'chip--err';
+    if (normalized === 'required') return 'chip--warn';
+    return 'chip--info';
+  }
+
+  function formatWorktreeRetrySchedule(value) {
+    const schedule = toArray(value)
+      .map((item) => toNumber(item, NaN))
+      .filter((item) => Number.isFinite(item))
+      .map((item) => `${item.toFixed(item >= 0.1 ? 1 : 2)}s`);
+    return schedule.join(', ');
+  }
+
+  function renderWorktreeResolutionActions(actions) {
+    const normalized = normalizeWorktreeResolutionActions(actions);
+    if (!normalized.length) {
+      return `<div class="summary-note">${escapeHTML(t('common.noDataAvailableYet'))}</div>`;
+    }
+    return `
+      <div class="compact-list">
+        ${normalized.map((action) => `
+          <div class="compact-list__item">
+            <span class="compact-list__bullet"></span>
+            <div>
+              <div class="compact-list__body">${chip(worktreeResolutionActionLabel(action.kind), worktreeResolutionActionToneClass(action.status))}</div>
+              <div class="compact-list__meta">${escapeHTML([worktreeResolutionActionStatusLabel(action.status), action.path, action.detail].filter(Boolean).join(' | '))}</div>
+            </div>
+          </div>
+        `).join('')}
       </div>
     `;
   }
@@ -15078,12 +15212,17 @@
       .join('');
     const meta = toText(entry.meta, '').trim();
     const summary = toText(entry.summary, '').trim();
+    const actionLabel = toText(entry.title, '').trim();
+    const actionChip = actionLabel && actionLabel !== toText(entry.kindLabel, '').trim()
+      ? chip(actionLabel, worktreeDiagnosticsEntryToneClass(entry.tone))
+      : '';
     return `
       <div class="compact-list__item worktree-diagnostics__entry">
         <span class="compact-list__bullet"></span>
         <div class="worktree-diagnostics__entry-body">
           <div class="worktree-diagnostics__entry-head">
             ${chip(entry.kindLabel || worktreeDiagnosticsEntryKindLabel(entry.kind), worktreeDiagnosticsEntryToneClass(entry.tone))}
+            ${actionChip}
             <div class="worktree-diagnostics__entry-categories">${categoryChips}</div>
           </div>
           <div class="worktree-diagnostics__entry-summary">${escapeHTML(summary || t('common.none'))}</div>
@@ -15156,6 +15295,15 @@
     const review = state.worktreeMerge;
     const status = toText(review.status, 'none');
     const cleanupState = toText(review.cleanupState, 'none');
+    const cleanupDetails = toObject(review.cleanupDetails || review.cleanup_details);
+    const resolutionActions = normalizeWorktreeResolutionActions(review.resolutionActions || review.resolution_actions);
+    const lockingPath = toText(cleanupDetails.lockingPath || cleanupDetails.locking_path || cleanupDetails.path, '');
+    const affectedArtifact = toText(
+      cleanupDetails.affectedArtifact || cleanupDetails.affected_artifact || cleanupDetails.worktreeDir || cleanupDetails.worktree_dir || review.worktreeDir || review.cleanupPath,
+      ''
+    );
+    const retrySchedule = formatWorktreeRetrySchedule(cleanupDetails.retrySchedule || cleanupDetails.retry_schedule);
+    const rebootGuidance = toText(cleanupDetails.rebootGuidance || cleanupDetails.reboot_guidance, '');
     const cleanupFailed = cleanupState === 'failed' || status === 'applied_cleanup_failed' || status === 'discard_cleanup_failed';
     const reviewRequired = Boolean(review.reviewRequired || status === 'error' || (status && status !== 'none' && status !== 'applied' && status !== 'discarded'));
     const actionEnabled = worktreeActionEnabled(review, 'merge');
@@ -15225,6 +15373,18 @@
       { label: t('worktree.cleanupMessage'), value: review.cleanupMessage || '--', meta: t('worktree.cleanupStatusDetail') },
       { label: t('worktree.runnerRc'), value: String(review.runnerRc ?? review.lastRc ?? 0), meta: t('worktree.exportStatus') },
     ];
+    if (lockingPath) {
+      detailRows.push({ label: t('worktree.lockingPath'), value: lockingPath, meta: t('worktree.cleanupRequired') });
+    }
+    if (affectedArtifact) {
+      detailRows.push({ label: t('worktree.affectedArtifact'), value: affectedArtifact, meta: t('worktree.cleanupTarget') });
+    }
+    if (retrySchedule) {
+      detailRows.push({ label: t('worktree.retrySchedule'), value: retrySchedule, meta: t('worktree.cleanupRequired') });
+    }
+    if (rebootGuidance) {
+      detailRows.push({ label: t('worktree.rebootGuidance'), value: rebootGuidance, meta: t('worktree.manualRecovery') });
+    }
     const bannerTone = reviewSummary.tone;
     const bannerTitle = reviewSummary.title;
     const bannerCopy = reviewSummary.copy;
@@ -15234,6 +15394,7 @@
     const copyPatchAttrs = canCopyPatch
       ? ''
       : `disabled aria-disabled="true" title="${escapeHTML(t('worktree.noPatchPathAvailable'))}"`;
+    const cleanupActionsHTML = renderWorktreeResolutionActions(resolutionActions);
     const riskNoteItems = (() => {
       if (cleanupFailed) {
         const cleanupPath = review.cleanupPath || review.worktreeDir || review.worktree || '--';
@@ -15369,6 +15530,12 @@
                 `).join('') : `<div class="summary-note">${escapeHTML(t('common.noDataAvailableYet'))}</div>`}
               </div>
             `
+          )}
+
+          ${panel(
+            t('worktree.cleanupActions'),
+            cleanupFailed ? t('worktree.cleanupRequired') : reviewRequired ? t('worktree.confirmationRequired') : t('worktree.finalizedWorktree'),
+            cleanupActionsHTML
           )}
 
           ${panel(

@@ -80,6 +80,26 @@ WORKTREE_DIAGNOSTIC_CATEGORY_ORDER = (
     "missing_patch",
 )
 
+WORKTREE_RESOLUTION_ACTION_ORDER = (
+    "source_safe_discard",
+    "generated_worktree_remove",
+    "stale_marker_prune",
+    "cleanup_failed_reconcile",
+)
+
+WORKTREE_CLEANUP_FAILED_STATUS_MAP: dict[str, dict[str, str]] = {
+    "applied_cleanup_failed": {
+        "artifact_name": "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json",
+        "final_status": "applied",
+        "final_artifact_name": "WORKTREE_MERGE_APPLIED.json",
+    },
+    "discard_cleanup_failed": {
+        "artifact_name": "WORKTREE_MERGE_DISCARD_CLEANUP_FAILED.json",
+        "final_status": "discarded",
+        "final_artifact_name": "WORKTREE_MERGE_DISCARDED.json",
+    },
+}
+
 
 def _worktree_normalize_diagnostic_category(value: object) -> str:
     text = str(value or "").strip().lower().replace("-", "_")
@@ -107,6 +127,143 @@ def _worktree_normalize_diagnostic_categories(value: object) -> list[str]:
         if _worktree_normalize_diagnostic_category(item) in WORKTREE_DIAGNOSTIC_CATEGORY_ORDER
     }
     return [category for category in WORKTREE_DIAGNOSTIC_CATEGORY_ORDER if category in requested]
+
+
+def _worktree_resolution_action(
+    kind: str,
+    status: str,
+    *,
+    path: str = "",
+    detail: str = "",
+) -> dict[str, object]:
+    action = {
+        "kind": str(kind),
+        "status": str(status),
+    }
+    if path:
+        action["path"] = str(path)
+    if detail:
+        action["detail"] = str(detail)
+    return action
+
+
+def worktree_resolution_actions(
+    status: str,
+    *,
+    source_repo: str = "",
+    worktree_dir: str = "",
+    cleanup_path: str = "",
+    pending_paths: Sequence[str] | None = None,
+    cleanup_message: str = "",
+    artifact_path: str = "",
+    reconciliation: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
+    normalized = str(status or "").strip().lower()
+    marker_path = next((str(path).strip() for path in pending_paths or [] if str(path).strip()), "")
+    cleanup_target = str(cleanup_path or worktree_dir).strip()
+    worktree_target = str(worktree_dir or cleanup_target).strip()
+    source_repo_text = str(source_repo).strip()
+    artifact_path_text = str(artifact_path).strip()
+    reconciliation_data = dict(reconciliation or {})
+    actions: list[dict[str, object]] = []
+
+    if normalized in {"discarded", "discard_cleanup_failed"}:
+        actions.append(
+            _worktree_resolution_action(
+                "source_safe_discard",
+                "done",
+                path=source_repo_text,
+                detail="Discard recorded without changing source repository files.",
+            )
+        )
+
+    if normalized in {"applied", "discarded", "applied_cleanup_failed", "discard_cleanup_failed"}:
+        remove_status = "failed" if normalized in WORKTREE_CLEANUP_FAILED_STATUS_MAP else "done"
+        remove_detail = (
+            cleanup_message or "Generated worktree removal is still blocked."
+            if remove_status == "failed"
+            else "Generated worktree removed."
+        )
+        actions.append(
+            _worktree_resolution_action(
+                "generated_worktree_remove",
+                remove_status,
+                path=worktree_target,
+                detail=remove_detail,
+            )
+        )
+        actions.append(
+            _worktree_resolution_action(
+                "stale_marker_prune",
+                "done",
+                path=marker_path,
+                detail="Pending marker paths were cleared after the worktree result was finalized.",
+            )
+        )
+
+    if normalized == "stale_pending_marker":
+        actions.append(
+            _worktree_resolution_action(
+                "stale_marker_prune",
+                "required",
+                path=marker_path,
+                detail="Remove or repair the stale pending marker only after verifying the patch metadata.",
+            )
+        )
+
+    if normalized == "orphaned_worktree":
+        actions.append(
+            _worktree_resolution_action(
+                "generated_worktree_remove",
+                "required",
+                path=worktree_target,
+                detail="Remove the orphaned generated worktree after verifying no active marker still references it.",
+            )
+        )
+
+    if normalized in WORKTREE_CLEANUP_FAILED_STATUS_MAP:
+        blocking_paths = [
+            str(path).strip()
+            for path in reconciliation_data.get("blocking_paths", [])
+            if str(path).strip()
+        ]
+        reconcile_status = "done" if reconciliation_data.get("reconciled") else "required"
+        if reconcile_status == "done":
+            reconcile_detail = "Cleanup-failed artifact reconciled after the worktree path and marker state were cleared."
+        elif blocking_paths:
+            reconcile_detail = f"Still blocked by: {', '.join(blocking_paths)}"
+        else:
+            reconcile_detail = "Keep the cleanup-failed artifact visible until the worktree path and marker state are reconciled."
+        actions.append(
+            _worktree_resolution_action(
+                "cleanup_failed_reconcile",
+                reconcile_status,
+                path=artifact_path_text,
+                detail=reconcile_detail,
+            )
+        )
+
+    reconciled_from = str(
+        reconciliation_data.get("reconciled_from")
+        or reconciliation_data.get("cleanup_reconciled_from")
+        or ""
+    ).strip().lower()
+    if normalized in {"applied", "discarded"} and reconciled_from in WORKTREE_CLEANUP_FAILED_STATUS_MAP:
+        actions.append(
+            _worktree_resolution_action(
+                "cleanup_failed_reconcile",
+                "done",
+                path=artifact_path_text,
+                detail="Cleanup-failed artifact was reconciled after the generated worktree path and marker state cleared.",
+            )
+        )
+
+    ordered_actions: list[dict[str, object]] = []
+    for action_kind in WORKTREE_RESOLUTION_ACTION_ORDER:
+        for action in actions:
+            if action.get("kind") == action_kind:
+                ordered_actions.append(action)
+    return ordered_actions
 
 
 def _worktree_diagnostic_category_counts(*collections: Sequence[dict[str, object]]) -> dict[str, int]:
@@ -1040,6 +1197,8 @@ def _worktree_cleanup_attempt_details(
         "attempt": int(attempt),
         "operation": str(operation),
         "path": cleanup_path,
+        "locking_path": cleanup_path,
+        "affected_artifact": worktree_dir.as_posix(),
         "worktree_dir": worktree_dir.as_posix(),
         "error_type": error.__class__.__name__,
         "message": str(error).strip() or error.__class__.__name__,
@@ -1077,6 +1236,7 @@ def _remove_generated_worktree_with_retry(
     last_error: BaseException | None = None
     total_attempts = max(1, int(max_attempts))
     backoff = max(0.0, float(initial_backoff_seconds))
+    retry_schedule_seconds: list[float] = []
 
     for attempt in range(1, total_attempts + 1):
         try:
@@ -1096,10 +1256,15 @@ def _remove_generated_worktree_with_retry(
         if not worktree_dir.exists():
             return
         if attempt < total_attempts:
+            retry_delay = round(backoff or initial_backoff_seconds, 3)
+            attempts[-1]["next_retry_seconds"] = retry_delay
+            retry_schedule_seconds.append(retry_delay)
             time.sleep(backoff)
             backoff = min(backoff * 2 if backoff else initial_backoff_seconds, 0.25)
 
     blocked_path = attempts[-1]["path"] if attempts else worktree_dir.as_posix()
+    locking_path = attempts[-1].get("locking_path") if attempts else blocked_path
+    locking_path_text = str(locking_path or blocked_path).strip() or blocked_path
     message = f"Failed to remove generated worktree after {len(attempts) or total_attempts} attempts: {blocked_path}"
     if attempts:
         last_attempt = attempts[-1]
@@ -1109,14 +1274,25 @@ def _remove_generated_worktree_with_retry(
             message = f"{message} ({last_attempt_type}: {last_attempt_message})"
     details: dict[str, object] = {
         "path": blocked_path,
+        "locking_path": locking_path_text,
+        "affected_artifact": worktree_dir.as_posix(),
         "worktree_dir": worktree_dir.as_posix(),
         "attempts": attempts,
         "operation": "shutil.rmtree",
+        "retry_schedule_seconds": retry_schedule_seconds,
+        "retry_schedule": retry_schedule_seconds,
+        "user_mode_cleanup_progress": False,
     }
     if git_remove is not None:
         details["git_worktree_remove"] = dict(git_remove)
     if git_prune is not None:
         details["git_worktree_prune"] = dict(git_prune)
+    if os.name == "nt":
+        details["reboot_required"] = True
+        details["reboot_guidance"] = (
+            "Close the process holding the locking path, retry after the scheduled backoff, "
+            "and reboot Windows if user-mode cleanup still cannot make progress."
+        )
     raise WorktreeCleanupError(message, cleanup_path=str(blocked_path), details=details, attempts=attempts) from last_error
 
 
@@ -1828,11 +2004,166 @@ def _worktree_filter_diagnostics_result(
     return filtered
 
 
+def _worktree_cleanup_artifact_dirs(repo: Path, run_dir: Path | None = None) -> list[Path]:
+    search_dirs: list[Path] = []
+    if run_dir is not None:
+        search_dirs.append(run_dir.expanduser().resolve())
+    search_dirs.append((repo / ".AgentCLI").expanduser().resolve())
+    runs_root = repo / ".AgentCLI" / "agent_runs"
+    if runs_root.exists():
+        for candidate in sorted([path for path in runs_root.iterdir() if path.is_dir()], key=lambda path: path.name, reverse=True):
+            search_dirs.append(candidate.expanduser().resolve())
+    uniq: list[Path] = []
+    seen: set[str] = set()
+    for directory in search_dirs:
+        key = directory.as_posix()
+        if key not in seen:
+            seen.add(key)
+            uniq.append(directory)
+    return uniq
+
+
+def _path_exists_safely(path_text: str) -> bool:
+    text = str(path_text or "").strip()
+    if not text:
+        return False
+    try:
+        return Path(text).expanduser().exists()
+    except Exception:
+        return False
+
+
+def _cleanup_failed_reconciliation_state(
+    payload: dict[str, object],
+    artifact_path: Path,
+) -> dict[str, object]:
+    artifact_status = _payload_text(payload, "status").lower()
+    if not artifact_status:
+        artifact_name = artifact_path.name
+        artifact_status = next(
+            (
+                status_name
+                for status_name, details in WORKTREE_CLEANUP_FAILED_STATUS_MAP.items()
+                if details["artifact_name"] == artifact_name
+            ),
+            "cleanup_failed",
+        )
+    artifact_mapping = WORKTREE_CLEANUP_FAILED_STATUS_MAP.get(artifact_status, {})
+    final_status = str(artifact_mapping.get("final_status") or "").strip().lower()
+    worktree_dir = _worktree_text_path(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree"))
+    cleanup_path = _worktree_text_path(payload.get("cleanup_path") or payload.get("cleanupPath") or worktree_dir)
+    pending_candidates = _pending_companion_paths(payload, artifact_path.with_name(WORKTREE_MERGE_PENDING))
+    existing_pending_markers = [
+        candidate.resolve().as_posix() if candidate.exists() else candidate.as_posix()
+        for candidate in pending_candidates
+        if candidate.exists()
+    ]
+    worktree_exists = _path_exists_safely(worktree_dir)
+    cleanup_path_exists = _path_exists_safely(cleanup_path)
+    blocking_paths: list[str] = []
+    if worktree_exists and worktree_dir:
+        blocking_paths.append(worktree_dir)
+    if cleanup_path_exists and cleanup_path and cleanup_path not in blocking_paths:
+        blocking_paths.append(cleanup_path)
+    for marker_path in existing_pending_markers:
+        if marker_path not in blocking_paths:
+            blocking_paths.append(marker_path)
+    worktree_state = "reconciled" if not worktree_exists and not cleanup_path_exists else "present"
+    marker_state = "reconciled" if not existing_pending_markers else "present"
+    reconciled = bool(final_status and worktree_state == "reconciled" and marker_state == "reconciled")
+    return {
+        "artifact_path": artifact_path.resolve().as_posix(),
+        "artifact_status": artifact_status,
+        "final_status": final_status,
+        "final_artifact_name": str(artifact_mapping.get("final_artifact_name") or "").strip(),
+        "worktree_dir": worktree_dir,
+        "worktree_exists": worktree_exists,
+        "cleanup_path": cleanup_path,
+        "cleanup_path_exists": cleanup_path_exists,
+        "pending_marker_paths": [candidate.as_posix() for candidate in pending_candidates],
+        "existing_pending_markers": existing_pending_markers,
+        "marker_state": marker_state,
+        "worktree_state": worktree_state,
+        "blocking_paths": blocking_paths,
+        "reconciled": reconciled,
+        "reconciled_from": artifact_status if reconciled else "",
+    }
+
+
+def reconcile_cleanup_failed_artifacts(repo: Path, run_dir: Path | None = None) -> list[dict[str, object]]:
+    repo_resolved = repo.expanduser().resolve()
+    reconciled_states: list[dict[str, object]] = []
+    for directory in _worktree_cleanup_artifact_dirs(repo_resolved, run_dir):
+        for status_name, mapping in WORKTREE_CLEANUP_FAILED_STATUS_MAP.items():
+            artifact_path = directory / mapping["artifact_name"]
+            if not artifact_path.exists():
+                continue
+            try:
+                payload = _read_json_payload(artifact_path)
+            except Exception:
+                reconciled_states.append(
+                    {
+                        "artifact_path": artifact_path.resolve().as_posix(),
+                        "artifact_status": status_name,
+                        "final_status": mapping["final_status"],
+                        "reconciled": False,
+                        "malformed": True,
+                    }
+                )
+                continue
+            state = _cleanup_failed_reconciliation_state(payload, artifact_path)
+            if state.get("reconciled") and state.get("final_status") and state.get("final_artifact_name"):
+                final_artifact = artifact_path.with_name(str(state["final_artifact_name"]))
+                final_payload: dict[str, object] = {}
+                if final_artifact.exists():
+                    try:
+                        final_payload = _read_json_payload(final_artifact)
+                    except Exception:
+                        final_payload = {}
+                if not final_payload:
+                    final_payload = dict(payload)
+                final_payload["status"] = str(state["final_status"])
+                final_payload["resolved_at"] = now_iso()
+                final_payload["cleanup_reconciled_at"] = now_iso()
+                final_payload["cleanup_reconciled_from"] = str(state["artifact_status"])
+                final_payload["cleanup_path"] = _worktree_text_path(
+                    final_payload.get("worktree_dir") or final_payload.get("worktreeDir") or final_payload.get("worktree")
+                )
+                final_payload["cleanup_reconciliation"] = {
+                    **state,
+                    "reconciled": True,
+                    "reconciled_from": str(state["artifact_status"]),
+                }
+                final_payload["resolution_actions"] = worktree_resolution_actions(
+                    str(state["final_status"]),
+                    source_repo=_payload_text(final_payload, "source_repo", "sourceRepo"),
+                    worktree_dir=_worktree_text_path(final_payload.get("worktree_dir") or final_payload.get("worktreeDir") or final_payload.get("worktree")),
+                    cleanup_path=_worktree_text_path(final_payload.get("worktree_dir") or final_payload.get("worktreeDir") or final_payload.get("worktree")),
+                    pending_paths=state.get("pending_marker_paths") if isinstance(state.get("pending_marker_paths"), list) else [],
+                    artifact_path=artifact_path.resolve().as_posix(),
+                    reconciliation=final_payload["cleanup_reconciliation"] if isinstance(final_payload.get("cleanup_reconciliation"), dict) else state,
+                )
+                final_payload.pop("cleanup_error", None)
+                final_payload.pop("cleanup_message", None)
+                final_payload.pop("cleanup_details", None)
+                final_payload.pop("cleanup_attempts", None)
+                safe_write_text(final_artifact, json.dumps(final_payload, ensure_ascii=False, indent=2) + "\n")
+                try:
+                    artifact_path.unlink()
+                except Exception:
+                    pass
+                state["cleared"] = True
+                state["final_artifact_path"] = final_artifact.resolve().as_posix()
+            reconciled_states.append(state)
+    return reconciled_states
+
+
 def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None = None) -> dict[str, object]:
     repo_resolved = repo.expanduser().resolve()
     source_root = git_show_toplevel(repo_resolved) or repo_resolved.as_posix()
     scanned_at = now_iso()
     run_dirs = _worktree_run_dirs(repo_resolved)
+    reconcile_cleanup_failed_artifacts(repo_resolved)
     central_pending = repo_resolved / ".AgentCLI" / WORKTREE_MERGE_PENDING
     generated_root = _generated_worktree_home(repo_resolved)
     generated_worktrees: list[dict[str, object]] = []
@@ -1904,6 +2235,10 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
         except Exception as ex:
             reason = str(ex).strip() or ex.__class__.__name__
             marker_categories = ["pending", "stale"]
+            resolution_actions = worktree_resolution_actions(
+                "stale_pending_marker",
+                pending_paths=[marker_path],
+            )
             pending_markers.append(
                 {
                     "path": marker_path,
@@ -1919,6 +2254,7 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
                     "exists": True,
                     "stale": True,
                     "categories": marker_categories,
+                    "resolution_actions": resolution_actions,
                 }
             )
             add_issue(
@@ -1946,6 +2282,10 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
             marker_categories.append("active")
         if payload_patch_path and not Path(payload_patch_path).exists():
             marker_categories.append("missing_patch")
+        resolution_actions = worktree_resolution_actions(
+            "stale_pending_marker" if is_stale else "pending",
+            pending_paths=[marker_path],
+        )
         pending_markers.append(
             {
                 "path": marker_path,
@@ -1961,6 +2301,7 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
                 "exists": True,
                 "stale": is_stale,
                 "categories": marker_categories,
+                "resolution_actions": resolution_actions,
             }
         )
         register_reference(payload_worktree_dir)
@@ -1993,8 +2334,12 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
     for run_dir in run_dirs:
         scan_pending_marker(run_dir / WORKTREE_MERGE_PENDING, scope="run", run_dir_text=run_dir.resolve().as_posix())
 
-        for artifact_name in ("WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json", "WORKTREE_MERGE_DISCARD_CLEANUP_FAILED.json"):
-            artifact_path = run_dir / artifact_name
+    for artifact_dir in _worktree_cleanup_artifact_dirs(repo_resolved):
+        for artifact_name in (
+            WORKTREE_CLEANUP_FAILED_STATUS_MAP["applied_cleanup_failed"]["artifact_name"],
+            WORKTREE_CLEANUP_FAILED_STATUS_MAP["discard_cleanup_failed"]["artifact_name"],
+        ):
+            artifact_path = artifact_dir / artifact_name
             if not artifact_path.exists():
                 continue
             try:
@@ -2002,11 +2347,17 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
             except Exception as ex:
                 reason = str(ex).strip() or ex.__class__.__name__
                 artifact_categories = ["cleanup_failed", "active"]
+                artifact_path_text = artifact_path.resolve().as_posix()
+                resolution_actions = worktree_resolution_actions(
+                    "cleanup_failed",
+                    artifact_path=artifact_path_text,
+                    cleanup_message=reason,
+                )
                 cleanup_failed.append(
                     {
-                        "path": artifact_path.resolve().as_posix(),
+                        "path": artifact_path_text,
                         "status": "malformed",
-                        "run_dir": run_dir.resolve().as_posix(),
+                        "run_dir": artifact_dir.resolve().as_posix() if artifact_dir.name != ".AgentCLI" else "",
                         "source_repo": "",
                         "worktree_dir": "",
                         "patch_path": "",
@@ -2015,18 +2366,20 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
                         "cleanup_details": {},
                         "cleanup_attempts": [],
                         "categories": artifact_categories,
+                        "resolution_actions": resolution_actions,
                     }
                 )
                 add_issue(
                     "cleanup_failed",
                     f"Cleanup-failed artifact is malformed: {reason}",
                     severity="error",
-                    path=artifact_path.resolve().as_posix(),
+                    path=artifact_path_text,
                     categories=[category for category in artifact_categories if category != "active"],
-                    details={"run_dir": run_dir.resolve().as_posix(), "reason": reason},
+                    details={"run_dir": artifact_dir.resolve().as_posix() if artifact_dir.name != ".AgentCLI" else "", "reason": reason},
                 )
                 continue
 
+            reconciliation = _cleanup_failed_reconciliation_state(payload, artifact_path)
             payload_worktree_dir = _worktree_text_path(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree"))
             payload_patch_path = _worktree_text_path(payload.get("patch_path") or payload.get("patchPath") or payload.get("patch"))
             payload_cleanup_path = _worktree_text_path(payload.get("cleanup_path") or payload.get("cleanupPath") or payload_worktree_dir)
@@ -2041,11 +2394,21 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
             cleanup_categories = ["cleanup_failed", "active"]
             if payload_patch_path and not Path(payload_patch_path).exists():
                 cleanup_categories.append("missing_patch")
+            resolution_actions = worktree_resolution_actions(
+                status,
+                source_repo=_worktree_text_path(payload.get("source_repo") or payload.get("sourceRepo")),
+                worktree_dir=payload_worktree_dir,
+                cleanup_path=payload_cleanup_path,
+                pending_paths=reconciliation.get("pending_marker_paths") if isinstance(reconciliation.get("pending_marker_paths"), list) else [],
+                cleanup_message=payload_cleanup_message,
+                artifact_path=artifact_path.resolve().as_posix(),
+                reconciliation=reconciliation,
+            )
             cleanup_failed.append(
                 {
                     "path": artifact_path.resolve().as_posix(),
                     "status": status,
-                    "run_dir": run_dir.resolve().as_posix(),
+                    "run_dir": _worktree_text_path(payload.get("run_dir") or payload.get("runDir")),
                     "source_repo": _worktree_text_path(payload.get("source_repo") or payload.get("sourceRepo")),
                     "worktree_dir": payload_worktree_dir,
                     "patch_path": payload_patch_path,
@@ -2054,6 +2417,8 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
                     "cleanup_details": payload_cleanup_details,
                     "cleanup_attempts": payload_cleanup_attempts,
                     "categories": cleanup_categories,
+                    "reconciliation": reconciliation,
+                    "resolution_actions": resolution_actions,
                 }
             )
             register_reference(payload_worktree_dir)
@@ -2064,12 +2429,13 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
                 path=artifact_path.resolve().as_posix(),
                 categories=[category for category in cleanup_categories if category != "active"],
                 details={
-                    "run_dir": run_dir.resolve().as_posix(),
+                    "run_dir": _worktree_text_path(payload.get("run_dir") or payload.get("runDir")),
                     "worktree_dir": payload_worktree_dir,
                     "patch_path": payload_patch_path,
                     "cleanup_path": payload_cleanup_path,
                     "cleanup_message": payload_cleanup_message,
                     "status": status,
+                    "reconciliation": reconciliation,
                 },
             )
             if payload_patch_path and not Path(payload_patch_path).exists():
@@ -2077,7 +2443,7 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
                     payload_patch_path,
                     reason=payload_cleanup_message or "cleanup-failed artifact references a missing patch",
                     marker_path=artifact_path.resolve().as_posix(),
-                    run_dir=run_dir.resolve().as_posix(),
+                    run_dir=_worktree_text_path(payload.get("run_dir") or payload.get("runDir")),
                     scope="cleanup_failed",
                     categories=cleanup_categories,
                 )
@@ -2141,6 +2507,10 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
             or (not contract and not active_reference)
         )
         worktree_categories = ["orphaned"] if is_orphaned else ["active"]
+        resolution_actions = worktree_resolution_actions(
+            "orphaned_worktree" if is_orphaned else "generated_worktree",
+            worktree_dir=worktree_path,
+        )
 
         generated_worktrees.append(
             {
@@ -2154,6 +2524,7 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
                 "orphaned": is_orphaned,
                 "referenced": active_reference,
                 "categories": worktree_categories,
+                "resolution_actions": resolution_actions,
             }
         )
         if is_orphaned:
@@ -2518,7 +2889,7 @@ def _write_pending_status(
     message: str = "",
     *,
     extra: dict[str, object] | None = None,
-) -> None:
+) -> list[Path]:
     updated = dict(payload)
     updated["status"] = status
     updated["resolved_at"] = now_iso()
@@ -2527,13 +2898,17 @@ def _write_pending_status(
     if extra:
         updated.update(extra)
     text = json.dumps(updated, ensure_ascii=False, indent=2) + "\n"
+    written_paths: list[Path] = []
     for path in reversed(_pending_companion_paths(payload, pending_path)):
         if path.exists():
-            safe_write_text(path.with_name(f"WORKTREE_MERGE_{status.upper()}.json"), text)
+            target = path.with_name(f"WORKTREE_MERGE_{status.upper()}.json")
+            safe_write_text(target, text)
+            written_paths.append(target)
             try:
                 path.unlink()
             except Exception:
                 pass
+    return written_paths
 
 
 def _cleanup_failure_result(
@@ -2572,8 +2947,33 @@ def _cleanup_failure_result(
         updates["cleanup_details"] = cleanup_details
     if cleanup_attempts:
         updates["cleanup_attempts"] = cleanup_attempts
-
-    _write_pending_status(payload, pending_path, status, cleanup_message, extra=updates)
+    artifact_name = WORKTREE_CLEANUP_FAILED_STATUS_MAP.get(status, {}).get("artifact_name", f"WORKTREE_MERGE_{status.upper()}.json")
+    artifact_hint = pending_path.with_name(artifact_name)
+    written_paths = _write_pending_status(payload, pending_path, status, cleanup_message, extra=updates)
+    artifact_path = next(
+        (path for path in written_paths if path.resolve() == artifact_hint.resolve()),
+        written_paths[0] if written_paths else artifact_hint,
+    )
+    cleanup_reconciliation = _cleanup_failed_reconciliation_state(
+        {**payload, **updates, "status": status},
+        artifact_path,
+    )
+    resolution_actions = worktree_resolution_actions(
+        status,
+        source_repo=_payload_text(payload, "source_repo", "sourceRepo"),
+        worktree_dir=_worktree_text_path(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree")),
+        cleanup_path=cleanup_path,
+        pending_paths=[path.as_posix() for path in _pending_companion_paths(payload, pending_path)],
+        cleanup_message=cleanup_message,
+        artifact_path=artifact_path.as_posix(),
+        reconciliation=cleanup_reconciliation,
+    )
+    updates["cleanup_reconciliation"] = cleanup_reconciliation
+    updates["resolution_actions"] = resolution_actions
+    artifact_payload = dict(payload)
+    artifact_payload["status"] = status
+    artifact_payload.update(updates)
+    safe_write_text(artifact_path, json.dumps(artifact_payload, ensure_ascii=False, indent=2) + "\n")
     result = dict(payload)
     result["status"] = status
     result.update(updates)
@@ -2663,6 +3063,13 @@ def _apply_fast_forward_then_dirty_patch(
         split_merge_metadata["dirtyPatchApplied"] = True
 
     updates = dict(split_merge_metadata)
+    updates["resolution_actions"] = worktree_resolution_actions(
+        "applied",
+        source_repo=source_repo.as_posix(),
+        worktree_dir=worktree_dir.as_posix(),
+        cleanup_path=worktree_dir.as_posix(),
+        pending_paths=[path.as_posix() for path in _pending_companion_paths(payload, pending_path)],
+    )
     result_payload = dict(payload)
     result_payload.update(updates)
     try:
@@ -2678,6 +3085,7 @@ def _apply_fast_forward_then_dirty_patch(
     _write_pending_status(result_payload, pending_path, "applied", extra=updates)
     result = dict(result_payload)
     result["status"] = "applied"
+    result["resolution_actions"] = updates["resolution_actions"]
     return result
 
 
@@ -2845,9 +3253,19 @@ def apply_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
             ex,
             fallback_cleanup_path=worktree_dir,
         )
-    _write_pending_status(payload, pending_path, "applied")
+    applied_updates = {
+        "resolution_actions": worktree_resolution_actions(
+            "applied",
+            source_repo=source_repo.as_posix(),
+            worktree_dir=worktree_dir.as_posix(),
+            cleanup_path=worktree_dir.as_posix(),
+            pending_paths=[path.as_posix() for path in _pending_companion_paths(payload, pending_path)],
+        )
+    }
+    _write_pending_status(payload, pending_path, "applied", extra=applied_updates)
     result = dict(payload)
     result["status"] = "applied"
+    result.update(applied_updates)
     return result
 
 
@@ -2866,9 +3284,19 @@ def discard_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
                 ex,
                 fallback_cleanup_path=worktree_dir,
             )
-    _write_pending_status(payload, pending_path, "discarded")
+    discarded_updates = {
+        "resolution_actions": worktree_resolution_actions(
+            "discarded",
+            source_repo=source_repo.as_posix(),
+            worktree_dir=worktree_dir.as_posix(),
+            cleanup_path=worktree_dir.as_posix(),
+            pending_paths=[path.as_posix() for path in _pending_companion_paths(payload, pending_path)],
+        )
+    }
+    _write_pending_status(payload, pending_path, "discarded", extra=discarded_updates)
     result = dict(payload)
     result["status"] = "discarded"
+    result.update(discarded_updates)
     return result
 
 

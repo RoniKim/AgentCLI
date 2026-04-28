@@ -300,9 +300,17 @@ class WorktreeManualMergeTests(unittest.TestCase):
         self.assertEqual(locked_file.as_posix(), error.cleanup_path)
         self.assertIn(locked_file.as_posix(), error.cleanup_message)
         self.assertEqual(locked_file.as_posix(), error.details["path"])
+        self.assertEqual(locked_file.as_posix(), error.details["locking_path"])
+        self.assertEqual(retry_worktree.as_posix(), error.details["affected_artifact"])
         self.assertEqual(locked_file.as_posix(), error.details["attempts"][0]["path"])
+        self.assertEqual(locked_file.as_posix(), error.details["attempts"][0]["locking_path"])
+        self.assertEqual(retry_worktree.as_posix(), error.details["attempts"][0]["affected_artifact"])
         self.assertEqual(4, len(error.details["attempts"]))
+        self.assertEqual([0.05, 0.1, 0.2], error.details["retry_schedule_seconds"])
         self.assertEqual(3, sleep_mock.call_count)
+        if os.name == "nt":
+            self.assertTrue(error.details["reboot_required"])
+            self.assertIn("reboot", str(error.details["reboot_guidance"]).lower())
         self.assertTrue(retry_worktree.exists())
 
     def test_apply_pending_worktree_merge_keeps_patch_applied_when_cleanup_fails(self) -> None:
@@ -337,6 +345,12 @@ index 0000000..7c890e8
         self.assertIn(locked_file.as_posix(), str(result["cleanup_error"]))
         self.assertEqual(locked_file.as_posix(), result["cleanup_details"]["path"])
         self.assertEqual(locked_file.as_posix(), result["cleanup_details"]["attempts"][0]["path"])
+        self.assertEqual("generated_worktree_remove", result["resolution_actions"][0]["kind"])
+        self.assertEqual("failed", result["resolution_actions"][0]["status"])
+        self.assertEqual("stale_marker_prune", result["resolution_actions"][1]["kind"])
+        self.assertEqual("done", result["resolution_actions"][1]["status"])
+        self.assertEqual("cleanup_failed_reconcile", result["resolution_actions"][2]["kind"])
+        self.assertEqual("required", result["resolution_actions"][2]["status"])
         self.assertEqual("from patch\n", (self.repo / "feature.txt").read_text(encoding="utf-8"))
         self.assertFalse(self.pending_path.exists())
         cleanup_artifact = self.fixture_root / "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json"
@@ -344,6 +358,7 @@ index 0000000..7c890e8
         cleanup_payload = json.loads(cleanup_artifact.read_text(encoding="utf-8"))
         self.assertEqual(locked_file.as_posix(), cleanup_payload["cleanup_path"])
         self.assertEqual(str(cleanup_error), cleanup_payload["cleanup_message"])
+        self.assertEqual("required", cleanup_payload["resolution_actions"][2]["status"])
 
     def test_apply_pending_worktree_merge_fast_forwards_commits_before_dirty_patch(self) -> None:
         base_ref = self._init_repo(source_text="base\n")
@@ -374,6 +389,10 @@ index 0000000..7c890e8
         result = apply_pending_worktree_merge(self.pending_path)
 
         self.assertEqual("applied", result["status"])
+        self.assertEqual("generated_worktree_remove", result["resolution_actions"][0]["kind"])
+        self.assertEqual("done", result["resolution_actions"][0]["status"])
+        self.assertEqual("stale_marker_prune", result["resolution_actions"][1]["kind"])
+        self.assertEqual("done", result["resolution_actions"][1]["status"])
         self.assertEqual("fast_forward_then_patch", result["merge_mode"])
         self.assertEqual(head_ref, result["fast_forward_ref"])
         self.assertEqual(head_ref, result["fastForwardRef"])
@@ -436,6 +455,12 @@ index 0000000..7c890e8
         self.assertEqual(str(cleanup_error), result["cleanup_message"])
         self.assertIn(locked_file.as_posix(), str(result["cleanup_error"]))
         self.assertEqual(locked_file.as_posix(), result["cleanup_details"]["path"])
+        self.assertEqual("source_safe_discard", result["resolution_actions"][0]["kind"])
+        self.assertEqual("done", result["resolution_actions"][0]["status"])
+        self.assertEqual("generated_worktree_remove", result["resolution_actions"][1]["kind"])
+        self.assertEqual("failed", result["resolution_actions"][1]["status"])
+        self.assertEqual("cleanup_failed_reconcile", result["resolution_actions"][3]["kind"])
+        self.assertEqual("required", result["resolution_actions"][3]["status"])
         self.assertFalse(self.pending_path.exists())
         cleanup_artifact = self.fixture_root / "WORKTREE_MERGE_DISCARD_CLEANUP_FAILED.json"
         self.assertTrue(cleanup_artifact.exists())

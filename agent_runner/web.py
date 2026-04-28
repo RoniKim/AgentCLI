@@ -37,9 +37,11 @@ from .gitops import (
     git_head,
     git_show_toplevel,
     read_pending_worktree_merge,
+    reconcile_cleanup_failed_artifacts,
     scan_worktree_diagnostics,
     summarize_worktree_diff,
     summarize_worktree_preflight,
+    worktree_resolution_actions,
     WorktreeSafetyError,
 )
 from .prompts import (
@@ -348,7 +350,11 @@ def _worktree_default_payload(repo_root: Path, run_dir: Path | None, branch: str
         "cleanupMessage": "No cleanup state is available.",
         "cleanupDetails": {},
         "cleanupAttempts": [],
+        "cleanupReconciliation": {},
+        "cleanup_reconciliation": {},
         "cleanupState": "none",
+        "resolutionActions": [],
+        "resolution_actions": [],
         "summary": "No pending worktree merge.",
         "risk": "No isolated worktree patch is pending review.",
         "changedFiles": [],
@@ -521,6 +527,9 @@ def _worktree_status_payload(
     cleanup_attempts = raw.get("cleanup_attempts") if isinstance(raw.get("cleanup_attempts"), list) else raw.get("cleanupAttempts")
     if not isinstance(cleanup_attempts, list):
         cleanup_attempts = []
+    cleanup_reconciliation = raw.get("cleanup_reconciliation") if isinstance(raw.get("cleanup_reconciliation"), dict) else raw.get("cleanupReconciliation")
+    if not isinstance(cleanup_reconciliation, dict):
+        cleanup_reconciliation = {}
     pending_file = pending_path.as_posix() if pending_path is not None else ""
     status_file = artifact_path.as_posix()
     changed_files = _worktree_normalize_changed_files(raw.get("changedFiles") or raw.get("changed_files"), patch_path, allow_placeholder=status not in {"error"})
@@ -588,6 +597,21 @@ def _worktree_status_payload(
         cleanup_state = "failed"
     elif status in {"apply_failed", "patch_not_applied", "not_applied"}:
         cleanup_state = "none"
+
+    raw_resolution_actions = raw.get("resolution_actions") if isinstance(raw.get("resolution_actions"), list) else raw.get("resolutionActions")
+    if isinstance(raw_resolution_actions, list):
+        resolution_actions = [dict(item) for item in raw_resolution_actions if isinstance(item, dict)]
+    else:
+        resolution_actions = worktree_resolution_actions(
+            "stale_pending_marker" if status == "error" and pending_path is not None else status,
+            source_repo=source_repo_value,
+            worktree_dir=worktree_dir,
+            cleanup_path=cleanup_path,
+            pending_paths=[pending_file] if pending_file else [],
+            cleanup_message=cleanup_message,
+            artifact_path=status_file,
+            reconciliation=cleanup_reconciliation,
+        )
 
     summary = base["summary"]
     review_required_message = base["reviewRequiredMessage"]
@@ -696,7 +720,11 @@ def _worktree_status_payload(
         "cleanupMessage": cleanup_message,
         "cleanupDetails": cleanup_details,
         "cleanupAttempts": cleanup_attempts,
+        "cleanupReconciliation": cleanup_reconciliation,
+        "cleanup_reconciliation": cleanup_reconciliation,
         "cleanupState": cleanup_state,
+        "resolutionActions": resolution_actions,
+        "resolution_actions": resolution_actions,
         "summary": summary,
         "risk": risk,
         "changedFiles": changed_files,
@@ -6162,6 +6190,16 @@ def _build_worktree_payload(repo: Path, run_dir: Path | None, branch: str) -> di
                     "patch_hash": str(payload.get("patch_hash") or payload.get("patchHash") or ""),
                     "pendingMarkerPath": pending_path.as_posix(),
                     "pending_marker_path": pending_path.as_posix(),
+                    "resolutionActions": worktree_resolution_actions(
+                        "stale_pending_marker",
+                        pending_paths=[pending_path.as_posix()],
+                        artifact_path=pending_path.as_posix(),
+                    ),
+                    "resolution_actions": worktree_resolution_actions(
+                        "stale_pending_marker",
+                        pending_paths=[pending_path.as_posix()],
+                        artifact_path=pending_path.as_posix(),
+                    ),
                     "runDir": str(payload.get("run_dir") or payload.get("runDir") or run_dir_value or "").strip(),
                     "runnerRc": 0,
                     "lastRc": 0,
@@ -6208,6 +6246,16 @@ def _build_worktree_payload(repo: Path, run_dir: Path | None, branch: str) -> di
                     "patch_hash": str(payload.get("patch_hash") or payload.get("patchHash") or ""),
                     "pendingMarkerPath": pending_path.as_posix(),
                     "pending_marker_path": pending_path.as_posix(),
+                    "resolutionActions": worktree_resolution_actions(
+                        "stale_pending_marker",
+                        pending_paths=[pending_path.as_posix()],
+                        artifact_path=pending_path.as_posix(),
+                    ),
+                    "resolution_actions": worktree_resolution_actions(
+                        "stale_pending_marker",
+                        pending_paths=[pending_path.as_posix()],
+                        artifact_path=pending_path.as_posix(),
+                    ),
                     "runDir": str(payload.get("run_dir") or payload.get("runDir") or run_dir_value or "").strip(),
                     "runnerRc": 0,
                     "lastRc": 0,
@@ -6365,6 +6413,7 @@ def build_snapshot(
         controller = _build_runner_controller(repo_root, cfg, cfg_path)
     controller_status = _controller_status_payload(controller)
     latest_run_dir = _resolve_latest_run_dir(repo_root, controller_status, controller)
+    reconcile_cleanup_failed_artifacts(repo_root, latest_run_dir)
     logs_events = _cycle_events(latest_run_dir)
     progress = _build_progress_payload(
         repo=repo_root,
