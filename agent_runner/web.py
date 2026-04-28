@@ -2096,6 +2096,164 @@ def _runner_control_status_payload(
     }
 
 
+def _live_state_status_label(status: str) -> str:
+    value = str(status or "").strip().lower()
+    labels = {
+        "alive": "Alive",
+        "flushing": "Flushing",
+        "idle": "Idle",
+        "stopped": "Stopped",
+        "unavailable": "Unavailable",
+    }
+    return labels.get(value, value.replace("_", " ").title() if value else "Unavailable")
+
+
+def _live_state_entry(
+    kind: str,
+    *,
+    available: bool,
+    status: str,
+    source: str = "",
+    alive: bool | None = None,
+    flushing: bool | None = None,
+    count: int | None = None,
+    alive_count: int | None = None,
+    phase: str = "",
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "kind": str(kind),
+        "available": bool(available),
+        "status": str(status or "").strip().lower() or "unavailable",
+        "source": str(source or "").strip(),
+    }
+    if alive is not None:
+        entry["alive"] = bool(alive)
+    if flushing is not None:
+        entry["flushing"] = bool(flushing)
+    if count is not None:
+        entry["count"] = max(0, int(count))
+    if alive_count is not None:
+        entry["alive_count"] = max(0, int(alive_count))
+        entry["aliveCount"] = entry["alive_count"]
+    if phase:
+        entry["phase"] = str(phase).strip()
+    entry["status_label"] = _live_state_status_label(entry["status"])
+    entry["statusLabel"] = entry["status_label"]
+    if not entry["available"]:
+        entry["status"] = "unavailable"
+        entry["status_label"] = _live_state_status_label("unavailable")
+        entry["statusLabel"] = entry["status_label"]
+    return entry
+
+
+def _build_live_state_payload(
+    controller_status: dict[str, Any] | None,
+    *,
+    progress: dict[str, Any] | None = None,
+    active_run: dict[str, Any] | None = None,
+    controller_available: bool = False,
+) -> dict[str, Any]:
+    status = controller_status if isinstance(controller_status, dict) else {}
+    progress_data = progress if isinstance(progress, dict) else {}
+    active = active_run if isinstance(active_run, dict) else {}
+    status_reason = str(status.get("reason") or "").strip()
+    controller_live_available = bool(controller_available and status and not status_reason.startswith("status_error:"))
+    controller_running = bool(status.get("running")) if controller_live_available else False
+
+    stop_progress = status.get("stop_progress")
+    if not isinstance(stop_progress, dict):
+        stop_progress = {}
+    else:
+        stop_progress = normalize_stop_progress_payload(stop_progress)
+
+    run_status = _pick_text(
+        progress_data.get("run_status"),
+        progress_data.get("runStatus"),
+        active.get("status"),
+        active.get("runStatus"),
+        active.get("executionStatus"),
+        active.get("execution_status"),
+    ).strip().lower()
+    backend_available = controller_live_available and bool(run_status or active.get("status") or active.get("executionStatus") or active.get("execution_status"))
+    backend_alive = backend_available and run_status == "running"
+    backend_status = "unavailable" if not backend_available else ("alive" if backend_alive else "idle")
+
+    tracked_child_processes = stop_progress.get("tracked_child_processes")
+    if not isinstance(tracked_child_processes, list):
+        tracked_child_processes = []
+    tracked_child_pids = stop_progress.get("tracked_child_pids")
+    if not isinstance(tracked_child_pids, list):
+        tracked_child_pids = []
+    tracked_available = controller_live_available and bool(stop_progress)
+    tracked_alive_count = 0
+    for record in tracked_child_processes:
+        if isinstance(record, dict) and bool(record.get("alive")):
+            tracked_alive_count += 1
+    tracked_count = len(tracked_child_processes) if tracked_child_processes else len(tracked_child_pids)
+    tracked_alive = tracked_available and tracked_alive_count > 0
+    tracked_status = "unavailable" if not tracked_available else ("alive" if tracked_alive else "stopped")
+
+    current_phase = stop_progress.get("current_phase") if isinstance(stop_progress.get("current_phase"), dict) else {}
+    artifact_phase = _pick_text(stop_progress.get("phase"), current_phase.get("phase")).strip().lower()
+    artifact_available = controller_live_available and bool(stop_progress)
+    artifact_flushing = artifact_available and (
+        artifact_phase == "final_artifact_collection"
+        or (artifact_phase in {"runner_wait", "timeout"} and bool(stop_progress.get("last_artifact_signal")))
+    )
+    artifact_status = "unavailable" if not artifact_available else ("flushing" if artifact_flushing else "idle")
+
+    runner_process = _live_state_entry(
+        "runner_process",
+        available=controller_live_available,
+        status="alive" if controller_running else "stopped",
+        source="controller.status.running" if controller_live_available else "unavailable",
+        alive=controller_running if controller_live_available else None,
+    )
+    task_backend = _live_state_entry(
+        "task_backend",
+        available=backend_available,
+        status=backend_status,
+        source="progress.run_status" if run_status else "active_run.status" if backend_available else "unavailable",
+        alive=backend_alive if backend_available else None,
+    )
+    tracked_children = _live_state_entry(
+        "tracked_children",
+        available=tracked_available,
+        status=tracked_status,
+        source="stop_progress.tracked_child_processes" if tracked_child_processes else "stop_progress.tracked_child_pids" if tracked_child_pids else "stop_progress",
+        alive=tracked_alive if tracked_available else None,
+        count=tracked_count if tracked_available else None,
+        alive_count=tracked_alive_count if tracked_available else None,
+    )
+    artifact_writer = _live_state_entry(
+        "artifact_writer",
+        available=artifact_available,
+        status=artifact_status,
+        source="stop_progress.current_phase.phase" if artifact_phase else "stop_progress.last_artifact_signal" if artifact_available else "unavailable",
+        flushing=artifact_flushing if artifact_available else None,
+        phase=artifact_phase if artifact_available else "",
+    )
+    live_state = {
+        "available": bool(controller_live_available or backend_available or tracked_available or artifact_available),
+        "source": "controller.status + progress + stop_progress" if controller_live_available else "unavailable",
+        "runner_process": runner_process,
+        "runnerProcess": runner_process,
+        "task_backend": task_backend,
+        "taskBackend": task_backend,
+        "tracked_children": tracked_children,
+        "trackedChildren": tracked_children,
+        "artifact_writer": artifact_writer,
+        "artifactWriter": artifact_writer,
+    }
+    live_state["items"] = [
+        live_state["runner_process"],
+        live_state["task_backend"],
+        live_state["tracked_children"],
+        live_state["artifact_writer"],
+    ]
+    return live_state
+
+
 def _runner_control_actions(
     enabled: bool,
     status_payload: dict[str, Any],
@@ -2199,6 +2357,7 @@ def _runner_control_payload(
     last_action: str = "",
     last_message: str = "",
     last_error: str = "",
+    live_state: dict[str, Any] | None = None,
     run_status: str = "",
     execution_status: str = "",
     project_complete: bool = False,
@@ -2277,6 +2436,8 @@ def _runner_control_payload(
         "startOptions": start_options,
         "actions": actions,
         "confirmation": dict(RUNNER_CONTROL_CONFIRMATIONS),
+        "live_state": live_state if isinstance(live_state, dict) else {},
+        "liveState": live_state if isinstance(live_state, dict) else {},
         "last_action": last_action,
         "last_message": last_message,
         "last_error": last_error,
@@ -2295,6 +2456,7 @@ def _live_run_payload(
     logs: dict[str, Any],
     notifications: list[dict[str, Any]],
     runner_control: dict[str, Any],
+    live_state: dict[str, Any] | None = None,
     controller_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     active = active_run if isinstance(active_run, dict) else {}
@@ -2304,6 +2466,7 @@ def _live_run_payload(
     notification_items = notifications if isinstance(notifications, list) else []
     control = runner_control if isinstance(runner_control, dict) else {}
     controller_data = controller_status if isinstance(controller_status, dict) else {}
+    live_state_data = live_state if isinstance(live_state, dict) else {}
 
     repo_path = str(active.get("repo") or _path_text(repo)).strip() or _path_text(repo)
     run_id = _pick_text(active.get("id"), active.get("runId"), progress_data.get("run_id"), "no-run")
@@ -2512,6 +2675,8 @@ def _live_run_payload(
             "reason": _pick_text(control_status.get("reason"), ""),
             "lastEvent": _pick_text(control_status.get("last_event"), control_status.get("lastEvent"), ""),
             "stopProgress": normalize_stop_progress_payload(control_status.get("stop_progress")),
+            "liveState": live_state_data,
+            "live_state": live_state_data,
         },
         "timestamps": {
             "startedAt": started_at,
@@ -2558,6 +2723,8 @@ def _live_run_payload(
         "logSource": log_summary["source"],
         "logCursor": log_cursor,
         "logState": log_state,
+        "liveState": live_state_data,
+        "live_state": live_state_data,
     }
     return live_run
 
@@ -5672,6 +5839,12 @@ def build_snapshot(
         "run_log": (latest_run_dir / "logs" / "run.log").as_posix() if latest_run_dir else "",
         "metrics": (latest_run_dir / "metrics.jsonl").as_posix() if latest_run_dir else "",
     }
+    live_state = _build_live_state_payload(
+        controller_status,
+        progress=progress,
+        active_run=active_run,
+        controller_available=controller is not None,
+    )
     runner_control = _runner_control_payload(
         controller,
         repo=repo_root,
@@ -5683,6 +5856,7 @@ def build_snapshot(
         last_action=runner_control_last_action,
         last_message=runner_control_last_message,
         last_error=runner_control_last_error,
+        live_state=live_state,
         run_status=str(progress.get("run_status") or "idle"),
         execution_status=str(progress.get("execution_status") or progress.get("executionStatus") or ""),
         project_complete=bool(progress.get("project_complete", False)),
@@ -5863,6 +6037,7 @@ def build_snapshot(
         },
         notifications=notifications,
         runner_control=runner_control,
+        live_state=live_state,
         controller_status=controller_status,
     )
 
