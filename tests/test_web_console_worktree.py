@@ -185,6 +185,58 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
         _write(self.patch_path, text)
         return self.patch_path
 
+    def _write_pending_payload(
+        self,
+        *,
+        patch_text: str,
+        base_ref: str,
+        expected_head: str,
+        branch: str,
+        source_repo_state: str = "clean",
+        worktree_state: str = "dirty",
+        run_id: str | None = None,
+        head_ref: str | None = None,
+    ) -> dict[str, object]:
+        _write(self.patch_path, patch_text)
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "status": "pending",
+            "created_at": "2026-04-26T12:02:00",
+            "run_id": run_id or self.run_dir.name,
+            "run_dir": self.run_dir.as_posix(),
+            "source_repo": self.repo.as_posix(),
+            "source_repo_root": self.repo.as_posix(),
+            "branch": branch,
+            "source_branch": branch,
+            "expected_head": expected_head,
+            "source_repo_state": source_repo_state,
+            "worktree_state": worktree_state,
+            "worktree_dir": self.worktree_dir.as_posix(),
+            "patch_path": self.patch_path.as_posix(),
+            "patch_hash": "",
+            "base_ref": base_ref,
+            "head_ref": head_ref or expected_head,
+            "last_rc": 0,
+        }
+        payload["sourceRepoRoot"] = payload["source_repo_root"]
+        payload["sourceRepoState"] = payload["source_repo_state"]
+        payload["worktreeState"] = payload["worktree_state"]
+        payload["patchHash"] = payload["patch_hash"]
+        payload["runId"] = payload["run_id"]
+        payload["runDir"] = payload["run_dir"]
+        payload["sourceRepo"] = payload["source_repo"]
+        payload["sourceBranch"] = payload["branch"]
+        payload["source_repo_state"] = source_repo_state
+        payload["sourceRepoState"] = source_repo_state
+        payload["worktreeState"] = worktree_state
+        payload["worktree_state"] = worktree_state
+        payload["baseRef"] = base_ref
+        payload["headRef"] = head_ref or expected_head
+        payload["patchPath"] = self.patch_path.as_posix()
+        payload["pendingFile"] = self.pending_path.as_posix()
+        self.pending_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return payload
+
     def test_no_pending_file_returns_read_only_empty_state(self) -> None:
         snapshot = self._build_snapshot()
         normalized = _run_adapter_harness([snapshot])[0]
@@ -307,6 +359,120 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             self.assertTrue(any(item["orphaned"] for item in diagnostics["generated_worktrees"]))
 
     def test_valid_pending_file_surfaces_review_required_fields(self) -> None:
+        changed_files = [
+            {
+                "path": "bin/data.bin",
+                "oldPath": "bin/data.bin",
+                "newPath": "bin/data.bin",
+                "kind": "binary",
+                "state": "binary",
+                "note": "binary patch",
+                "summary": "Binary patch",
+                "binary": True,
+                "deleted": False,
+                "renamed": False,
+                "large": False,
+                "truncated": False,
+                "hunks": [],
+                "lineCount": 0,
+            },
+            {
+                "path": "docs/old.md",
+                "oldPath": "docs/old.md",
+                "newPath": "docs/old.md",
+                "kind": "deleted",
+                "state": "deleted",
+                "note": "docs/old.md",
+                "summary": "Deleted file",
+                "binary": False,
+                "deleted": True,
+                "renamed": False,
+                "large": False,
+                "truncated": False,
+                "hunks": [],
+                "lineCount": 0,
+            },
+            {
+                "path": "docs/new.md",
+                "oldPath": "docs/old.md",
+                "newPath": "docs/new.md",
+                "kind": "renamed",
+                "state": "renamed",
+                "note": "docs/old.md -> docs/new.md",
+                "summary": "Renamed docs/old.md -> docs/new.md",
+                "binary": False,
+                "deleted": False,
+                "renamed": True,
+                "large": False,
+                "truncated": False,
+                "hunks": [],
+                "lineCount": 0,
+            },
+            {
+                "path": "src/large.txt",
+                "oldPath": "src/large.txt",
+                "newPath": "src/large.txt",
+                "kind": "modified",
+                "state": "modified",
+                "note": "preview truncated",
+                "summary": "Text patch | preview truncated",
+                "binary": False,
+                "deleted": False,
+                "renamed": False,
+                "large": True,
+                "truncated": True,
+                "hunks": [
+                    {
+                        "header": "@@ -1,4 +1,4 @@",
+                        "oldStart": 1,
+                        "oldCount": 4,
+                        "newStart": 1,
+                        "newCount": 4,
+                        "lines": [
+                            "-old line 1",
+                            "+new line 1",
+                            " context line",
+                        ],
+                        "truncated": True,
+                        "lineCount": 18,
+                    }
+                ],
+                "lineCount": 18,
+            },
+        ]
+        preflight = {
+            "sourceRepoState": "dirty",
+            "sourceRepoDirty": True,
+            "sourceHead": "abc12345",
+            "expectedBaseRef": "main",
+            "patchHash": "f" * 64,
+            "pendingMarkerPath": self.pending_path.as_posix(),
+            "applyCheck": {
+                "command": "git apply --check --binary --whitespace=nowarn",
+                "rc": 1,
+                "ok": False,
+                "status": "failed",
+                "message": "git apply --check failed.",
+                "output": "error: patch failed: src/large.txt:1",
+                "failedFiles": [
+                    {
+                        "path": "src/large.txt",
+                        "line": 1,
+                        "reason": "patch failed",
+                    }
+                ],
+                "failedHunks": [
+                    {
+                        "path": "src/large.txt",
+                        "line": 1,
+                        "reason": "patch failed",
+                        "header": "@@ -1,4 +1,4 @@",
+                        "lines": ["-old line 1", "+new line 1"],
+                        "truncated": False,
+                    }
+                ],
+            },
+        }
         _write(
             self.patch_path,
             "\n".join(
@@ -341,6 +507,34 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             )
             + "\n",
         )
+        payload = self._write_pending_payload(
+            patch_text=self.patch_path.read_text(encoding="utf-8"),
+            base_ref="main",
+            expected_head="abc12345",
+            branch="main",
+        )
+        payload.update(
+            {
+                "changedFiles": changed_files,
+                "changed_files": changed_files,
+                "preflight": preflight,
+                "applyCheck": preflight["applyCheck"],
+                "apply_check": preflight["applyCheck"],
+                "source_repo_state": preflight["sourceRepoState"],
+                "sourceRepoState": preflight["sourceRepoState"],
+                "source_repo_dirty": preflight["sourceRepoDirty"],
+                "sourceRepoDirty": preflight["sourceRepoDirty"],
+                "source_head": preflight["sourceHead"],
+                "sourceHead": preflight["sourceHead"],
+                "expected_base_ref": preflight["expectedBaseRef"],
+                "expectedBaseRef": preflight["expectedBaseRef"],
+                "patch_hash": preflight["patchHash"],
+                "patchHash": preflight["patchHash"],
+                "pending_marker_path": preflight["pendingMarkerPath"],
+                "pendingMarkerPath": preflight["pendingMarkerPath"],
+            }
+        )
+        self.pending_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
         snapshot = self._build_snapshot()
         normalized = _run_adapter_harness([snapshot])[0]
@@ -363,7 +557,24 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
         self.assertIn("discard-worktree", worktree["reviewRequiredMessage"])
         self.assertIn(self.patch_path.as_posix(), worktree["reviewRequiredMessage"])
         self.assertGreaterEqual(len(worktree["changedFiles"]), 1)
-        self.assertEqual("src/app.py", worktree["changedFiles"][0]["path"])
+        self.assertTrue(worktree["sourceRepoDirty"])
+        self.assertEqual(self.pending_path.as_posix(), worktree["pendingMarkerPath"])
+        self.assertEqual("binary", worktree["changedFiles"][0]["kind"])
+        self.assertTrue(worktree["changedFiles"][0]["binary"])
+        self.assertEqual("deleted", worktree["changedFiles"][1]["kind"])
+        self.assertTrue(worktree["changedFiles"][1]["deleted"])
+        self.assertEqual("renamed", worktree["changedFiles"][2]["kind"])
+        self.assertTrue(worktree["changedFiles"][2]["renamed"])
+        self.assertEqual("docs/old.md", worktree["changedFiles"][2]["oldPath"])
+        self.assertEqual("docs/new.md", worktree["changedFiles"][2]["newPath"])
+        self.assertTrue(worktree["changedFiles"][3]["large"])
+        self.assertTrue(worktree["changedFiles"][3]["truncated"])
+        self.assertEqual("failed", worktree["preflight"]["applyCheck"]["status"])
+        self.assertEqual("src/large.txt", worktree["preflight"]["applyCheck"]["failedFiles"][0]["path"])
+        self.assertEqual("@@ -1,4 +1,4 @@", worktree["preflight"]["applyCheck"]["failedHunks"][0]["header"])
+        self.assertEqual("binary", normalized["worktreeMerge"]["changedFiles"][0]["kind"])
+        self.assertTrue(normalized["worktreeMerge"]["changedFiles"][0]["binary"])
+        self.assertEqual("failed", normalized["worktreeMerge"]["preflight"]["applyCheck"]["status"])
         self.assertEqual("partial", normalized["sectionState"]["worktree"]["status"])
 
     def test_malformed_pending_file_returns_error_state(self) -> None:

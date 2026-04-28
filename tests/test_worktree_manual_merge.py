@@ -23,6 +23,7 @@ from agent_runner.gitops import (
     discard_pending_worktree_merge,
     export_worktree_patch,
     remove_worktree,
+    summarize_worktree_diff,
     WorktreeCleanupError,
     WorktreeSafetyError,
     sha256_text,
@@ -160,6 +161,72 @@ class WorktreeManualMergeTests(unittest.TestCase):
         self.assertIn("feature.txt", patch_text)
         self.assertIn("from worktree", patch_text)
         remove_worktree(self.repo, self.worktree)
+
+    def test_summarize_worktree_diff_handles_binary_deleted_renamed_and_large_files(self) -> None:
+        patch_path = self.fixture_root / "states.patch"
+        patch_path.write_text(
+            "\n".join(
+                [
+                    "diff --git a/bin/data.bin b/bin/data.bin",
+                    "Binary files a/bin/data.bin and b/bin/data.bin differ",
+                    "",
+                    "diff --git a/docs/old.md b/docs/old.md",
+                    "deleted file mode 100644",
+                    "--- a/docs/old.md",
+                    "+++ /dev/null",
+                    "@@ -1 +0,0 @@",
+                    "-old",
+                    "",
+                    "diff --git a/docs/old-name.md b/docs/new-name.md",
+                    "similarity index 100%",
+                    "rename from docs/old-name.md",
+                    "rename to docs/new-name.md",
+                    "",
+                    "diff --git a/src/large.txt b/src/large.txt",
+                    "--- a/src/large.txt",
+                    "+++ b/src/large.txt",
+                    "@@ -1,8 +1,18 @@",
+                    "-old line 1",
+                    "-old line 2",
+                    "-old line 3",
+                    "-old line 4",
+                    "-old line 5",
+                    "-old line 6",
+                    "-old line 7",
+                    "-old line 8",
+                    "+new line 1",
+                    "+new line 2",
+                    "+new line 3",
+                    "+new line 4",
+                    "+new line 5",
+                    "+new line 6",
+                    "+new line 7",
+                    "+new line 8",
+                    "+new line 9",
+                    "+new line 10",
+                    "+new line 11",
+                    "+new line 12",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        changed_files = summarize_worktree_diff(patch_path)
+        by_path = {item["path"]: item for item in changed_files}
+
+        self.assertEqual("binary", by_path["bin/data.bin"]["kind"])
+        self.assertTrue(by_path["bin/data.bin"]["binary"])
+        self.assertEqual("deleted", by_path["docs/old.md"]["kind"])
+        self.assertTrue(by_path["docs/old.md"]["deleted"])
+        self.assertEqual("renamed", by_path["docs/new-name.md"]["kind"])
+        self.assertTrue(by_path["docs/new-name.md"]["renamed"])
+        self.assertEqual("docs/old-name.md", by_path["docs/new-name.md"]["oldPath"])
+        self.assertEqual("docs/new-name.md", by_path["docs/new-name.md"]["newPath"])
+        self.assertTrue(by_path["src/large.txt"]["large"])
+        self.assertTrue(by_path["src/large.txt"]["truncated"])
+        self.assertGreaterEqual(by_path["src/large.txt"]["lineCount"], 12)
+        self.assertTrue(by_path["src/large.txt"]["hunks"])
 
     def test_remove_worktree_retries_locked_path_before_succeeding(self) -> None:
         self._init_repo()
@@ -450,6 +517,47 @@ index 0000000..7c890e8
             apply_pending_worktree_merge(self.pending_path)
 
         self.assertEqual("worktree_patch_check_failed", ctx.exception.code)
+        self.assertEqual("feature.txt", ctx.exception.details["failed_files"][0]["path"])
+        self.assertEqual("feature.txt", ctx.exception.details["apply_check"]["failed_files"][0]["path"])
+        self.assertEqual("@@ -1 +1 @@", ctx.exception.details["failed_hunks"][0]["header"])
+        self.assertEqual("@@ -1 +1 @@", ctx.exception.details["apply_check"]["failed_hunks"][0]["header"])
+        self.assertTrue(self.pending_path.exists())
+        self.assertFalse((self.repo / "feature.txt").exists())
+
+    def test_apply_pending_worktree_merge_reports_patch_apply_failure_details_and_keeps_pending_state(self) -> None:
+        base_ref = self._init_repo()
+        branch = self._source_branch()
+        patch_text = (
+            "diff --git a/feature.txt b/feature.txt\n"
+            "new file mode 100644\n"
+            "index 0000000..7c890e8\n"
+            "--- /dev/null\n"
+            "+++ b/feature.txt\n"
+            "@@ -0,0 +1 @@\n"
+            "+from patch\n"
+        )
+        self._write_pending_payload(
+            patch_text=patch_text,
+            base_ref=base_ref,
+            expected_head=base_ref,
+            branch=branch,
+        )
+
+        def fake_run_cmd(cmd, cwd, timeout_sec=600):
+            if cmd[:5] == ["git", "apply", "--check", "--binary", "--whitespace=nowarn"]:
+                return 0, ""
+            if cmd[:4] == ["git", "apply", "--binary", "--whitespace=nowarn"]:
+                return 1, "error: patch failed: feature.txt:1\nerror: feature.txt: patch does not apply\n"
+            return run_cmd(cmd, cwd=cwd, timeout_sec=timeout_sec)
+
+        with patch("agent_runner.gitops.run_cmd", side_effect=fake_run_cmd):
+            with self.assertRaises(WorktreeSafetyError) as ctx:
+                apply_pending_worktree_merge(self.pending_path)
+
+        self.assertEqual("worktree_patch_apply_failed", ctx.exception.code)
+        self.assertEqual("feature.txt", ctx.exception.details["failed_files"][0]["path"])
+        self.assertEqual("feature.txt", ctx.exception.details["failed_hunks"][0]["path"])
+        self.assertEqual("@@ -0,0 +1 @@", ctx.exception.details["failed_hunks"][0]["header"])
         self.assertTrue(self.pending_path.exists())
         self.assertFalse((self.repo / "feature.txt").exists())
 

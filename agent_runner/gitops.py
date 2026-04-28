@@ -5,6 +5,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -1120,7 +1121,19 @@ def apply_patch_to_repo(repo: Path, patch_path: Path) -> None:
         raise RuntimeError(f"Patch not found: {patch_path}")
     code, out = run_cmd(["git", "apply", "--binary", "--whitespace=nowarn", str(patch_path)], cwd=repo, timeout_sec=120)
     if code != 0:
-        raise RuntimeError(f"git apply failed: rc={code}\n{out}")
+        failure_details = _worktree_parse_apply_failure(out, patch_path)
+        raise WorktreeSafetyError(
+            "worktree_patch_apply_failed",
+            "git apply failed while applying the pending worktree patch.",
+            details={
+                "path": patch_path.as_posix(),
+                "source_repo": repo.as_posix(),
+                "command": "git apply --binary --whitespace=nowarn",
+                "output": out.strip(),
+                "failed_files": failure_details["failed_files"],
+                "failed_hunks": failure_details["failed_hunks"],
+            },
+        )
 
 
 def _patch_has_changes(patch_path: Path) -> bool:
@@ -1164,6 +1177,464 @@ def _worktree_text_path(value: Path | str | None) -> str:
         return Path(raw).expanduser().resolve().as_posix()
     except Exception:
         return raw.replace("\\", "/")
+
+
+def _worktree_excerpt_line(line: str, *, max_chars: int = 200) -> str:
+    text = str(line or "").rstrip("\r\n")
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    return text[: max_chars - 3].rstrip() + "..."
+
+
+def _worktree_parse_hunk_header(header: str) -> dict[str, int]:
+    match = re.match(r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@", str(header or ""))
+    if not match:
+        return {}
+    return {
+        "oldStart": int(match.group("old_start")),
+        "oldCount": int(match.group("old_count") or "1"),
+        "newStart": int(match.group("new_start")),
+        "newCount": int(match.group("new_count") or "1"),
+    }
+
+
+def _worktree_normalize_patch_path(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text in {"/dev/null", "dev/null"}:
+        return ""
+    if text.startswith("a/") or text.startswith("b/"):
+        text = text[2:]
+    if text.startswith('"') and text.endswith('"'):
+        text = text[1:-1]
+    return text.replace("\\", "/")
+
+
+def _worktree_parse_patch_sections(patch_text: str) -> list[tuple[str, list[str]]]:
+    sections: list[tuple[str, list[str]]] = []
+    current_header = ""
+    current_lines: list[str] = []
+    for raw_line in (patch_text or "").splitlines():
+        if raw_line.startswith("diff --git "):
+            if current_header:
+                sections.append((current_header, current_lines))
+            current_header = raw_line.rstrip("\r\n")
+            current_lines = []
+            continue
+        if current_header:
+            current_lines.append(raw_line.rstrip("\r\n"))
+    if current_header:
+        sections.append((current_header, current_lines))
+    return sections
+
+
+def _worktree_summarize_patch_section(
+    header: str,
+    lines: list[str],
+    *,
+    max_hunks: int = 6,
+    max_hunk_lines: int = 12,
+    max_preview_chars: int = 12000,
+) -> dict[str, object]:
+    header_match = re.match(r"^diff --git a/(.+) b/(.+)$", header or "")
+    left_path = _worktree_normalize_patch_path(header_match.group(1)) if header_match else ""
+    right_path = _worktree_normalize_patch_path(header_match.group(2)) if header_match else ""
+    old_path = left_path
+    new_path = right_path
+    rename_from = ""
+    rename_to = ""
+    binary = False
+    deleted = False
+    renamed = False
+    new_file = False
+    truncated = False
+    preview_chars = 0
+    total_lines = 0
+    hunks: list[dict[str, object]] = []
+    current_hunk: dict[str, object] | None = None
+
+    for line in lines:
+        total_lines += 1
+        text = str(line or "").rstrip("\r\n")
+        if text.startswith("rename from "):
+            rename_from = _worktree_normalize_patch_path(text[len("rename from "):])
+            if rename_from:
+                old_path = rename_from
+                renamed = True
+            continue
+        if text.startswith("rename to "):
+            rename_to = _worktree_normalize_patch_path(text[len("rename to "):])
+            if rename_to:
+                new_path = rename_to
+                renamed = True
+            continue
+        if text.startswith("new file mode "):
+            new_file = True
+            continue
+        if text.startswith("deleted file mode "):
+            deleted = True
+            continue
+        if text.startswith("Binary files "):
+            binary = True
+            continue
+        if text.startswith("GIT binary patch"):
+            binary = True
+            continue
+        if text.startswith("--- "):
+            old_path = _worktree_normalize_patch_path(text[4:].strip())
+            if old_path == "":
+                new_file = True
+            continue
+        if text.startswith("+++ "):
+            new_path = _worktree_normalize_patch_path(text[4:].strip())
+            if new_path == "":
+                deleted = True
+            continue
+        if text.startswith("@@"):
+            hunk_meta = _worktree_parse_hunk_header(text)
+            current_hunk = {
+                "header": text,
+                "oldStart": hunk_meta.get("oldStart", 0),
+                "oldCount": hunk_meta.get("oldCount", 0),
+                "newStart": hunk_meta.get("newStart", 0),
+                "newCount": hunk_meta.get("newCount", 0),
+                "lines": [],
+                "truncated": False,
+                "lineCount": 0,
+            }
+            if len(hunks) < max_hunks:
+                hunks.append(current_hunk)
+            else:
+                current_hunk = None
+                truncated = True
+            continue
+        if current_hunk is None:
+            continue
+        current_hunk["lineCount"] = int(current_hunk.get("lineCount", 0)) + 1
+        lines_preview = current_hunk.setdefault("lines", [])
+        if isinstance(lines_preview, list) and len(lines_preview) < max_hunk_lines and preview_chars < max_preview_chars:
+            lines_preview.append(_worktree_excerpt_line(text))
+            preview_chars += len(text)
+        else:
+            current_hunk["truncated"] = True
+            truncated = True
+
+    if deleted:
+        kind = "deleted"
+    elif renamed:
+        kind = "renamed"
+    elif binary:
+        kind = "binary"
+    elif new_file:
+        kind = "added"
+    else:
+        kind = "modified"
+
+    path = new_path or old_path or right_path or left_path
+    note = ""
+    summary = ""
+    if binary:
+        summary = "Binary patch"
+        note = "binary patch"
+    elif deleted:
+        summary = "Deleted file"
+        note = old_path or path or "deleted file"
+    elif renamed:
+        summary = "Renamed file"
+        if rename_from and rename_to:
+            note = f"{rename_from} -> {rename_to}"
+            summary = f"Renamed {rename_from} -> {rename_to}"
+        else:
+            note = path or "renamed file"
+    elif new_file:
+        summary = "Added file"
+        note = path or "new file"
+    elif hunks:
+        summary = "Text patch"
+        note = f"{len(hunks)} hunk(s)"
+    else:
+        summary = "File metadata"
+        note = path or "patch"
+
+    if truncated:
+        note = f"{note} | preview truncated" if note else "preview truncated"
+        summary = f"{summary} | preview truncated"
+
+    return {
+        "path": path,
+        "oldPath": old_path or path,
+        "newPath": new_path or path,
+        "kind": kind,
+        "state": kind,
+        "note": note,
+        "summary": summary,
+        "binary": binary,
+        "deleted": deleted,
+        "renamed": renamed,
+        "large": truncated,
+        "truncated": truncated,
+        "hunks": hunks,
+        "lineCount": total_lines,
+    }
+
+
+def summarize_worktree_diff(
+    patch_path: Path,
+    *,
+    allow_placeholder: bool = True,
+    max_files: int = 128,
+    max_hunks_per_file: int = 6,
+    max_hunk_lines: int = 12,
+    max_preview_chars: int = 12000,
+) -> list[dict[str, object]]:
+    patch_file = Path(patch_path)
+    if not patch_file.exists() or not patch_file.is_file():
+        if allow_placeholder and str(patch_file).strip():
+            return [
+                {
+                    "path": patch_file.as_posix(),
+                    "oldPath": patch_file.as_posix(),
+                    "newPath": patch_file.as_posix(),
+                    "kind": "modified",
+                    "state": "modified",
+                    "note": "patch export",
+                    "summary": "Patch export",
+                    "binary": False,
+                    "deleted": False,
+                    "renamed": False,
+                    "large": False,
+                    "truncated": False,
+                    "hunks": [],
+                    "lineCount": 0,
+                }
+            ]
+        return []
+
+    try:
+        patch_text = patch_file.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        if allow_placeholder:
+            return [
+                {
+                    "path": patch_file.as_posix(),
+                    "oldPath": patch_file.as_posix(),
+                    "newPath": patch_file.as_posix(),
+                    "kind": "modified",
+                    "state": "modified",
+                    "note": "patch export",
+                    "summary": "Patch export",
+                    "binary": False,
+                    "deleted": False,
+                    "renamed": False,
+                    "large": False,
+                    "truncated": False,
+                    "hunks": [],
+                    "lineCount": 0,
+                }
+            ]
+        return []
+
+    sections = _worktree_parse_patch_sections(patch_text)
+    changed_files = [
+        _worktree_summarize_patch_section(
+            header,
+            section_lines,
+            max_hunks=max_hunks_per_file,
+            max_hunk_lines=max_hunk_lines,
+            max_preview_chars=max_preview_chars,
+        )
+        for header, section_lines in sections[:max_files]
+    ]
+    if not changed_files and allow_placeholder and patch_text.strip():
+        changed_files = [
+            {
+                "path": patch_file.as_posix(),
+                "oldPath": patch_file.as_posix(),
+                "newPath": patch_file.as_posix(),
+                "kind": "modified",
+                "state": "modified",
+                "note": "patch export",
+                "summary": "Patch export",
+                "binary": False,
+                "deleted": False,
+                "renamed": False,
+                "large": False,
+                "truncated": False,
+                "hunks": [],
+                "lineCount": 0,
+            }
+        ]
+    return changed_files
+
+
+def _worktree_parse_apply_failure(output: str, patch_path: Path) -> dict[str, list[dict[str, object]]]:
+    failed_files: list[dict[str, object]] = []
+    failed_hunks: list[dict[str, object]] = []
+    seen_file_keys: set[tuple[str, int, str]] = set()
+
+    section_map: dict[str, list[dict[str, object]]] = {}
+    for item in summarize_worktree_diff(patch_path, allow_placeholder=False):
+        for key in {str(item.get("path") or ""), str(item.get("oldPath") or ""), str(item.get("newPath") or "")}:
+            if key:
+                section_map.setdefault(key, []).append(item)
+
+    def add_failure(path: str, line: int | None, reason: str) -> None:
+        normalized_path = _worktree_normalize_patch_path(path)
+        key = (normalized_path, int(line or 0), reason)
+        if not normalized_path or key in seen_file_keys:
+            return
+        seen_file_keys.add(key)
+        failed_files.append(
+            {
+                "path": normalized_path,
+                "line": int(line or 0) if line else None,
+                "reason": reason,
+            }
+        )
+        candidates = section_map.get(normalized_path, [])
+        if not candidates:
+            return
+        for candidate in candidates:
+            hunks = candidate.get("hunks") if isinstance(candidate.get("hunks"), list) else []
+            matched_hunk: dict[str, object] | None = None
+            if line:
+                for hunk in hunks:
+                    if not isinstance(hunk, dict):
+                        continue
+                    new_start = int(hunk.get("newStart") or 0)
+                    new_count = int(hunk.get("newCount") or 0) or 1
+                    if new_start <= line < new_start + max(1, new_count):
+                        matched_hunk = hunk
+                        break
+            if matched_hunk is None and hunks:
+                first_hunk = hunks[0]
+                matched_hunk = first_hunk if isinstance(first_hunk, dict) else None
+            if matched_hunk is None:
+                continue
+            failed_hunks.append(
+                {
+                    "path": normalized_path,
+                    "line": int(line or 0) if line else None,
+                    "reason": reason,
+                    "header": str(matched_hunk.get("header") or ""),
+                }
+            )
+            break
+
+    for raw_line in (output or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.match(r"^error: patch failed: (?P<path>.+?):(?P<line>\d+)$", line)
+        if match:
+            add_failure(match.group("path"), int(match.group("line")), "patch failed")
+            continue
+        match = re.match(r"^error: (?P<path>.+?): patch does not apply$", line)
+        if match:
+            add_failure(match.group("path"), None, "patch does not apply")
+            continue
+        match = re.match(r"^error: (?P<path>.+?): No such file or directory$", line)
+        if match:
+            add_failure(match.group("path"), None, "No such file or directory")
+            continue
+        match = re.match(r"^error: patch failed: (?P<path>.+?):(?P<line>\d+):", line)
+        if match:
+            add_failure(match.group("path"), int(match.group("line")), "patch failed")
+            continue
+        match = re.match(r"^error: corrupt patch at line (?P<line>\d+)(?:: (?P<reason>.*))?$", line)
+        if match:
+            failed_hunks.append(
+                {
+                    "path": "",
+                    "line": int(match.group("line")),
+                    "reason": match.group("reason") or "corrupt patch",
+                    "header": "",
+                }
+            )
+            continue
+        match = re.match(r"^error: cannot apply binary patch to '(?P<path>.+?)'$", line)
+        if match:
+            add_failure(match.group("path"), None, "binary patch failed")
+            continue
+        match = re.match(r"^error: cannot apply binary patch to (?P<path>.+)$", line)
+        if match:
+            add_failure(match.group("path"), None, "binary patch failed")
+            continue
+
+    return {"failed_files": failed_files, "failed_hunks": failed_hunks}
+
+
+def summarize_worktree_apply_check(
+    source_repo: Path,
+    patch_path: Path,
+    *,
+    pending_path: Path | None = None,
+) -> dict[str, object]:
+    source_repo_resolved = source_repo.expanduser().resolve()
+    patch_resolved = patch_path.expanduser().resolve()
+    command = "git apply --check --binary --whitespace=nowarn"
+    if not source_repo_resolved.exists() or not patch_resolved.exists():
+        return {
+            "command": command,
+            "rc": 1,
+            "ok": False,
+            "status": "missing",
+            "message": "Patch file or source repository is missing.",
+            "output": "",
+            "failed_files": [],
+            "failed_hunks": [],
+            "pending_file": pending_path.as_posix() if pending_path is not None else "",
+        }
+
+    rc, out = run_cmd(["git", "apply", "--check", "--binary", "--whitespace=nowarn", str(patch_resolved)], cwd=source_repo_resolved, timeout_sec=120)
+    failure_details = {"failed_files": [], "failed_hunks": []}
+    if rc != 0:
+        failure_details = _worktree_parse_apply_failure(out, patch_resolved)
+
+    return {
+        "command": command,
+        "rc": rc,
+        "ok": rc == 0,
+        "status": "ok" if rc == 0 else "failed",
+        "message": "git apply --check passed." if rc == 0 else "git apply --check failed.",
+        "output": "" if rc == 0 else out.strip(),
+        "failed_files": failure_details["failed_files"],
+        "failed_hunks": failure_details["failed_hunks"],
+        "pending_file": pending_path.as_posix() if pending_path is not None else "",
+    }
+
+
+def summarize_worktree_preflight(
+    source_repo: Path,
+    patch_path: Path,
+    *,
+    base_ref: str = "",
+    pending_path: Path | None = None,
+) -> dict[str, object]:
+    source_repo_resolved = source_repo.expanduser().resolve()
+    patch_resolved = patch_path.expanduser().resolve()
+    source_state = git_repo_state(source_repo_resolved) if source_repo_resolved.exists() else "missing"
+    source_head = git_head(source_repo_resolved) if source_repo_resolved.exists() else ""
+    patch_hash = ""
+    if patch_resolved.exists() and patch_resolved.is_file():
+        try:
+            patch_hash = sha256_text(patch_resolved.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            patch_hash = ""
+    apply_check = summarize_worktree_apply_check(source_repo_resolved, patch_resolved, pending_path=pending_path)
+    return {
+        "sourceRepoState": source_state,
+        "sourceRepoDirty": source_state != "clean",
+        "sourceHead": source_head,
+        "expectedBaseRef": str(base_ref or "").strip(),
+        "patchHash": patch_hash,
+        "pendingFile": pending_path.as_posix() if pending_path is not None else "",
+        "pendingMarkerPath": pending_path.as_posix() if pending_path is not None else "",
+        "applyCheck": apply_check,
+    }
 
 
 def _worktree_safe_name(value: str, fallback: str) -> str:
@@ -1756,12 +2227,19 @@ def _worktree_pending_payload(
     worktree_resolved = worktree_dir.expanduser().resolve()
     source_head = git_head(source_repo_resolved)
     worktree_head = git_head(worktree_resolved)
-    source_state = git_repo_state(source_repo_resolved)
     worktree_state = git_repo_state(worktree_resolved)
     patch_hash = sha256_text(patch_path.read_text(encoding="utf-8", errors="replace"))
     source_root = git_show_toplevel(source_repo_resolved) or source_repo_resolved.as_posix()
     branch = git_current_branch(source_repo_resolved) or "HEAD"
     resolved_base_ref = git_rev_parse_ref(source_repo_resolved, base_ref) or source_head
+    pending_marker_path = (run_dir.resolve() / WORKTREE_MERGE_PENDING).as_posix()
+    preflight = summarize_worktree_preflight(
+        source_repo_resolved,
+        patch_path,
+        base_ref=resolved_base_ref,
+        pending_path=run_dir.resolve() / WORKTREE_MERGE_PENDING,
+    )
+    changed_files = summarize_worktree_diff(patch_path)
     return {
         "schema_version": 1,
         "status": "pending",
@@ -1771,20 +2249,33 @@ def _worktree_pending_payload(
         "source_repo_root": source_root,
         "branch": branch,
         "expected_head": resolved_base_ref,
-        "source_repo_state": source_state,
+        "source_repo_state": str(preflight.get("sourceRepoState") or git_repo_state(source_repo_resolved)),
         "worktree_state": worktree_state,
         "worktree_branch": git_current_branch(worktree_resolved) or "HEAD",
         "source_branch": branch,
-        "sourceRepoState": source_state,
+        "source_head": source_head,
+        "sourceHead": source_head,
+        "sourceRepoState": str(preflight.get("sourceRepoState") or git_repo_state(source_repo_resolved)),
         "worktreeState": worktree_state,
         "sourceRepoRoot": source_root,
         "patch_hash": patch_hash,
         "patchHash": patch_hash,
+        "expected_base_ref": resolved_base_ref,
+        "expectedBaseRef": resolved_base_ref,
         "run_dir": str(run_dir.resolve()),
         "worktree_dir": str(worktree_resolved),
         "patch_path": str(patch_path.resolve()),
         "base_ref": resolved_base_ref,
         "head_ref": worktree_head,
+        "pending_file": pending_marker_path,
+        "pendingFile": pending_marker_path,
+        "pending_marker_path": pending_marker_path,
+        "pendingMarkerPath": pending_marker_path,
+        "preflight": preflight,
+        "apply_check": preflight.get("applyCheck", {}),
+        "applyCheck": preflight.get("applyCheck", {}),
+        "changed_files": changed_files,
+        "changedFiles": changed_files,
         "last_rc": last_rc,
     }
 
@@ -1960,12 +2451,8 @@ def _apply_fast_forward_then_dirty_patch(
         )
 
     if dirty_patch_has_changes:
-        check_rc, check_out = run_cmd(
-            ["git", "apply", "--check", "--binary", "--whitespace=nowarn", str(dirty_patch_path)],
-            cwd=source_repo,
-            timeout_sec=120,
-        )
-        if check_rc != 0:
+        check_result = summarize_worktree_apply_check(source_repo, dirty_patch_path)
+        if not bool(check_result.get("ok")):
             rollback_rc, rollback_out = run_cmd(["git", "reset", "--hard", resolved_base_ref], cwd=source_repo, timeout_sec=120)
             raise WorktreeSafetyError(
                 "worktree_patch_check_failed",
@@ -1977,8 +2464,11 @@ def _apply_fast_forward_then_dirty_patch(
                     "worktree_dir": worktree_dir.as_posix(),
                     "base_ref": resolved_base_ref,
                     "head_ref": resolved_head_ref,
-                    "output": check_out,
+                    "output": check_result.get("output", ""),
                     "merge_mode": "fast_forward_then_patch",
+                    "failed_files": check_result.get("failed_files", []),
+                    "failed_hunks": check_result.get("failed_hunks", []),
+                    "apply_check": check_result,
                     "rollback": {"rc": rollback_rc, "output": rollback_out},
                 },
             )
@@ -2144,12 +2634,8 @@ def apply_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
     if split_result is not None:
         return split_result
 
-    check_rc, check_out = run_cmd(
-        ["git", "apply", "--check", "--binary", "--whitespace=nowarn", str(patch_path)],
-        cwd=source_repo,
-        timeout_sec=120,
-    )
-    if check_rc != 0:
+    check_result = summarize_worktree_apply_check(source_repo, patch_path, pending_path=pending_path)
+    if not bool(check_result.get("ok")):
         raise WorktreeSafetyError(
             "worktree_patch_check_failed",
             "Worktree patch did not pass git apply --check preflight.",
@@ -2158,7 +2644,10 @@ def apply_pending_worktree_merge(pending_path: Path) -> dict[str, object]:
                 "source_repo": source_repo.as_posix(),
                 "run_dir": run_dir.as_posix(),
                 "worktree_dir": worktree_dir.as_posix(),
-                "output": check_out,
+                "output": check_result.get("output", ""),
+                "failed_files": check_result.get("failed_files", []),
+                "failed_hunks": check_result.get("failed_hunks", []),
+                "apply_check": check_result,
             },
         )
 

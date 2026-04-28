@@ -35,8 +35,11 @@ from .gitops import (
     discard_pending_worktree_merge,
     find_pending_worktree_merge,
     git_head,
+    git_show_toplevel,
     read_pending_worktree_merge,
     scan_worktree_diagnostics,
+    summarize_worktree_diff,
+    summarize_worktree_preflight,
     WorktreeSafetyError,
 )
 from .prompts import (
@@ -348,6 +351,19 @@ def _worktree_default_payload(repo_root: Path, run_dir: Path | None, branch: str
         "summary": "No pending worktree merge.",
         "risk": "No isolated worktree patch is pending review.",
         "changedFiles": [],
+        "changed_files": [],
+        "preflight": {},
+        "applyCheck": {},
+        "sourceRepoState": "",
+        "source_repo_state": "",
+        "sourceHead": "",
+        "source_head": "",
+        "expectedBaseRef": "",
+        "expected_base_ref": "",
+        "patchHash": "",
+        "patch_hash": "",
+        "pendingMarkerPath": "",
+        "pending_marker_path": "",
         "checklist": list(WORKTREE_REVIEW_CHECKLIST),
         "runDir": run_dir_value,
         "runnerRc": 0,
@@ -356,29 +372,14 @@ def _worktree_default_payload(repo_root: Path, run_dir: Path | None, branch: str
 
 
 def _worktree_changed_files_from_patch(patch_path: str, *, allow_placeholder: bool = True) -> list[dict[str, Any]]:
-    changed_files: list[dict[str, Any]] = []
-    if patch_path:
-        patch_file = Path(patch_path)
-        if patch_file.exists():
-            try:
-                text = patch_file.read_text(encoding="utf-8", errors="replace")
-                seen: set[str] = set()
-                for line in text.splitlines():
-                    match = re.match(r"^\+\+\+\s+b/(.+)$", line)
-                    if not match:
-                        match = re.match(r"^diff --git a/.+ b/(.+)$", line)
-                    if not match:
-                        continue
-                    path = match.group(1).strip()
-                    if not path or path in seen:
-                        continue
-                    seen.add(path)
-                    changed_files.append({"path": path, "kind": "modified", "note": ""})
-            except Exception:
-                changed_files = []
-    if not changed_files and allow_placeholder and patch_path:
-        changed_files = [{"path": patch_path, "kind": "modified", "note": "patch export"}]
-    return changed_files
+    if not patch_path:
+        return []
+    try:
+        return summarize_worktree_diff(Path(patch_path), allow_placeholder=allow_placeholder)
+    except Exception:
+        if allow_placeholder:
+            return [{"path": patch_path, "kind": "modified", "note": "patch export", "summary": "Patch export"}]
+        return []
 
 
 def _worktree_normalize_changed_files(raw_changed_files: Any, patch_path: str, *, allow_placeholder: bool = True) -> list[dict[str, Any]]:
@@ -389,17 +390,42 @@ def _worktree_normalize_changed_files(raw_changed_files: Any, patch_path: str, *
                 path = _pick_text(item.get("path"), item.get("file"), item.get("name"))
                 if not path:
                     continue
+                raw_hunks = item.get("hunks") if isinstance(item.get("hunks"), list) else []
                 changed_files.append(
                     {
                         "path": path,
+                        "oldPath": _pick_text(item.get("oldPath"), item.get("old_path"), item.get("sourcePath"), item.get("source_path"), path),
+                        "newPath": _pick_text(item.get("newPath"), item.get("new_path"), item.get("targetPath"), item.get("target_path"), path),
                         "kind": _pick_text(item.get("kind"), item.get("type"), "modified"),
+                        "state": _pick_text(item.get("state"), item.get("kind"), item.get("type"), "modified"),
                         "note": _pick_text(item.get("note"), item.get("message")),
+                        "summary": _pick_text(item.get("summary"), item.get("title"), item.get("note"), item.get("message")),
+                        "binary": bool(item.get("binary")),
+                        "deleted": bool(item.get("deleted")),
+                        "renamed": bool(item.get("renamed")),
+                        "large": bool(item.get("large")),
+                        "truncated": bool(item.get("truncated")),
+                        "lineCount": _coerce_optional_int(item.get("lineCount") or item.get("line_count")) or 0,
+                        "hunks": [
+                            {
+                                "header": _pick_text(hunk.get("header"), hunk.get("hunkHeader")),
+                                "oldStart": _coerce_optional_int(hunk.get("oldStart") or hunk.get("old_start")) or 0,
+                                "oldCount": _coerce_optional_int(hunk.get("oldCount") or hunk.get("old_count")) or 0,
+                                "newStart": _coerce_optional_int(hunk.get("newStart") or hunk.get("new_start")) or 0,
+                                "newCount": _coerce_optional_int(hunk.get("newCount") or hunk.get("new_count")) or 0,
+                                "lines": [str(line) for line in hunk.get("lines", []) if line is not None] if isinstance(hunk, dict) else [],
+                                "truncated": bool(hunk.get("truncated")) if isinstance(hunk, dict) else False,
+                                "lineCount": _coerce_optional_int(hunk.get("lineCount") or hunk.get("line_count")) or 0 if isinstance(hunk, dict) else 0,
+                            }
+                            for hunk in raw_hunks
+                            if isinstance(hunk, dict)
+                        ],
                     }
                 )
             else:
                 path = _pick_text(item)
                 if path:
-                    changed_files.append({"path": path, "kind": "modified", "note": ""})
+                    changed_files.append({"path": path, "oldPath": path, "newPath": path, "kind": "modified", "state": "modified", "note": "", "summary": "Patch export", "binary": False, "deleted": False, "renamed": False, "large": False, "truncated": False, "hunks": [], "lineCount": 0})
     if changed_files:
         return changed_files
     return _worktree_changed_files_from_patch(patch_path, allow_placeholder=allow_placeholder)
@@ -487,6 +513,39 @@ def _worktree_status_payload(
     pending_file = pending_path.as_posix() if pending_path is not None else ""
     status_file = artifact_path.as_posix()
     changed_files = _worktree_normalize_changed_files(raw.get("changedFiles") or raw.get("changed_files"), patch_path, allow_placeholder=status not in {"error"})
+    raw_preflight = raw.get("preflight") if isinstance(raw.get("preflight"), dict) else raw.get("mergePreflight")
+    if not isinstance(raw_preflight, dict):
+        raw_preflight = {}
+    preflight = dict(raw_preflight)
+    source_repo_path: Path | None = None
+    try:
+        if source_repo_value:
+            source_repo_path = Path(source_repo_value).expanduser().resolve()
+    except Exception:
+        source_repo_path = None
+    if status in {"pending", "pending review"} and source_repo_path is not None and patch_path and Path(patch_path).exists():
+        try:
+            if source_repo_path.exists() and git_show_toplevel(source_repo_path):
+                live_preflight = summarize_worktree_preflight(
+                    source_repo_path,
+                    Path(patch_path),
+                    base_ref=base_ref or str(raw_preflight.get("expectedBaseRef") or raw_preflight.get("expected_base_ref") or base_ref),
+                    pending_path=pending_path,
+                )
+                if live_preflight:
+                    preflight.update(live_preflight)
+        except Exception:
+            pass
+    source_repo_state = str(preflight.get("sourceRepoState") or raw.get("source_repo_state") or raw.get("sourceRepoState") or "")
+    source_head = str(preflight.get("sourceHead") or raw.get("source_head") or raw.get("sourceHead") or raw.get("head_ref") or raw.get("headRef") or "")
+    expected_base_ref = str(preflight.get("expectedBaseRef") or raw.get("expected_base_ref") or raw.get("expectedBaseRef") or base_ref).strip()
+    patch_hash_value = str(preflight.get("patchHash") or raw.get("patch_hash") or raw.get("patchHash") or "").strip()
+    pending_marker_path = str(preflight.get("pendingMarkerPath") or preflight.get("pendingFile") or raw.get("pending_marker_path") or raw.get("pendingMarkerPath") or pending_file).strip()
+    apply_check = preflight.get("applyCheck") if isinstance(preflight.get("applyCheck"), dict) else raw.get("applyCheck")
+    if not isinstance(apply_check, dict):
+        apply_check = raw.get("apply_check") if isinstance(raw.get("apply_check"), dict) else {}
+    if not isinstance(apply_check, dict):
+        apply_check = {}
     review_required = status in {
         "pending",
         "pending review",
@@ -580,15 +639,25 @@ def _worktree_status_payload(
         "reviewRequired": review_required,
         "reviewRequiredMessage": review_required_message,
         "sourceRepo": source_repo_value,
+        "sourceRepoState": source_repo_state,
+        "source_repo_state": source_repo_state,
+        "sourceHead": source_head,
+        "source_head": source_head,
         "sourceBranch": source_branch,
         "branch": source_branch,
         "baseRef": base_ref,
+        "expectedBaseRef": expected_base_ref,
+        "expected_base_ref": expected_base_ref,
         "headRef": head_ref,
         "worktreeDir": worktree_dir,
         "worktree": worktree_dir,
         "patchPath": patch_path,
         "patch": patch_path,
+        "patchHash": patch_hash_value,
+        "patch_hash": patch_hash_value,
         "pendingFile": pending_file,
+        "pendingMarkerPath": pending_marker_path,
+        "pending_marker_path": pending_marker_path,
         "statusFile": status_file,
         "cleanupPath": cleanup_path,
         "cleanupMessage": cleanup_message,
@@ -598,6 +667,11 @@ def _worktree_status_payload(
         "summary": summary,
         "risk": risk,
         "changedFiles": changed_files,
+        "changed_files": changed_files,
+        "preflight": preflight,
+        "applyCheck": apply_check,
+        "apply_check": apply_check,
+        "sourceRepoDirty": source_repo_state != "clean" if source_repo_state else False,
         "checklist": list(WORKTREE_REVIEW_CHECKLIST),
         "runDir": run_dir_value,
         "runnerRc": runner_rc,
@@ -5903,6 +5977,19 @@ def _build_worktree_payload(repo: Path, run_dir: Path | None, branch: str) -> di
                     "summary": "Pending worktree merge file is malformed.",
                     "risk": "Fix or delete the pending merge file before applying any source-repo change.",
                     "changedFiles": [],
+                    "changed_files": [],
+                    "preflight": {},
+                    "applyCheck": {},
+                    "sourceRepoState": str(payload.get("source_repo_state") or payload.get("sourceRepoState") or ""),
+                    "source_repo_state": str(payload.get("source_repo_state") or payload.get("sourceRepoState") or ""),
+                    "sourceHead": str(payload.get("head_ref") or payload.get("headRef") or ""),
+                    "source_head": str(payload.get("head_ref") or payload.get("headRef") or ""),
+                    "expectedBaseRef": str(payload.get("base_ref") or payload.get("baseRef") or ""),
+                    "expected_base_ref": str(payload.get("base_ref") or payload.get("baseRef") or ""),
+                    "patchHash": str(payload.get("patch_hash") or payload.get("patchHash") or ""),
+                    "patch_hash": str(payload.get("patch_hash") or payload.get("patchHash") or ""),
+                    "pendingMarkerPath": pending_path.as_posix(),
+                    "pending_marker_path": pending_path.as_posix(),
                     "runDir": str(payload.get("run_dir") or payload.get("runDir") or run_dir_value or "").strip(),
                     "runnerRc": 0,
                     "lastRc": 0,
@@ -5936,6 +6023,19 @@ def _build_worktree_payload(repo: Path, run_dir: Path | None, branch: str) -> di
                     "summary": "Pending worktree merge file is stale.",
                     "risk": "Fix or delete the stale pending merge file before applying any source-repo change.",
                     "changedFiles": [],
+                    "changed_files": [],
+                    "preflight": {},
+                    "applyCheck": {},
+                    "sourceRepoState": str(payload.get("source_repo_state") or payload.get("sourceRepoState") or ""),
+                    "source_repo_state": str(payload.get("source_repo_state") or payload.get("sourceRepoState") or ""),
+                    "sourceHead": str(payload.get("head_ref") or payload.get("headRef") or ""),
+                    "source_head": str(payload.get("head_ref") or payload.get("headRef") or ""),
+                    "expectedBaseRef": str(payload.get("base_ref") or payload.get("baseRef") or ""),
+                    "expected_base_ref": str(payload.get("base_ref") or payload.get("baseRef") or ""),
+                    "patchHash": str(payload.get("patch_hash") or payload.get("patchHash") or ""),
+                    "patch_hash": str(payload.get("patch_hash") or payload.get("patchHash") or ""),
+                    "pendingMarkerPath": pending_path.as_posix(),
+                    "pending_marker_path": pending_path.as_posix(),
                     "runDir": str(payload.get("run_dir") or payload.get("runDir") or run_dir_value or "").strip(),
                     "runnerRc": 0,
                     "lastRc": 0,
@@ -5975,6 +6075,16 @@ def _build_worktree_payload(repo: Path, run_dir: Path | None, branch: str) -> di
                 pending_path=artifact_path.with_name("WORKTREE_MERGE_PENDING.json"),
             )
         if artifact_status in {"apply_failed", "patch_not_applied", "not_applied"}:
+            artifact_patch_path = (run_dir / "worktree.patch") if run_dir is not None else None
+            artifact_patch_text = artifact_patch_path.as_posix() if artifact_patch_path is not None and artifact_patch_path.exists() else ""
+            artifact_changed_files = summarize_worktree_diff(artifact_patch_path, allow_placeholder=True) if artifact_patch_text else []
+            artifact_preflight: dict[str, Any] = {}
+            if artifact_patch_path is not None and artifact_patch_path.exists():
+                try:
+                    if git_show_toplevel(repo_root):
+                        artifact_preflight = summarize_worktree_preflight(repo_root, artifact_patch_path, base_ref="", pending_path=None)
+                except Exception:
+                    artifact_preflight = {}
             payload = _worktree_default_payload(repo_root, run_dir, branch)
             payload.update(
                 {
@@ -6002,7 +6112,22 @@ def _build_worktree_payload(repo: Path, run_dir: Path | None, branch: str) -> di
                     "cleanupState": "none",
                     "statusFile": artifact_path.as_posix(),
                     "pendingFile": "",
-                    "changedFiles": [],
+                    "patchPath": artifact_patch_text,
+                    "patch": artifact_patch_text,
+                    "changedFiles": artifact_changed_files,
+                    "changed_files": artifact_changed_files,
+                    "preflight": artifact_preflight,
+                    "applyCheck": artifact_preflight.get("applyCheck", {}) if isinstance(artifact_preflight, dict) else {},
+                    "sourceRepoState": artifact_preflight.get("sourceRepoState", "") if isinstance(artifact_preflight, dict) else "",
+                    "source_repo_state": artifact_preflight.get("sourceRepoState", "") if isinstance(artifact_preflight, dict) else "",
+                    "sourceHead": artifact_preflight.get("sourceHead", "") if isinstance(artifact_preflight, dict) else "",
+                    "source_head": artifact_preflight.get("sourceHead", "") if isinstance(artifact_preflight, dict) else "",
+                    "expectedBaseRef": artifact_preflight.get("expectedBaseRef", "") if isinstance(artifact_preflight, dict) else "",
+                    "expected_base_ref": artifact_preflight.get("expectedBaseRef", "") if isinstance(artifact_preflight, dict) else "",
+                    "patchHash": artifact_preflight.get("patchHash", "") if isinstance(artifact_preflight, dict) else "",
+                    "patch_hash": artifact_preflight.get("patchHash", "") if isinstance(artifact_preflight, dict) else "",
+                    "pendingMarkerPath": "",
+                    "pending_marker_path": "",
                     "runDir": run_dir.as_posix() if run_dir else "",
                 }
             )

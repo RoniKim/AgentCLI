@@ -572,6 +572,7 @@
         pendingMerge: 'Pending merge',
         reviewChecklist: 'Review checklist',
         mergeActions: 'Merge actions',
+        mergePreflight: 'Merge preflight',
         merging: 'Merging...',
         discarding: 'Discarding...',
         refreshingStatus: 'refreshing status',
@@ -592,6 +593,35 @@
         patchExportFailed: 'Patch export failed',
         patchExportNotApplied: 'Patch exported, not auto-applied',
         patchNotApplied: 'Patch not applied',
+        sourceDirtyState: 'Source dirty state',
+        sourceHead: 'Source HEAD',
+        expectedBaseRef: 'Expected base ref',
+        patchHash: 'Patch hash',
+        gitApplyCheck: 'git apply --check',
+        pendingMarkerPath: 'Pending marker path',
+        failureDetails: 'Failure details',
+        pendingStateRecoverable: 'Pending state remains recoverable for retry or discard.',
+        binaryFile: 'Binary file',
+        deletedFile: 'Deleted file',
+        renamedFile: 'Renamed file',
+        largeFile: 'Large file',
+        previewTruncated: 'Preview truncated',
+        binaryFileNoPreview: 'Binary patch has no text preview.',
+        deletedFileNoPreview: 'Deleted file has no text preview.',
+        largeFilePreviewTruncated: 'Large patch preview truncated.',
+        noDiffHunks: 'No diff hunks available.',
+        oldPath: 'Old path',
+        newPath: 'New path',
+        lineCount: 'Line count',
+        hunk: 'Hunk {index}',
+        failedFiles: 'Failed files',
+        failedHunks: 'Failed hunks',
+        applyCheckCommand: 'Command',
+        applyCheckRc: 'rc',
+        applyCheckMessage: 'Message',
+        applyCheckPassed: 'passed',
+        applyCheckFailed: 'failed',
+        applyCheckUnavailable: 'unavailable',
         exactConfirmation: 'Exact confirmation',
         confirmationPhrase: 'Confirmation phrase',
         typeConfirmationPhrase: 'Type "{confirmation}" to confirm this worktree action.',
@@ -1075,6 +1105,7 @@
         pendingMerge: '대기 중인 작업트리 병합',
         reviewChecklist: '검토 체크리스트',
         mergeActions: '병합/폐기 작업',
+        mergePreflight: '병합 사전 점검',
         confirmMergePhrase: 'MERGE WORKTREE',
         confirmDiscardPhrase: 'DISCARD WORKTREE',
         readOnlyMode: '읽기 전용 모드',
@@ -1092,6 +1123,35 @@
         patchExportFailed: '패치 내보내기 실패',
         patchExportNotApplied: '패치가 내보내졌지만 자동 적용되지 않음',
         patchNotApplied: '패치가 적용되지 않음',
+        sourceDirtyState: '소스 변경 상태',
+        sourceHead: '소스 HEAD',
+        expectedBaseRef: '예상 기준 ref',
+        patchHash: '패치 해시',
+        gitApplyCheck: 'git apply --check',
+        pendingMarkerPath: '대기 마커 경로',
+        failureDetails: '실패 세부 정보',
+        pendingStateRecoverable: '대기 상태는 다시 시도하거나 폐기할 수 있습니다.',
+        binaryFile: '바이너리 파일',
+        deletedFile: '삭제된 파일',
+        renamedFile: '이름이 변경된 파일',
+        largeFile: '큰 파일',
+        previewTruncated: '미리보기가 잘렸습니다',
+        binaryFileNoPreview: '바이너리 패치는 텍스트 미리보기를 제공하지 않습니다.',
+        deletedFileNoPreview: '삭제된 파일은 텍스트 미리보기를 제공하지 않습니다.',
+        largeFilePreviewTruncated: '큰 패치 미리보기가 잘렸습니다.',
+        noDiffHunks: '차이 덩어리가 없습니다.',
+        oldPath: '이전 경로',
+        newPath: '새 경로',
+        lineCount: '줄 수',
+        hunk: '덩어리 {index}',
+        failedFiles: '실패한 파일',
+        failedHunks: '실패한 덩어리',
+        applyCheckCommand: '명령',
+        applyCheckRc: 'rc',
+        applyCheckMessage: '메시지',
+        applyCheckPassed: '통과',
+        applyCheckFailed: '실패',
+        applyCheckUnavailable: '사용 불가',
         exactConfirmation: '정확한 확인',
         confirmationPhrase: '확인 문구',
         confirmMerge: '병합 확인',
@@ -4940,19 +5000,103 @@
     };
   }
 
-  function normalizeChangedFile(file) {
-    const raw = toObject(file);
+  function normalizeWorktreeDiffHunk(hunk) {
+    const raw = toObject(hunk);
     return {
-      path: toText(raw.path, '(unknown)'),
-      kind: toText(raw.kind, 'modified'),
-      note: toText(raw.note, ''),
+      header: toText(raw.header || raw.hunkHeader, ''),
+      oldStart: toMaybeNumber(raw.oldStart ?? raw.old_start) ?? 0,
+      oldCount: toMaybeNumber(raw.oldCount ?? raw.old_count) ?? 0,
+      newStart: toMaybeNumber(raw.newStart ?? raw.new_start) ?? 0,
+      newCount: toMaybeNumber(raw.newCount ?? raw.new_count) ?? 0,
+      lines: toArray(raw.lines).map((line) => toText(line, '')),
+      truncated: Boolean(raw.truncated),
+      lineCount: toMaybeNumber(raw.lineCount ?? raw.line_count) ?? 0,
+    };
+  }
+
+  function normalizeWorktreeDiffFile(file) {
+    const raw = toObject(file);
+    const kind = toText(raw.kind || raw.state || raw.type, 'modified');
+    const oldPath = toText(raw.oldPath || raw.old_path || raw.sourcePath || raw.source_path || raw.path || raw.file || raw.name, '');
+    const newPath = toText(raw.newPath || raw.new_path || raw.targetPath || raw.target_path || raw.path || raw.file || raw.name || oldPath, '');
+    const path = toText(raw.path || raw.file || raw.name || newPath || oldPath, '(unknown)');
+    return {
+      path,
+      oldPath: oldPath || path,
+      newPath: newPath || path,
+      kind,
+      state: toText(raw.state || raw.kind || raw.type, kind),
+      note: toText(raw.note || raw.message, ''),
+      summary: toText(raw.summary || raw.title || raw.note || raw.message, ''),
+      binary: Boolean(raw.binary),
+      deleted: Boolean(raw.deleted),
+      renamed: Boolean(raw.renamed),
+      large: Boolean(raw.large),
+      truncated: Boolean(raw.truncated),
+      lineCount: toMaybeNumber(raw.lineCount ?? raw.line_count) ?? 0,
+      hunks: toArray(raw.hunks).map(normalizeWorktreeDiffHunk),
+    };
+  }
+
+  function normalizeWorktreeFailureFile(item) {
+    const raw = toObject(item);
+    return {
+      path: toText(raw.path, ''),
+      line: toMaybeNumber(raw.line ?? raw.lineNumber ?? raw.line_number),
+      reason: toText(raw.reason || raw.message, ''),
+    };
+  }
+
+  function normalizeWorktreeFailureHunk(item) {
+    const raw = toObject(item);
+    return {
+      path: toText(raw.path, ''),
+      line: toMaybeNumber(raw.line ?? raw.lineNumber ?? raw.line_number),
+      reason: toText(raw.reason || raw.message, ''),
+      header: toText(raw.header || raw.hunkHeader, ''),
+      lines: toArray(raw.lines).map((line) => toText(line, '')),
+      truncated: Boolean(raw.truncated),
+    };
+  }
+
+  function normalizeWorktreeApplyCheck(applyCheck) {
+    const raw = toObject(applyCheck);
+    const rc = toMaybeNumber(raw.rc ?? raw.returnCode ?? raw.return_code ?? raw.exitCode ?? raw.exit_code);
+    return {
+      command: toText(raw.command || raw.cmd, ''),
+      rc: rc ?? 0,
+      ok: Boolean(raw.ok ?? (rc != null ? rc === 0 : false)),
+      status: toText(raw.status, ''),
+      message: toText(raw.message, ''),
+      output: toText(raw.output, ''),
+      failedFiles: toArray(raw.failedFiles || raw.failed_files).map(normalizeWorktreeFailureFile),
+      failedHunks: toArray(raw.failedHunks || raw.failed_hunks).map(normalizeWorktreeFailureHunk),
+    };
+  }
+
+  function normalizeWorktreePreflight(preflight) {
+    const raw = toObject(preflight);
+    const applyCheck = normalizeWorktreeApplyCheck(raw.applyCheck || raw.apply_check);
+    const sourceRepoState = toText(raw.sourceRepoState || raw.source_repo_state, '');
+    return {
+      sourceRepoState,
+      sourceRepoDirty: Boolean(
+        raw.sourceRepoDirty ?? raw.source_repo_dirty ?? (sourceRepoState ? sourceRepoState !== 'clean' : false)
+      ),
+      sourceHead: toText(raw.sourceHead || raw.source_head, ''),
+      expectedBaseRef: toText(raw.expectedBaseRef || raw.expected_base_ref || raw.baseRef || raw.base_ref, ''),
+      patchHash: toText(raw.patchHash || raw.patch_hash, ''),
+      pendingFile: toText(raw.pendingFile || raw.pending_file, ''),
+      pendingMarkerPath: toText(raw.pendingMarkerPath || raw.pending_marker_path || raw.pendingFile || raw.pending_file, ''),
+      applyCheck,
     };
   }
 
   function normalizeWorktreeState(worktree) {
     const raw = toObject(worktree);
     const status = toText(raw.status, 'none');
-    const changedFiles = toArray(raw.changedFiles).map(normalizeChangedFile);
+    const changedFiles = toArray(raw.changedFiles || raw.changed_files).map(normalizeWorktreeDiffFile);
+    const preflight = normalizeWorktreePreflight(raw.preflight || raw.mergePreflight);
     const checklist = toArray(raw.checklist).map((item) => toText(item)).filter(Boolean);
     const sourceRepo = toText(raw.sourceRepo || raw.source_repo, '');
     const sourceBranch = toText(raw.sourceBranch || raw.source_branch || raw.branch, 'HEAD');
@@ -4961,7 +5105,7 @@
     const worktreeDir = toText(raw.worktreeDir || raw.worktree_dir || raw.worktree, '');
     const patchPath = toText(raw.patchPath || raw.patch_path || raw.patch, '');
     const statusFile = toText(raw.statusFile || raw.status_file || raw.pendingFile || raw.pending_file, '');
-    const pendingFile = toText(raw.pendingFile || raw.pending_file || ((status === 'pending' || status === 'pending review') ? statusFile : ''), '');
+    const pendingFile = toText(raw.pendingFile || raw.pending_file || preflight.pendingFile || preflight.pendingMarkerPath || ((status === 'pending' || status === 'pending review') ? statusFile : ''), '');
     const cleanupPath = toText(raw.cleanupPath || raw.cleanup_path || worktreeDir, '');
     const cleanupMessage = toText(raw.cleanupMessage || raw.cleanup_message || raw.message || '', '');
     const cleanupState = toText(raw.cleanupState || raw.cleanup_state, 'none');
@@ -4976,21 +5120,41 @@
       raw.reviewRequiredMessage || raw.review_required_message || raw.message || raw.summary,
       ''
     );
+    const sourceRepoState = toText(raw.sourceRepoState || raw.source_repo_state || preflight.sourceRepoState, '');
+    const sourceHead = toText(raw.sourceHead || raw.source_head || preflight.sourceHead || headRef, '');
+    const expectedBaseRef = toText(raw.expectedBaseRef || raw.expected_base_ref || preflight.expectedBaseRef || baseRef, '');
+    const patchHash = toText(raw.patchHash || raw.patch_hash || preflight.patchHash, '');
+    const pendingMarkerPath = toText(
+      raw.pendingMarkerPath || raw.pending_marker_path || preflight.pendingMarkerPath || preflight.pendingFile || pendingFile,
+      ''
+    );
+    const applyCheck = normalizeWorktreeApplyCheck(raw.applyCheck || raw.apply_check || preflight.applyCheck);
     return {
       status,
       mode: toText(raw.mode, 'manual'),
       reviewRequired,
       reviewRequiredMessage,
       sourceRepo,
+      sourceRepoState,
+      source_repo_state: sourceRepoState,
+      sourceRepoDirty: Boolean(raw.sourceRepoDirty ?? raw.source_repo_dirty ?? preflight.sourceRepoDirty ?? (sourceRepoState ? sourceRepoState !== 'clean' : false)),
+      sourceHead,
+      source_head: sourceHead,
       sourceBranch,
       branch: sourceBranch,
       baseRef,
+      expectedBaseRef,
+      expected_base_ref: expectedBaseRef,
       headRef,
       worktreeDir,
       worktree: worktreeDir,
       patchPath,
       patch: patchPath,
+      patchHash,
+      patch_hash: patchHash,
       pendingFile,
+      pendingMarkerPath,
+      pending_marker_path: pendingMarkerPath,
       statusFile,
       cleanupPath,
       cleanupMessage,
@@ -4998,6 +5162,10 @@
       summary: toText(raw.summary, ''),
       risk: toText(raw.risk, ''),
       changedFiles,
+      changed_files: changedFiles,
+      preflight,
+      applyCheck,
+      apply_check: applyCheck,
       checklist,
       runDir,
       runnerRc,
@@ -6591,6 +6759,20 @@
         summary: t('worktree.noPendingReview'),
         risk: t('worktree.reviewThePatchBeforeSourceRepoChanges'),
         changedFiles: [],
+        changed_files: [],
+        preflight: {},
+        applyCheck: {},
+        sourceRepoState: '',
+        source_repo_state: '',
+        sourceRepoDirty: false,
+        sourceHead: '',
+        source_head: '',
+        expectedBaseRef: '',
+        expected_base_ref: '',
+        patchHash: '',
+        patch_hash: '',
+        pendingMarkerPath: '',
+        pending_marker_path: '',
         checklist: [
           t('worktree.checklistInspectPatchHunks'),
           t('worktree.checklistVerifyNoSecretLeakage'),
@@ -7004,6 +7186,20 @@
         summary: t('worktree.noPendingReview'),
         risk: t('worktree.reviewThePatchBeforeSourceRepoChanges'),
         changedFiles: [],
+        changed_files: [],
+        preflight: {},
+        applyCheck: {},
+        sourceRepoState: '',
+        source_repo_state: '',
+        sourceRepoDirty: false,
+        sourceHead: '',
+        source_head: '',
+        expectedBaseRef: '',
+        expected_base_ref: '',
+        patchHash: '',
+        patch_hash: '',
+        pendingMarkerPath: '',
+        pending_marker_path: '',
         checklist: [
           t('worktree.checklistInspectPatchHunks'),
           t('worktree.checklistVerifyNoSecretLeakage'),
@@ -7582,10 +7778,12 @@
     }
 
     if (pendingReview) {
+      const applyCheck = normalizeWorktreeFailureDetails(review?.preflight?.applyCheck || review?.preflight?.apply_check || review?.applyCheck || review?.apply_check);
+      const applyCheckCopy = !applyCheck.ok && applyCheck.message ? `${t('worktree.gitApplyCheck')}: ${applyCheck.message}` : '';
       return {
         tone: 'warn',
         title: t('worktree.reviewRequiredBeforeChanges'),
-        copy: reviewMessage || summary || `${t('worktree.reviewThePatchBeforeSourceRepoChanges')} ${patchPath}.`,
+        copy: reviewMessage || summary || applyCheckCopy || `${t('worktree.reviewThePatchBeforeSourceRepoChanges')} ${patchPath}.`,
         actionCopy:
           `${t('worktree.confirmMergeToApply')} ${t('worktree.backendValidates')} ${t('worktree.noCommitWillBeCreated')}`,
         mergeHint: t('worktree.reviewRequired'),
@@ -7643,6 +7841,360 @@
 
   function chip(label, className = '') {
     return `<span class="chip ${className}">${escapeHTML(label)}</span>`;
+  }
+
+  function normalizeWorktreeFailureDetails(details) {
+    const raw = toObject(details);
+    const source = raw.applyCheck || raw.apply_check || raw;
+    const applyCheck = normalizeWorktreeApplyCheck(source);
+    const hasRc = Boolean(
+      raw.rc != null ||
+        raw.returnCode != null ||
+        raw.return_code != null ||
+        raw.exitCode != null ||
+        raw.exit_code != null ||
+        source.rc != null ||
+        source.returnCode != null ||
+        source.return_code != null ||
+        source.exitCode != null ||
+        source.exit_code != null
+    );
+    return {
+      ...applyCheck,
+      path: toText(raw.path, ''),
+      sourceRepo: toText(raw.sourceRepo || raw.source_repo, ''),
+      runDir: toText(raw.runDir || raw.run_dir, ''),
+      worktreeDir: toText(raw.worktreeDir || raw.worktree_dir || raw.worktree, ''),
+      pendingFile: toText(raw.pendingFile || raw.pending_file || raw.pendingMarkerPath || raw.pending_marker_path, ''),
+      hasRc,
+    };
+  }
+
+  function renderWorktreeDiffHunk(hunk, index) {
+    const raw = toObject(hunk);
+    const header = toText(raw.header || raw.hunkHeader, '');
+    const lines = toArray(raw.lines).map((line) => toText(line, ''));
+    const truncated = Boolean(raw.truncated);
+    const lineCount = toMaybeNumber(raw.lineCount ?? raw.line_count) ?? lines.length;
+    const lineHTML = lines.length
+      ? lines
+          .map((line) => {
+            const lineClass = line.startsWith('+')
+              ? 'review-file__hunk-line--add'
+              : line.startsWith('-')
+                ? 'review-file__hunk-line--remove'
+                : 'review-file__hunk-line--context';
+            return `<div class="review-file__hunk-line ${lineClass}">${escapeHTML(line)}</div>`;
+          })
+          .join('')
+      : `<div class="summary-note">${escapeHTML(t('worktree.noDiffHunks'))}</div>`;
+
+    return `
+      <div class="review-file__hunk">
+        <div class="review-file__hunk-head">
+          <div class="review-file__hunk-title">${escapeHTML(header || t('worktree.hunk', { index: index + 1 }))}</div>
+          <div class="review-file__hunk-meta">
+            ${lineCount ? chip(`${lineCount} ${t('common.lines')}`, 'chip--info') : ''}
+            ${truncated ? chip(t('worktree.previewTruncated'), 'chip--warn') : ''}
+          </div>
+        </div>
+        <div class="review-file__hunk-lines">
+          ${lineHTML}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderWorktreeDiffFile(file) {
+    const raw = toObject(file);
+    const kind = toText(raw.kind || raw.state || raw.type, 'modified').toLowerCase();
+    const path = toText(raw.path || raw.file || raw.name, '(unknown)');
+    const oldPath = toText(raw.oldPath || raw.old_path || raw.sourcePath || raw.source_path || path, path);
+    const newPath = toText(raw.newPath || raw.new_path || raw.targetPath || raw.target_path || path, path);
+    const binary = Boolean(raw.binary);
+    const deleted = Boolean(raw.deleted);
+    const renamed = Boolean(raw.renamed);
+    const large = Boolean(raw.large);
+    const truncated = Boolean(raw.truncated);
+    const hunks = toArray(raw.hunks).map(normalizeWorktreeDiffHunk);
+    const displayPath = renamed && oldPath && newPath && oldPath !== newPath ? `${oldPath} -> ${newPath}` : path;
+    const stateLabel = binary
+      ? t('worktree.binaryFile')
+      : deleted
+        ? t('worktree.deletedFile')
+        : renamed
+          ? t('worktree.renamedFile')
+          : kind === 'added'
+            ? t('common.added')
+            : t('common.edited');
+    const stateTone = binary || deleted
+      ? 'chip--warn'
+      : renamed
+        ? 'chip--info'
+        : kind === 'added'
+          ? 'chip--accent'
+          : 'chip--info';
+    const chips = [
+      chip(stateLabel, stateTone),
+      large ? chip(t('worktree.largeFile'), 'chip--warn') : '',
+      truncated ? chip(t('worktree.previewTruncated'), 'chip--warn') : '',
+      hunks.length ? chip(`${hunks.length} ${t('common.changes')}`, 'chip--accent') : chip(t('worktree.noDiffHunks'), 'chip--info'),
+    ]
+      .filter(Boolean)
+      .join('');
+    const facts = [];
+    if (oldPath && oldPath !== path) {
+      facts.push(compactFactItem(t('worktree.oldPath'), oldPath));
+    }
+    if (newPath && newPath !== oldPath) {
+      facts.push(compactFactItem(t('worktree.newPath'), newPath));
+    }
+    if (raw.lineCount != null && String(raw.lineCount).trim() !== '') {
+      facts.push(compactFactItem(t('worktree.lineCount'), String(raw.lineCount), truncated ? t('worktree.previewTruncated') : ''));
+    }
+    const factsHTML = facts.length
+      ? `<div class="review-file__facts">${facts.join('')}</div>`
+      : '';
+    const diffHTML = hunks.length
+      ? hunks.map((hunk, index) => renderWorktreeDiffHunk(hunk, index)).join('')
+      : `<div class="summary-note">${escapeHTML(binary
+          ? t('worktree.binaryFileNoPreview')
+          : deleted
+            ? t('worktree.deletedFileNoPreview')
+            : large
+              ? t('worktree.largeFilePreviewTruncated')
+              : t('worktree.noDiffHunks'))}</div>`;
+    const summary = compactText(toText(raw.summary || raw.note, ''), 220);
+    const openAttr = binary || deleted || renamed || large || hunks.length === 0 ? ' open' : '';
+    return `
+      <details class="review-file review-file--diff"${openAttr}>
+        <summary class="review-file__summary">
+          <div class="review-file__summary-head">
+            <div class="review-file__path">${escapeHTML(displayPath)}</div>
+            <div class="review-file__chips">${chips}</div>
+          </div>
+          ${summary ? `<div class="review-file__summary-copy">${escapeHTML(summary)}</div>` : ''}
+        </summary>
+        <div class="review-file__body">
+          ${factsHTML}
+          ${diffHTML}
+        </div>
+      </details>
+    `;
+  }
+
+  function renderWorktreeFailureDetails(details, title = t('worktree.failureDetails')) {
+    const failure = normalizeWorktreeFailureDetails(details);
+    const failedFiles = toArray(failure.failedFiles).map(normalizeWorktreeFailureFile);
+    const failedHunks = toArray(failure.failedHunks).map(normalizeWorktreeFailureHunk);
+    const hasDetails = Boolean(
+      failure.command ||
+        failure.message ||
+        failure.output ||
+        failure.pendingFile ||
+        failedFiles.length ||
+        failedHunks.length
+    );
+    if (!hasDetails || failure.ok) {
+      return '';
+    }
+
+    const statusLabel = failure.status === 'missing'
+      ? t('worktree.applyCheckUnavailable')
+      : t('worktree.applyCheckFailed');
+    const statusTone = failure.status === 'missing' ? 'chip--info' : 'chip--warn';
+    const metaParts = [
+      failure.command ? `${t('worktree.applyCheckCommand')}: ${failure.command}` : '',
+      failure.hasRc ? `${t('worktree.applyCheckRc')}: ${String(failure.rc ?? 0)}` : '',
+      failure.message ? `${t('worktree.applyCheckMessage')}: ${failure.message}` : '',
+    ].filter(Boolean);
+
+    const failedFilesHTML = failedFiles.length
+      ? `
+        <div class="worktree-check__section">
+          <div class="worktree-check__section-title">${escapeHTML(t('worktree.failedFiles'))}</div>
+          <div class="compact-list">
+            ${failedFiles
+              .map((item) => `
+                <div class="compact-list__item worktree-check__item">
+                  <span class="compact-list__bullet"></span>
+                  <div>
+                    <div class="compact-list__body">${escapeHTML(item.path || t('common.unknown'))}</div>
+                    <div class="compact-list__meta">${escapeHTML([
+                      item.line ? t('logs.line', { lineNumber: item.line }) : '',
+                      item.reason || '',
+                    ].filter(Boolean).join(' | '))}</div>
+                  </div>
+                </div>
+              `)
+              .join('')}
+          </div>
+        </div>
+      `
+      : '';
+
+    const failedHunksHTML = failedHunks.length
+      ? `
+        <div class="worktree-check__section">
+          <div class="worktree-check__section-title">${escapeHTML(t('worktree.failedHunks'))}</div>
+          <div class="worktree-check__hunks">
+            ${failedHunks
+              .map((item) => `
+                <div class="worktree-check__hunk">
+                  <div class="worktree-check__hunk-head">
+                    <div class="worktree-check__hunk-path">${escapeHTML(item.path || t('common.unknown'))}</div>
+                    <div class="worktree-check__hunk-meta">${escapeHTML([
+                      item.line ? t('logs.line', { lineNumber: item.line }) : '',
+                      item.reason || '',
+                    ].filter(Boolean).join(' | '))}</div>
+                  </div>
+                  ${item.header ? `<div class="worktree-check__hunk-header">${escapeHTML(item.header)}</div>` : ''}
+                  ${item.lines.length ? `
+                    <div class="worktree-check__hunk-lines">
+                      ${item.lines.map((line) => `<div class="worktree-check__hunk-line">${escapeHTML(line)}</div>`).join('')}
+                    </div>
+                  ` : ''}
+                </div>
+              `)
+              .join('')}
+          </div>
+        </div>
+      `
+      : '';
+
+    const outputHTML = failure.output
+      ? `<pre class="worktree-check__output">${escapeHTML(compactText(failure.output, 720) || failure.output)}</pre>`
+      : '';
+
+    return `
+      <div class="worktree-check">
+        <div class="worktree-check__head">
+          <div class="worktree-check__title">${escapeHTML(title)}</div>
+          ${chip(statusLabel, statusTone)}
+        </div>
+        ${metaParts.length ? `<div class="summary-note">${escapeHTML(metaParts.join(' | '))}</div>` : ''}
+        ${outputHTML}
+        ${failedFilesHTML}
+        ${failedHunksHTML}
+        ${!failure.ok && (failedFiles.length || failedHunks.length || failure.output) ? `
+          <div class="summary-note worktree-check__recoverable">${escapeHTML(t('worktree.pendingStateRecoverable'))}</div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  function renderWorktreePreflightBlock(review) {
+    const raw = toObject(review);
+    const preflight = toObject(raw.preflight);
+    const sourceRepoState = toText(raw.sourceRepoState || raw.source_repo_state || preflight.sourceRepoState || preflight.source_repo_state, '');
+    const sourceRepoDirty = Boolean(
+      raw.sourceRepoDirty ??
+        raw.source_repo_dirty ??
+        preflight.sourceRepoDirty ??
+        preflight.source_repo_dirty ??
+        (sourceRepoState ? sourceRepoState !== 'clean' : false)
+    );
+    const sourceHead = toText(raw.sourceHead || raw.source_head || preflight.sourceHead || preflight.source_head, '');
+    const expectedBaseRef = toText(raw.expectedBaseRef || raw.expected_base_ref || preflight.expectedBaseRef || preflight.expected_base_ref || raw.baseRef || raw.base_ref, '');
+    const patchHash = toText(raw.patchHash || raw.patch_hash || preflight.patchHash || preflight.patch_hash, '');
+    const pendingMarkerPath = toText(
+      raw.pendingMarkerPath ||
+        raw.pending_marker_path ||
+        preflight.pendingMarkerPath ||
+        preflight.pending_marker_path ||
+        preflight.pendingFile ||
+        preflight.pending_file ||
+        raw.pendingFile ||
+        raw.pending_file ||
+        raw.statusFile ||
+        raw.status_file,
+      ''
+    );
+    const rawApplyCheck = toObject(raw.applyCheck || raw.apply_check || preflight.applyCheck || preflight.apply_check);
+    const applyCheck = normalizeWorktreeFailureDetails(rawApplyCheck);
+    const applyCheckHasData = Boolean(
+      rawApplyCheck.command ||
+        rawApplyCheck.cmd ||
+        rawApplyCheck.output ||
+        rawApplyCheck.failedFiles ||
+        rawApplyCheck.failed_files ||
+        rawApplyCheck.failedHunks ||
+        rawApplyCheck.failed_hunks ||
+        rawApplyCheck.message ||
+        rawApplyCheck.status ||
+        rawApplyCheck.ok != null ||
+        rawApplyCheck.rc != null
+    );
+    const hasAnyPreflightData = Boolean(
+      sourceRepoState ||
+        sourceHead ||
+        expectedBaseRef ||
+        patchHash ||
+        pendingMarkerPath ||
+        applyCheck.command ||
+        applyCheck.message ||
+        applyCheck.output ||
+        applyCheck.failedFiles.length ||
+        applyCheck.failedHunks.length
+    );
+    if (!hasAnyPreflightData) {
+      return '';
+    }
+
+    const applyCheckValue = !applyCheckHasData
+      ? t('common.unavailable')
+      : applyCheck.ok
+        ? `${t('worktree.applyCheckPassed')} | rc=${String(applyCheck.rc ?? 0)}`
+        : applyCheck.status === 'missing'
+          ? t('worktree.applyCheckUnavailable')
+          : `${t('worktree.applyCheckFailed')} | rc=${String(applyCheck.rc ?? 0)}`;
+    const preflightCards = [
+      {
+        label: t('worktree.sourceDirtyState'),
+        value: sourceRepoState || (sourceRepoDirty ? t('common.dirty') : t('common.unavailable')),
+        valueClass: sourceRepoState || sourceRepoDirty ? (sourceRepoDirty ? 'runner-control__value--warn' : 'runner-control__value--muted') : 'runner-control__value--muted',
+      },
+      {
+        label: t('worktree.sourceHead'),
+        value: sourceHead || '--',
+        valueClass: sourceHead ? 'runner-control__value--accent' : 'runner-control__value--muted',
+      },
+      {
+        label: t('worktree.expectedBaseRef'),
+        value: expectedBaseRef || '--',
+        valueClass: expectedBaseRef ? 'runner-control__value--accent' : 'runner-control__value--muted',
+      },
+      {
+        label: t('worktree.patchHash'),
+        value: patchHash || '--',
+        valueClass: patchHash ? 'runner-control__value--accent' : 'runner-control__value--muted',
+      },
+      {
+        label: t('worktree.gitApplyCheck'),
+        value: applyCheckValue,
+        valueClass: !applyCheckHasData
+          ? 'runner-control__value--muted'
+          : applyCheck.ok
+            ? 'runner-control__value--accent'
+            : applyCheck.status === 'missing'
+              ? 'runner-control__value--muted'
+              : 'runner-control__value--warn',
+      },
+      {
+        label: t('worktree.pendingMarkerPath'),
+        value: pendingMarkerPath || '--',
+        valueClass: pendingMarkerPath ? 'runner-control__value--muted' : 'runner-control__value--muted',
+      },
+    ];
+
+    return `
+      <div class="worktree-preflight">
+        <div class="runner-control__details worktree-preflight__details">
+          ${preflightCards.map((item) => detailCard(item.label, item.value, item.valueClass)).join('')}
+        </div>
+        ${renderWorktreeFailureDetails(applyCheck, t('worktree.gitApplyCheck'))}
+      </div>
+    `;
   }
 
   function button(label, action, extraClass = 'button--quiet', attrs = '') {
@@ -10267,20 +10819,24 @@
       { label: t('worktree.runDir'), value: toText(review.runDir, '--') },
       { label: t('worktree.worktreeDir'), value: toText(review.worktreeDir || review.worktree, '--') },
       { label: t('worktree.patchPath'), value: toText(review.patchPath || review.patch, '--') },
-      { label: t('worktree.pendingFile'), value: toText(review.pendingFile || review.statusFile, '--') },
-      { label: t('worktree.baseRef'), value: toText(review.baseRef, '--') },
-      { label: t('worktree.headRef'), value: toText(review.headRef, '--') },
+      { label: t('worktree.pendingMarkerPath'), value: toText(review.pendingMarkerPath || review.pendingFile || review.statusFile, '--') },
     ];
     const detailHTML = detailCards
-      .map(
-        (item) => `
-          <div class="runner-control__detail">
-            <div class="runner-control__label">${escapeHTML(item.label)}</div>
-            <div class="runner-control__value">${escapeHTML(item.value)}</div>
-          </div>
-        `
-      )
+      .map((item) => detailCard(item.label, item.value))
       .join('');
+    const preflightHTML = renderWorktreePreflightBlock(review);
+    const errorDetailsRaw = toObject(actionState.errorDetails);
+    const failureHTML = errorDetailsRaw.applyCheck || errorDetailsRaw.apply_check
+      ? ''
+      : (errorDetailsRaw.command ||
+          errorDetailsRaw.cmd ||
+          errorDetailsRaw.output ||
+          errorDetailsRaw.failed_files ||
+          errorDetailsRaw.failed_hunks ||
+          errorDetailsRaw.failedFiles ||
+          errorDetailsRaw.failedHunks)
+        ? renderWorktreeFailureDetails(errorDetailsRaw, t('worktree.failureDetails'))
+        : '';
     const actionLabel = worktreeActionLabel(action, actionState.submitting);
     // Confirm ${actionLabel.toLowerCase()}
     const bannerMessage = actionState.submitting
@@ -10307,6 +10863,16 @@
               <div class="runner-control__details worktree-action__details">
                 ${detailHTML}
               </div>
+              ${preflightHTML ? `
+                <div class="worktree-action__preflight">
+                  ${preflightHTML}
+                </div>
+              ` : ''}
+              ${failureHTML ? `
+                <div class="worktree-action__failure">
+                  ${failureHTML}
+                </div>
+              ` : ''}
               <div class="modal-banner section-banner section-banner--info worktree-action__warning">
                 <span class="dot" style="background: currentColor;"></span>
                 <div>
@@ -10402,7 +10968,11 @@
       if (!response.ok || normalized.ok === false) {
         const message = toText(normalized.message || toObject(normalized.error).message || t('worktree.actionFailedHttp', { status: response.status }), t('worktree.actionFailed'));
         const error = new Error(message);
+        const errorDetails = toObject(normalized.error).details;
         const snapshot = toObject(normalized.snapshot);
+        if (errorDetails && Object.keys(errorDetails).length) {
+          error.details = errorDetails;
+        }
         if (Object.keys(snapshot).length) {
           error.snapshot = snapshot;
         }
@@ -10421,6 +10991,7 @@
     } catch (error) {
       const message = toText(error?.message || error, t('worktree.actionFailed'));
       const snapshot = toObject(error?.snapshot);
+      const details = toObject(error?.details);
       if (Object.keys(snapshot).length) {
         applyServerSnapshot(snapshot);
       }
@@ -10428,6 +10999,7 @@
         ...actionState,
         submitting: false,
         error: message,
+        errorDetails: details,
       };
       renderWorktreeActionOverlay();
     }
@@ -13402,6 +13974,14 @@
     const actionEnabled = worktreeActionEnabled(review, 'merge');
     const canCopyPatch = Boolean(review.patchPath || review.patch);
     const reviewSummary = describeWorktreeReview(review);
+    const preflightHTML = status !== 'none' ? renderWorktreePreflightBlock(review) : '';
+    const changedFilesHTML = review.changedFiles.length
+      ? `
+        <div class="review-files review-files--diff">
+          ${review.changedFiles.map((file) => renderWorktreeDiffFile(file)).join('')}
+        </div>
+      `
+      : `<div class="summary-note">${escapeHTML(t('worktree.noChangedFiles'))}</div>`;
     const statusLabel = (() => {
       const normalized = status.toLowerCase();
       if (normalized === 'none') return t('common.none');
@@ -13565,23 +14145,16 @@
             `
           )}
 
+          ${preflightHTML ? panel(
+            t('worktree.mergePreflight'),
+            status === 'pending review' || status === 'pending' ? t('worktree.reviewRequired') : t('worktree.readOnly'),
+            preflightHTML
+          ) : ''}
+
           ${panel(
             t('worktree.changedFiles'),
             `${escapeHTML(review.changedFiles.length)} ${escapeHTML(t('common.files'))}`,
-            `
-              ${review.changedFiles.length ? `
-                <div class="review-files">
-                  ${review.changedFiles
-                    .map((file) => `
-                      <div class="review-file">
-                        <div class="review-file__path">${escapeHTML(file.path)}</div>
-                        <div class="review-file__meta">${escapeHTML(file.kind)} | ${escapeHTML(file.note)}</div>
-                      </div>
-                    `)
-                    .join('')}
-                </div>
-              ` : `<div class="summary-note">${escapeHTML(t('worktree.noChangedFiles'))}</div>`}
-            `
+            changedFilesHTML
           )}
         </div>
 

@@ -1726,6 +1726,49 @@ class WebConsoleSafetyTests(unittest.TestCase):
         payload = response.json()
         self.assertFalse(payload["ok"])
         self.assertEqual("worktree_patch_check_failed", payload["error"]["code"])
+        self.assertEqual("src/app.py", payload["error"]["details"]["failed_files"][0]["path"])
+        self.assertEqual("src/app.py", payload["error"]["details"]["apply_check"]["failed_files"][0]["path"])
+        self.assertEqual("@@ -1 +1 @@", payload["error"]["details"]["failed_hunks"][0]["header"])
+        self.assertEqual("@@ -1 +1 @@", payload["error"]["details"]["apply_check"]["failed_hunks"][0]["header"])
+        self.assertEqual("failed", payload["worktree"]["applyCheck"]["status"])
+        self.assertTrue(self.pending_path.exists())
+        self.assertEqual(snapshot["worktree"]["sourceRepo"], payload["worktree"]["sourceRepo"])
+
+    def test_worktree_merge_reports_patch_apply_failure_details_and_keeps_pending_state(self) -> None:
+        from agent_runner.web import build_snapshot
+
+        fixture = self._prepare_pending_worktree()
+        snapshot = build_snapshot(self.repo)
+        worktree = snapshot["worktree"]
+        body = self._worktree_action_payload(worktree, confirmation="MERGE WORKTREE")
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        def fake_run_cmd(cmd, cwd, timeout_sec=600):
+            if cmd[:5] == ["git", "apply", "--check", "--binary", "--whitespace=nowarn"]:
+                return 0, ""
+            if cmd[:4] == ["git", "apply", "--binary", "--whitespace=nowarn"]:
+                return 1, "error: patch failed: src/app.py:1\nerror: src/app.py: patch does not apply\n"
+            completed = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            return completed.returncode, (completed.stdout or "") + (completed.stderr or "")
+
+        with patch("agent_runner.gitops.run_cmd", side_effect=fake_run_cmd):
+            response = client.post("/api/worktree/merge", json=body)
+
+        self.assertEqual(409, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("worktree_patch_apply_failed", payload["error"]["code"])
+        self.assertEqual("src/app.py", payload["error"]["details"]["failed_files"][0]["path"])
+        self.assertEqual("src/app.py", payload["error"]["details"]["failed_hunks"][0]["path"])
+        self.assertEqual("@@ -1 +1 @@", payload["error"]["details"]["failed_hunks"][0]["header"])
         self.assertTrue(self.pending_path.exists())
         self.assertEqual(snapshot["worktree"]["sourceRepo"], payload["worktree"]["sourceRepo"])
 
