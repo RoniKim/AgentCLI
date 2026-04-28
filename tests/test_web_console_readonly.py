@@ -1406,7 +1406,7 @@ def _run_adapter_harness(fixtures):
         const vm = require('vm');
         const sourcePath = __SOURCE_PATH__;
         const source = fs.readFileSync(sourcePath, 'utf8');
-        const root = { innerHTML: '' };
+        const root = { innerHTML: '', dataset: Object.create(null) };
         const document = {
           title: '',
           body: {
@@ -1510,7 +1510,7 @@ def _run_log_tail_harness(ops):
         const vm = require('vm');
         const sourcePath = __SOURCE_PATH__;
         const source = fs.readFileSync(sourcePath, 'utf8');
-        const root = { innerHTML: '' };
+        const root = { innerHTML: '', dataset: Object.create(null) };
         const document = {
           title: '',
           body: {
@@ -4540,6 +4540,179 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         restore_banner = results[10]
         self.assertIn("Prompt restored", restore_banner)
 
+    def test_config_restore_panel_renders_backup_selection_and_state_variants(self) -> None:
+        selected_backup_path = (self.config_path.parent / f"{self.config_path.stem}.20260428-121500.bak{self.config_path.suffix}").as_posix()
+        sibling_backup_path = (self.config_path.parent / f"{self.config_path.stem}.20260428-121000.bak{self.config_path.suffix}").as_posix()
+        new_backup_path = (self.config_path.parent / f"{self.config_path.stem}.20260428-123500.bak{self.config_path.suffix}").as_posix()
+        contract = {
+            "path": self.config_path.as_posix(),
+            "source": "api",
+            "resolved_prompts_dir": "prompts/agentcli",
+            "values": {
+                "repo": self.repo.as_posix(),
+                "profile": "personal",
+                "execution_backend": "codex",
+                "iterations": 2,
+                "prompts_dir": "prompts/agentcli",
+            },
+            "defaults": {
+                "repo": "",
+                "profile": "personal",
+                "execution_backend": "codex",
+                "iterations": 1,
+                "prompts_dir": "prompts/agentcli",
+            },
+            "schema": {},
+            "groups": [],
+            "redaction": {
+                "placeholder": "[redacted]",
+                "paths": [],
+                "tokens": [],
+            },
+            "restart_required_paths": [],
+            "backups": [
+                {
+                    "backup_path": selected_backup_path,
+                    "updated": "2026-04-28 12:15",
+                    "size": 128,
+                },
+                {
+                    "path": sibling_backup_path,
+                    "name": Path(sibling_backup_path).name,
+                    "updated": "2026-04-28 12:10",
+                    "size": 64,
+                },
+            ],
+            "meta": {
+                "path": self.config_path.as_posix(),
+                "source": "api",
+                "resolved_prompts_dir": "prompts/agentcli",
+                "save_enabled": True,
+                "save_endpoint": "/api/config/save",
+                "save_requires_opt_in": True,
+                "restore_enabled": True,
+                "restore_endpoint": "/api/config/restore",
+                "restore_requires_opt_in": True,
+            },
+        }
+        blank_state = {
+            "status": "idle",
+            "message": "",
+            "errorCode": "",
+            "backupPath": "",
+            "restoredFromPath": "",
+            "restoredAt": 0,
+            "backupSelection": selected_backup_path,
+            "restoreConfirmation": "",
+            "requestPath": "/api/config/restore",
+        }
+        restoring_state = {
+            **blank_state,
+            "status": "restoring",
+            "message": "Restoring...",
+            "restoreConfirmation": "RESTORE CONFIG BACKUP",
+        }
+        success_state = {
+            **blank_state,
+            "status": "success",
+            "message": f"Config restored from {selected_backup_path}. Backup written to {new_backup_path}.",
+            "errorCode": "",
+            "backupPath": new_backup_path,
+            "restoredFromPath": selected_backup_path,
+            "restoredAt": 1,
+            "backupSelection": new_backup_path,
+            "restoreConfirmation": "",
+        }
+        error_state = {
+            **blank_state,
+            "status": "error",
+            "message": "Config restore failed: checksum mismatch.",
+            "errorCode": "config_restore_failed",
+            "backupPath": new_backup_path,
+            "restoredFromPath": selected_backup_path,
+            "restoredAt": 2,
+            "restoreConfirmation": "RESTORE CONFIG BACKUP",
+        }
+        locked_contract = {
+            **contract,
+            "meta": {
+                **contract["meta"],
+                "restore_enabled": False,
+            },
+        }
+
+        results = _run_adapter_harness(
+            [
+                {"kind": "call", "name": "normalizeConfigBackup", "args": [{"backup_path": selected_backup_path, "updated": "2026-04-28 12:15", "size": 128}]},
+                {"kind": "call", "name": "createBlankConfigRestoreState", "args": []},
+                {"kind": "call", "name": "renderConfigRestorePanel", "args": [contract, blank_state]},
+                {"kind": "call", "name": "renderConfigRestorePanel", "args": [contract, restoring_state]},
+                {"kind": "call", "name": "renderConfigRestorePanel", "args": [contract, success_state]},
+                {"kind": "call", "name": "renderConfigRestorePanel", "args": [contract, error_state]},
+                {"kind": "call", "name": "renderConfigRestorePanel", "args": [locked_contract, blank_state]},
+                {"kind": "call", "name": "setLocale", "args": ["ko"]},
+                {"kind": "call", "name": "renderConfigRestorePanel", "args": [contract, success_state]},
+            ]
+        )
+
+        normalized_backup = results[0]
+        self.assertEqual(selected_backup_path, normalized_backup["path"])
+        self.assertEqual(Path(selected_backup_path).name, normalized_backup["name"])
+        self.assertEqual("2026-04-28 12:15 | 128 bytes", normalized_backup["summary"])
+
+        blank = results[1]
+        self.assertEqual("idle", blank["status"])
+        self.assertEqual("/api/config/restore", blank["requestPath"])
+
+        panel = results[2]
+        self.assertIn('data-config-backup-select', panel)
+        self.assertIn('data-config-restore-confirmation', panel)
+        self.assertIn('data-config-restore-button', panel)
+        self.assertIn("Selected backup", panel)
+        self.assertIn("Available backups", panel)
+        self.assertIn("Restore confirmation", panel)
+        self.assertIn("Type RESTORE CONFIG BACKUP", panel)
+        self.assertIn(selected_backup_path, panel)
+        self.assertIn('data-config-restore-status="idle"', panel)
+
+        restoring = results[3]
+        self.assertIn('data-config-restoring="true"', restoring)
+        self.assertIn("Restoring...", restoring)
+
+        success = results[4]
+        self.assertIn('data-config-restore-status="success"', success)
+        self.assertIn("Config restored", success)
+        self.assertIn("Restore backup path", success)
+        self.assertIn("Restored from", success)
+        self.assertIn(new_backup_path, success)
+        self.assertIn(selected_backup_path, success)
+
+        error = results[5]
+        self.assertIn('data-config-restore-status="error"', error)
+        self.assertIn("Config restore failed", error)
+        self.assertIn("config_restore_failed", error)
+        self.assertIn("Restore backup path", error)
+        self.assertIn("Restored from", error)
+        self.assertIn(new_backup_path, error)
+
+        locked = results[6]
+        self.assertIn("Config restores are locked", locked)
+        self.assertTrue(
+            "Loading runner control status..." in locked
+            or "Config saves and restores are disabled until runner controls are enabled." in locked
+        )
+        self.assertIn("Restore Backup", locked)
+
+        ko_panel = results[8]
+        self.assertIn("백업 복원", ko_panel)
+        self.assertIn("선택된 백업", ko_panel)
+        self.assertIn("사용 가능한 백업", ko_panel)
+        self.assertIn("복원 확인", ko_panel)
+        self.assertIn("복원 백업 경로", ko_panel)
+        self.assertIn("복원 원본", ko_panel)
+        self.assertIn("설정이 복원되었습니다", ko_panel)
+        self.assertIn("RESTORE CONFIG BACKUP", ko_panel)
+
     def test_prompt_read_surfaces_validation_failures_for_empty_and_partial_templates(self) -> None:
         _write_config(self.config_path, self.repo)
         prompts_dir = self.home / "prompts" / "agentcli"
@@ -6821,6 +6994,19 @@ Another unsupported line.
                 {"id": "prompts", "title": "Prompt Paths", "paths": ["prompts_dir"]},
                 {"id": "telegram", "title": "Telegram", "paths": ["telegram.bot_token"]},
             ],
+            "backups": [
+                {
+                    "backup_path": "config/agentcli.20260428-120000.bak.json",
+                    "updated": "2026-04-28 12:00",
+                    "size": 128,
+                },
+                {
+                    "path": "config/agentcli.20260427-120000.bak.json",
+                    "name": "config/agentcli.20260427-120000.bak.json",
+                    "updated": "2026-04-27 12:00",
+                    "size": 64,
+                },
+            ],
             "redaction": {
                 "placeholder": "[redacted]",
                 "paths": ["telegram.bot_token"],
@@ -6831,6 +7017,11 @@ Another unsupported line.
                 "path": "config/agentcli.json",
                 "source": "api",
                 "resolved_prompts_dir": "prompts/agentcli",
+                "save_enabled": True,
+                "save_requires_opt_in": True,
+                "restore_enabled": True,
+                "restore_endpoint": "/api/config/restore",
+                "restore_requires_opt_in": True,
             },
         }
 
@@ -6851,6 +7042,13 @@ Another unsupported line.
         self.assertEqual(["prompts_dir"], normalized["configContract"]["groups"][0]["paths"])
         self.assertIn("telegram.bot_token", normalized["configContract"]["redaction"]["paths"])
         self.assertIn("telegram.bot_token", normalized["configContract"]["restart_required_paths"])
+        self.assertEqual("config/agentcli.20260428-120000.bak.json", normalized["configContract"]["backups"][0]["path"])
+        self.assertEqual("agentcli.20260428-120000.bak.json", normalized["configContract"]["backups"][0]["name"])
+        self.assertEqual("2026-04-28 12:00 | 128 bytes", normalized["configContract"]["backups"][0]["summary"])
+        self.assertEqual("config/agentcli.20260427-120000.bak.json", normalized["configContract"]["backups"][1]["path"])
+        self.assertTrue(normalized["configContract"]["meta"]["restore_enabled"])
+        self.assertEqual("/api/config/restore", normalized["configContract"]["meta"]["restore_endpoint"])
+        self.assertTrue(normalized["configContract"]["meta"]["restore_requires_opt_in"])
 
     def test_adapter_reports_security_role_requirements_and_warnings(self) -> None:
         schema = {

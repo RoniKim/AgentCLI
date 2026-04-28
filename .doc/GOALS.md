@@ -152,26 +152,26 @@
 - [x] Dashboard, Pipeline, Logs, Notifications, and Runner Controls consume the same normalized live-run contract instead of each reconstructing status independently.
 - [x] A long-running PM/Dev/QA task shows elapsed time, last log line, latest backend event, and "no output for N minutes" warning without requiring terminal access.
 - [x] Live logs preserve scroll position, selection, pause state, and filters across route changes and refreshes.
-- [ ] Log tailing can switch between `run.log`, `error.log`, `events.jsonl`, `cycle_summary.log`, and backend transcript sources when available.
+- [x] Log tailing can switch between `run.log`, `error.log`, `events.jsonl`, `cycle_summary.log`, and backend transcript sources when available.
 - [x] UI explicitly marks stale snapshots when the run directory, controller state, and process table disagree.
-- [ ] Playwright coverage verifies a simulated long-running task, stop-in-progress sequence, reconnect, stale snapshot, and completed-run transition.
+- [x] Playwright coverage verifies a simulated long-running task, stop-in-progress sequence, reconnect, stale snapshot, and completed-run transition.
 
 ### P0-O. Enterprise-Grade Config And Role Management
 
 - [x] Role editing preserves unknown/plugin stage specs such as `pkg.mod:Class` instead of silently dropping values outside the built-in enum.
-- [ ] Built-in role choices, defaults, and ordering have a single source of truth shared by CLI, web schema, stage registry, tests, and docs.
-- [ ] The web config editor exposes PM, Security, Dev, QA, reporter, and fallback model settings with labels that match their runtime behavior.
-- [ ] Model selection supports the approved Codex model ladder: PM `gpt-5.5`; Dev fallback `gpt-5.4-mini -> gpt-5.4 -> gpt-5.5`; QA `gpt-5.5`; reporter `gpt-5.4-mini`.
-- [ ] Security role UX shows both requirements: the role must be selected and `security.enabled` must be true, with a warning when one side is missing.
-- [ ] Config saves normalize list/string fields before runner launch so web-saved `roles`, models, allowlists, and paths cannot produce zero-stage runs.
-- [ ] Config save validation reports every rejected field in one response, not only the first failure.
+- [x] Built-in role choices, defaults, and ordering have a single source of truth shared by CLI, web schema, stage registry, tests, and docs.
+- [x] The web config editor exposes PM, Security, Dev, QA, reporter, and fallback model settings with labels that match their runtime behavior.
+- [x] Model selection supports the approved Codex model ladder: PM `gpt-5.5`; Dev fallback `gpt-5.4-mini -> gpt-5.4 -> gpt-5.5`; QA `gpt-5.5`; reporter `gpt-5.4-mini`.
+- [x] Security role UX shows both requirements: the role must be selected and `security.enabled` must be true, with a warning when one side is missing.
+- [x] Config saves normalize list/string fields before runner launch so web-saved `roles`, models, allowlists, and paths cannot produce zero-stage runs.
+- [x] Config save validation reports every rejected field in one response, not only the first failure.
 - [ ] Config backup/restore UI can list recent backups and restore a selected backup with confirmation.
 
 ### P0-P. Worktree Review, Merge, And Cleanup Operations
 
-- [ ] Worktree Review includes an inspectable per-file diff view with binary, deleted, renamed, and large-file states handled explicitly.
-- [ ] Merge preflight details are shown in the UI: source dirty state, source `HEAD`, expected base ref, patch hash, `git apply --check`, and pending marker path.
-- [ ] Merge conflicts or patch apply failures show exact failed files/hunks and leave the pending state recoverable.
+- [x] Worktree Review includes an inspectable per-file diff view with binary, deleted, renamed, and large-file states handled explicitly.
+- [x] Merge preflight details are shown in the UI: source dirty state, source `HEAD`, expected base ref, patch hash, `git apply --check`, and pending marker path.
+- [x] Merge conflicts or patch apply failures show exact failed files/hunks and leave the pending state recoverable.
 - [x] Worktree merge prefers fast-forwarding committed worktree history before applying a dirty-only patch when `head_ref` descends from `base_ref`, so one stale hunk in a cumulative patch cannot block an otherwise mergeable run.
 - [ ] Worktree Review shows split-merge metadata, including fast-forward ref, dirty patch path, and whether the dirty patch was applied, when a merge uses the fast-forward-then-patch recovery path.
 - [ ] Discard and cleanup actions distinguish source-safe discard, generated worktree removal, stale marker pruning, and cleanup-failed reconciliation.

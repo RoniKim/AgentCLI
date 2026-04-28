@@ -26,6 +26,8 @@
   // Keep the template-form text in source for static coverage:
   // Type ${worktreeActionConfirmationPhrase('merge')} exactly to apply
   // Type ${worktreeActionConfirmationPhrase('discard')} exactly to discard
+  // Type ${CONFIG_RESTORE_CONFIRMATION_PHRASE} exactly to restore
+  const CONFIG_RESTORE_CONFIRMATION_PHRASE = 'RESTORE CONFIG BACKUP';
   const VIEW_ORDER = [
     'dashboard',
     'pipeline',
@@ -434,6 +436,24 @@
         noChanges: 'No config changes',
         readyToSave: 'Ready to save changes',
         backupPath: 'Backup path',
+        selectedBackup: 'Selected backup',
+        availableBackups: 'Available backups',
+        restoreBackup: 'Restore Backup',
+        restoreBackupPath: 'Restore backup path',
+        restoredFrom: 'Restored from',
+        restoreConfirmation: 'Restore confirmation',
+        confirmationRequired: 'Confirmation required',
+        readyToRestore: 'Ready to restore',
+        restoring: 'Restoring...',
+        restored: 'Config restored',
+        restoreFailed: 'Config restore failed',
+        restoreLocked: 'Config restores are locked',
+        restoreInProgress: 'Config restore is already in progress.',
+        mutationInProgress: 'A config mutation is already in progress.',
+        mutationsDisabledUntilRunnerEnabled: 'Config saves and restores are disabled until runner controls are enabled.',
+        noBackupsAvailable: 'No backups available',
+        restoreCreatesBackup: 'Restoring always creates a timestamped backup before overwriting the active config.',
+        restoreOverwritePhrase: 'Type RESTORE CONFIG BACKUP to confirm the selected backup will overwrite the config file.',
         reloadRequired: 'Reload required',
         pendingPaths: 'Pending paths',
         restartRequired: 'Restart required',
@@ -1004,6 +1024,24 @@
         noChanges: '변경된 설정 없음',
         readyToSave: '저장할 변경 사항 준비됨',
         backupPath: '백업 경로',
+        selectedBackup: '선택된 백업',
+        availableBackups: '사용 가능한 백업',
+        restoreBackup: '백업 복원',
+        restoreBackupPath: '복원 백업 경로',
+        restoredFrom: '복원 원본',
+        restoreConfirmation: '복원 확인',
+        confirmationRequired: '확인 필요',
+        readyToRestore: '복원 준비됨',
+        restoring: '복원 중...',
+        restored: '설정이 복원되었습니다',
+        restoreFailed: '설정 복원 실패',
+        restoreLocked: '설정 복원이 잠겨 있습니다',
+        restoreInProgress: '설정 복원이 이미 진행 중입니다.',
+        mutationInProgress: '설정 변경이 이미 진행 중입니다.',
+        mutationsDisabledUntilRunnerEnabled: '러너 컨트롤이 활성화될 때까지 설정 저장과 복원은 비활성화됩니다.',
+        noBackupsAvailable: '사용 가능한 백업이 없습니다',
+        restoreCreatesBackup: '복원할 때는 항상 현재 설정의 타임스탬프 백업을 만든 다음 활성 설정을 덮어씁니다.',
+        restoreOverwritePhrase: '선택한 백업이 설정 파일을 덮어쓴다는 것을 확인하려면 RESTORE CONFIG BACKUP를 입력하세요.',
         reloadRequired: '다시 불러오기 필요',
         pendingPaths: '대기 경로',
         restartRequired: '재시작 필요',
@@ -5338,6 +5376,22 @@
     return data;
   }
 
+  function normalizeConfigBackup(raw) {
+    const item = toObject(raw);
+    const path = toText(item.path || item.backup_path, '');
+    const name = toText(item.name, path ? (path.split(/[\\/]/).pop() || path) : '');
+    const updated = toText(item.updated, '');
+    const size = toNumber(item.size, 0);
+    const summary = toText(item.summary, updated ? `${updated} | ${size} bytes` : `${size} bytes`);
+    return {
+      path,
+      name,
+      updated,
+      size,
+      summary,
+    };
+  }
+
   function buildConfigContract(rawContract, fallback = {}) {
     const raw = toObject(rawContract);
     const fallbackSchema = toObject(fallback.schema || {});
@@ -5378,6 +5432,7 @@
         restartRequiredPaths.push(path);
       }
     }
+    const backups = toArray(raw.backups || fallback.backups).map(normalizeConfigBackup).filter((backup) => Boolean(backup.path));
 
     return {
       path: toText(raw.path || fallback.path, ''),
@@ -5393,6 +5448,7 @@
         tokens: normalizeListValues(redactionSource.tokens || fallback.redaction?.tokens || []),
       },
       restart_required_paths: restartRequiredPaths,
+      backups,
       meta: {
         ...fallbackMeta,
         ...rawMeta,
@@ -5402,6 +5458,9 @@
         save_enabled: Boolean(rawMeta.save_enabled ?? fallbackMeta.save_enabled ?? false),
         save_endpoint: toText(rawMeta.save_endpoint || fallbackMeta.save_endpoint || '/api/config/save', '/api/config/save'),
         save_requires_opt_in: Boolean(rawMeta.save_requires_opt_in ?? fallbackMeta.save_requires_opt_in ?? true),
+        restore_enabled: Boolean(rawMeta.restore_enabled ?? fallbackMeta.restore_enabled ?? rawMeta.save_enabled ?? fallbackMeta.save_enabled ?? false),
+        restore_endpoint: toText(rawMeta.restore_endpoint || fallbackMeta.restore_endpoint || '/api/config/restore', '/api/config/restore'),
+        restore_requires_opt_in: Boolean(rawMeta.restore_requires_opt_in ?? fallbackMeta.restore_requires_opt_in ?? true),
       },
     };
   }
@@ -5662,6 +5721,7 @@
       path: toText(raw.path || context.path || '', ''),
       source: toText(raw.source || context.source || '', ''),
       resolved_prompts_dir: toText(raw.resolved_prompts_dir || context.resolved_prompts_dir || '', ''),
+      backups: clone(toArray(context.backups || defaults.configContract?.backups || [])),
       values: clone(toObject(context.legacyConfig || defaults.config || {})),
       defaults: clone(toObject(context.defaults || defaults.configDefault || {})),
       schema: clone(toObject(context.schema || defaults.configSchema || {})),
@@ -5673,6 +5733,9 @@
         save_enabled: Boolean(raw.meta?.save_enabled ?? context.save_enabled ?? false),
         save_endpoint: toText(raw.meta?.save_endpoint || context.save_endpoint || '/api/config/save', '/api/config/save'),
         save_requires_opt_in: Boolean(raw.meta?.save_requires_opt_in ?? context.save_requires_opt_in ?? true),
+        restore_enabled: Boolean(raw.meta?.restore_enabled ?? context.restore_enabled ?? context.save_enabled ?? false),
+        restore_endpoint: toText(raw.meta?.restore_endpoint || context.restore_endpoint || '/api/config/restore', '/api/config/restore'),
+        restore_requires_opt_in: Boolean(raw.meta?.restore_requires_opt_in ?? context.restore_requires_opt_in ?? true),
       },
       redaction: {
         placeholder: toText(context.redaction?.placeholder || raw.redaction?.placeholder, '[redacted]'),
@@ -6733,9 +6796,13 @@
         save_enabled: false,
         save_endpoint: '/api/config/save',
         save_requires_opt_in: true,
+        restore_enabled: false,
+        restore_endpoint: '/api/config/restore',
+        restore_requires_opt_in: true,
       },
       configSchema,
       configSave: createBlankConfigSaveState(),
+      configRestore: createBlankConfigRestoreState(),
       prompts: [],
       promptEditor: createBlankPromptEditor(),
       worktreeMerge: {
@@ -7123,6 +7190,9 @@
           save_enabled: false,
           save_endpoint: '/api/config/save',
           save_requires_opt_in: true,
+          restore_enabled: false,
+          restore_endpoint: '/api/config/restore',
+          restore_requires_opt_in: true,
         },
       },
       configDraft: clone(defaults.configContract.values),
@@ -7133,8 +7203,12 @@
         save_enabled: false,
         save_endpoint: '/api/config/save',
         save_requires_opt_in: true,
+        restore_enabled: false,
+        restore_endpoint: '/api/config/restore',
+        restore_requires_opt_in: true,
       },
       configSave: createBlankConfigSaveState(),
+      configRestore: createBlankConfigRestoreState(),
       prompts: [
         {
           id: 'bootstrap',
@@ -7393,7 +7467,21 @@
     createBlankPromptEditor,
     createBlankPromptSaveState,
     createBlankPromptRestoreState,
+    createBlankConfigSaveState,
+    createBlankConfigRestoreState,
     createBlankGoalSaveState,
+    normalizeConfigBackup,
+    configBackups,
+    configSelectedBackup,
+    configRestoreEnabled,
+    configRestoreInFlight,
+    configRestoreRequestPath,
+    configMutationInFlight,
+    configRestoreDisabledReason,
+    resetConfigRestoreState,
+    updateConfigRestoreMutationField,
+    renderConfigRestorePanel,
+    restoreConfigBackup,
     inspectPromptEditorState,
     promptEditorValidation,
     renderPromptEditorState,
@@ -8722,6 +8810,14 @@
     return state.configSave?.status === 'saving';
   }
 
+  function configRestoreInFlight() {
+    return state.configRestore?.status === 'restoring';
+  }
+
+  function configMutationInFlight() {
+    return configSaveInFlight() || configRestoreInFlight();
+  }
+
   function configSaveEnabled() {
     const meta = toObject(state.configMeta);
     if (Object.prototype.hasOwnProperty.call(meta, 'save_enabled')) {
@@ -8730,9 +8826,22 @@
     return Boolean(state.runnerControl?.enabled);
   }
 
+  function configRestoreEnabled() {
+    const meta = toObject(state.configMeta);
+    if (Object.prototype.hasOwnProperty.call(meta, 'restore_enabled')) {
+      return Boolean(meta.restore_enabled);
+    }
+    return configSaveEnabled();
+  }
+
   function configSaveRequestPath() {
     const meta = toObject(state.configMeta);
     return toText(meta.save_endpoint || '/api/config/save', '/api/config/save');
+  }
+
+  function configRestoreRequestPath() {
+    const meta = toObject(state.configMeta);
+    return toText(meta.restore_endpoint || '/api/config/restore', '/api/config/restore');
   }
 
   function resetConfigSaveState() {
@@ -8740,6 +8849,13 @@
       return;
     }
     state.configSave = createBlankConfigSaveState();
+  }
+
+  function resetConfigRestoreState() {
+    if (configRestoreInFlight()) {
+      return;
+    }
+    state.configRestore = createBlankConfigRestoreState();
   }
 
   function configChangeError(path, value, schema, baseValue) {
@@ -8759,6 +8875,9 @@
     if (configSaveInFlight()) {
       return t('config.saveInProgress');
     }
+    if (configRestoreInFlight()) {
+      return t('config.restoreInProgress');
+    }
     if (!configSaveEnabled()) {
       return redactionAwareText(state.runnerControl?.message, t('config.savesDisabledUntilRunnerEnabled'));
     }
@@ -8769,6 +8888,213 @@
       return t('config.fixInvalidChangesBeforeSaving', { count: invalidDiffs.length });
     }
     return '';
+  }
+
+  function configBackups(contract = state.configContract) {
+    const raw = toObject(contract);
+    const backups = toArray(raw.backups || []);
+    return backups
+      .map((backup) => normalizeConfigBackup(backup))
+      .filter((backup) => Boolean(backup.path));
+  }
+
+  function configSelectedBackup(contract = state.configContract, restoreState = state.configRestore) {
+    const backups = configBackups(contract);
+    if (!backups.length) {
+      return null;
+    }
+    const selectedPath = toText(toObject(restoreState).backupSelection, '');
+    if (selectedPath) {
+      const selected = backups.find((backup) => backup.path === selectedPath);
+      if (selected) {
+        return selected;
+      }
+    }
+    return backups[0] || null;
+  }
+
+  function configRestoreDisabledReason(
+    contract = state.configContract,
+    restoreState = state.configRestore,
+  ) {
+    const restoreStatus = toText(toObject(restoreState).status, 'idle');
+    const restoreConfirmation = toText(toObject(restoreState).restoreConfirmation, '').trim();
+    if (restoreStatus === 'restoring') {
+      return t('config.restoreInProgress');
+    }
+    if (configSaveInFlight()) {
+      return t('config.saveInProgress');
+    }
+    if (!configRestoreEnabled()) {
+      return redactionAwareText(state.runnerControl?.message, t('config.mutationsDisabledUntilRunnerEnabled'));
+    }
+    const backups = configBackups(contract);
+    if (!backups.length) {
+      return t('config.noBackupsAvailable');
+    }
+    if (!restoreConfirmation || restoreConfirmation !== CONFIG_RESTORE_CONFIRMATION_PHRASE) {
+      return t('config.restoreOverwritePhrase');
+    }
+    return '';
+  }
+
+  function updateConfigRestoreMutationField(field, value) {
+    if (configMutationInFlight()) {
+      return;
+    }
+    const restoreState = toObject(state.configRestore);
+    const nextState = {
+      ...restoreState,
+      [field]: value,
+      status: 'idle',
+      message: '',
+      errorCode: '',
+      backupPath: '',
+      restoredFromPath: '',
+      restoredAt: 0,
+      requestPath: configRestoreRequestPath(),
+    };
+    if (field === 'backupSelection') {
+      nextState.restoreConfirmation = '';
+    }
+    state.configRestore = nextState;
+    renderShell({ preserveScroll: true });
+  }
+
+  async function restoreConfigBackup() {
+    const restoreState = toObject(state.configRestore || {});
+    if (configRestoreInFlight()) {
+      return;
+    }
+
+    const selectedBackup = configSelectedBackup(state.configContract, restoreState);
+    const restorePath = toText(selectedBackup?.path || restoreState.backupSelection, '').trim();
+    const confirmation = toText(restoreState.restoreConfirmation, '').trim();
+    const disabledReason = configRestoreDisabledReason(state.configContract, restoreState);
+    if (disabledReason) {
+      let errorCode = 'config_restore_failed';
+      if (!configRestoreEnabled()) {
+        errorCode = 'config_restore_disabled';
+      } else if (configSaveInFlight()) {
+        errorCode = 'config_save_in_progress';
+      } else if (!configBackups(state.configContract).length) {
+        errorCode = 'config_backup_not_found';
+      } else if (!confirmation) {
+        errorCode = 'config_restore_confirmation_required';
+      } else if (confirmation !== CONFIG_RESTORE_CONFIRMATION_PHRASE) {
+        errorCode = 'config_restore_confirmation_mismatch';
+      }
+      state.configRestore = {
+        ...createBlankConfigRestoreState(),
+        status: 'error',
+        message: disabledReason,
+        errorCode,
+        backupPath: '',
+        restoredFromPath: restorePath,
+        restoredAt: nowMs(),
+        backupSelection: restorePath,
+        restoreConfirmation: confirmation,
+        requestPath: configRestoreRequestPath(),
+      };
+      renderShell({ preserveScroll: true });
+      return;
+    }
+
+    const requestPath = configRestoreRequestPath();
+    state.configSave = createBlankConfigSaveState();
+    state.configRestore = {
+      ...createBlankConfigRestoreState(),
+      status: 'restoring',
+      message: t('config.restoring'),
+      errorCode: '',
+      backupPath: '',
+      restoredFromPath: restorePath,
+      restoredAt: nowMs(),
+      backupSelection: restorePath,
+      restoreConfirmation: confirmation,
+      requestPath,
+    };
+    renderShell({ preserveScroll: true });
+
+    try {
+      const response = await fetch(requestPath, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          backup_path: restorePath,
+          confirm: confirmation,
+        }),
+      });
+      let body = null;
+      try {
+        body = await response.json();
+      } catch {
+        body = null;
+      }
+      const payload = toObject(body);
+      const error = toObject(payload.error);
+      const details = toObject(error.details);
+      if (!response.ok || payload.ok === false) {
+        const backupPath = toText(details.backup_path || details.backupPath || payload.backup_path || payload.backupPath || '', '');
+        const restoredFromPath = toText(
+          details.restored_from_path || details.restoredFromPath || payload.restored_from_path || payload.restoredFromPath || restorePath,
+          restorePath,
+        );
+        state.configRestore = {
+          ...createBlankConfigRestoreState(),
+          status: 'error',
+          message: toText(error.message || payload.message || t('config.restoreFailed'), t('config.restoreFailed')),
+          errorCode: toText(error.code || payload.code || 'config_restore_failed', 'config_restore_failed'),
+          backupPath,
+          restoredFromPath,
+          restoredAt: nowMs(),
+          backupSelection: restorePath,
+          restoreConfirmation: confirmation,
+          requestPath,
+        };
+        renderShell({ preserveScroll: true });
+        return;
+      }
+
+      if (payload.snapshot && typeof payload.snapshot === 'object') {
+        applyServerSnapshot(payload.snapshot);
+      } else {
+        await refreshSnapshot({ allowFallback: true, silent: true });
+      }
+      state.configDraft = clone(state.configContract?.values || defaults.configContract.values || {});
+      const backupPath = toText(payload.backup_path || payload.backupPath || '', '');
+      const restoredFromPath = toText(payload.restored_from_path || payload.restoredFromPath || restorePath, restorePath);
+      state.configRestore = {
+        ...createBlankConfigRestoreState(),
+        status: 'success',
+        message: toText(payload.message || t('config.restored'), t('config.restored')),
+        errorCode: '',
+        backupPath,
+        restoredFromPath,
+        restoredAt: nowMs(),
+        backupSelection: backupPath || restorePath,
+        restoreConfirmation: '',
+        requestPath,
+      };
+      renderShell({ preserveScroll: true });
+    } catch (error) {
+      state.configRestore = {
+        ...createBlankConfigRestoreState(),
+        status: 'error',
+        message: toText(error?.message || error, t('config.restoreFailed')),
+        errorCode: 'config_restore_failed',
+        backupPath: '',
+        restoredFromPath: restorePath,
+        restoredAt: nowMs(),
+        backupSelection: restorePath,
+        restoreConfirmation: confirmation,
+        requestPath,
+      };
+      renderShell({ preserveScroll: true });
+    }
   }
 
   function renderConfigSaveBanner(diffs, invalidDiffs) {
@@ -8940,8 +9266,176 @@
     `;
   }
 
+  function renderConfigRestorePanel(contract = state.configContract, restoreState = state.configRestore) {
+    const rawContract = toObject(contract);
+    const rawMeta = toObject(rawContract.meta || {});
+    const backups = configBackups(rawContract);
+    const selectedBackup = configSelectedBackup(rawContract, restoreState);
+    const selectedBackupPath = toText(selectedBackup?.path, '');
+    const restoreRequestPath = toText(rawMeta.restore_endpoint || configRestoreRequestPath(), '/api/config/restore');
+    const restoreEnabled = Object.prototype.hasOwnProperty.call(rawMeta, 'restore_enabled')
+      ? Boolean(rawMeta.restore_enabled)
+      : configSaveEnabled();
+    const saveInFlight = configSaveInFlight();
+    const mutationInFlight = configMutationInFlight();
+    const restoreStatus = toText(toObject(restoreState).status, 'idle');
+    const confirmation = toText(toObject(restoreState).restoreConfirmation, '').trim();
+    const confirmationMatches = confirmation === CONFIG_RESTORE_CONFIRMATION_PHRASE;
+    const restoreDisabledReason = configRestoreDisabledReason(rawContract, restoreState);
+    const bannerTitle = restoreStatus === 'restoring'
+      ? t('config.restoring')
+      : restoreStatus === 'success'
+        ? t('config.restored')
+        : restoreStatus === 'error'
+          ? t('config.restoreFailed')
+          : saveInFlight
+            ? t('config.saveInProgress')
+            : mutationInFlight
+              ? t('config.mutationInProgress')
+            : !restoreEnabled
+              ? t('config.restoreLocked')
+              : !backups.length
+                ? t('config.noBackupsAvailable')
+                : confirmationMatches
+                ? t('config.readyToRestore')
+                : t('config.confirmationRequired');
+    const bannerTone = restoreStatus === 'restoring'
+      ? 'running'
+      : restoreStatus === 'success'
+        ? 'success'
+        : restoreStatus === 'error'
+          ? 'err'
+          : mutationInFlight || !restoreEnabled
+            ? 'warn'
+            : !backups.length || !confirmationMatches
+              ? 'warn'
+              : 'info';
+    const bannerCopy = restoreStatus === 'restoring'
+      ? t('config.restoreCreatesBackup')
+      : restoreStatus === 'success'
+        ? toText(restoreState.message, t('config.restored'))
+        : restoreStatus === 'error'
+          ? toText(restoreState.message, t('config.restoreFailed'))
+          : saveInFlight
+            ? t('config.saveInProgress')
+            : mutationInFlight
+              ? t('config.mutationInProgress')
+          : !restoreEnabled
+            ? restoreDisabledReason
+            : !backups.length
+              ? t('config.noBackupsAvailable')
+              : confirmationMatches
+                ? t('config.restoreCreatesBackup')
+                : t('config.restoreOverwritePhrase');
+    const backupSelectAttrs = !restoreEnabled || !backups.length || mutationInFlight || restoreStatus === 'restoring'
+      ? 'disabled'
+      : '';
+    const restoreConfirmationAttrs = !restoreEnabled || mutationInFlight || restoreStatus === 'restoring'
+      ? 'disabled'
+      : '';
+    const restoreButtonAttrs = restoreDisabledReason ? `disabled title="${escapeHTML(restoreDisabledReason)}"` : '';
+    const backupOptions = backups.length
+      ? backups.map((backup) => `
+          <option value="${escapeHTML(backup.path)}"${backup.path === selectedBackupPath ? ' selected' : ''}>${escapeHTML(backup.summary || backup.name || backup.path)}</option>
+        `).join('')
+      : `<option value="">${escapeHTML(t('config.noBackupsAvailable'))}</option>`;
+    const metaRows = [];
+    metaRows.push(`
+      <div>
+        <div class="config-save-state__label">${escapeHTML(t('common.open'))}</div>
+        <div class="config-save-state__path">${escapeHTML(restoreRequestPath)}</div>
+      </div>
+    `);
+    if (selectedBackupPath) {
+      metaRows.push(`
+        <div>
+          <div class="config-save-state__label">${escapeHTML(t('config.selectedBackup'))}</div>
+          <div class="config-save-state__path">${escapeHTML(selectedBackupPath)}</div>
+        </div>
+      `);
+    }
+    metaRows.push(`
+      <div>
+        <div class="config-save-state__label">${escapeHTML(t('config.restoreConfirmation'))}</div>
+        <div class="config-save-state__code">${escapeHTML(CONFIG_RESTORE_CONFIRMATION_PHRASE)}</div>
+      </div>
+    `);
+    if (restoreStatus === 'success' || restoreStatus === 'error') {
+      if (toText(restoreState.backupPath, '')) {
+        metaRows.push(`
+          <div>
+            <div class="config-save-state__label">${escapeHTML(t('config.restoreBackupPath'))}</div>
+            <div class="config-save-state__path">${escapeHTML(toText(restoreState.backupPath, ''))}</div>
+          </div>
+        `);
+      }
+      if (toText(restoreState.restoredFromPath, '')) {
+        metaRows.push(`
+          <div>
+            <div class="config-save-state__label">${escapeHTML(t('config.restoredFrom'))}</div>
+            <div class="config-save-state__path">${escapeHTML(toText(restoreState.restoredFromPath, ''))}</div>
+          </div>
+        `);
+      }
+      if (toText(restoreState.errorCode, '')) {
+        metaRows.push(`
+          <div>
+            <div class="config-save-state__label">${escapeHTML(t('config.errorCode'))}</div>
+            <div class="config-save-state__code">${escapeHTML(toText(restoreState.errorCode, ''))}</div>
+          </div>
+        `);
+      }
+    }
+    return `
+      <div class="config-save-state" data-config-restore-root data-config-restore-status="${escapeHTML(restoreStatus)}" data-config-restoring="${restoreStatus === 'restoring' ? 'true' : 'false'}">
+        <div class="modal-banner section-banner section-banner--${bannerTone}">
+          <span class="dot" style="background: currentColor;"></span>
+          <div>
+            <div class="section-banner__title">${escapeHTML(bannerTitle)}</div>
+            <div class="section-banner__copy">${escapeHTML(bannerCopy)}</div>
+          </div>
+        </div>
+        <div class="config-save-state__meta" data-config-restore-meta>
+          ${metaRows.join('')}
+        </div>
+        <div class="prompt-backup-panel config-backup-panel">
+          <div class="prompt-editor__field">
+            <label class="prompt-editor__label" for="config-backup-selection">${escapeHTML(t('config.selectedBackup'))}</label>
+            <select
+              id="config-backup-selection"
+              class="field-control prompt-editor__input prompt-backup-select"
+              data-config-backup-select
+              ${backupSelectAttrs}
+            >
+              ${backupOptions}
+            </select>
+            <div class="summary-note">${escapeHTML(t('config.availableBackups'))}</div>
+          </div>
+          <div class="prompt-editor__field">
+            <label class="prompt-editor__label" for="config-restore-confirmation">${escapeHTML(t('config.restoreConfirmation'))}</label>
+            <input
+              id="config-restore-confirmation"
+              class="field-control prompt-editor__input prompt-backup-confirm"
+              data-config-restore-confirmation
+              type="text"
+              value="${escapeHTML(toText(restoreState.restoreConfirmation, ''))}"
+              placeholder="${escapeHTML(t('config.restoreOverwritePhrase'))}"
+              autocomplete="off"
+              spellcheck="false"
+              ${restoreConfirmationAttrs}
+            >
+            <div class="summary-note">${escapeHTML(t('config.restoreOverwritePhrase'))}</div>
+          </div>
+          <div class="prompt-editor__actions">
+            ${button(t('config.restoreBackup'), 'config-restore', 'button--danger', `${restoreButtonAttrs} data-config-restore-button`)}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   async function saveConfigDraft() {
-    if (configSaveInFlight()) {
+    if (configMutationInFlight()) {
       return;
     }
     const diffs = getConfigDiffs();
@@ -9001,6 +9495,7 @@
       requestPath,
       savedAt: nowMs(),
     };
+    resetConfigRestoreState();
     renderShell({ preserveScroll: true });
 
     try {
@@ -13241,7 +13736,7 @@
   function configControl(path) {
     const schema = state.configSchema[path];
     const value = getAt(state.configDraft, path);
-    const disabled = configSaveInFlight();
+    const disabled = configMutationInFlight();
     if (!schema) {
       return `<div class="field-error">${escapeHTML(t('config.missingSchema', { path }))}</div>`;
     }
@@ -13332,14 +13827,16 @@
     const selectedError = configChangeError(selectedPath, selectedDraftValue, selectedSchema, selectedActiveValue);
     const restartDiffs = diffs.filter((diff) => diff.restart);
     const invalidDiffs = diffs.filter((diff) => diff.error);
-    const saveLocked = configSaveInFlight();
+    const saveLocked = configMutationInFlight();
+    const saveInFlight = configSaveInFlight();
     const saveDisabledReason = configSaveDisabledReason(diffs, invalidDiffs);
     const saveBannerHTML = renderConfigSaveBanner(diffs, invalidDiffs);
     const securityRoleBannerHTML = renderConfigSecurityRoleBanner(state.configDraft, state.configSchema, selectedPath);
+    const restorePanelHTML = renderConfigRestorePanel();
     const configRedaction = toObject(state.redaction);
     // restart required
     const saveButtonAttrs = saveDisabledReason ? `disabled title="${escapeHTML(saveDisabledReason)}"` : '';
-    const saveButtonLabel = saveLocked ? t('config.saving') : t('config.saveChanges');
+    const saveButtonLabel = saveInFlight ? t('config.saving') : t('config.saveChanges');
 
     const groupsHTML = configGroups()
       .map((group) => `
@@ -13443,6 +13940,7 @@
           ${configRedaction.active ? `<div class="summary-note">${escapeHTML(t('config.redactedHidden'))}</div>` : ''}
           ${saveBannerHTML}
           ${securityRoleBannerHTML}
+          ${restorePanelHTML}
           ${invalidDiffs.length ? `
             <div class="modal-banner section-banner section-banner--err">
               <span class="dot" style="background: currentColor;"></span>
@@ -14936,9 +15434,10 @@
   }
 
   function resetConfig() {
-    if (configSaveInFlight()) return;
+    if (configMutationInFlight()) return;
     state.configDraft = deepMerge(clone(state.configContract?.values || defaults.configContract.values || {}), null);
     resetConfigSaveState();
+    resetConfigRestoreState();
     renderShell({ preserveScroll: true });
   }
 
@@ -14965,14 +15464,16 @@
 
   function selectConfigPath(path) {
     if (!state.configSchema[path]) return;
+    if (configMutationInFlight()) return;
     state.configSelection = path;
     renderShell({ preserveScroll: true });
   }
 
   function setConfigValue(path, value) {
-    if (configSaveInFlight()) return;
+    if (configMutationInFlight()) return;
     state.configDraft = setAt(state.configDraft || {}, path, value);
     resetConfigSaveState();
+    resetConfigRestoreState();
     renderShell({ preserveScroll: true });
   }
 
@@ -15292,6 +15793,20 @@
     };
   }
 
+  function createBlankConfigRestoreState() {
+    return {
+      status: 'idle',
+      message: '',
+      errorCode: '',
+      backupPath: '',
+      restoredFromPath: '',
+      restoredAt: 0,
+      backupSelection: '',
+      restoreConfirmation: '',
+      requestPath: '/api/config/restore',
+    };
+  }
+
   function createBlankGoalSaveState() {
     return {
       status: 'idle',
@@ -15385,6 +15900,7 @@
     configSchema: clone(defaults.configContract?.schema || defaults.configSchema),
     configDraft: clone(defaults.configContract?.values || defaults.config),
     configSave: clone(defaults.configSave || createBlankConfigSaveState()),
+    configRestore: clone(defaults.configRestore || createBlankConfigRestoreState()),
     prompts: clone(defaults.prompts),
     promptsDir: defaults.config.prompts_dir,
     worktreeMerge: clone(defaults.worktreeMerge),
@@ -15657,7 +16173,7 @@
   }
 
   function updateConfigPath(path, rawValue) {
-    if (configSaveInFlight()) return;
+    if (configMutationInFlight()) return;
     const schema = state.configSchema[path];
     if (!schema) return;
     let value = rawValue;
@@ -15680,19 +16196,21 @@
     }
     state.configDraft = setAt(state.configDraft || {}, path, value);
     resetConfigSaveState();
+    resetConfigRestoreState();
     renderShell({ preserveScroll: true });
   }
 
   function toggleConfigBool(path) {
-    if (configSaveInFlight()) return;
+    if (configMutationInFlight()) return;
     const current = Boolean(getAt(state.configDraft, path));
     state.configDraft = setAt(state.configDraft || {}, path, !current);
     resetConfigSaveState();
+    resetConfigRestoreState();
     renderShell({ preserveScroll: true });
   }
 
   function toggleConfigMulti(path, value) {
-    if (configSaveInFlight()) return;
+    if (configMutationInFlight()) return;
     const current = Array.isArray(getAt(state.configDraft, path)) ? getAt(state.configDraft, path).slice() : [];
     const index = current.findIndex((item) => String(item).toLowerCase() === String(value).toLowerCase());
     if (index >= 0) {
@@ -15702,11 +16220,12 @@
     }
     state.configDraft = setAt(state.configDraft || {}, path, current);
     resetConfigSaveState();
+    resetConfigRestoreState();
     renderShell({ preserveScroll: true });
   }
 
   function removeConfigMultiItem(path, index) {
-    if (configSaveInFlight()) return;
+    if (configMutationInFlight()) return;
     const current = Array.isArray(getAt(state.configDraft, path)) ? getAt(state.configDraft, path).slice() : [];
     if (!Number.isInteger(index) || index < 0 || index >= current.length) {
       return;
@@ -15714,6 +16233,7 @@
     current.splice(index, 1);
     state.configDraft = setAt(state.configDraft || {}, path, current);
     resetConfigSaveState();
+    resetConfigRestoreState();
     renderShell({ preserveScroll: true });
   }
 
@@ -16888,6 +17408,12 @@
       return;
     }
 
+    const configRestoreButton = event.target.closest('[data-config-restore-button]');
+    if (configRestoreButton) {
+      void restoreConfigBackup();
+      return;
+    }
+
     const goalToggle = event.target.closest('[data-goal-action="toggle"]');
     if (goalToggle) {
       const bucket = goalToggle.dataset.goalBucket;
@@ -16930,6 +17456,11 @@
 
     if (event.target.matches('[data-goal-save-confirmation]')) {
       updateGoalSaveConfirmation(event.target.value);
+      return;
+    }
+
+    if (event.target.matches('[data-config-restore-confirmation]')) {
+      updateConfigRestoreMutationField('restoreConfirmation', event.target.value);
       return;
     }
 
@@ -16976,6 +17507,11 @@
       const schema = state.configSchema[path];
       if (!schema) return;
       updateConfigPath(path, event.target.value);
+      return;
+    }
+
+    if (event.target.matches('[data-config-backup-select]')) {
+      updateConfigRestoreMutationField('backupSelection', event.target.value);
       return;
     }
 

@@ -331,6 +331,22 @@ class WebConsoleSafetyTests(unittest.TestCase):
             "note": note,
         }
 
+    def _config_backup(
+        self,
+        stamp: str,
+        *,
+        data: dict[str, object],
+        mtime: float | None = None,
+        nested: str | None = None,
+    ) -> Path:
+        backup_dir = self.config_path.parent / nested if nested else self.config_path.parent
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir / f"{self.config_path.stem}.{stamp}.bak{self.config_path.suffix}"
+        _write(backup_path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        if mtime is not None:
+            os.utime(backup_path, (mtime, mtime))
+        return backup_path
+
     def _git(self, *args: str, cwd: Path | None = None) -> str:
         completed = subprocess.run(
             ["git", *args],
@@ -1952,6 +1968,210 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual(before, self.config_path.read_text(encoding="utf-8"))
         backups = list(self.config_path.parent.glob(f"{self.config_path.stem}.*.bak{self.config_path.suffix}"))
         self.assertEqual([], backups)
+
+    def test_config_backup_listing_surfaces_recent_sibling_backups(self) -> None:
+        _write_config(self.config_path, self.repo)
+        config_dir = self.config_path.parent
+        backup_data = {
+            "repo": self.repo.as_posix(),
+            "profile": "personal",
+            "execution_backend": "codex",
+            "iterations": 2,
+            "prompts_dir": "prompts/agentcli",
+        }
+        older = self._config_backup("20260427-120000", data={**backup_data, "iterations": 3}, mtime=1_714_280_000.0)
+        newer = self._config_backup("20260428-120000", data={**backup_data, "iterations": 4}, mtime=1_714_280_060.0)
+        ignored = config_dir / f"{self.config_path.stem}.20260428-120000.txt"
+        _write(ignored, "{}\n")
+
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+        payload = client.get("/api/config").json()
+
+        self.assertEqual("/api/config/restore", payload["meta"]["restore_endpoint"])
+        self.assertTrue(payload["meta"]["restore_enabled"])
+        self.assertTrue(payload["meta"]["restore_requires_opt_in"])
+        self.assertEqual([newer.as_posix(), older.as_posix()], [item["path"] for item in payload["backups"]])
+        self.assertEqual(newer.name, payload["backups"][0]["name"])
+        self.assertIn("bytes", payload["backups"][0]["summary"])
+        self.assertNotIn(ignored.as_posix(), [item["path"] for item in payload["backups"]])
+
+    def test_config_restore_creates_backup_and_reloads_selected_backup(self) -> None:
+        _write_config(self.config_path, self.repo, iterations=2, prompts_dir="prompts/agentcli")
+        original = self.config_path.read_text(encoding="utf-8")
+        selected = self._config_backup(
+            "20260428-121500",
+            data={
+                "repo": self.repo.as_posix(),
+                "profile": "personal",
+                "execution_backend": "codex",
+                "iterations": 7,
+                "prompts_dir": "prompts/agentcli",
+                "telegram": {"enabled": True, "bot_token": "selected-token", "pairing_code": "PAIR-7777"},
+            },
+            mtime=1_714_280_500.0,
+        )
+        other = self._config_backup(
+            "20260428-121000",
+            data={
+                "repo": self.repo.as_posix(),
+                "profile": "personal",
+                "execution_backend": "codex",
+                "iterations": 3,
+                "prompts_dir": "prompts/agentcli",
+            },
+            mtime=1_714_280_100.0,
+        )
+        client, app = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        response = client.post(
+            "/api/config/restore",
+            json={
+                "backup_path": selected.as_posix(),
+                "confirm": "RESTORE CONFIG BACKUP",
+            },
+        )
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual("config-restore", payload["action"])
+        self.assertEqual("restored", payload["status"])
+        self.assertEqual(selected.as_posix(), payload["restored_from_path"])
+        self.assertIn("backup_path", payload)
+        self.assertIn("validation", payload)
+        self.assertTrue(payload["validation"]["current"]["ok"])
+        self.assertTrue(payload["validation"]["backup"]["ok"])
+        self.assertTrue(payload["validation"]["restored"]["ok"])
+
+        backup_path = Path(payload["backup_path"])
+        self.assertTrue(backup_path.exists())
+        self.assertEqual(json.loads(original), json.loads(backup_path.read_text(encoding="utf-8")))
+        self.assertEqual(json.loads(selected.read_text(encoding="utf-8")), json.loads(self.config_path.read_text(encoding="utf-8")))
+        self.assertEqual(7, json.loads(self.config_path.read_text(encoding="utf-8"))["iterations"])
+        self.assertEqual(True, json.loads(self.config_path.read_text(encoding="utf-8"))["telegram"]["enabled"])
+        self.assertEqual(self.config_path.as_posix(), payload["config_path"])
+        self.assertEqual(7, payload["snapshot"]["config"]["data"]["iterations"])
+
+        config_payload = client.get("/api/config").json()
+        self.assertEqual(backup_path.as_posix(), config_payload["backups"][0]["path"])
+        self.assertIn(other.as_posix(), [item["path"] for item in config_payload["backups"]])
+
+        controller = app.state.runner_controller
+        self.assertEqual(self.config_path.as_posix(), controller.base_args.config_path)
+
+    def test_config_restore_rejects_confirmation_mismatch(self) -> None:
+        _write_config(self.config_path, self.repo, iterations=2)
+        backup = self._config_backup(
+            "20260428-122000",
+            data={
+                "repo": self.repo.as_posix(),
+                "profile": "personal",
+                "execution_backend": "codex",
+                "iterations": 5,
+                "prompts_dir": "prompts/agentcli",
+            },
+            mtime=1_714_280_700.0,
+        )
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        before = self.config_path.read_text(encoding="utf-8")
+        response = client.post(
+            "/api/config/restore",
+            json={
+                "backup_path": backup.as_posix(),
+                "confirm": "RESTORE CONFIG",
+            },
+        )
+        self.assertEqual(400, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("config_restore_confirmation_mismatch", payload["error"]["code"])
+        self.assertEqual("RESTORE CONFIG BACKUP", payload["error"]["details"]["confirmation_phrase"])
+        self.assertEqual(before, self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual([backup.as_posix()], [item["path"] for item in client.get("/api/config").json()["backups"]])
+
+    def test_config_restore_rejects_traversal_and_non_sibling_backups(self) -> None:
+        _write_config(self.config_path, self.repo, iterations=2)
+        backup = self._config_backup(
+            "20260428-122500",
+            data={
+                "repo": self.repo.as_posix(),
+                "profile": "personal",
+                "execution_backend": "codex",
+                "iterations": 6,
+                "prompts_dir": "prompts/agentcli",
+            },
+            mtime=1_714_280_900.0,
+        )
+        nested_backup = self._config_backup(
+            "20260428-122600",
+            data={
+                "repo": self.repo.as_posix(),
+                "profile": "personal",
+                "execution_backend": "codex",
+                "iterations": 9,
+                "prompts_dir": "prompts/agentcli",
+            },
+            mtime=1_714_280_960.0,
+            nested="nested",
+        )
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        before = self.config_path.read_text(encoding="utf-8")
+        traversal = client.post(
+            "/api/config/restore",
+            json={
+                "backup_path": "../escape.json",
+                "confirm": "RESTORE CONFIG BACKUP",
+            },
+        )
+        self.assertEqual(400, traversal.status_code)
+        traversal_payload = traversal.json()
+        self.assertFalse(traversal_payload["ok"])
+        self.assertEqual("config_backup_path_outside_config_dir", traversal_payload["error"]["code"])
+
+        non_sibling = client.post(
+            "/api/config/restore",
+            json={
+                "backup_path": nested_backup.as_posix(),
+                "confirm": "RESTORE CONFIG BACKUP",
+            },
+        )
+        self.assertEqual(404, non_sibling.status_code)
+        non_sibling_payload = non_sibling.json()
+        self.assertFalse(non_sibling_payload["ok"])
+        self.assertEqual("config_backup_not_found", non_sibling_payload["error"]["code"])
+        self.assertEqual(before, self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual([backup.as_posix()], [item["path"] for item in client.get("/api/config").json()["backups"]])
+
+    def test_config_restore_is_disabled_until_opt_in(self) -> None:
+        _write_config(self.config_path, self.repo, iterations=2)
+        backup = self._config_backup(
+            "20260428-123000",
+            data={
+                "repo": self.repo.as_posix(),
+                "profile": "personal",
+                "execution_backend": "codex",
+                "iterations": 8,
+                "prompts_dir": "prompts/agentcli",
+            },
+            mtime=1_714_281_200.0,
+        )
+        client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=self.config_path)
+
+        before = self.config_path.read_text(encoding="utf-8")
+        response = client.post(
+            "/api/config/restore",
+            json={
+                "backup_path": backup.as_posix(),
+                "confirm": "RESTORE CONFIG BACKUP",
+            },
+        )
+        self.assertEqual(403, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("config_restore_disabled", payload["error"]["code"])
+        self.assertEqual(before, self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual([backup.as_posix()], [item["path"] for item in client.get("/api/config").json()["backups"]])
 
     def test_goals_save_is_disabled_until_opt_in(self) -> None:
         client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=self.config_path)

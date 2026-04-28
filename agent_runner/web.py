@@ -152,6 +152,7 @@ RUNNER_CONTROL_CONFIRMATIONS = {
     "restart": "RESTART RUNNER",
 }
 GOALS_SAVE_CONFIRMATION_PHRASE = "DELETE OR DOWNGRADE UNMET P0 GOALS"
+CONFIG_RESTORE_CONFIRMATION_PHRASE = "RESTORE CONFIG BACKUP"
 RUN_DIR_ARTIFACT_NAMES = {
     "BACKLOG.json",
     "BACKLOG.md",
@@ -1700,6 +1701,9 @@ def _build_config_contract(
     save_enabled: bool = False,
     save_endpoint: str = "/api/config/save",
     save_requires_opt_in: bool = True,
+    restore_enabled: bool | None = None,
+    restore_endpoint: str = "/api/config/restore",
+    restore_requires_opt_in: bool = True,
 ) -> dict[str, Any]:
     effective_cfg = _merge_config_tree(CLI_DEFAULTS, cfg)
     effective_cfg["repo"] = repo_root.as_posix()
@@ -1757,6 +1761,7 @@ def _build_config_contract(
     restart_required_paths = list(dict.fromkeys(restart_required_paths))
     redacted_values = _redact_config(values)
     redacted_defaults = _redact_config(defaults)
+    backups = _config_backup_candidates(cfg_path)
     for path in redaction["paths"]:
         if _config_path_get(redacted_values, path) not in (None, "", False):
             _config_path_set(redacted_values, path, REDACTED_VALUE)
@@ -1773,6 +1778,7 @@ def _build_config_contract(
         "groups": CONFIG_CONTRACT_GROUPS,
         "redaction": redaction,
         "restart_required_paths": restart_required_paths,
+        "backups": backups,
         "meta": {
             "path": cfg_path.as_posix(),
             "source": cfg_source,
@@ -1780,6 +1786,9 @@ def _build_config_contract(
             "save_enabled": bool(save_enabled),
             "save_endpoint": str(save_endpoint or "/api/config/save"),
             "save_requires_opt_in": bool(save_requires_opt_in),
+            "restore_enabled": bool(save_enabled if restore_enabled is None else restore_enabled),
+            "restore_endpoint": str(restore_endpoint or "/api/config/restore"),
+            "restore_requires_opt_in": bool(restore_requires_opt_in),
         },
     }
 
@@ -1787,6 +1796,122 @@ def _build_config_contract(
 def _config_save_backup_path(cfg_path: Path) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%fZ")
     return cfg_path.with_name(f"{cfg_path.stem}.{stamp}.bak{cfg_path.suffix}")
+
+
+def _config_restore_error(status_code: int, code: str, message: str, **details: Any) -> JSONResponse:
+    payload: dict[str, Any] = {
+        "ok": False,
+        "action": "config-restore",
+        "status": "error",
+        "message": message,
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    }
+    if details:
+        payload["error"]["details"] = details
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+def _config_backup_candidates(cfg_path: Path, *, limit: int = 20) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    pattern = f"{cfg_path.stem}.*.bak{cfg_path.suffix}"
+    try:
+        parent = cfg_path.parent
+        if parent.exists() and parent.is_dir():
+            for candidate in sorted(
+                [path for path in parent.glob(pattern) if path.is_file()],
+                key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+                reverse=True,
+            )[: max(0, int(limit)) or 0]:
+                try:
+                    stats = candidate.stat()
+                except Exception:
+                    continue
+                candidates.append(
+                    {
+                        "path": candidate.as_posix(),
+                        "name": candidate.name,
+                        "updated": _fmt_mtime(stats.st_mtime),
+                        "size": stats.st_size,
+                        "summary": f"{_fmt_mtime(stats.st_mtime)} | {stats.st_size} bytes",
+                    }
+                )
+    except Exception:
+        return []
+    return candidates
+
+
+def _config_resolve_backup_selection(
+    cfg_path: Path,
+    requested_backup_path: Any,
+    *,
+    backups: list[dict[str, Any]] | None = None,
+) -> tuple[Path | None, JSONResponse | None]:
+    requested = str(requested_backup_path or "").strip()
+    if not requested:
+        return None, _config_restore_error(400, "config_backup_path_required", "A backup path is required.", field="backup_path")
+
+    candidate = Path(requested.replace("\\", "/")).expanduser()
+    resolved = candidate.resolve() if candidate.is_absolute() else (cfg_path.parent / candidate).resolve()
+
+    try:
+        resolved.relative_to(cfg_path.parent)
+    except Exception:
+        return (
+            None,
+            _config_restore_error(
+                400,
+                "config_backup_path_outside_config_dir",
+                "Config backup must stay within the config directory.",
+                path=resolved.as_posix(),
+                config_path=cfg_path.as_posix(),
+            ),
+        )
+
+    expected_pattern = f"{cfg_path.stem}.*.bak{cfg_path.suffix}"
+    if not resolved.name.startswith(f"{cfg_path.stem}.") or not resolved.name.endswith(f".bak{cfg_path.suffix}"):
+        return (
+            None,
+            _config_restore_error(
+                400,
+                "config_backup_not_found",
+                "The selected backup file is not available for this config path.",
+                path=resolved.as_posix(),
+                config_path=cfg_path.as_posix(),
+                expected_pattern=expected_pattern,
+            ),
+        )
+
+    discovered = backups if backups is not None else _config_backup_candidates(cfg_path)
+    discovered_paths = {str(item.get("path") or "") for item in discovered if isinstance(item, dict)}
+    if resolved.as_posix() not in discovered_paths:
+        return (
+            None,
+            _config_restore_error(
+                404,
+                "config_backup_not_found",
+                "The selected backup file is not available for this config path.",
+                path=resolved.as_posix(),
+                config_path=cfg_path.as_posix(),
+                expected_pattern=expected_pattern,
+            ),
+        )
+
+    if not resolved.is_file():
+        return (
+            None,
+            _config_restore_error(
+                404,
+                "config_backup_not_found",
+                "The selected backup file was not found.",
+                path=resolved.as_posix(),
+                config_path=cfg_path.as_posix(),
+            ),
+        )
+
+    return resolved, None
 
 
 def _config_save_validate_change(path: str, raw_value: Any, schema: dict[str, Any], current_value: Any) -> tuple[Any, str, dict[str, Any]]:
@@ -6179,6 +6304,9 @@ def build_snapshot(
         save_enabled=control_enabled,
         save_endpoint="/api/config/save",
         save_requires_opt_in=True,
+        restore_enabled=control_enabled,
+        restore_endpoint="/api/config/restore",
+        restore_requires_opt_in=True,
     )
     profile = _prompt_profile(cfg)
     goals_completion_level = resolve_goals_completion_level(cfg.get("goals_completion_level"))
@@ -8027,6 +8155,150 @@ def create_app(
     @app.get("/api/config")
     def api_config() -> dict[str, Any]:
         return _snapshot().get("config_contract") or _section("config")
+
+    @app.post("/api/config/restore")
+    async def api_config_restore(request: Request) -> Any:
+        nonlocal cfg
+        if not controls_enabled:
+            return _config_restore_error(
+                403,
+                "config_restore_disabled",
+                "Config restores are disabled until the server is started with AGENTCLI_WEB_RUNNER_CONTROLS=1 or --enable-runner-controls.",
+            )
+        if not control_lock.acquire(blocking=False):
+            return _config_restore_error(409, "config_restore_busy", "A mutating action is already in flight.")
+
+        backup_path: Path | None = None
+        restored_from_path = ""
+        try:
+            if cfg_path.exists() and not cfg_path.is_file():
+                return _config_restore_error(400, "config_path_not_file", "Config path must reference a JSON file.", path=cfg_path.as_posix())
+
+            body = await _config_save_body(request)
+            if body is None:
+                return _config_restore_error(400, "invalid_json", "Config restore request body must be JSON.")
+
+            requested_backup_path = _pick_text(
+                body.get("backup_path"),
+                body.get("backupPath"),
+                body.get("selected_backup_path"),
+                body.get("selectedBackupPath"),
+            )
+            confirmation = _pick_text(
+                body.get("confirm"),
+                body.get("confirmation"),
+                body.get("restore_confirmation"),
+                body.get("restoreConfirmation"),
+            )
+            if not requested_backup_path:
+                return _config_restore_error(400, "config_backup_path_required", "A backup path is required.", field="backup_path")
+            if not confirmation:
+                return _config_restore_error(
+                    400,
+                    "config_restore_confirmation_required",
+                    "A restore confirmation phrase is required.",
+                    field="confirm",
+                    confirmation_phrase=CONFIG_RESTORE_CONFIRMATION_PHRASE,
+                )
+            if confirmation != CONFIG_RESTORE_CONFIRMATION_PHRASE:
+                return _config_restore_error(
+                    400,
+                    "config_restore_confirmation_mismatch",
+                    "The restore confirmation phrase did not match.",
+                    field="confirm",
+                    confirmation_phrase=CONFIG_RESTORE_CONFIRMATION_PHRASE,
+                )
+
+            backups = _config_backup_candidates(cfg_path)
+            restored_from, error = _config_resolve_backup_selection(cfg_path, requested_backup_path, backups=backups)
+            if error is not None or restored_from is None:
+                return error if error is not None else _config_restore_error(404, "config_backup_not_found", "The selected backup file is not available for this config path.")
+            restored_from_path = restored_from.as_posix()
+
+            try:
+                current_raw = load_config(cfg_path)
+            except Exception as ex:
+                return _config_restore_error(
+                    400,
+                    "config_read_error",
+                    "Existing config file could not be read.",
+                    path=cfg_path.as_posix(),
+                    error=str(ex).strip() or ex.__class__.__name__,
+                )
+            if not isinstance(current_raw, dict):
+                return _config_restore_error(400, "config_read_error", "Existing config file could not be read.", path=cfg_path.as_posix())
+
+            try:
+                restored_raw = load_config(restored_from)
+            except Exception as ex:
+                return _config_restore_error(
+                    400,
+                    "config_backup_invalid_json",
+                    "The selected backup file could not be parsed as JSON.",
+                    path=restored_from_path,
+                    error=str(ex).strip() or ex.__class__.__name__,
+                )
+            if not isinstance(restored_raw, dict):
+                return _config_restore_error(400, "config_backup_invalid_json", "The selected backup file could not be parsed as JSON.", path=restored_from_path)
+
+            backup_path = _config_save_backup_path(cfg_path)
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            if cfg_path.exists():
+                shutil.copy2(cfg_path, backup_path)
+            else:
+                atomic_write_json(backup_path, current_raw)
+
+            atomic_write_json(cfg_path, restored_raw)
+            post_restore_raw = load_config(cfg_path)
+            if not isinstance(post_restore_raw, dict) or post_restore_raw != restored_raw:
+                return _config_restore_error(
+                    500,
+                    "config_restore_validation_failed",
+                    "Config restore could not be validated after writing.",
+                    path=cfg_path.as_posix(),
+                    restored_from_path=restored_from_path,
+                    backup_path=backup_path.as_posix(),
+                )
+
+            cfg = restored_raw
+            if controller is not None and hasattr(controller, "base_args"):
+                try:
+                    controller.base_args = _build_runner_base_args(repo_root, restored_raw, cfg_path)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(controller, "runner_mode"):
+                        controller.runner_mode = _runner_mode_from_config(restored_raw)
+                except Exception:
+                    pass
+
+            snapshot = _snapshot(busy_override=False)
+            message = f"Config restored from {restored_from_path}. Backup written to {backup_path.as_posix()}."
+            response_payload: dict[str, Any] = {
+                "ok": True,
+                "action": "config-restore",
+                "status": "restored",
+                "message": message,
+                "config_path": cfg_path.as_posix(),
+                "backup_path": backup_path.as_posix(),
+                "restored_from_path": restored_from_path,
+                "validation": {
+                    "current": {"ok": True, "path": cfg_path.as_posix()},
+                    "backup": {"ok": True, "path": restored_from_path},
+                    "restored": {"ok": True, "path": cfg_path.as_posix()},
+                },
+                "snapshot": snapshot,
+            }
+            return JSONResponse(status_code=200, content=response_payload)
+        except Exception as ex:
+            details: dict[str, Any] = {"path": cfg_path.as_posix()}
+            if backup_path is not None:
+                details["backup_path"] = backup_path.as_posix()
+            if restored_from_path:
+                details["restored_from_path"] = restored_from_path
+            return _config_restore_error(500, "config_restore_failed", f"Config restore failed: {ex}", **details)
+        finally:
+            control_lock.release()
 
     @app.post("/api/config/save")
     async def api_config_save(request: Request) -> Any:
