@@ -91,23 +91,48 @@ def resolve_goals_completion_level(value: Any = None, *, default: str = "all") -
     return fallback
 
 
-def parse_goals_completion(goals_text: Optional[str], *,
-                           completion_level: str = "all") -> Dict[str, Any]:
-    """Parse GOALS.md checkboxes and evaluate completion status.
+def _normalize_goal_match_text(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w가-힣]+", " ", str(text or "").lower())).strip()
 
-    Args:
-        goals_text: Raw GOALS.md content.
-        completion_level: When to declare project_complete.
-            "p0"  — P0 all checked (legacy).
-            "p1"  — P0 + P1 all checked.
-            "all" — Every checkbox checked (default).
 
-    Returns dict with:
-      has_goals, valid, missing_sections, warnings,
-      p0_total, p0_done, p1_total, p1_done,
-      all_total, all_done, p0_complete, p1_complete, project_complete,
-      unmet_p0, unmet_p1
-    """
+def _goal_ref_for_item(section: str, line_number: int) -> str:
+    section_label = str(section or "").strip().upper() or "P?"
+    return f"{section_label}-L{int(line_number)}"
+
+
+def _build_goal_item(
+    *,
+    section: str,
+    section_index: int,
+    line_number: int,
+    text: str,
+    checked: bool,
+    raw_line: str,
+) -> Dict[str, Any]:
+    goal_ref = _goal_ref_for_item(section, line_number)
+    section_label = str(section or "").strip().upper() or "P?"
+    return {
+        "goal_ref": goal_ref,
+        "goal_id": goal_ref,
+        "goal_section": section,
+        "goal_section_label": section_label,
+        "goal_index": int(section_index),
+        "goal_line_number": int(line_number),
+        "goal_text": text,
+        "text": text,
+        "checked": bool(checked),
+        "done": bool(checked),
+        "line_number": int(line_number),
+        "raw_line": raw_line,
+    }
+
+
+def _analyze_goals_markdown(
+    goals_text: Optional[str],
+    *,
+    completion_level: str = "all",
+) -> Dict[str, Any]:
+    """Parse GOALS.md checkboxes and evaluate completion status."""
     level = resolve_goals_completion_level(completion_level)
     required_sections = _goals_completion_required_sections(level)
 
@@ -125,6 +150,14 @@ def parse_goals_completion(goals_text: Optional[str], *,
             "project_complete": False,
             "unmet_p0": [],
             "unmet_p1": [],
+            "items": {"p0": [], "p1": []},
+            "goal_items": [],
+            "unmet_p0_items": [],
+            "unmet_p1_items": [],
+            "unmet_p0_goal_refs": [],
+            "unmet_p0_goal_texts": [],
+            "unmet_p1_goal_refs": [],
+            "unmet_p1_goal_texts": [],
         }
 
     result: Dict[str, Any] = {
@@ -137,10 +170,20 @@ def parse_goals_completion(goals_text: Optional[str], *,
         "all_total": 0, "all_done": 0,
         "unmet_p0": [],
         "unmet_p1": [],
+        "items": {"p0": [], "p1": []},
+        "goal_items": [],
+        "unmet_p0_items": [],
+        "unmet_p1_items": [],
+        "unmet_p0_goal_refs": [],
+        "unmet_p0_goal_texts": [],
+        "unmet_p1_goal_refs": [],
+        "unmet_p1_goal_texts": [],
     }
 
     current_priority: Optional[str] = None
     section_has_items: dict[str, bool] = {"p0": False, "p1": False}
+    section_items: dict[str, list[Dict[str, Any]]] = {"p0": [], "p1": []}
+    all_items: list[Dict[str, Any]] = []
 
     for line_number, line in enumerate(goals_text.splitlines(), start=1):
         stripped = line.strip()
@@ -151,7 +194,6 @@ def parse_goals_completion(goals_text: Optional[str], *,
         if stripped.startswith("<!--") and stripped.endswith("-->"):
             continue
 
-        # Detect priority section headers
         heading = re.match(r"^(#+)\s+(.+)$", stripped)
         if heading:
             level_no = len(heading.group(1))
@@ -193,6 +235,16 @@ def parse_goals_completion(goals_text: Optional[str], *,
                     result["p0_done"] += 1
                 else:
                     result["unmet_p0"].append(item_text)
+                item = _build_goal_item(
+                    section="p0",
+                    section_index=len(section_items["p0"]) + 1,
+                    line_number=line_number,
+                    text=item_text,
+                    checked=is_done,
+                    raw_line=line,
+                )
+                section_items["p0"].append(item)
+                all_items.append(item)
             elif current_priority == "p1":
                 section_has_items["p1"] = True
                 result["p1_total"] += 1
@@ -200,6 +252,16 @@ def parse_goals_completion(goals_text: Optional[str], *,
                     result["p1_done"] += 1
                 else:
                     result["unmet_p1"].append(item_text)
+                item = _build_goal_item(
+                    section="p1",
+                    section_index=len(section_items["p1"]) + 1,
+                    line_number=line_number,
+                    text=item_text,
+                    checked=is_done,
+                    raw_line=line,
+                )
+                section_items["p1"].append(item)
+                all_items.append(item)
             else:
                 result["warnings"].append(
                     {
@@ -219,21 +281,36 @@ def parse_goals_completion(goals_text: Optional[str], *,
     result["missing_sections"] = missing_sections
     result["valid"] = not missing_sections and not has_malformed_required_heading
 
-    # Per-level completion flags
     result["p0_complete"] = section_has_items["p0"] and (result["p0_done"] >= result["p0_total"])
     result["p1_complete"] = section_has_items["p0"] and section_has_items["p1"] and (result["p0_done"] >= result["p0_total"]) and (result["p1_done"] >= result["p1_total"])
 
-    # Project completion depends on configured level and required section validity.
     if not result["valid"]:
         result["project_complete"] = False
     elif level == "p0":
         result["project_complete"] = result["p0_complete"]
     elif level == "p1":
         result["project_complete"] = result["p1_complete"]
-    else:  # "all" (default)
+    else:
         result["project_complete"] = result["all_total"] > 0 and result["all_done"] >= result["all_total"]
 
+    result["items"] = {
+        "p0": [dict(item) for item in section_items["p0"]],
+        "p1": [dict(item) for item in section_items["p1"]],
+    }
+    result["goal_items"] = [dict(item) for item in all_items]
+    result["unmet_p0_items"] = [dict(item) for item in section_items["p0"] if not item["checked"]]
+    result["unmet_p1_items"] = [dict(item) for item in section_items["p1"] if not item["checked"]]
+    result["unmet_p0_goal_refs"] = [item["goal_ref"] for item in result["unmet_p0_items"]]
+    result["unmet_p0_goal_texts"] = [item["goal_text"] for item in result["unmet_p0_items"]]
+    result["unmet_p1_goal_refs"] = [item["goal_ref"] for item in result["unmet_p1_items"]]
+    result["unmet_p1_goal_texts"] = [item["goal_text"] for item in result["unmet_p1_items"]]
+
     return result
+
+
+def parse_goals_completion(goals_text: Optional[str], *,
+                           completion_level: str = "all") -> Dict[str, Any]:
+    return _analyze_goals_markdown(goals_text, completion_level=completion_level)
 
 
 def write_completion_status(run_dir: Path, status: Dict[str, Any], *,
@@ -253,6 +330,172 @@ def write_completion_status(run_dir: Path, status: Dict[str, Any], *,
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
                    encoding="utf-8", errors="replace")
     return out
+
+
+def _goal_gate_task_text(task: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "title": _normalize_goal_match_text(task.get("title") or ""),
+        "prompt": _normalize_goal_match_text(task.get("prompt") or ""),
+        "done_when": _normalize_goal_match_text(task.get("done_when") or ""),
+    }
+
+
+def _goal_gate_trace_for_task(
+    task: Dict[str, Any],
+    goal_items: list[Dict[str, Any]],
+    *,
+    goal_path: Optional[Path],
+) -> list[Dict[str, Any]]:
+    """Return deterministic goal trace candidates for a task."""
+    if not goal_items:
+        return []
+
+    task_text = _goal_gate_task_text(task)
+    traces: list[Dict[str, Any]] = []
+    seen_refs: set[str] = set()
+
+    for item in goal_items:
+        goal_ref = str(item.get("goal_ref") or item.get("goal_id") or "").strip()
+        if not goal_ref or goal_ref in seen_refs:
+            continue
+        goal_text = str(item.get("goal_text") or item.get("text") or "").strip()
+        goal_text_norm = _normalize_goal_match_text(goal_text)
+        section_label = str(item.get("goal_section_label") or item.get("goal_section") or "").strip().upper()
+        line_number = int(item.get("goal_line_number") or item.get("line_number") or 0)
+        ref_pattern = None
+        if section_label and line_number > 0:
+            ref_pattern = re.compile(rf"\b{re.escape(section_label)}\W*L\W*{line_number}\b", re.IGNORECASE)
+
+        matched_fields: list[str] = []
+        matched_ref = False
+        matched_text = False
+        for field_name, field_text in task_text.items():
+            if not field_text:
+                continue
+            if ref_pattern and ref_pattern.search(field_text):
+                matched_fields.append(field_name)
+                matched_ref = True
+                continue
+            if goal_text_norm and goal_text_norm in field_text:
+                matched_fields.append(field_name)
+                matched_text = True
+
+        if not matched_fields:
+            continue
+
+        seen_refs.add(goal_ref)
+        traces.append(
+            {
+                "goal_path": goal_path.as_posix() if goal_path else "",
+                "goal_ref": goal_ref,
+                "goal_id": str(item.get("goal_id") or goal_ref),
+                "goal_section": str(item.get("goal_section") or ""),
+                "goal_section_label": section_label or str(item.get("goal_section") or "").strip().upper(),
+                "goal_line_number": line_number,
+                "goal_index": int(item.get("goal_index") or item.get("index") or 0),
+                "goal_text": goal_text,
+                "goal_checked": bool(item.get("checked") if "checked" in item else item.get("goal_checked")),
+                "matched_fields": list(dict.fromkeys(matched_fields)),
+                "match_mode": "goal_ref+text" if matched_ref and matched_text else "goal_ref" if matched_ref else "goal_text",
+            }
+        )
+
+    return traces
+
+
+def gate_pm_tasks_against_goals(
+    repo: Path,
+    tasks: list[Dict[str, Any]],
+    *,
+    completion_level: str = "all",
+) -> Dict[str, Any]:
+    """Gate PM tasks against GOALS.md and attach trace metadata.
+
+    When unchecked P0 items exist, each PM task must reference at least one
+    unchecked P0 goal by exact text or a deterministic GOALS id. Tasks that do
+    not trace to an unchecked P0 are rejected rather than being written to
+    BACKLOG.json.
+    """
+    goal_path, goals_text = read_goals(repo)
+    goal_status = parse_goals_completion(goals_text, completion_level=completion_level)
+    goal_items = list(goal_status.get("goal_items") or [])
+    unmet_p0_items = list(goal_status.get("unmet_p0_items") or [])
+    gate_required = bool(goal_path and goals_text and goals_text.strip() and unmet_p0_items)
+    candidate_items = unmet_p0_items if gate_required else goal_items
+
+    accepted_tasks: list[Dict[str, Any]] = []
+    rejected_tasks: list[Dict[str, Any]] = []
+    goal_path_str = goal_path.as_posix() if goal_path else ""
+
+    for raw_task in tasks:
+        if not isinstance(raw_task, dict):
+            continue
+        task = dict(raw_task)
+        all_matches = _goal_gate_trace_for_task(task, goal_items, goal_path=goal_path)
+        accepted_matches = _goal_gate_trace_for_task(task, candidate_items, goal_path=goal_path)
+
+        if gate_required:
+            if not accepted_matches:
+                rejected_tasks.append(
+                    {
+                        "id": str(task.get("id") or "").strip(),
+                        "title": str(task.get("title") or "").strip(),
+                        "reason": "missing_unchecked_p0_reference",
+                        "message": "Task does not reference an unchecked P0 goal by exact text or GOALS id.",
+                        "matched_goal_refs": [trace["goal_ref"] for trace in all_matches],
+                        "required_goal_refs": [item["goal_ref"] for item in unmet_p0_items],
+                    }
+                )
+                continue
+            task["goal_trace"] = accepted_matches
+        else:
+            task["goal_trace"] = all_matches if all_matches else list(task.get("goal_trace") or [])
+
+        accepted_tasks.append(task)
+
+    if gate_required:
+        if rejected_tasks and not accepted_tasks:
+            status = "rejected"
+            error_code = "pm_goal_gate_rejected"
+            message = "PM tasks were rejected because GOALS has unchecked P0 items and no task referenced them."
+        elif rejected_tasks:
+            status = "partial"
+            error_code = "pm_goal_gate_partial"
+            message = "Some PM tasks were rejected because they did not reference an unchecked P0 goal."
+        else:
+            status = "accepted"
+            error_code = ""
+            message = "All PM tasks referenced an unchecked P0 goal."
+    else:
+        status = "accepted"
+        error_code = ""
+        message = "GOALS gate was not required."
+
+    error: Optional[Dict[str, Any]] = None
+    if error_code:
+        error = {
+            "code": error_code,
+            "message": message,
+            "details": {
+                "goal_path": goal_path_str,
+                "gate_required": gate_required,
+                "accepted_count": len(accepted_tasks),
+                "rejected_count": len(rejected_tasks),
+                "unmet_p0_goal_refs": [item["goal_ref"] for item in unmet_p0_items],
+                "unmet_p0_goal_texts": [item["goal_text"] for item in unmet_p0_items],
+            },
+        }
+
+    return {
+        "goal_path": goal_path_str,
+        "goals": goal_status,
+        "gate_required": gate_required,
+        "status": status,
+        "message": message,
+        "accepted_tasks": accepted_tasks,
+        "rejected_tasks": rejected_tasks,
+        "error": error,
+    }
 
 
 # -- PM Goals generation prompt fragment --

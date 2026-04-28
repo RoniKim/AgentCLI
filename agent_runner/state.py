@@ -19,6 +19,7 @@ class TaskItem:
     skills: list[str]
     skills_rationale: str | None
     depends_on: list[str]
+    goal_trace: list[dict[str, Any]] | None = None
 
 
 def load_backlog_json(path: Path) -> list[TaskItem]:
@@ -102,6 +103,15 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
         else:
             depends_on = []
 
+        goal_trace_val = x.get("goal_trace") or []
+        goal_trace: list[dict[str, Any]] = []
+        if isinstance(goal_trace_val, dict):
+            goal_trace_val = [goal_trace_val]
+        if isinstance(goal_trace_val, list):
+            for trace in goal_trace_val:
+                if isinstance(trace, dict):
+                    goal_trace.append(dict(trace))
+
         # drop empty id/title/prompt
         if tid and title and prompt:
             items.append(
@@ -114,6 +124,7 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
                     skills=skills,
                     skills_rationale=skills_rationale,
                     depends_on=depends_on,
+                    goal_trace=goal_trace,
                 )
             )
 
@@ -166,6 +177,7 @@ def parse_backlog_md(path: Path) -> list[TaskItem]:
                 skills=[],
                 skills_rationale=None,
                 depends_on=[],
+                goal_trace=[],
             )
         )
     return items

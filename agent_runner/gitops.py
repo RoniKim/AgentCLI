@@ -9,7 +9,7 @@ import re
 import shutil
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
@@ -650,9 +650,72 @@ class TaskBranch:
     created_at: str
     task_id: str
     task_title: str = ""  # e.g. "Add IDisposable + CTS to TransactionEntry.razor"
+    goal_trace: list[dict[str, object]] = field(default_factory=list)
 
 
-def create_task_branch(repo: Path, task_id: str, task_title: str = "") -> TaskBranch:
+def _sanitize_branch_fragment(value: str, *, max_len: int = 48) -> str:
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip())
+    text = re.sub(r"-{2,}", "-", text).strip("-._")
+    if len(text) > max_len:
+        text = text[:max_len].rstrip("-._")
+    return text
+
+
+def _task_branch_goal_fragment(goal_trace: Sequence[dict[str, object]] | None) -> str:
+    if not goal_trace:
+        return ""
+    first = goal_trace[0] if isinstance(goal_trace, Sequence) else None
+    if not isinstance(first, dict):
+        return ""
+    goal_ref = _sanitize_branch_fragment(
+        str(first.get("goal_ref") or first.get("goal_id") or "").strip(),
+        max_len=48,
+    )
+    if goal_ref:
+        return f"__goal-{goal_ref}"
+    goal_text = _sanitize_branch_fragment(str(first.get("goal_text") or first.get("text") or "").strip(), max_len=48)
+    if goal_text:
+        return f"__goal-{goal_text}"
+    return ""
+
+
+def format_task_commit_message(
+    tb: TaskBranch,
+    *,
+    action: str = "",
+) -> tuple[str, str]:
+    """Return a git commit subject/body that preserves GOALS traceability."""
+    base_subject = f"[{tb.task_id}] {tb.task_title}" if tb.task_title else f"[auto] task {tb.task_id}"
+    goal_fragment = _task_branch_goal_fragment(tb.goal_trace)
+    if goal_fragment:
+        goal_label = goal_fragment.removeprefix("__goal-")
+        base_subject = f"{base_subject} [GOAL {goal_label}]"
+    if action:
+        base_subject = f"{base_subject} ({action})"
+
+    body_lines: list[str] = []
+    for trace in (tb.goal_trace or [])[:3]:
+        if not isinstance(trace, dict):
+            continue
+        goal_ref = str(trace.get("goal_ref") or trace.get("goal_id") or "").strip()
+        goal_text = str(trace.get("goal_text") or trace.get("text") or "").strip()
+        if goal_ref or goal_text:
+            body_lines.append(f"GOAL: {goal_ref} {goal_text}".strip())
+        matched_fields = trace.get("matched_fields")
+        if isinstance(matched_fields, Sequence) and matched_fields:
+            fields = ", ".join(str(field).strip() for field in matched_fields if str(field).strip())
+            if fields:
+                body_lines.append(f"Matched fields: {fields}")
+    return base_subject, "\n".join(body_lines).strip()
+
+
+def create_task_branch(
+    repo: Path,
+    task_id: str,
+    task_title: str = "",
+    *,
+    goal_trace: Sequence[dict[str, object]] | None = None,
+) -> TaskBranch:
     """Create a ``task/<id>_<timestamp>`` branch for isolated work.
 
     If the working tree is dirty the changes are stashed, the branch is
@@ -670,7 +733,8 @@ def create_task_branch(repo: Path, task_id: str, task_title: str = "") -> TaskBr
         raise RuntimeError("Cannot create task branch: unable to determine HEAD")
 
     ts = _safe_ts()
-    branch_name = f"task/{task_id}_{ts}"
+    goal_fragment = _task_branch_goal_fragment(goal_trace)
+    branch_name = f"task/{task_id}{goal_fragment}_{ts}"
 
     # Stash dirty tree if needed
     dirty = bool(git_porcelain(repo).strip())
@@ -702,6 +766,7 @@ def create_task_branch(repo: Path, task_id: str, task_title: str = "") -> TaskBr
         created_at=now_iso(),
         task_id=task_id,
         task_title=task_title,
+        goal_trace=[dict(trace) for trace in goal_trace or [] if isinstance(trace, dict)],
     )
 
 
@@ -718,11 +783,11 @@ def merge_task_branch(repo: Path, tb: TaskBranch) -> bool:
     porcelain = git_porcelain(repo)
     if porcelain.strip():
         run_cmd(["git", "add", "-A"], cwd=repo, timeout_sec=120)
-        _msg = f"[{tb.task_id}] {tb.task_title}" if tb.task_title else f"[auto] task {tb.task_id} final commit"
-        run_cmd(
-            ["git", "commit", "--no-verify", "-m", _msg],
-            cwd=repo, timeout_sec=120,
-        )
+        subject, body = format_task_commit_message(tb, action="final commit")
+        commit_cmd = ["git", "commit", "--no-verify", "-m", subject]
+        if body:
+            commit_cmd.extend(["-m", body])
+        run_cmd(commit_cmd, cwd=repo, timeout_sec=120)
 
     # Switch back to base
     checkout_target = tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit
@@ -765,11 +830,11 @@ def abandon_task_branch(repo: Path, tb: TaskBranch) -> str:
     porcelain = git_porcelain(repo)
     if porcelain.strip():
         run_cmd(["git", "add", "-A"], cwd=repo, timeout_sec=120)
-        _msg = f"[{tb.task_id}] {tb.task_title} (abandoned)" if tb.task_title else f"[auto] task {tb.task_id} abandoned — preserving work"
-        run_cmd(
-            ["git", "commit", "--no-verify", "-m", _msg],
-            cwd=repo, timeout_sec=120,
-        )
+        subject, body = format_task_commit_message(tb, action="abandoned")
+        commit_cmd = ["git", "commit", "--no-verify", "-m", subject]
+        if body:
+            commit_cmd.extend(["-m", body])
+        run_cmd(commit_cmd, cwd=repo, timeout_sec=120)
 
     # Switch back to base
     checkout_target = tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit

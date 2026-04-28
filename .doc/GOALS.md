@@ -165,7 +165,7 @@
 - [x] Security role UX shows both requirements: the role must be selected and `security.enabled` must be true, with a warning when one side is missing.
 - [x] Config saves normalize list/string fields before runner launch so web-saved `roles`, models, allowlists, and paths cannot produce zero-stage runs.
 - [x] Config save validation reports every rejected field in one response, not only the first failure.
-- [ ] Config backup/restore UI can list recent backups and restore a selected backup with confirmation.
+- [x] Config backup/restore UI can list recent backups and restore a selected backup with confirmation.
 
 ### P0-P. Worktree Review, Merge, And Cleanup Operations
 
@@ -173,12 +173,12 @@
 - [x] Merge preflight details are shown in the UI: source dirty state, source `HEAD`, expected base ref, patch hash, `git apply --check`, and pending marker path.
 - [x] Merge conflicts or patch apply failures show exact failed files/hunks and leave the pending state recoverable.
 - [x] Worktree merge prefers fast-forwarding committed worktree history before applying a dirty-only patch when `head_ref` descends from `base_ref`, so one stale hunk in a cumulative patch cannot block an otherwise mergeable run.
-- [ ] Worktree Review shows split-merge metadata, including fast-forward ref, dirty patch path, and whether the dirty patch was applied, when a merge uses the fast-forward-then-patch recovery path.
-- [ ] Discard and cleanup actions distinguish source-safe discard, generated worktree removal, stale marker pruning, and cleanup-failed reconciliation.
-- [ ] Worktree diagnostics can filter active, pending, stale, orphaned, cleanup-failed, and missing-patch entries without mutating files by default.
-- [ ] Cleanup-failed artifacts are cleared automatically only after the worktree path and marker state are actually reconciled.
-- [ ] Windows locked-path cleanup reports the locking path, affected artifact, retry schedule, and reboot-required guidance when user-mode cleanup cannot progress.
-- [ ] API and Playwright tests cover failed merge preflight, patch apply failure, stale marker repair, orphaned worktree reporting, and cleanup-failed reconciliation.
+- [x] Worktree Review shows split-merge metadata, including fast-forward ref, dirty patch path, and whether the dirty patch was applied, when a merge uses the fast-forward-then-patch recovery path.
+- [x] Discard and cleanup actions distinguish source-safe discard, generated worktree removal, stale marker pruning, and cleanup-failed reconciliation.
+- [x] Worktree diagnostics can filter active, pending, stale, orphaned, cleanup-failed, and missing-patch entries without mutating files by default.
+- [x] Cleanup-failed artifacts are cleared automatically only after the worktree path and marker state are actually reconciled.
+- [x] Windows locked-path cleanup reports the locking path, affected artifact, retry schedule, and reboot-required guidance when user-mode cleanup cannot progress.
+- [x] API and Playwright tests cover failed merge preflight, patch apply failure, stale marker repair, orphaned worktree reporting, and cleanup-failed reconciliation.
 
 ### P0-Q. Safe Self-Development Automation
 
