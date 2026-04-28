@@ -8,6 +8,7 @@ import subprocess
 import textwrap
 import unittest
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1362,7 +1363,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         except Exception as exc:
             raise unittest.SkipTest(f"FastAPI is unavailable: {exc}") from exc
 
-    def _create_app(self, repo: Path, *, config_path: Path | None = None):
+    def _create_app(self, repo: Path, *, config_path: Path | None = None, bind_host: str = "127.0.0.1"):
         from agent_runner.web import create_app
 
         kwargs = {"web_dir": WEB_CONSOLE}
@@ -1370,6 +1371,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             kwargs["config_path"] = str(config_path)
         elif repo == self.repo:
             kwargs["config_path"] = str(self.config_path)
+        kwargs["bind_host"] = bind_host
         return create_app(repo, **kwargs)
 
     def _write_worktree_artifact(self, relative: str, text: str) -> Path:
@@ -1826,16 +1828,292 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         payload.update(overrides)
         return payload
 
-    def _api_status(self, repo: Path, controller_status: dict[str, object] | None) -> dict[str, object]:
+    def _write_long_running_stage_bundle(
+        self,
+        *,
+        run_name: str,
+        active_stage: str,
+        elapsed_minutes: int,
+        log_minutes_ago: int,
+        backend_minutes_ago: int,
+        missing_logs: bool = False,
+        secret: str | None = None,
+    ) -> tuple[Path, dict[str, object]]:
+        run_dir = self._make_live_run_dir(run_name)
+        _write_run_bundle(run_dir, task_id="T-020", task_title="API-backed observation path", status="success")
+
+        active_stage = active_stage if active_stage in {"PM", "Dev", "QA"} else "Dev"
+        now = datetime.now(timezone.utc)
+        task_id = "T-020"
+        task_title = "API-backed observation path"
+        task_model = {
+            "PM": "gpt-5.5",
+            "Dev": "gpt-5.4-mini",
+            "QA": "gpt-5.4-mini",
+        }
+        stage_recent_output = {
+            "PM": "PM stage checkpoint recorded.",
+            "Dev": "Dev stage checkpoint recorded.",
+            "QA": "QA stage checkpoint recorded.",
+        }
+
+        def iso(dt: datetime) -> str:
+            return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+        def ms(dt: datetime) -> int:
+            return int(dt.timestamp() * 1000)
+
+        def touch(path: Path, minutes_ago: int) -> None:
+            stamp = (now - timedelta(minutes=minutes_ago)).timestamp()
+            os.utime(path, (stamp, stamp))
+
+        elapsed_minutes = max(1, int(elapsed_minutes))
+        active_started = now - timedelta(minutes=elapsed_minutes)
+        active_elapsed_sec = elapsed_minutes * 60
+
+        stage_started: dict[str, datetime | None] = {"PM": None, "Dev": None, "QA": None}
+        stage_ended: dict[str, datetime | None] = {"PM": None, "Dev": None, "QA": None}
+        stage_status: dict[str, str] = {"PM": "pending", "Dev": "pending", "QA": "pending"}
+        stage_elapsed: dict[str, int | None] = {"PM": None, "Dev": None, "QA": None}
+
+        if active_stage == "PM":
+            stage_started["PM"] = active_started
+            stage_status["PM"] = "running"
+            stage_elapsed["PM"] = active_elapsed_sec
+        elif active_stage == "Dev":
+            pm_started = active_started - timedelta(minutes=20)
+            stage_started["PM"] = pm_started
+            stage_ended["PM"] = pm_started + timedelta(minutes=10)
+            stage_status["PM"] = "ok"
+            stage_elapsed["PM"] = 600
+            stage_started["Dev"] = active_started
+            stage_status["Dev"] = "running"
+            stage_elapsed["Dev"] = active_elapsed_sec
+        else:
+            pm_started = active_started - timedelta(minutes=30)
+            stage_started["PM"] = pm_started
+            stage_ended["PM"] = pm_started + timedelta(minutes=10)
+            stage_status["PM"] = "ok"
+            stage_elapsed["PM"] = 600
+            dev_started = active_started - timedelta(minutes=15)
+            stage_started["Dev"] = dev_started
+            stage_ended["Dev"] = dev_started + timedelta(minutes=10)
+            stage_status["Dev"] = "ok"
+            stage_elapsed["Dev"] = 600
+            stage_started["QA"] = active_started
+            stage_status["QA"] = "running"
+            stage_elapsed["QA"] = active_elapsed_sec
+
+        stage_output_paths = {
+            "PM": [
+                run_dir / "pm_final_output_cycle_001.txt",
+                run_dir / "NOTES_PM.md",
+            ],
+            "Dev": [
+                run_dir / "tasks" / "c001_s000_T-020" / "attempt_02" / "dev_output.txt",
+                run_dir / "tasks" / "c001_s000_T-020" / "attempt_02" / "NOTES.md",
+                run_dir / "tasks" / "c001_s000_T-020" / "attempt_02" / "DEPENDENCY_REQUIRED.md",
+                run_dir / "dev_logs" / "c001_s000_T-020_a02.txt",
+                run_dir / "tasks" / "c001_s000_T-020" / "attempt_02" / "build.txt",
+            ],
+            "QA": [
+                run_dir / "qa_followups_cycle_001.json",
+            ],
+        }
+
+        for stage_name, paths in stage_output_paths.items():
+            for index, path in enumerate(paths):
+                if not path.exists():
+                    continue
+                if missing_logs and stage_name == active_stage:
+                    path.unlink()
+                    continue
+                if stage_name == active_stage and index == 0:
+                    continue
+                if stage_name == active_stage:
+                    touch(path, log_minutes_ago + 20 + (index * 5))
+                else:
+                    touch(path, elapsed_minutes + 30 + (index * 5))
+
+        active_output_path = stage_output_paths[active_stage][0]
+        if not missing_logs:
+            if active_stage == "QA":
+                active_output_text = json.dumps(
+                    {
+                        "cycle": 1,
+                        "status": "running",
+                        "note": secret or f"{active_stage} stage still active.",
+                    },
+                    ensure_ascii=False,
+                )
+                _write(active_output_path, active_output_text + "\n")
+            else:
+                active_output_text = secret or f"{active_stage} stage still active."
+                _write(active_output_path, active_output_text + "\n")
+            touch(active_output_path, log_minutes_ago)
+
+        backend_text = secret or f"{active_stage} backend event recorded."
+        metrics_events: list[dict[str, object]] = []
+
+        def add_event(ts: datetime, seq: int, event: str, stage_name: str, **extra: object) -> None:
+            payload = {
+                "ts": iso(ts),
+                "seq": seq,
+                "level": "info",
+                "event": event,
+                "stage": stage_name,
+                "cycle": 1,
+            }
+            payload.update(extra)
+            metrics_events.append(payload)
+
+        pm_started = stage_started["PM"] or active_started
+        pm_ended = stage_ended["PM"]
+        dev_started = stage_started["Dev"]
+        dev_ended = stage_ended["Dev"]
+        qa_started = stage_started["QA"]
+
+        seq = 1
+        add_event(pm_started, seq, "cycle_start", "PM", message="cycle start")
+        seq += 1
+        add_event(pm_started, seq, "pm_start", "PM", message="pm stage start")
+        seq += 1
+
+        if active_stage == "PM":
+            add_event(now - timedelta(minutes=max(1, backend_minutes_ago)), seq, "stage_event", "PM", message=backend_text)
+        elif active_stage == "Dev":
+            if pm_ended is not None:
+                add_event(pm_ended, seq, "pm_end", "PM", rc=0, reason="pm_ready", message="pm stage end")
+                seq += 1
+            if dev_started is not None:
+                add_event(dev_started, seq, "task_start", "Dev", step=0, task_id=task_id, task_title=task_title, message="task start")
+                seq += 1
+                add_event(dev_started, seq, "dev_attempt_start", "Dev", step=0, task_id=task_id, task_title=task_title, attempt=2, model=task_model["Dev"], message="dev attempt 2 start")
+                seq += 1
+            add_event(now - timedelta(minutes=max(1, backend_minutes_ago)), seq, "stage_event", "Dev", step=0, task_id=task_id, task_title=task_title, message=backend_text)
+        else:
+            if pm_ended is not None:
+                add_event(pm_ended, seq, "pm_end", "PM", rc=0, reason="pm_ready", message="pm stage end")
+                seq += 1
+            if dev_started is not None:
+                add_event(dev_started, seq, "task_start", "Dev", step=0, task_id=task_id, task_title=task_title, message="task start")
+                seq += 1
+                add_event(dev_started, seq, "dev_attempt_start", "Dev", step=0, task_id=task_id, task_title=task_title, attempt=2, model=task_model["Dev"], message="dev attempt 2 start")
+                seq += 1
+            if dev_ended is not None:
+                add_event(dev_ended, seq, "task_end", "Dev", step=0, task_id=task_id, task_title=task_title, attempt=2, rc=0, reason="completed", message="task end")
+                seq += 1
+            if qa_started is not None:
+                add_event(qa_started, seq, "qa_start", "QA", task_id=task_id, task_title=task_title, message="qa start")
+                seq += 1
+            add_event(now - timedelta(minutes=max(1, backend_minutes_ago)), seq, "stage_event", "QA", task_id=task_id, task_title=task_title, message=backend_text)
+
+        _write(run_dir / "metrics.jsonl", "\n".join(json.dumps(item, ensure_ascii=False) for item in metrics_events) + "\n")
+
+        stage_entries = []
+        for stage_name in ("PM", "Dev", "QA"):
+            stage_started_at = stage_started[stage_name]
+            stage_ended_at = stage_ended[stage_name]
+            stage_entries.append(
+                {
+                    "name": stage_name,
+                    "status": stage_status[stage_name],
+                    "rc": 0 if stage_status[stage_name] == "ok" else None,
+                    "reason": {
+                        "PM": "pm_ready",
+                        "Dev": "completed",
+                        "QA": "qa_verified",
+                    }.get(stage_name, "") if stage_status[stage_name] == "ok" else "",
+                    "cycle": 1,
+                    "startedAt": iso(stage_started_at) if stage_started_at is not None else None,
+                    "endedAt": iso(stage_ended_at) if stage_ended_at is not None else None,
+                    "durationSec": stage_elapsed[stage_name],
+                    "model": task_model[stage_name],
+                    "taskId": task_id,
+                    "taskTitle": task_title,
+                    "attempt": 1 if stage_name == "PM" else 2,
+                    "step": 0 if stage_name == "Dev" else None,
+                    "recentOutput": stage_recent_output[stage_name],
+                }
+            )
+
+        _write(
+            run_dir / "run_summary.json",
+            json.dumps(
+                {
+                    "run_id": run_dir.name,
+                    "repo": str(self.repo),
+                    "branch": "main",
+                    "cycles": [
+                        {
+                            "cycle": 1,
+                            "stages": stage_entries,
+                        }
+                    ],
+                    "final": {"rc": 0, "reason": ""},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        _write(
+            run_dir / "last_run_summary.json",
+            json.dumps(
+                {
+                    "ts": iso(now),
+                    "cycle": 1,
+                    "run_dir": str(run_dir),
+                    "done": 1,
+                    "skipped": 0,
+                    "total_tasks": 2,
+                    "failed_count": 0,
+                    "duration_seconds": active_elapsed_sec,
+                    "status": "running",
+                    "rc": 0,
+                    "stop_reason": "",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+
+        controller_status = self._controller_status(
+            run_dir,
+            stage=active_stage,
+            current_task_id=task_id,
+            current_task_title=task_title,
+            startedAt=ms(active_started),
+            elapsedSec=active_elapsed_sec,
+            cycle=1,
+            current_cycle=1,
+            attempt=1 if active_stage == "PM" else 2,
+            last_event=backend_text,
+        )
+        return run_dir, controller_status
+
+    def _api_status(self, repo: Path, controller_status: dict[str, object] | None, *, bind_host: str = "127.0.0.1") -> dict[str, object]:
         from agent_runner import web as web_module
         from fastapi.testclient import TestClient
 
         controller = FakeRunnerController(controller_status) if controller_status is not None else None
         with patch.object(web_module, "_build_runner_controller", return_value=controller):
-            client = TestClient(self._create_app(repo))
+            client = TestClient(self._create_app(repo, bind_host=bind_host))
         response = client.get("/api/status")
         self.assertEqual(200, response.status_code)
         return response.json()
+
+    def _render_snapshot_views(self, payload: dict[str, object]) -> tuple[dict[str, object], str, str]:
+        normalized = _run_adapter_harness([
+            {"kind": "call", "name": "normalizeSnapshot", "args": [payload]},
+        ])[0]
+        rendered = _run_adapter_harness([
+            {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+            {"kind": "call", "name": "renderDashboard", "args": []},
+            {"kind": "call", "name": "renderPipeline", "args": []},
+        ])
+        return normalized, rendered[1], rendered[2]
 
     def _api_log_tail(self, **params: object) -> dict[str, object]:
         response = self.client.get("/api/logs/tail", params=params)
@@ -1960,6 +2238,136 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         kinds = {item["kind"] for item in payload["notifications"]}
         self.assertIn("run_start", kinds)
         self.assertIn("task_done", kinds)
+
+    def test_api_status_long_running_stage_summary_covers_recent_pm_dev_qa_output(self) -> None:
+        for stage_name in ("PM", "Dev", "QA"):
+            with self.subTest(stage=stage_name):
+                run_name = f"20260428-{stage_name.lower()}-recent"
+                _, controller_status = self._write_long_running_stage_bundle(
+                    run_name=run_name,
+                    active_stage=stage_name,
+                    elapsed_minutes=18,
+                    log_minutes_ago=2,
+                    backend_minutes_ago=1,
+                )
+
+                payload = self._api_status(self.repo, controller_status)
+                stage = next(item for item in payload["stages"] if item["id"] == stage_name)
+                log_phrase = f"{stage_name} stage still active."
+                backend_phrase = f"{stage_name} backend event recorded."
+
+                self.assertEqual("running", payload["progress"]["run_status"])
+                self.assertEqual("running", payload["active_run"]["status"])
+                self.assertGreater(stage["elapsedSec"], 0)
+                self.assertFalse(stage["outputStalled"])
+                self.assertIsNone(stage["noOutputMinutes"])
+                self.assertIn(log_phrase, stage["latestLogLine"])
+                self.assertEqual(backend_phrase, stage["latestBackendEvent"])
+                self.assertTrue(stage["recentOutput"])
+
+                normalized, dashboard_html, pipeline_html = self._render_snapshot_views(payload)
+                normalized_stage = next(item for item in normalized["stages"] if item["id"] == stage_name)
+                self.assertEqual(stage["latestLogLine"], normalized_stage["latestLogLine"])
+                self.assertEqual(stage["latestBackendEvent"], normalized_stage["latestBackendEvent"])
+
+                for html in (dashboard_html, pipeline_html):
+                    self.assertIn("Elapsed", html)
+                    self.assertIn("Latest log line", html)
+                    self.assertIn("Latest backend event", html)
+                    self.assertIn(log_phrase, html)
+                    self.assertIn(backend_phrase, html)
+                    self.assertNotIn("No output for", html)
+
+    def test_api_status_long_running_stage_summary_handles_missing_logs(self) -> None:
+        _, controller_status = self._write_long_running_stage_bundle(
+            run_name="20260428-dev-missing-logs",
+            active_stage="Dev",
+            elapsed_minutes=16,
+            log_minutes_ago=2,
+            backend_minutes_ago=1,
+            missing_logs=True,
+        )
+
+        payload = self._api_status(self.repo, controller_status)
+        stage = next(item for item in payload["stages"] if item["id"] == "Dev")
+        backend_phrase = "Dev backend event recorded."
+
+        self.assertEqual("", stage["latestLogLine"])
+        self.assertEqual(backend_phrase, stage["latestBackendEvent"])
+        self.assertFalse(stage["outputStalled"])
+        self.assertIsNone(stage["noOutputMinutes"])
+
+        normalized, dashboard_html, pipeline_html = self._render_snapshot_views(payload)
+        normalized_stage = next(item for item in normalized["stages"] if item["id"] == "Dev")
+        self.assertEqual(stage["latestLogLine"], normalized_stage["latestLogLine"])
+        self.assertEqual(stage["latestBackendEvent"], normalized_stage["latestBackendEvent"])
+
+        for html in (dashboard_html, pipeline_html):
+            self.assertIn("No log line available yet.", html)
+            self.assertIn(backend_phrase, html)
+            self.assertNotIn("No output for", html)
+
+    def test_api_status_long_running_stage_summary_warns_on_stale_output(self) -> None:
+        _, controller_status = self._write_long_running_stage_bundle(
+            run_name="20260428-qa-stale-output",
+            active_stage="QA",
+            elapsed_minutes=28,
+            log_minutes_ago=20,
+            backend_minutes_ago=20,
+        )
+
+        payload = self._api_status(self.repo, controller_status)
+        stage = next(item for item in payload["stages"] if item["id"] == "QA")
+        log_phrase = "QA stage still active."
+        backend_phrase = "QA backend event recorded."
+
+        self.assertTrue(stage["outputStalled"])
+        self.assertIsInstance(stage["noOutputMinutes"], int)
+        self.assertGreaterEqual(stage["noOutputMinutes"], 19)
+        self.assertIn(log_phrase, stage["latestLogLine"])
+        self.assertEqual(backend_phrase, stage["latestBackendEvent"])
+
+        normalized, dashboard_html, pipeline_html = self._render_snapshot_views(payload)
+        normalized_stage = next(item for item in normalized["stages"] if item["id"] == "QA")
+        self.assertEqual(stage["latestLogLine"], normalized_stage["latestLogLine"])
+        self.assertEqual(stage["latestBackendEvent"], normalized_stage["latestBackendEvent"])
+
+        warning_text = f"No output for {stage['noOutputMinutes']} minutes."
+        for html in (dashboard_html, pipeline_html):
+            self.assertIn(log_phrase, html)
+            self.assertIn(backend_phrase, html)
+            self.assertIn(warning_text, html)
+
+    def test_api_status_long_running_stage_summary_redacts_secret_signals(self) -> None:
+        secret = "token=abc123"
+        _, controller_status = self._write_long_running_stage_bundle(
+            run_name="20260428-dev-redacted",
+            active_stage="Dev",
+            elapsed_minutes=18,
+            log_minutes_ago=2,
+            backend_minutes_ago=1,
+            secret=secret,
+        )
+
+        payload = self._api_status(self.repo, controller_status, bind_host="0.0.0.0")
+        stage = next(item for item in payload["stages"] if item["id"] == "Dev")
+
+        self.assertTrue(payload["redaction"]["active"])
+        self.assertEqual("[redacted]", stage["latestLogLine"])
+        self.assertEqual("[redacted]", stage["latestBackendEvent"])
+        self.assertEqual("[redacted]", stage["recentOutput"])
+        self.assertIn("latestLogLine", stage["redaction"]["fields"])
+        self.assertIn("latestBackendEvent", stage["redaction"]["fields"])
+        self.assertIn("recentOutput", stage["redaction"]["fields"])
+
+        normalized, dashboard_html, pipeline_html = self._render_snapshot_views(payload)
+        normalized_stage = next(item for item in normalized["stages"] if item["id"] == "Dev")
+        self.assertEqual(stage["latestLogLine"], normalized_stage["latestLogLine"])
+        self.assertEqual(stage["latestBackendEvent"], normalized_stage["latestBackendEvent"])
+
+        for html in (dashboard_html, pipeline_html):
+            self.assertIn("Redacted values stay hidden in the browser.", html)
+            self.assertNotIn(secret, html)
 
     def test_empty_latest_timestamp_run_dir_does_not_mask_real_run(self) -> None:
         empty_run = self.repo / ".AgentCLI" / "agent_runs" / "20260426-130000"

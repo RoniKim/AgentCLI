@@ -304,8 +304,14 @@
         readOnlyShell: 'Read-only shell by default. Stop, merge, and discard are not auto-applied here.',
         manualConfirmation: 'Current run uses manual stop confirmation and a local review workflow.',
         devStage: 'Dev stage',
+        elapsed: 'Elapsed',
         started: 'Started',
         ended: 'Ended',
+        latestLogLine: 'Latest log line',
+        latestBackendEvent: 'Latest backend event',
+        latestLogLineUnavailable: 'No log line available yet.',
+        latestBackendEventUnavailable: 'No backend event available yet.',
+        noOutputWarning: 'No output for {count} minutes.',
         tokensProcessed: 'tokens processed',
         tokensGenerated: 'tokens generated',
         tokenTelemetryUnavailable: 'token telemetry unavailable',
@@ -1190,6 +1196,7 @@
     readOnlyShell: '기본은 읽기 전용 셸입니다. 정지, 병합, 폐기는 여기서 자동 적용되지 않습니다.',
     manualConfirmation: '현재 실행은 수동 정지 확인과 로컬 검토 흐름을 사용합니다.',
     devStage: 'Dev 단계',
+    elapsed: '경과',
     tokensProcessed: '처리된 토큰',
     tokensGenerated: '생성된 토큰',
     tokenTelemetryUnavailable: '토큰 원격 측정 없음',
@@ -1198,6 +1205,11 @@
     lifecycleRecord: '수명주기 기록',
     startedUnavailable: '시작 정보 없음',
     endedUnavailable: '종료 정보 없음',
+    latestLogLine: '최신 로그 줄',
+    latestBackendEvent: '최신 백엔드 이벤트',
+    latestLogLineUnavailable: '아직 로그 줄이 없습니다.',
+    latestBackendEventUnavailable: '아직 백엔드 이벤트가 없습니다.',
+    noOutputWarning: '{count}분 동안 출력 없음.',
     inProgress: '진행 중',
     pending: '대기',
     completed: '완료',
@@ -5307,12 +5319,17 @@
           startedAt: toMaybeNumber(raw.startedAt || raw.started_at),
           endedAt: toMaybeNumber(raw.endedAt || raw.ended_at),
           durationSec: toMaybeNumber(raw.durationSec ?? raw.duration_seconds),
+          elapsedSec: toMaybeNumber(raw.elapsedSec ?? raw.elapsed_seconds ?? raw.durationSec ?? raw.duration_seconds),
           model: toText(raw.model || raw.backend || '', ''),
           taskId: toText(raw.taskId || raw.task_id, ''),
           taskTitle: toText(raw.taskTitle || raw.task_title, ''),
           attempt: toMaybeNumber(raw.attempt || raw.currentAttempt),
           step: toMaybeNumber(raw.step),
           recentOutput: toText(raw.recentOutput || raw.recent_output, ''),
+          latestLogLine: toText(raw.latestLogLine || raw.latest_log_line, ''),
+          latestBackendEvent: toText(raw.latestBackendEvent || raw.latest_backend_event, ''),
+          outputStalled: Boolean(raw.outputStalled ?? raw.output_stalled),
+          noOutputMinutes: toMaybeNumber(raw.noOutputMinutes ?? raw.no_output_minutes),
           reason: toText(raw.reason || raw.message, ''),
           rc: toMaybeNumber(raw.rc),
           isFallback: false,
@@ -6988,6 +7005,7 @@
     adaptConfig,
     adaptConfigContract,
     adaptLiveRun,
+    applySnapshotModel,
     normalizeRoleSpec,
     normalizeRoleSpecs,
     classifyRoleSpec,
@@ -6998,6 +7016,9 @@
     adaptMetrics,
     adaptHistory,
     adaptWorktree,
+    renderDashboard,
+    renderPipeline,
+    renderStageHealthSignals,
     goalBucketLabel,
     goalBucketName,
     goalItemLineNumber,
@@ -7161,6 +7182,15 @@
       redaction: next.configContract?.redaction || defaults.configContract.redaction,
       restart_required_paths: next.configContract?.restart_required_paths || defaults.configContract.restart_required_paths,
     });
+    const nextRedaction = toObject(next.redaction);
+    const configContractRedaction = toObject(state.configContract.redaction);
+    state.redaction = {
+      ...clone(configContractRedaction),
+      ...clone(nextRedaction),
+      active: Boolean(nextRedaction.active ?? configContractRedaction.active),
+      placeholder: toText(nextRedaction.placeholder || configContractRedaction.placeholder, REDACTED_VALUE),
+      scope: toText(nextRedaction.scope || configContractRedaction.scope, ''),
+    };
     state.configSchema = clone(toObject(state.configContract.schema || defaults.configSchema));
     state.configDraft = deepMerge(clone(toObject(state.configContract.values || {})), toObject(state.configDraft || {}));
     const nextPrompts = toArray(next.prompts);
@@ -7172,7 +7202,7 @@
     state.history = toArray(next.history);
     state.runs = state.history;
     state.historySummary = toObject(next.historySummary);
-    state.metrics = toObject(next.metrics);
+    state.metrics = normalizeMetrics(next.metrics);
     state.notifications = toArray(next.notifications).slice(-MAX_LOG_ROWS);
     state.progress = toObject(next.progress);
     state.sectionState = toObject(next.sectionState);
@@ -7663,6 +7693,36 @@
       .join('');
   }
 
+  function renderStageHealthSignals(stage) {
+    const elapsedValue = stage.elapsedSec != null ? stage.elapsedSec : stage.durationSec;
+    const elapsedText = elapsedValue != null ? fmtDuration(elapsedValue) : t('common.unavailable');
+    const latestLogLine = compactText(redactionAwareText(stage.latestLogLine, t('pipeline.latestLogLineUnavailable')), 180) || t('pipeline.latestLogLineUnavailable');
+    const latestBackendEvent = compactText(redactionAwareText(stage.latestBackendEvent, t('pipeline.latestBackendEventUnavailable')), 180) || t('pipeline.latestBackendEventUnavailable');
+    const noOutputMinutes = Math.max(1, toNumber(stage.noOutputMinutes, 1));
+    const warningText = stage.outputStalled ? t('pipeline.noOutputWarning', { count: noOutputMinutes }) : '';
+    return `
+      <div class="stage-card__signals">
+        <div class="stage-card__signal">
+          <div class="stage-card__signal-label">${escapeHTML(t('pipeline.elapsed'))}</div>
+          <div class="stage-card__signal-value">${escapeHTML(elapsedText)}</div>
+        </div>
+        <div class="stage-card__signal">
+          <div class="stage-card__signal-label">${escapeHTML(t('pipeline.latestLogLine'))}</div>
+          <div class="stage-card__signal-value">${escapeHTML(latestLogLine)}</div>
+        </div>
+        <div class="stage-card__signal">
+          <div class="stage-card__signal-label">${escapeHTML(t('pipeline.latestBackendEvent'))}</div>
+          <div class="stage-card__signal-value">${escapeHTML(latestBackendEvent)}</div>
+        </div>
+        ${warningText ? `
+          <div class="stage-card__signal stage-card__signal--warn">
+            <div class="stage-card__signal-label">${escapeHTML(warningText)}</div>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
   function renderStageCard(stage) {
     const status = normalizeStageStatus(stage.status, 'pending');
     const cardClass = lifecycleStageCardClass(status);
@@ -7676,7 +7736,7 @@
     const attemptText = stage.attempt != null ? `${t('dashboard.attempt')} ${stage.attempt}` : t('common.unavailable');
     const startedText = stage.startedAt ? `${t('pipeline.started')} ${fmtClock(stage.startedAt)}` : t('pipeline.startedUnavailable');
     const endedText = stage.endedAt ? `${t('pipeline.ended')} ${fmtClock(stage.endedAt)}` : status === 'running' ? t('pipeline.inProgress') : t('pipeline.endedUnavailable');
-    const durationText = stage.durationSec != null ? fmtDuration(stage.durationSec) : '--';
+    const elapsedText = stage.elapsedSec != null ? fmtDuration(stage.elapsedSec) : stage.durationSec != null ? fmtDuration(stage.durationSec) : '--';
     const recentOutput = compactText(redactionAwareText(stage.recentOutput), 180) || t('pipeline.recentOutputUnavailable');
     return `
       <div class="${cardClass}">
@@ -7689,8 +7749,9 @@
         </div>
         <div class="stage-card__body">
           <div>${escapeHTML(title)}</div>
-          <div class="muted">${escapeHTML(model || t('common.unavailable'))} | ${escapeHTML(durationText)}</div>
+          <div class="muted">${escapeHTML(model || t('common.unavailable'))} | ${escapeHTML(elapsedText)}</div>
           <div class="summary-note" style="margin-top:6px;">${escapeHTML([taskIdText, attemptText, startedText, endedText].join(' | '))}</div>
+          ${renderStageHealthSignals(stage)}
           <div class="summary-note" style="margin-top:6px;">${escapeHTML(recentOutput)}</div>
         </div>
       </div>
@@ -11703,10 +11764,11 @@
             ${chip(stage.cycle != null ? t('backlog.cycleText', { cycle: stage.cycle }) : t('backlog.cycleUnavailable'), 'chip--info')}
             ${stage.model ? chip(stage.model, 'chip--info') : ''}
           </div>
-          <div class="summary-note" style="margin-top:8px;">${escapeHTML(stage.startedAt ? `${t('pipeline.started')} ${fmtClock(stage.startedAt)}` : t('pipeline.startedUnavailable'))} | ${escapeHTML(stage.endedAt ? `${t('pipeline.ended')} ${fmtClock(stage.endedAt)}` : normalizeStageStatus(stage.status, 'pending') === 'running' ? t('pipeline.inProgress') : t('pipeline.endedUnavailable'))}</div>
+          <div class="summary-note" style="margin-top:8px;">${escapeHTML(stage.startedAt ? `${t('pipeline.started')} ${fmtClock(stage.startedAt)}` : t('pipeline.startedUnavailable'))} | ${escapeHTML(stage.endedAt ? `${t('pipeline.ended')} ${fmtClock(stage.endedAt)}` : normalizeStageStatus(stage.status, 'pending') === 'running' ? t('pipeline.inProgress') : t('pipeline.endedUnavailable'))} | ${escapeHTML(stage.elapsedSec != null ? fmtDuration(stage.elapsedSec) : stage.durationSec != null ? fmtDuration(stage.durationSec) : '--')}</div>
+          ${renderStageHealthSignals(stage)}
           <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(redactionAwareText(stage.recentOutput, ''), 220) || t('pipeline.recentOutputUnavailable'))}</div>
         </div>
-      `).join('')
+      `)
       : [`<div class="summary-note">${escapeHTML(t('pipeline.noLifecycleRecords'))}</div>`];
 
     const body = `

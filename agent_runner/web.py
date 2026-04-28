@@ -1031,12 +1031,12 @@ def _redact_web_backlog_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _redact_web_stage(stage: dict[str, Any]) -> dict[str, Any]:
     redacted = deepcopy(stage)
     changed = False
-    for key in ("recentOutput", "recent_output"):
+    for key in ("latestLogLine", "latest_log_line", "latestBackendEvent", "latest_backend_event", "recentOutput", "recent_output"):
         if redacted.get(key) not in (None, "", False):
             redacted[key] = REDACTED_VALUE
             changed = True
     if changed:
-        redacted["redaction"] = _web_redaction_meta("recentOutput", "recent_output")
+        redacted["redaction"] = _web_redaction_meta("latestLogLine", "latest_log_line", "latestBackendEvent", "latest_backend_event", "recentOutput", "recent_output")
     return redacted
 
 
@@ -1906,6 +1906,15 @@ def _tail_text(path: Path, lines: int = 50) -> str:
     except Exception:
         return ""
     return "\n".join(dq).strip()
+
+
+def _path_mtime_ms(path: Path | None) -> int | None:
+    if path is None:
+        return None
+    try:
+        return int(path.stat().st_mtime_ns / 1_000_000)
+    except Exception:
+        return None
 
 
 def _host_is_loopback(bind_host: str) -> bool:
@@ -4032,6 +4041,7 @@ def _task_runtime_index(events: list[dict[str, Any]]) -> dict[str, dict[str, Any
                 "reason": "",
                 "lastMessage": "",
                 "lastEvent": "",
+                "lastEventAt": None,
             },
         )
 
@@ -4062,6 +4072,9 @@ def _task_runtime_index(events: list[dict[str, Any]]) -> dict[str, dict[str, Any
         if reason or message:
             entry["lastMessage"] = reason or message
             entry["lastEvent"] = message or reason
+        if ts:
+            current_last_event_at = _coerce_optional_int(entry.get("lastEventAt"))
+            entry["lastEventAt"] = ts if current_last_event_at is None else max(current_last_event_at, ts)
 
         if event_type in {"task_start", "dev_attempt_start"}:
             if ts and (entry.get("startedAt") is None or ts < int(entry.get("startedAt") or 0)):
@@ -4112,6 +4125,36 @@ def _task_output_excerpt(
     if run_dir is None:
         return _pick_text(fallback_text)
 
+    for candidate in _task_output_candidates(
+        run_dir,
+        stage_name=stage_name,
+        cycle=cycle,
+        step=step,
+        task_id=task_id,
+        attempt=attempt,
+        reason=reason,
+        include_summary_artifacts=True,
+    ):
+        text = _tail_text(candidate, 12)
+        if text:
+            return text
+    return _pick_text(fallback_text)
+
+
+def _task_output_candidates(
+    run_dir: Path | None,
+    *,
+    stage_name: str,
+    cycle: int | None = None,
+    step: int | None = None,
+    task_id: str = "",
+    attempt: int | None = None,
+    reason: str = "",
+    include_summary_artifacts: bool = True,
+) -> list[Path]:
+    if run_dir is None:
+        return []
+
     candidates: list[Path] = []
     stage_key = _normalize_stage_name(stage_name)
     cycle_i = _coerce_optional_int(cycle)
@@ -4123,18 +4166,24 @@ def _task_output_excerpt(
             [
                 run_dir / f"pm_final_output_cycle_{cycle_i:03d}.txt",
                 run_dir / "NOTES_PM.md",
-                run_dir / "cycle_summary.log",
-                run_dir / f"run_summary_cycle_{cycle_i:03d}.json",
             ]
         )
+        if include_summary_artifacts:
+            candidates.extend(
+                [
+                    run_dir / "cycle_summary.log",
+                    run_dir / f"run_summary_cycle_{cycle_i:03d}.json",
+                ]
+            )
     elif stage_key == "QA" and cycle_i is not None:
-        candidates.extend(
-            [
-                run_dir / f"qa_followups_cycle_{cycle_i:03d}.json",
-                run_dir / "cycle_summary.log",
-                run_dir / f"run_summary_cycle_{cycle_i:03d}.json",
-            ]
-        )
+        candidates.append(run_dir / f"qa_followups_cycle_{cycle_i:03d}.json")
+        if include_summary_artifacts:
+            candidates.extend(
+                [
+                    run_dir / "cycle_summary.log",
+                    run_dir / f"run_summary_cycle_{cycle_i:03d}.json",
+                ]
+            )
     elif task_id and cycle_i is not None and step_i is not None and attempt_i is not None:
         task_dir = run_dir / "tasks" / f"c{cycle_i:03d}_s{step_i:03d}_{task_id}" / f"attempt_{attempt_i:02d}"
         reason_text = _pick_text(reason).lower()
@@ -4150,7 +4199,7 @@ def _task_output_excerpt(
                 run_dir / "dev_logs" / f"c{cycle_i:03d}_s{step_i:03d}_{task_id}_a{attempt_i:02d}.txt",
             ]
         )
-    elif task_id and cycle_i is not None:
+    elif task_id and cycle_i is not None and include_summary_artifacts:
         candidates.extend(
             [
                 run_dir / "cycle_summary.log",
@@ -4158,11 +4207,63 @@ def _task_output_excerpt(
             ]
         )
 
-    for candidate in candidates:
-        text = _tail_text(candidate, 12)
-        if text:
-            return text
-    return _pick_text(fallback_text)
+    return candidates
+
+
+def _task_output_signal(
+    run_dir: Path | None,
+    *,
+    stage_name: str,
+    cycle: int | None = None,
+    step: int | None = None,
+    task_id: str = "",
+    attempt: int | None = None,
+    reason: str = "",
+    include_summary_artifacts: bool = False,
+) -> dict[str, Any]:
+    if run_dir is None:
+        return {"text": "", "path": "", "mtimeMs": None}
+
+    best: dict[str, Any] | None = None
+    best_score = (-1, -1)
+    for index, candidate in enumerate(
+        _task_output_candidates(
+            run_dir,
+            stage_name=stage_name,
+            cycle=cycle,
+            step=step,
+            task_id=task_id,
+            attempt=attempt,
+            reason=reason,
+            include_summary_artifacts=include_summary_artifacts,
+        )
+    ):
+        text = _tail_text(candidate, 1)
+        if not text:
+            continue
+        mtime_ms = _path_mtime_ms(candidate)
+        score = (mtime_ms or -1, index)
+        if best is None or score > best_score:
+            best = {
+                "text": text,
+                "path": candidate.as_posix(),
+                "mtimeMs": mtime_ms,
+            }
+            best_score = score
+    return best or {"text": "", "path": "", "mtimeMs": None}
+
+
+def _stage_output_stall_threshold_seconds(config: dict[str, Any]) -> int:
+    telegram_cfg = config.get("telegram") if isinstance(config, dict) else {}
+    stalled_seconds = _coerce_optional_int(
+        _pick_value(
+            telegram_cfg.get("stalled_seconds") if isinstance(telegram_cfg, dict) else None,
+            config.get("telegram_stalled_seconds") if isinstance(config, dict) else None,
+        )
+    )
+    if stalled_seconds is None:
+        stalled_seconds = 600
+    return max(60, stalled_seconds)
 
 
 def _load_log_entries(run_dir: Path | None) -> list[dict[str, Any]]:
@@ -4843,6 +4944,7 @@ def _stage_payload(
     last_run_summary = last_run_summary if isinstance(last_run_summary, dict) else {}
     events = list(events) if isinstance(events, list) else (_cycle_events(run_dir) if run_dir is not None else [])
     task_runtime = _task_runtime_index(events)
+    snapshot_now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
     stage_titles = {
         "PM": "Backlog planning",
@@ -4970,6 +5072,7 @@ def _stage_payload(
                 "step": None,
                 "lastMessage": "",
                 "lastEvent": "",
+                "lastEventAt": None,
             },
         )
         ts = _iso_to_ms(event.get("ts"))
@@ -4980,6 +5083,8 @@ def _stage_payload(
                 entry["startedAt"] = ts
             if event_type.endswith("end") and (ended_at is None or ts > ended_at):
                 entry["endedAt"] = ts
+            current_last_event_at = _coerce_optional_int(entry.get("lastEventAt"))
+            entry["lastEventAt"] = ts if current_last_event_at is None else max(current_last_event_at, ts)
         cycle_value = _coerce_optional_int(_pick_value(event.get("cycle"), payload.get("cycle")))
         if cycle_value is not None and entry["cycle"] is None:
             entry["cycle"] = cycle_value
@@ -5129,6 +5234,50 @@ def _stage_payload(
             duration_sec = _coerce_optional_float(_pick_value(active_run.get("elapsedSec"), controller_data.get("elapsedSec"), controller_data.get("elapsed_seconds")))
 
         output_reason = reason or summary_reason or _pick_text(stage_runtime.get("reason"))
+        latest_log_signal = _task_output_signal(
+            run_dir,
+            stage_name=stage_name,
+            cycle=cycle_value,
+            step=step,
+            task_id=task_id or current_task_id,
+            attempt=attempt,
+            reason=output_reason,
+            include_summary_artifacts=False,
+        )
+        latest_log_line = _pick_text(latest_log_signal.get("text"))
+        latest_log_line_mtime = _coerce_optional_int(latest_log_signal.get("mtimeMs"))
+        latest_backend_event = _pick_text(
+            stage_runtime.get("lastEvent"),
+            stage_runtime.get("lastMessage"),
+            stage_runtime.get("reason"),
+            output_reason,
+            summary_reason,
+        )
+        latest_backend_event_at = _coerce_optional_int(stage_runtime.get("lastEventAt"))
+        elapsed_sec = duration_sec
+        if running:
+            if started_at is not None:
+                elapsed_sec = round(max(0, snapshot_now_ms - started_at) / 1000.0, 3)
+            elif elapsed_sec is None:
+                elapsed_sec = _coerce_optional_float(
+                    _pick_value(
+                        stage_runtime.get("elapsedSec"),
+                        active_run.get("elapsedSec"),
+                        controller_data.get("elapsedSec"),
+                        controller_data.get("elapsed_seconds"),
+                    )
+                )
+        elif elapsed_sec is None and started_at is not None and ended_at is not None and ended_at >= started_at:
+            elapsed_sec = round((ended_at - started_at) / 1000.0, 3)
+        latest_signal_ms = max([value for value in [latest_log_line_mtime, latest_backend_event_at, started_at if running else None] if value is not None], default=None)
+        output_stalled = False
+        no_output_minutes = None
+        if running and latest_signal_ms is not None:
+            stalled_threshold_ms = _stage_output_stall_threshold_seconds(config) * 1000
+            age_ms = max(0, snapshot_now_ms - latest_signal_ms)
+            if age_ms >= stalled_threshold_ms:
+                output_stalled = True
+                no_output_minutes = max(1, int(age_ms // 60000))
         recent_output = _pick_text(summary.get("recentOutput"), summary.get("recent_output"))
         if not recent_output:
             recent_output = _task_output_excerpt(
@@ -5173,6 +5322,11 @@ def _stage_payload(
                 "attempt": attempt,
                 "step": step,
                 "recentOutput": recent_output,
+                "elapsedSec": elapsed_sec,
+                "latestLogLine": latest_log_line,
+                "latestBackendEvent": latest_backend_event,
+                "outputStalled": output_stalled,
+                "noOutputMinutes": no_output_minutes,
                 "reason": reason,
                 "rc": rc,
             }
