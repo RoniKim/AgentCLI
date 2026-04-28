@@ -21,7 +21,7 @@ Verified on 2026-04-26 with a local server and Playwright:
 - Checked-in Playwright smoke coverage now exercises Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, EN/KO Dashboard and Config locale switching, and a mobile-width viewport.
 - Runner controls are disabled by default and require explicit opt-in.
 - Config saves now reuse that opt-in and create a timestamped backup before atomic disk writes.
-- Config rendering now tolerates `roles` as either `PM,Dev,QA` or `["PM", "Dev", "QA"]`.
+- Config rendering now tolerates `roles` as strings or arrays and preserves built-in order `PM, Security, Dev, QA`.
 - Empty timestamped run directories are ignored so they do not appear as active runs.
 - Completed runs with final reason `ok`, `prepared_only`, `project_complete`, or `all_tasks_done` are no longer displayed as still running.
 

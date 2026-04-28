@@ -52,7 +52,7 @@
 - 과금: **Codex 크레딧** (ChatGPT 구독) — API per-token 과금 없음
 
 동작 방식:
-- `codex exec` 서브프로세스를 통해 모든 역할(PM/Dev/QA/Reporter)을 실행
+- `codex exec` 서브프로세스를 통해 선택된 역할을 실행
 - JSONL 이벤트 스트리밍으로 결과 파싱
 
 ## Claude Code backend
@@ -80,12 +80,14 @@ python -m agent_runner.backends.claude_smoke_test --prompt "hi"
 
 | 설정 | 기본값 | 용도 |
 |------|--------|------|
-| `pm_model` | `gpt-5.5` | PM 백로그 생성 |
-| `dev_model` | `gpt-5.4-mini` | Dev 코딩 (기본 티어) |
-| `dev_model_tier1` | `gpt-5.4` | Dev 에스컬레이션 1단계 |
-| `dev_model_tier2` | `gpt-5.5` | Dev 에스컬레이션 2단계 |
-| `qa_model` | `gpt-5.5` | QA 리뷰 |
-| `reporter_model` | `gpt-5.4-mini` | 종료 보고서 |
+| `pm_model` | `gpt-5.5` | PM model |
+| `dev_model` | `gpt-5.4-mini` | Dev fallback model |
+| `dev_model_tier1` | `gpt-5.4` | Dev fallback tier 1 |
+| `dev_model_tier2` | `gpt-5.5` | Dev fallback tier 2 |
+| `qa_model` | `gpt-5.5` | QA model |
+| `reporter_model` | `gpt-5.4-mini` | Reporter model |
+
+Dev fallback ladder: `gpt-5.4-mini -> gpt-5.4 -> gpt-5.5`.
 
 ## Claude 백엔드 (Claude 모델)
 

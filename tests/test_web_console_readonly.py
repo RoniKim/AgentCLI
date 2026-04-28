@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from agent_runner.runtime_contract import BUILTIN_ROLE_SPECS, CODEX_MODEL_DEFAULTS, DEFAULT_ROLE_SPECS, PIPELINE_STAGE_ORDER
+
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB_CONSOLE = ROOT / "web_console"
@@ -40,7 +42,7 @@ def _write_config(path: Path, repo: Path, **overrides: object) -> None:
         "repo": repo.as_posix(),
         "profile": "personal",
         "execution_backend": "codex",
-        "roles": ["PM", "Dev", "QA"],
+        "roles": list(DEFAULT_ROLE_SPECS),
         "iterations": 2,
         "prompts_dir": "prompts/agentcli",
         "goals_completion_level": "all",
@@ -300,9 +302,9 @@ def _write_run_bundle(
     _write(run_dir / "metrics.jsonl", "\n".join(json.dumps(item, ensure_ascii=False) for item in metrics_entries) + "\n")
 
     run_summary_stages = [
-        {"name": "PM", "status": "ok", "rc": 0, "reason": "pm_ready", "cycle": cycle, "startedAt": pm_started, "endedAt": pm_ended, "durationSec": 60, "model": "gpt-5.5", "taskId": task_id, "taskTitle": task_title, "attempt": 1},
-        {"name": "Dev", "status": "ok" if status == "success" else "fail", "rc": 0 if status == "success" else final_rc, "reason": "completed" if status == "success" else final_reason, "cycle": cycle, "startedAt": dev_second_started, "endedAt": dev_second_ended, "durationSec": 60, "model": "gpt-5.4-mini", "taskId": task_id, "taskTitle": task_title, "attempt": 2, "step": step},
-        {"name": "QA", "status": "ok" if status == "success" else "fail", "rc": 0 if status == "success" else final_rc, "reason": "qa_verified" if status == "success" else final_reason, "cycle": cycle, "startedAt": qa_started, "endedAt": qa_ended, "durationSec": 60, "model": "gpt-5.4-mini", "taskId": task_id, "taskTitle": task_title, "attempt": 2},
+        {"name": "PM", "status": "ok", "rc": 0, "reason": "pm_ready", "cycle": cycle, "startedAt": pm_started, "endedAt": pm_ended, "durationSec": 60, "model": CODEX_MODEL_DEFAULTS["pm_model"], "taskId": task_id, "taskTitle": task_title, "attempt": 1},
+        {"name": "Dev", "status": "ok" if status == "success" else "fail", "rc": 0 if status == "success" else final_rc, "reason": "completed" if status == "success" else final_reason, "cycle": cycle, "startedAt": dev_second_started, "endedAt": dev_second_ended, "durationSec": 60, "model": CODEX_MODEL_DEFAULTS["dev_model"], "taskId": task_id, "taskTitle": task_title, "attempt": 2, "step": step},
+        {"name": "QA", "status": "ok" if status == "success" else "fail", "rc": 0 if status == "success" else final_rc, "reason": "qa_verified" if status == "success" else final_reason, "cycle": cycle, "startedAt": qa_started, "endedAt": qa_ended, "durationSec": 60, "model": CODEX_MODEL_DEFAULTS["qa_model"], "taskId": task_id, "taskTitle": task_title, "attempt": 2},
     ]
     _write(
         run_dir / "run_summary.json",
@@ -428,7 +430,7 @@ def _make_partial_snapshot():
             "backend": "codex",
             "startedAt": 1714133700000,
             "stage": "Dev",
-            "stageIndex": 1,
+            "stageIndex": PIPELINE_STAGE_ORDER.index("Dev"),
             "iteration": 2,
             "maxIterations": 4,
             "progress": 0.5,
@@ -447,7 +449,7 @@ def _make_partial_snapshot():
                 "title": "Backlog planning",
                 "status": "done",
                 "durationSec": 300,
-                "model": "gpt-5.1-codex-mini",
+                "model": CODEX_MODEL_DEFAULTS["pm_model"],
                 "cycle": 1,
                 "startedAt": 1714133400000,
                 "endedAt": 1714133700000,
@@ -464,7 +466,7 @@ def _make_partial_snapshot():
                 "title": "API-backed observation path",
                 "status": "running",
                 "durationSec": 960,
-                "model": "gpt-5.1-codex-mini",
+                "model": CODEX_MODEL_DEFAULTS["dev_model"],
                 "cycle": 1,
                 "startedAt": 1714133700000,
                 "endedAt": None,
@@ -499,7 +501,7 @@ def _make_partial_snapshot():
                     "cycle": 1,
                     "step": 0,
                     "task_title": "API-backed observation path",
-                    "model": "gpt-5.1-codex-mini",
+                    "model": CODEX_MODEL_DEFAULTS["dev_model"],
                     "started_at": 1714133700000,
                     "ended_at": None,
                 }
@@ -652,7 +654,7 @@ def _make_normal_snapshot():
             "backend": "codex",
             "startedAt": 1714132800000,
             "stage": "Dev",
-            "stageIndex": 1,
+            "stageIndex": PIPELINE_STAGE_ORDER.index("Dev"),
             "iteration": 3,
             "maxIterations": 5,
             "progress": 0.72,
@@ -671,7 +673,7 @@ def _make_normal_snapshot():
                 "title": "Backlog planning",
                 "status": "done",
                 "durationSec": 300,
-                "model": "gpt-5.1-codex-mini",
+                "model": CODEX_MODEL_DEFAULTS["pm_model"],
                 "cycle": 1,
                 "startedAt": 1714133400000,
                 "endedAt": 1714133700000,
@@ -688,7 +690,7 @@ def _make_normal_snapshot():
                 "title": "API-backed observation path",
                 "status": "running",
                 "durationSec": 960,
-                "model": "gpt-5.1-codex-mini",
+                "model": CODEX_MODEL_DEFAULTS["dev_model"],
                 "cycle": 1,
                 "startedAt": 1714133700000,
                 "endedAt": None,
@@ -705,7 +707,7 @@ def _make_normal_snapshot():
                 "title": "Verification",
                 "status": "pending",
                 "durationSec": 0,
-                "model": "gpt-5.1-codex-mini",
+                "model": CODEX_MODEL_DEFAULTS["qa_model"],
                 "cycle": 1,
                 "startedAt": None,
                 "endedAt": None,
@@ -740,7 +742,7 @@ def _make_normal_snapshot():
                     "cycle": 1,
                     "step": 0,
                     "task_title": "API-backed observation path",
-                    "model": "gpt-5.1-codex-mini",
+                    "model": CODEX_MODEL_DEFAULTS["dev_model"],
                     "started_at": 1714133700000,
                     "ended_at": None,
                 },
@@ -2395,9 +2397,9 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         task_id = "T-020"
         task_title = "API-backed observation path"
         task_model = {
-            "PM": "gpt-5.5",
-            "Dev": "gpt-5.4-mini",
-            "QA": "gpt-5.4-mini",
+            "PM": CODEX_MODEL_DEFAULTS["pm_model"],
+            "Dev": CODEX_MODEL_DEFAULTS["dev_model"],
+            "QA": CODEX_MODEL_DEFAULTS["qa_model"],
         }
         stage_recent_output = {
             "PM": "PM stage checkpoint recorded.",
@@ -3990,9 +3992,23 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("Repository", config["schema"]["repo"]["label"])
         self.assertTrue(config["schema"]["repo"]["restart"])
         self.assertEqual(self.repo.as_posix(), config["values"]["repo"])
+        self.assertEqual(list(BUILTIN_ROLE_SPECS), config["schema"]["roles"]["options"])
+        self.assertEqual("Built-in order: PM, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.", config["schema"]["roles"]["hint"])
         self.assertIn("pm_model", config["values"])
         self.assertIn("pm_model", config["schema"])
         self.assertIn("prompts_dir", config["defaults"])
+        self.assertEqual("PM model", config["schema"]["pm_model"]["label"])
+        self.assertEqual("Dev fallback model", config["schema"]["dev_model"]["label"])
+        self.assertEqual("Dev fallback tier 1", config["schema"]["dev_model_tier1"]["label"])
+        self.assertEqual("Dev fallback tier 2", config["schema"]["dev_model_tier2"]["label"])
+        self.assertEqual("QA model", config["schema"]["qa_model"]["label"])
+        self.assertEqual("Reporter model", config["schema"]["reporter_model"]["label"])
+        self.assertEqual(CODEX_MODEL_DEFAULTS["pm_model"], config["defaults"]["pm_model"])
+        self.assertEqual(CODEX_MODEL_DEFAULTS["dev_model"], config["defaults"]["dev_model"])
+        self.assertEqual(CODEX_MODEL_DEFAULTS["dev_model_tier1"], config["defaults"]["dev_model_tier1"])
+        self.assertEqual(CODEX_MODEL_DEFAULTS["dev_model_tier2"], config["defaults"]["dev_model_tier2"])
+        self.assertEqual(CODEX_MODEL_DEFAULTS["qa_model"], config["defaults"]["qa_model"])
+        self.assertEqual(CODEX_MODEL_DEFAULTS["reporter_model"], config["defaults"]["reporter_model"])
         group_titles = {group["title"] for group in config["groups"]}
         self.assertTrue({"Project", "Runner", "Quota", "Worktree", "Prompt Paths", "Codex Models", "PM Refresh", "Budget", "Telegram", "Goals"}.issubset(group_titles))
         self.assertTrue(config["schema"]["telegram.bot_token"]["redacted"])
@@ -6719,17 +6735,17 @@ Another unsupported line.
                 "repo": "C:/Dev/AgentCLI",
                 "profile": "personal",
                 "execution_backend": "codex",
-                "roles": ["PM", "Dev", "QA"],
+                "roles": list(DEFAULT_ROLE_SPECS),
                 "autopilot": True,
                 "continuous": True,
                 "iterations": 4,
                 "prompts_dir": "prompts/agentcli",
-                "pm_model": "gpt-5.5",
-                "dev_model": "gpt-5.4",
-                "dev_model_tier1": "gpt-5.4-mini",
-                "dev_model_tier2": "gpt-5.1",
-                "qa_model": "gpt-5.4-mini",
-                "reporter_model": "gpt-5.4-mini",
+                "pm_model": CODEX_MODEL_DEFAULTS["pm_model"],
+                "dev_model": CODEX_MODEL_DEFAULTS["dev_model"],
+                "dev_model_tier1": CODEX_MODEL_DEFAULTS["dev_model_tier1"],
+                "dev_model_tier2": CODEX_MODEL_DEFAULTS["dev_model_tier2"],
+                "qa_model": CODEX_MODEL_DEFAULTS["qa_model"],
+                "reporter_model": CODEX_MODEL_DEFAULTS["reporter_model"],
                 "quota_five_hour_max_utilization": 80,
                 "quota_seven_day_max_utilization": 90,
                 "telegram": {
@@ -6742,17 +6758,17 @@ Another unsupported line.
                 "repo": "",
                 "profile": "personal",
                 "execution_backend": "codex",
-                "roles": ["PM", "Dev", "QA"],
+                "roles": list(DEFAULT_ROLE_SPECS),
                 "autopilot": True,
                 "continuous": True,
                 "iterations": 1,
                 "prompts_dir": "prompts/agentcli",
-                "pm_model": "gpt-5.5",
-                "dev_model": "gpt-5.4",
-                "dev_model_tier1": "gpt-5.4-mini",
-                "dev_model_tier2": "gpt-5.1",
-                "qa_model": "gpt-5.4-mini",
-                "reporter_model": "gpt-5.4-mini",
+                "pm_model": CODEX_MODEL_DEFAULTS["pm_model"],
+                "dev_model": CODEX_MODEL_DEFAULTS["dev_model"],
+                "dev_model_tier1": CODEX_MODEL_DEFAULTS["dev_model_tier1"],
+                "dev_model_tier2": CODEX_MODEL_DEFAULTS["dev_model_tier2"],
+                "qa_model": CODEX_MODEL_DEFAULTS["qa_model"],
+                "reporter_model": CODEX_MODEL_DEFAULTS["reporter_model"],
                 "telegram": {
                     "bot_token": "[redacted]",
                     "instance_name": "home-pc-main",
@@ -6815,7 +6831,12 @@ Another unsupported line.
         self.assertEqual("config/agentcli.json", normalized["configMeta"]["path"])
         self.assertEqual("prompts/agentcli", normalized["configMeta"]["resolved_prompts_dir"])
         self.assertEqual("C:/Dev/AgentCLI", normalized["config"]["repo"])
-        self.assertEqual("gpt-5.5", normalized["config"]["pm_model"])
+        self.assertEqual(CODEX_MODEL_DEFAULTS["pm_model"], normalized["config"]["pm_model"])
+        self.assertEqual(CODEX_MODEL_DEFAULTS["dev_model"], normalized["config"]["dev_model"])
+        self.assertEqual(CODEX_MODEL_DEFAULTS["dev_model_tier1"], normalized["config"]["dev_model_tier1"])
+        self.assertEqual(CODEX_MODEL_DEFAULTS["dev_model_tier2"], normalized["config"]["dev_model_tier2"])
+        self.assertEqual(CODEX_MODEL_DEFAULTS["qa_model"], normalized["config"]["qa_model"])
+        self.assertEqual(CODEX_MODEL_DEFAULTS["reporter_model"], normalized["config"]["reporter_model"])
         self.assertEqual("[redacted]", normalized["config"]["telegram"]["bot_token"])
         self.assertEqual("[redacted]", normalized["configDefault"]["telegram"]["bot_token"])
         self.assertEqual("Prompt Paths", normalized["configContract"]["groups"][0]["title"])
@@ -6824,7 +6845,7 @@ Another unsupported line.
         self.assertIn("telegram.bot_token", normalized["configContract"]["restart_required_paths"])
 
     def test_adapter_preserves_plugin_role_specs_as_editable_controls(self) -> None:
-        options = ["PM", "Dev", "QA", "Security"]
+        options = list(BUILTIN_ROLE_SPECS)
         normalized_from_string, normalized_from_array, plugin_kind, malformed_kind, rendered_from_string, rendered_from_array = _run_adapter_harness(
             [
                 {"kind": "call", "name": "normalizeRoleSpecs", "args": ["PM, pkg.mod:Class, QA", options]},

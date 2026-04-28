@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
+from .runtime_contract import BUILTIN_ROLE_SPECS, CODEX_MODEL_DEFAULTS, default_role_string, enterprise_role_string
 from .config import (
     app_home,
     legacy_config_path,
@@ -114,9 +115,9 @@ DEFAULTS: Dict[str, Any] = {
     "claudecode_subagent_runner_model": "",
     "claudecode_subagent_auditor_model": "",
 
-    # Pipeline roles (comma-separated). Default keeps legacy order.
-    # Example: "PM,Dev,QA" or "PM,Dev".
-    "roles": "PM,Dev,QA",
+    # Pipeline roles (comma-separated). Default keeps the personal pipeline order.
+    # Example: "PM,Dev,QA" or "PM,Security,Dev,QA".
+    "roles": default_role_string(),
 
     # Profile
     "profile": "personal",
@@ -196,9 +197,9 @@ DEFAULTS: Dict[str, Any] = {
     "build_timeout_seconds": 1800,
 
     # Models (all Codex; single billing)
-    "pm_model": "gpt-5.5",
-    "dev_model": "gpt-5.4-mini",
-    "qa_model": "gpt-5.5",
+    "pm_model": CODEX_MODEL_DEFAULTS["pm_model"],
+    "dev_model": CODEX_MODEL_DEFAULTS["dev_model"],
+    "qa_model": CODEX_MODEL_DEFAULTS["qa_model"],
     # Optional codex exec override: -c model_reasoning_effort="<value>"
     # Empty = use Codex CLI/global config default.
     "codex_reasoning_effort": "",
@@ -207,14 +208,14 @@ DEFAULTS: Dict[str, Any] = {
     "max_qa_followups": 5,
 
     # Reporter / shutdown report
-    "reporter_model": "gpt-5.4-mini",
+    "reporter_model": CODEX_MODEL_DEFAULTS["reporter_model"],
     "report_max_turns": 8,
 
     # Dev cost controls
     "dev_auto_escalate": True,
     "dev_max_escalations": 2,
-    "dev_model_tier1": "gpt-5.4",
-    "dev_model_tier2": "gpt-5.5",
+    "dev_model_tier1": CODEX_MODEL_DEFAULTS["dev_model_tier1"],
+    "dev_model_tier2": CODEX_MODEL_DEFAULTS["dev_model_tier2"],
     "dev_escalate_on": ["no_diff", "build_failed", "test_failed", "fast_regression_failed", "no_commits"],
 
     # Timeouts (seconds) - referenced by cycle.py
@@ -383,7 +384,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Comma-separated pipeline roles/stages to run. "
-            "Examples: PM,Dev,QA (default), or PM,Dev (skip QA). "
+            f"Built-in order: {','.join(BUILTIN_ROLE_SPECS)}. "
+            "Examples: PM,Dev,QA (default), or PM,Security,Dev,QA. "
             "Forward-compatible with plugin stages."
         ),
     )
@@ -919,7 +921,7 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
             return
 
         if "roles" not in explicit_args and not eff.get("roles"):
-            eff["roles"] = "PM,Security,Dev,QA"
+            eff["roles"] = enterprise_role_string()
         if "qa_always" not in explicit_args:
             eff["qa_always"] = True
         if "policy_enabled" not in explicit_args and "no_policy_scan" not in explicit_args:

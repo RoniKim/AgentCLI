@@ -177,7 +177,7 @@ PM 호출 → JSON 응답 → parse_pm_output_with_errors() → 스키마 검증
 ```
 Codex 백엔드:
   dev_model → dev_model_tier1 → dev_model_tier2
-  (gpt-5.1-codex-mini → gpt-5.1-codex → gpt-5.2-codex)
+  (gpt-5.4-mini → gpt-5.4 → gpt-5.5)
 
 Claude 백엔드:
   claudecode_dev_model → claudecode_dev_model_tier1 → claudecode_dev_model_tier2
@@ -252,7 +252,7 @@ Dev 실행 → MaxTurnsExceeded 예외 발생
 - `roles="PM,Dev,QA"`
 
 내장 Stage:
-- `PM`, `Dev`, `QA`, `Security`
+- `PM`, `Security`, `Dev`, `QA`
 
 예시) QA를 끄고 PM→Dev만:
 ```text
@@ -262,7 +262,7 @@ Dev 실행 → MaxTurnsExceeded 예외 발생
 
 예시) Security Stage까지 포함:
 ```text
-> /set roles PM,Dev,QA,Security
+> /set roles PM,Security,Dev,QA
 > /save
 ```
 

@@ -2306,7 +2306,7 @@
     const inputValue = fmtList(items);
     const placeholder = optionValues.length
       ? `${optionValues.join(', ')}, pkg.mod:Class`
-      : 'PM, Dev, QA, pkg.mod:Class';
+      : 'PM, Security, Dev, QA, pkg.mod:Class';
     const chipsHTML = items.length
       ? items
         .map((item, index) => {
@@ -2618,9 +2618,9 @@
   const STAGE_INDEX = {
     idle: 0,
     pm: 0,
-    dev: 1,
-    qa: 2,
-    security: 3,
+    security: 1,
+    dev: 2,
+    qa: 3,
     reporter: 4,
   };
 
@@ -5919,11 +5919,60 @@
   }
 
   function createBlankModel() {
+    const DEFAULT_ROLE_SPECS = ['PM', 'Dev', 'QA'];
+    const BUILTIN_ROLE_OPTIONS = ['PM', 'Security', 'Dev', 'QA'];
+    const CODEX_DEV_MODEL_LADDER = ['gpt-5.4-mini', 'gpt-5.4', 'gpt-5.5'];
+    const CODEX_MODEL_DEFAULTS = {
+      pm_model: 'gpt-5.5',
+      dev_model: CODEX_DEV_MODEL_LADDER[0],
+      dev_model_tier1: CODEX_DEV_MODEL_LADDER[1],
+      dev_model_tier2: CODEX_DEV_MODEL_LADDER[2],
+      qa_model: 'gpt-5.5',
+      reporter_model: 'gpt-5.4-mini',
+    };
+    const CODEX_MODEL_FIELD_SPECS = {
+      pm_model: {
+        kind: 'text',
+        restart: false,
+        desc: 'Model used for PM planning and backlog generation.',
+        hint: 'Approved Codex default: gpt-5.5.',
+      },
+      dev_model: {
+        kind: 'text',
+        restart: false,
+        desc: 'First model in the Dev fallback ladder.',
+        hint: `Approved ladder: ${CODEX_DEV_MODEL_LADDER.join(' -> ')}.`,
+      },
+      dev_model_tier1: {
+        kind: 'text',
+        restart: false,
+        desc: 'Second model in the Dev fallback ladder.',
+        hint: 'Escalates to gpt-5.4 when the base model is not enough.',
+      },
+      dev_model_tier2: {
+        kind: 'text',
+        restart: false,
+        desc: 'Final model in the Dev fallback ladder.',
+        hint: 'Escalates to gpt-5.5 as the last approved Codex tier.',
+      },
+      qa_model: {
+        kind: 'text',
+        restart: false,
+        desc: 'Model used for QA verification.',
+        hint: 'Approved Codex default: gpt-5.5.',
+      },
+      reporter_model: {
+        kind: 'text',
+        restart: false,
+        desc: 'Model used for close-out reporting.',
+        hint: 'Approved Codex default: gpt-5.4-mini.',
+      },
+    };
     const configBase = {
       repo: '',
       profile: 'personal',
       execution_backend: 'codex',
-      roles: ['PM', 'Dev', 'QA'],
+      roles: [...DEFAULT_ROLE_SPECS],
       autopilot: true,
       continuous: true,
       iterations: 1,
@@ -5947,12 +5996,7 @@
         untracked_exclude_globs: [],
       },
       prompts_dir: 'prompts/agentcli-fallback',
-      pm_model: 'gpt-5.5',
-      dev_model: 'gpt-5.4',
-      dev_model_tier1: 'gpt-5.4-mini',
-      dev_model_tier2: 'gpt-5.1',
-      qa_model: 'gpt-5.4-mini',
-      reporter_model: 'gpt-5.4-mini',
+      ...CODEX_MODEL_DEFAULTS,
       pm_refresh_backlog: true,
       pm_refresh_every_cycles: 1,
       pm_include_working_tree: true,
@@ -6021,10 +6065,10 @@
       },
       roles: {
         kind: 'multienum',
-        options: ['PM', 'Dev', 'QA', 'Security'],
+        options: BUILTIN_ROLE_OPTIONS,
         restart: false,
         desc: 'Stages enabled in the pipeline.',
-        hint: 'PM usually runs first. Security requires security.enabled=true and can run before Dev.',
+        hint: 'Built-in order: PM, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.',
       },
       autopilot: {
         kind: 'bool',
@@ -6168,42 +6212,7 @@
         desc: 'Directory that stores repo-specific prompt templates.',
         hint: 'Empty means the repo-specific default prompts directory.',
       },
-      pm_model: {
-        kind: 'text',
-        restart: false,
-        desc: 'Model used for PM planning and backlog generation.',
-        hint: 'Usually a lightweight Codex model.',
-      },
-      dev_model: {
-        kind: 'text',
-        restart: false,
-        desc: 'Model used for the main Dev pass.',
-        hint: 'This is the default model for code changes.',
-      },
-      dev_model_tier1: {
-        kind: 'text',
-        restart: false,
-        desc: 'First escalation model for Dev.',
-        hint: 'Used after retries or capped responses.',
-      },
-      dev_model_tier2: {
-        kind: 'text',
-        restart: false,
-        desc: 'Second escalation model for Dev.',
-        hint: 'Used when tier 1 still cannot finish the task.',
-      },
-      qa_model: {
-        kind: 'text',
-        restart: false,
-        desc: 'Model used for QA verification.',
-        hint: 'Usually matches the cheaper Codex tier.',
-      },
-      reporter_model: {
-        kind: 'text',
-        restart: false,
-        desc: 'Model used for close-out reporting.',
-        hint: 'Generates the final run summary.',
-      },
+      ...CODEX_MODEL_FIELD_SPECS,
       pm_refresh_backlog: {
         kind: 'bool',
         restart: false,

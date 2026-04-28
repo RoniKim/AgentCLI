@@ -1156,7 +1156,7 @@ class RunnerShell:
             "  /config [--all]            현재 적용 설정 요약 출력 (--all: 전체 JSON 출력)",
             "  /set <key> <value>         설정 값을 덮어쓰기(타입은 기본값 기준)",
             "    예) /set execution_backend codex|claudecode",
-            "    예) /set roles PM,Dev,QA   (단계 선택)",
+            "    예) /set roles PM,Security,Dev,QA   (단계 선택)",
             "  /add <key> <value>         리스트 설정에 항목 추가 (예: policy_rule)",
             "  /load [path]               config JSON 로드",
             "  /save [path]               현재 설정을 config JSON으로 저장 (알 수 없는 키도 보존)",

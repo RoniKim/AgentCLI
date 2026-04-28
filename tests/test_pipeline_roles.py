@@ -5,9 +5,10 @@ import sys
 import unittest
 import types
 
-from agent_runner.config import normalize_roles_value, validate_roles_value
+from agent_runner.config import builtin_roles, normalize_roles_value, validate_roles_value
 from agent_runner.pipeline import PipelineManager, make_stages, parse_roles
 from agent_runner.pipeline.stages.base import Stage, StageOutcome
+from agent_runner.runtime_contract import BUILTIN_ROLE_SPECS, CODEX_MODEL_DEFAULTS, DEFAULT_ROLE_SPECS
 from agent_runner.shared import coerce_roles_arg
 
 
@@ -66,9 +67,21 @@ class PipelineRolesTests(unittest.TestCase):
         self.assertEqual(["PM", "pkg.mod:Class", "QA"], [stage.name for stage in stages])
 
     def test_coerce_roles_arg_uses_default_for_empty_values(self) -> None:
-        self.assertEqual("PM,Dev,QA", coerce_roles_arg([]))
-        self.assertEqual("PM,Dev,QA", coerce_roles_arg(""))
-        self.assertEqual("PM,Dev,QA", coerce_roles_arg(None))
+        default_role_string = ",".join(DEFAULT_ROLE_SPECS)
+        self.assertEqual(default_role_string, coerce_roles_arg([]))
+        self.assertEqual(default_role_string, coerce_roles_arg(""))
+        self.assertEqual(default_role_string, coerce_roles_arg(None))
+
+    def test_builtin_role_choices_and_defaults_are_shared(self) -> None:
+        self.assertEqual(list(BUILTIN_ROLE_SPECS), builtin_roles())
+        self.assertEqual(list(DEFAULT_ROLE_SPECS), parse_roles(None))
+        self.assertEqual(",".join(DEFAULT_ROLE_SPECS), coerce_roles_arg(None))
+        self.assertEqual("gpt-5.5", CODEX_MODEL_DEFAULTS["pm_model"])
+        self.assertEqual("gpt-5.4-mini", CODEX_MODEL_DEFAULTS["dev_model"])
+        self.assertEqual("gpt-5.4", CODEX_MODEL_DEFAULTS["dev_model_tier1"])
+        self.assertEqual("gpt-5.5", CODEX_MODEL_DEFAULTS["dev_model_tier2"])
+        self.assertEqual("gpt-5.5", CODEX_MODEL_DEFAULTS["qa_model"])
+        self.assertEqual("gpt-5.4-mini", CODEX_MODEL_DEFAULTS["reporter_model"])
 
     def test_empty_pipeline_stage_list_fails_instead_of_succeeding(self) -> None:
         class Session:

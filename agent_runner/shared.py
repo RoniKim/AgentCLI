@@ -5,11 +5,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .runtime_contract import default_role_string
 from .utils import read_text_robust
 from .skills.parser import parse_skill_text
 
 
-def coerce_roles_arg(value: Any, *, default: str = "PM,Dev,QA") -> str:
+def coerce_roles_arg(value: Any, *, default: str = default_role_string()) -> str:
     """Normalize the roles arg into a comma-separated string.
 
     Web UI persists multienum values as a list while CLI passes a string.

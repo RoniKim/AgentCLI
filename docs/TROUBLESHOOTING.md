@@ -181,7 +181,7 @@ pip install -U claude-agent-sdk
 
 **원인:** 설정한 모델 이름이 API에서 지원하지 않는 이름
 **해결:**
-- Codex (현행 DEFAULTS, `cli.py`): `pm_model=gpt-5.5`, `dev_model=gpt-5.4-mini`, `qa_model=gpt-5.5`, `reporter_model=gpt-5.4-mini`, `dev_model_tier1=gpt-5.4`, `dev_model_tier2=gpt-5.5`
+- Codex (현행 DEFAULTS, `cli.py`): `pm_model=gpt-5.5`, `dev_model=gpt-5.4-mini -> gpt-5.4 -> gpt-5.5`, `qa_model=gpt-5.5`, `reporter_model=gpt-5.4-mini`
 - Claude: `sonnet`, `opus`, `haiku` 중 선택
 - 에스컬레이션이 활성화되어 있으면 `dev_model` → `dev_model_tier1` → `dev_model_tier2` 순서로 자동 승격
 

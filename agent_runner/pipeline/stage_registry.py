@@ -5,19 +5,17 @@ import re
 from fnmatch import fnmatch
 from typing import Any, List, Type
 
+from ..runtime_contract import (
+    BUILTIN_ROLE_SPECS,
+    DEFAULT_ROLE_SPECS,
+    ROLE_SPEC_CANONICALS,
+)
 from .stages.base import Stage
 from .stages.pm_stage import PMStage
 from .stages.dev_stage import DevStage
 from .stages.qa_stage import QAStage
 from .stages.security_stage import SecurityStage
 
-
-_CANON = {
-    "pm": "PM",
-    "dev": "Dev",
-    "qa": "QA",
-    "security": "Security",
-}
 
 _BUILTIN: dict[str, Type[Stage]] = {
     "PM": PMStage,
@@ -32,14 +30,14 @@ _PLUGIN_SPEC_RE = re.compile(
 
 
 def builtin_role_specs() -> List[str]:
-    return list(_BUILTIN.keys())
+    return list(BUILTIN_ROLE_SPECS)
 
 
 def normalize_role_spec(spec: Any) -> str:
     text = str(spec or "").strip()
     if not text:
         return ""
-    return _CANON.get(text.lower(), text)
+    return ROLE_SPEC_CANONICALS.get(text.lower(), text)
 
 
 def is_plugin_role_spec(spec: Any) -> bool:
@@ -93,7 +91,7 @@ def parse_roles(raw: str | None) -> List[str]:
     Returns normalized role specs in input order. Builtins are canonicalized
     and plugin/unknown specs are preserved verbatim.
     """
-    return normalize_role_specs(raw, default=builtin_role_specs())
+    return normalize_role_specs(raw, default=list(DEFAULT_ROLE_SPECS))
 
 
 def _is_allowed(spec: str, allowlist: list[str]) -> bool:

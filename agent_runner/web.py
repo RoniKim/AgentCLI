@@ -60,6 +60,7 @@ from .remote.controller import (
     read_runner_control_event,
     write_runner_control_event,
 )
+from .runtime_contract import CODEX_MODEL_FIELD_SPECS, PIPELINE_ROLE_FIELD_SPEC, PIPELINE_STAGE_ORDER
 from .stop_progress import normalize_stop_progress_payload, summarize_stop_progress_liveness
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, load_state, parse_backlog_md
 from .utils import atomic_write_json, atomic_write_text, now_iso, run_cmd
@@ -137,7 +138,7 @@ PROMPT_SPECS: list[dict[str, str]] = [
     },
 ]
 
-STAGE_ORDER = {"pm": 0, "dev": 1, "qa": 2, "security": 3, "reporter": 4}
+STAGE_ORDER = {stage.lower(): index for index, stage in enumerate(PIPELINE_STAGE_ORDER)}
 RUNNER_CONTROL_CONFIRMATIONS = {
     "start": "START RUNNER",
     "stop": "STOP RUNNER",
@@ -1484,7 +1485,7 @@ CONFIG_CONTRACT_FIELDS: list[dict[str, Any]] = [
     {"path": "repo", "group": "project", "kind": "text", "label": "Repository", "restart": True, "allow_empty": False, "desc": "Repository root the runner targets.", "hint": "Set automatically from the repo the server serves."},
     {"path": "profile", "group": "project", "kind": "enum", "label": "Profile", "restart": True, "options": ["personal", "enterprise"], "allow_empty": False, "desc": "Default safety profile used to derive runner limits.", "hint": "Enterprise raises several guardrails."},
     {"path": "execution_backend", "group": "project", "kind": "enum", "label": "Execution backend", "restart": True, "options": ["codex", "claudecode"], "allow_empty": False, "desc": "Backend used for Dev and QA stages.", "hint": "codex = OpenAI Codex CLI, claudecode = Claude Code."},
-    {"path": "roles", "group": "project", "kind": "multienum", "label": "Pipeline roles", "options": builtin_roles(), "allow_empty": False, "desc": "Stages enabled in the pipeline.", "hint": "Built-in roles come from the stage registry. Plugin specs like pkg.mod:Class are preserved. PM usually runs first."},
+    PIPELINE_ROLE_FIELD_SPEC,
     {"path": "autopilot", "group": "runner", "kind": "bool", "label": "Autopilot", "allow_empty": True, "desc": "Skip interactive confirmation prompts.", "hint": "When off, the runner pauses between stages."},
     {"path": "continuous", "group": "runner", "kind": "bool", "label": "Continuous", "allow_empty": True, "desc": "Keep chaining cycles without manual stopping.", "hint": "Best paired with autopilot for unattended runs."},
     {"path": "iterations", "group": "runner", "kind": "number", "label": "Iterations", "min": 1, "allow_empty": False, "desc": "Maximum run iterations.", "hint": "One iteration equals one PM -> Dev -> QA cycle."},
@@ -1507,12 +1508,7 @@ CONFIG_CONTRACT_FIELDS: list[dict[str, Any]] = [
     {"path": "gitops.worktree_merge_mode", "group": "worktree", "kind": "enum", "label": "Merge mode", "restart": True, "options": ["manual", "auto"], "allow_empty": False, "desc": "How worktree patches are merged.", "hint": "Manual mode keeps review in the loop."},
     {"path": "gitops.untracked_exclude_globs", "group": "worktree", "kind": "list", "label": "Untracked exclude globs", "item_kind": "text", "allow_empty": True, "desc": "Comma-separated globs ignored by worktree review.", "hint": "Keep generated files out of merge noise."},
     {"path": "prompts_dir", "group": "prompts", "kind": "text", "label": "Prompts directory", "restart": True, "allow_empty": True, "desc": "Directory that stores repo-specific prompt templates.", "hint": "Empty means the repo-specific default prompts directory."},
-    {"path": "pm_model", "group": "codex_models", "kind": "text", "label": "PM model", "allow_empty": False, "desc": "Model used for PM planning and backlog generation.", "hint": "Usually a lightweight Codex model."},
-    {"path": "dev_model", "group": "codex_models", "kind": "text", "label": "Dev model", "allow_empty": False, "desc": "Model used for the main Dev pass.", "hint": "This is the default model for code changes."},
-    {"path": "dev_model_tier1", "group": "codex_models", "kind": "text", "label": "Dev model tier 1", "allow_empty": False, "desc": "First escalation model for Dev.", "hint": "Used after retries or capped responses."},
-    {"path": "dev_model_tier2", "group": "codex_models", "kind": "text", "label": "Dev model tier 2", "allow_empty": False, "desc": "Second escalation model for Dev.", "hint": "Used when tier 1 still cannot finish the task."},
-    {"path": "qa_model", "group": "codex_models", "kind": "text", "label": "QA model", "allow_empty": False, "desc": "Model used for QA verification.", "hint": "Usually matches the cheaper Codex tier."},
-    {"path": "reporter_model", "group": "codex_models", "kind": "text", "label": "Reporter model", "allow_empty": False, "desc": "Model used for close-out reporting.", "hint": "Generates the final run summary."},
+    *CODEX_MODEL_FIELD_SPECS,
     {"path": "pm_refresh_backlog", "group": "pm_refresh", "kind": "bool", "label": "Refresh backlog", "allow_empty": True, "desc": "Let PM refresh the backlog from live context.", "hint": "Useful when the backlog should absorb new work after a run."},
     {"path": "pm_refresh_every_cycles", "group": "pm_refresh", "kind": "number", "label": "Refresh every cycles", "min": 0, "allow_empty": False, "desc": "Refresh cadence for PM backlog updates.", "hint": "Zero disables periodic refreshes."},
     {"path": "pm_include_working_tree", "group": "pm_refresh", "kind": "bool", "label": "Include working tree", "allow_empty": True, "desc": "Let PM inspect the working tree during refresh.", "hint": "Helps PM pick up local edits while refreshing the backlog."},
