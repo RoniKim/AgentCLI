@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -118,16 +119,31 @@ def _validation_record(
     rc: int,
     artifact_path: Path,
     summary: str,
+    started_at: str = "",
+    ended_at: str = "",
+    elapsed_sec: float | int | None = None,
+    status: str = "",
     extra: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    failure_summary = summary if int(rc) != 0 else ""
+    validation_status = str(status or "").strip().lower()
+    if not validation_status:
+        validation_status = "stopped" if str(summary or "").strip().lower() == "stopped" else ("passed" if int(rc) == 0 else "failed")
+    failure_summary = summary if validation_status == "failed" else ""
+    elapsed_value = round(float(elapsed_sec), 3) if elapsed_sec is not None else None
     record: dict[str, object] = {
         "name": str(name),
         "kind": str(kind),
         "gate": str(gate),
         "cmd": [str(part) for part in cmd],
         "rc": int(rc),
-        "ok": int(rc) == 0,
+        "ok": validation_status == "passed",
+        "status": validation_status,
+        "started_at": str(started_at or ""),
+        "startedAt": str(started_at or ""),
+        "ended_at": str(ended_at or ""),
+        "endedAt": str(ended_at or ""),
+        "elapsed_sec": elapsed_value,
+        "elapsedSec": elapsed_value,
         "artifact_path": artifact_path.as_posix(),
         "artifactPath": artifact_path.as_posix(),
         "log_path": artifact_path.as_posix(),
@@ -245,6 +261,7 @@ async def run_fast_web_worktree_regression_async(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     started_at = now_iso()
+    started_monotonic = time.monotonic()
     command_specs = _fast_web_worktree_regression_commands()
     records: list[dict[str, object]] = []
     result: dict[str, object] = {
@@ -253,6 +270,8 @@ async def run_fast_web_worktree_regression_async(
         "repo": str(repo),
         "started_at": started_at,
         "ended_at": "",
+        "elapsed_sec": None,
+        "elapsedSec": None,
         "ok": False,
         "commands": records,
         "log_path": log_path.as_posix(),
@@ -274,6 +293,8 @@ async def run_fast_web_worktree_regression_async(
             test_file = str(spec["test_file"])  # type: ignore[index]
             name = str(spec["name"])  # type: ignore[index]
             cmd_log_path = log_dir / f"{index:02d}_{name}.txt"
+            started_at = now_iso()
+            started_monotonic = time.monotonic()
             rc, summary = await run_cmd_async(
                 cmd,
                 cwd=repo,
@@ -282,24 +303,34 @@ async def run_fast_web_worktree_regression_async(
                 stop_path=stop_path,
                 max_output_bytes=max_output_bytes,
             )
+            ended_at = now_iso()
+            elapsed_sec = round(max(0.0, time.monotonic() - started_monotonic), 3)
+            status = "stopped" if str(summary or "").strip().lower() == "stopped" else ("passed" if rc == 0 else "failed")
             record = {
                 "index": index,
                 "name": name,
                 "test_file": test_file,
                 "cmd": cmd,
                 "rc": rc,
+                "status": status,
+                "started_at": started_at,
+                "startedAt": started_at,
+                "ended_at": ended_at,
+                "endedAt": ended_at,
+                "elapsed_sec": elapsed_sec,
+                "elapsedSec": elapsed_sec,
                 "summary": summary,
                 "log_path": cmd_log_path.as_posix(),
                 "artifact_path": cmd_log_path.as_posix(),
                 "artifactPath": cmd_log_path.as_posix(),
-                "failure_summary": summary if rc != 0 else "",
-                "failureSummary": summary if rc != 0 else "",
+                "failure_summary": summary if status == "failed" else "",
+                "failureSummary": summary if status == "failed" else "",
             }
             records.append(record)
-            if rc != 0:
+            if status != "passed":
                 result["failed_command"] = record
                 break
-        result["ok"] = bool(records) and all(int(item.get("rc", 1)) == 0 for item in records)
+        result["ok"] = bool(records) and all(str(item.get("status") or "").lower() == "passed" for item in records)
         if not result["ok"]:
             try:
                 failure_summary = summarize_fast_web_worktree_regression_failure(result, log_path)
@@ -308,6 +339,9 @@ async def run_fast_web_worktree_regression_async(
             result["failure_summary"] = failure_summary
             result["failureSummary"] = failure_summary
         result["ended_at"] = now_iso()
+        elapsed_sec = round(max(0.0, time.monotonic() - started_monotonic), 3)
+        result["elapsed_sec"] = elapsed_sec
+        result["elapsedSec"] = elapsed_sec
     finally:
         try:
             log_path.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8", errors="replace")
@@ -418,6 +452,8 @@ async def run_build_validation_async(
     if not cmd:
         cmd = find_build_cmd(repo, legacy_build_target)
     timeout = int(build_timeout_sec or 1800)
+    started_at = now_iso()
+    started_monotonic = time.monotonic()
     code, summary = await run_cmd_async(
         cmd,
         cwd=repo,
@@ -426,6 +462,8 @@ async def run_build_validation_async(
         stop_path=stop_path,
         max_output_bytes=max_output_bytes,
     )
+    ended_at = now_iso()
+    elapsed_sec = round(max(0.0, time.monotonic() - started_monotonic), 3)
     return _validation_record(
         name="build",
         kind="compile",
@@ -434,6 +472,9 @@ async def run_build_validation_async(
         rc=code,
         artifact_path=log_path,
         summary=summary,
+        started_at=started_at,
+        ended_at=ended_at,
+        elapsed_sec=elapsed_sec,
     )
 
 
@@ -452,6 +493,8 @@ async def run_test_validation_async(
     if not cmd:
         cmd = find_test_cmd(repo, legacy_test_target, legacy_test_filter)
     timeout = int(test_timeout_sec or 3600)
+    started_at = now_iso()
+    started_monotonic = time.monotonic()
     code, summary = await run_cmd_async(
         cmd,
         cwd=repo,
@@ -460,6 +503,8 @@ async def run_test_validation_async(
         stop_path=stop_path,
         max_output_bytes=max_output_bytes,
     )
+    ended_at = now_iso()
+    elapsed_sec = round(max(0.0, time.monotonic() - started_monotonic), 3)
     return _validation_record(
         name="test",
         kind="test",
@@ -468,6 +513,9 @@ async def run_test_validation_async(
         rc=code,
         artifact_path=log_path,
         summary=summary,
+        started_at=started_at,
+        ended_at=ended_at,
+        elapsed_sec=elapsed_sec,
     )
 
 

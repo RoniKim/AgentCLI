@@ -176,6 +176,7 @@ def _write_run_bundle(
     state_payload: dict[str, object] | None = None,
     completion_status: str | None = None,
     completion_reason: str | None = None,
+    write_reports: bool = True,
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
@@ -367,9 +368,292 @@ def _write_run_bundle(
                 indent=2,
             )
             + "\n",
-        )
+    )
     _write(run_dir / "cycle_summary.log", f"2026-04-26T12:08:00 cycle=1 done={1 if status == 'success' else 0}/{task_count} failed={1 if status == 'failed' else 0} dt=480.0s\n")
     _write_log_source_files(run_dir)
+    if write_reports:
+        repo_path = run_dir.parents[2].as_posix()
+        qa_report_json = run_dir / "QA_VALIDATION_REPORT.json"
+        qa_report_md = run_dir / "QA_VALIDATION_REPORT.md"
+        final_report_json = run_dir / "FINAL_RUN_REPORT.json"
+        final_report_md = run_dir / "FINAL_RUN_REPORT.md"
+
+        qa_report_status = "passed" if status == "success" else ("failed" if status == "failed" else "stopped")
+        qa_build_status = "passed" if status == "success" else ("failed" if status == "failed" else "stopped")
+        qa_test_status = "passed" if status == "success" else "skipped"
+        qa_skip_rationale = (
+            "Fast web/worktree regression was not triggered by the task file scope."
+            if status == "success"
+            else "Fast web/worktree regression was skipped because build validation failed."
+        )
+        qa_skipped_commands = [
+            {
+                "name": "fast_web_worktree_regression_01",
+                "kind": "regression",
+                "gate": "fast_web_worktree_regression",
+                "cmd": [
+                    "python",
+                    "-B",
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    "tests",
+                    "-p",
+                    "test_web_console_readonly.py",
+                ],
+                "status": "skipped",
+                "reason": "not_triggered",
+                "skipped_rationale": qa_skip_rationale,
+                "skippedRationale": qa_skip_rationale,
+                "summary": "",
+                "elapsed_sec": 0,
+                "elapsedSec": 0,
+                "artifact_path": "",
+                "artifactPath": "",
+                "log_path": "",
+                "logPath": "",
+                "rc": None,
+            }
+        ]
+        if status == "failed":
+            qa_skipped_commands.insert(
+                0,
+                {
+                    "name": "test",
+                    "kind": "test",
+                    "gate": "test",
+                    "cmd": ["python", "-m", "pytest", "tests/test_web_console_readonly.py"],
+                    "status": "skipped",
+                    "reason": "build_failed",
+                    "skipped_rationale": "Test validation was skipped because build validation failed.",
+                    "skippedRationale": "Test validation was skipped because build validation failed.",
+                    "summary": "",
+                    "elapsed_sec": 0,
+                    "elapsedSec": 0,
+                    "artifact_path": "",
+                    "artifactPath": "",
+                    "log_path": "",
+                    "logPath": "",
+                    "rc": None,
+                },
+            )
+
+        qa_commands = [
+            {
+                "name": "build",
+                "kind": "compile",
+                "gate": "build",
+                "cmd": ["python", "-m", "pytest", "tests/test_web_console_static.py"],
+                "rc": 0 if status == "success" else final_rc,
+                "status": qa_build_status,
+                "started_at": qa_started,
+                "startedAt": qa_started,
+                "ended_at": qa_ended,
+                "endedAt": qa_ended,
+                "elapsed_sec": 4.0,
+                "elapsedSec": 4.0,
+                "summary": "Build validation passed." if status == "success" else "Build validation failed.",
+                "artifact_path": (attempt_02 / "build.txt").as_posix(),
+                "artifactPath": (attempt_02 / "build.txt").as_posix(),
+                "log_path": (attempt_02 / "build.txt").as_posix(),
+                "logPath": (attempt_02 / "build.txt").as_posix(),
+                "failure_summary": "Build validation failed." if status == "failed" else "",
+                "failureSummary": "Build validation failed." if status == "failed" else "",
+            }
+        ]
+        if status == "success":
+            qa_commands.append(
+                {
+                    "name": "test",
+                    "kind": "test",
+                    "gate": "test",
+                    "cmd": ["python", "-m", "pytest", "tests/test_web_console_readonly.py"],
+                    "rc": 0,
+                    "status": qa_test_status,
+                    "started_at": qa_started,
+                    "startedAt": qa_started,
+                    "ended_at": qa_ended,
+                    "endedAt": qa_ended,
+                    "elapsed_sec": 3.5,
+                    "elapsedSec": 3.5,
+                    "summary": "Read-only web console tests passed.",
+                    "artifact_path": (attempt_02 / "dev_output.txt").as_posix(),
+                    "artifactPath": (attempt_02 / "dev_output.txt").as_posix(),
+                    "log_path": (attempt_02 / "dev_output.txt").as_posix(),
+                    "logPath": (attempt_02 / "dev_output.txt").as_posix(),
+                    "failure_summary": "",
+                    "failureSummary": "",
+                }
+            )
+
+        qa_summary = {
+            "attempts": 1,
+            "task_attempts": 1,
+            "commands_total": len(qa_commands) + len(qa_skipped_commands),
+            "commands_executed": len(qa_commands),
+            "commands_passed": 2 if status == "success" else 0,
+            "commands_failed": 0 if status == "success" else 1,
+            "commands_stopped": 0,
+            "commands_skipped": len(qa_skipped_commands),
+        }
+        qa_attempt = {
+            "schema_version": 1,
+            "kind": "qa_validation_attempt",
+            "task_id": task_id,
+            "taskId": task_id,
+            "task_title": task_title,
+            "taskTitle": task_title,
+            "cycle": cycle,
+            "step": step,
+            "attempt": 2,
+            "status": qa_report_status,
+            "reason": "qa_verified" if status == "success" else final_reason,
+            "detail": "QA verification passed for the run." if status == "success" else "QA validation failed.",
+            "artifact_path": qa_report_json.as_posix(),
+            "artifactPath": qa_report_json.as_posix(),
+            "validation_path": (run_dir / "qa_followups_cycle_001.json").as_posix(),
+            "validationPath": (run_dir / "qa_followups_cycle_001.json").as_posix(),
+            "commands": qa_commands,
+            "command_groups": [],
+            "commandGroups": [],
+            "skipped_commands": qa_skipped_commands,
+            "skippedCommands": qa_skipped_commands,
+            "command_counts": {
+                "total": qa_summary["commands_total"],
+                "executed": qa_summary["commands_executed"],
+                "passed": qa_summary["commands_passed"],
+                "failed": qa_summary["commands_failed"],
+                "stopped": qa_summary["commands_stopped"],
+                "skipped": qa_summary["commands_skipped"],
+            },
+            "commandCounts": {
+                "total": qa_summary["commands_total"],
+                "executed": qa_summary["commands_executed"],
+                "passed": qa_summary["commands_passed"],
+                "failed": qa_summary["commands_failed"],
+                "stopped": qa_summary["commands_stopped"],
+                "skipped": qa_summary["commands_skipped"],
+            },
+            "elapsed_sec": 10.0,
+            "elapsedSec": 10.0,
+        }
+        qa_report = {
+            "schema_version": 1,
+            "kind": "qa_validation_report",
+            "generated_at": "2026-04-26T12:08:00",
+            "repo": repo_path,
+            "run_dir": run_dir.as_posix(),
+            "run_id": run_dir.name,
+            "status": qa_report_status,
+            "summary": qa_summary,
+            "summary_text": (
+                "2 executed, 2 passed, 0 failed, 1 skipped"
+                if status == "success"
+                else "1 executed, 0 passed, 1 failed, 2 skipped"
+            ),
+            "artifacts": {
+                "json": qa_report_json.as_posix(),
+                "markdown": qa_report_md.as_posix(),
+            },
+            "attempts": [qa_attempt],
+        }
+        _write(qa_report_json, json.dumps(qa_report, ensure_ascii=False, indent=2) + "\n")
+        _write(
+            qa_report_md,
+            "# QA Validation Report\n\n"
+            f"- run_id: {run_dir.name}\n"
+            f"- status: {qa_report_status}\n"
+            f"- summary: {qa_report['summary_text']}\n"
+            f"- skipped_rationale: {qa_skip_rationale}\n",
+        )
+
+        if completion_status:
+            project_complete = completion_status == "project_complete"
+            goals_status = completion_status
+            goals_reason = completion_reason or completion_status
+        else:
+            project_complete = False
+            goals_status = "incomplete"
+            goals_reason = final_reason
+
+        final_status = "success" if status == "success" else ("failed" if status == "failed" else "stopped")
+        final_execution_status = "completed" if status == "success" else ("failed" if status == "failed" else "stopped")
+        final_report = {
+            "schema_version": 1,
+            "kind": "final_run_report",
+            "generated_at": "2026-04-26T12:08:00",
+            "repo": repo_path,
+            "run_dir": run_dir.as_posix(),
+            "run_id": run_dir.name,
+            "status": final_status,
+            "execution_status": final_execution_status,
+            "stop_reason": final_reason if status == "stopped" else "",
+            "summary": f"{1 if status == 'success' else 0}/{task_count} tasks done; GOALS {goals_status}; QA {qa_report_status}",
+            "tasks": {
+                "total": task_count,
+                "done": 1 if status == "success" else 0,
+                "failed": 1 if status == "failed" else 0,
+                "skipped": 0,
+                "pending": max(0, task_count - (1 if status == "success" else 0) - (1 if status == "failed" else 0)),
+            },
+            "goals": {
+                "has_goals": True,
+                "project_complete": project_complete,
+                "completion_status": goals_status,
+                "completion_reason": goals_reason,
+                "stop_reason": final_reason if status == "stopped" else "",
+            },
+            "validation": {
+                "status": qa_report_status,
+                "attempts": 1,
+                "commands_total": qa_summary["commands_total"],
+                "commands_passed": qa_summary["commands_passed"],
+                "commands_failed": qa_summary["commands_failed"],
+                "commands_skipped": qa_summary["commands_skipped"],
+                "report_path": qa_report_json.as_posix(),
+                "reportMarkdownPath": qa_report_md.as_posix(),
+            },
+            "failures": [
+                {
+                    "task_id": task_id,
+                    "taskId": task_id,
+                    "task_title": task_title,
+                    "taskTitle": task_title,
+                    "reason": final_reason,
+                    "detail": "Dev attempt 2 failed during the build step." if status == "failed" else "",
+                    "attempt": 2,
+                    "cycle": 1,
+                    "step": 0,
+                    "rc": final_rc,
+                }
+            ]
+            if status == "failed"
+            else [],
+            "next_actions": (
+                ["Fix the failed task and rerun.", "Review the QA validation report before resuming."]
+                if status == "failed"
+                else (["Continue the remaining GOALS items.", "Resume with --resume-latest."] if not project_complete else ["No follow-up action was recorded."])
+            ),
+            "artifacts": {
+                "qa_validation_json": qa_report_json.as_posix(),
+                "qa_validation_markdown": qa_report_md.as_posix(),
+                "final_run_json": final_report_json.as_posix(),
+                "final_run_markdown": final_report_md.as_posix(),
+                "shutdown_report": (run_dir / "SHUTDOWN_REPORT.md").as_posix(),
+            },
+            "run_summary": json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8", errors="replace")),
+            "last_run_summary": json.loads((run_dir / "last_run_summary.json").read_text(encoding="utf-8", errors="replace")),
+        }
+        _write(final_report_json, json.dumps(final_report, ensure_ascii=False, indent=2) + "\n")
+        _write(
+            final_report_md,
+            "# Final Run Report\n\n"
+            f"- run_id: {run_dir.name}\n"
+            f"- status: {final_report['status']}\n"
+            f"- execution_status: {final_report['execution_status']}\n"
+            f"- summary: {final_report['summary']}\n",
+        )
     if stop_file:
         _write(run_dir / "STOP", "")
 
@@ -1523,6 +1807,188 @@ def _run_adapter_harness(fixtures):
         """
     ).replace("__SOURCE_PATH__", json.dumps(str(WEB_CONSOLE / "app.js"))).replace(
         "__FIXTURES__", json.dumps(fixtures, ensure_ascii=False)
+    )
+    completed = subprocess.run([node, "-"], input=script, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+    return json.loads(completed.stdout)
+
+
+def _run_shell_harness(steps):
+    node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
+    script = "(async () => {\n" + textwrap.dedent(
+        """
+        const fs = require('fs');
+        const vm = require('vm');
+
+        const sourcePath = __SOURCE_PATH__;
+        const source = fs.readFileSync(sourcePath, 'utf8');
+        const roots = {
+          app: { innerHTML: '', dataset: Object.create(null) },
+          topbar: { innerHTML: '' },
+          sidebar: { innerHTML: '' },
+          main: {
+            innerHTML: '',
+            dataset: Object.create(null),
+            scrollTop: 0,
+            querySelector() {
+              return null;
+            },
+          },
+          'overlay-root': { innerHTML: '' },
+        };
+        const clipboard = [];
+        const downloads = [];
+        const fetchCalls = [];
+
+        const document = {
+          title: '',
+          body: {
+            appendChild() {},
+            removeChild() {},
+          },
+          createElement(tag) {
+            const name = String(tag).toLowerCase();
+            if (name === 'a') {
+              return {
+                href: '',
+                download: '',
+                rel: '',
+                style: {},
+                click() {
+                  downloads.push({ kind: 'click', download: this.download, href: this.href });
+                },
+                setAttribute() {},
+              };
+            }
+            return {
+              tagName: String(tag).toUpperCase(),
+              style: {},
+              value: '',
+              setAttribute() {},
+              select() {},
+              focus() {},
+              setSelectionRange() {},
+              click() {},
+            };
+          },
+          execCommand() {
+            return true;
+          },
+          getElementById(id) {
+            return roots[id] || null;
+          },
+          addEventListener() {},
+          querySelector() {
+            return null;
+          },
+        };
+
+        const context = {
+          console,
+          JSON,
+          Date,
+          Math,
+          Number,
+          String,
+          Boolean,
+          Array,
+          Object,
+          RegExp,
+          Error,
+          Promise,
+          setTimeout() {
+            return 1;
+          },
+          clearTimeout() {},
+          setInterval() {
+            return 1;
+          },
+          clearInterval() {},
+          fetch(url) {
+            fetchCalls.push(url);
+            return Promise.resolve({
+              ok: true,
+              status: 200,
+              json() {
+                return Promise.resolve({});
+              },
+            });
+          },
+          navigator: {
+            clipboard: {
+              writeText(text) {
+                clipboard.push(text);
+                return Promise.resolve();
+              },
+            },
+          },
+          history: { replaceState() {} },
+          location: { hash: '' },
+          localStorage: {
+            _data: Object.create(null),
+            getItem(key) {
+              return Object.prototype.hasOwnProperty.call(this._data, key) ? this._data[key] : null;
+            },
+            setItem(key, value) {
+              this._data[key] = String(value);
+            },
+            removeItem(key) {
+              delete this._data[key];
+            },
+          },
+          document,
+          addEventListener() {},
+          removeEventListener() {},
+        };
+
+        context.window = context;
+        context.globalThis = context;
+        context.__AGENTCLI_SKIP_BOOTSTRAP__ = true;
+
+        vm.runInNewContext(source, context, { filename: sourcePath });
+
+        const adapters = context.__AGENTCLI_ADAPTERS__;
+        if (!adapters) {
+          throw new Error('Missing __AGENTCLI_ADAPTERS__ export');
+        }
+
+        const steps = __STEPS__;
+        const results = [];
+        for (const step of steps) {
+          if (step.kind !== 'call') {
+            throw new Error('Unknown step kind: ' + step.kind);
+          }
+          const fn = adapters[step.name];
+          if (typeof fn !== 'function') {
+            throw new Error('Missing adapter: ' + step.name);
+          }
+          let value = fn(...(step.args || []));
+          if (value && typeof value.then === 'function') {
+            value = await value;
+          }
+          results.push(value);
+          await Promise.resolve();
+          await Promise.resolve();
+        }
+
+        process.stdout.write(JSON.stringify({
+          results,
+          clipboard,
+          downloads,
+          fetchCalls,
+          title: document.title,
+          roots: {
+            app: roots.app.innerHTML,
+            topbar: roots.topbar.innerHTML,
+            sidebar: roots.sidebar.innerHTML,
+            main: roots.main.innerHTML,
+            overlay: roots['overlay-root'].innerHTML,
+            view: roots.main.dataset.view || '',
+          },
+        }));
+        """
+    ) + "\n})().catch((error) => {\n  console.error(error);\n  process.exit(1);\n});\n"
+    script = script.replace("__SOURCE_PATH__", json.dumps(str(WEB_CONSOLE / "app.js"))).replace(
+        "__STEPS__", json.dumps(steps, ensure_ascii=False)
     )
     completed = subprocess.run([node, "-"], input=script, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
     return json.loads(completed.stdout)
@@ -2691,6 +3157,17 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         ])
         return normalized, rendered[1], rendered[2]
 
+    def _render_history_view(self, payload: dict[str, object]) -> tuple[dict[str, object], str, str]:
+        normalized = _run_adapter_harness([
+            {"kind": "call", "name": "normalizeSnapshot", "args": [payload]},
+        ])[0]
+        rendered = _run_shell_harness([
+            {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+            {"kind": "call", "name": "setView", "args": ["history"]},
+            {"kind": "call", "name": "renderShell", "args": [{"force": True, "preserveScroll": True}]},
+        ])
+        return normalized, rendered["roots"]["main"], rendered["title"]
+
     def _api_log_tail(self, **params: object) -> dict[str, object]:
         response = self.client.get("/api/logs/tail", params=params)
         self.assertEqual(200, response.status_code)
@@ -2817,10 +3294,79 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIn("runSummary", history_item)
         self.assertIn("lastRunSummary", history_item)
 
+        report_run_dir = self._make_live_run_dir("20260426-130500")
+        _write_run_bundle(
+            report_run_dir,
+            status="success",
+            final_rc=0,
+            final_reason="project_complete",
+            branch="main",
+        )
+        from fastapi.testclient import TestClient
+
+        report_client = TestClient(self._create_app(self.repo))
+        report_payload = report_client.get("/api/status").json()
+        report_history = report_client.get("/api/history").json()
+        report_history_item = next(item for item in report_history["items"] if item["id"] == report_run_dir.name)
+        self.assertEqual("success", report_history_item["reportStatus"])
+        self.assertEqual("passed", report_history_item["qaValidationReportStatus"])
+        self.assertIn("qaValidationReport", report_history_item)
+        self.assertIn("finalRunReport", report_history_item)
+        self.assertIn("reportArtifacts", report_history_item)
+        self.assertEqual("passed", report_history_item["qaValidationReport"]["status"])
+        self.assertEqual("success", report_history_item["finalRunReport"]["status"])
+        self.assertEqual(1, report_history_item["finalRunReport"]["validation"]["commands_skipped"])
+        self.assertEqual(
+            "Fast web/worktree regression was not triggered by the task file scope.",
+            report_history_item["qaValidationReport"]["attempts"][0]["skipped_commands"][0]["skipped_rationale"],
+        )
+
+        normalized, history_html, history_title = self._render_history_view(report_payload)
+        normalized_history_item = next(item for item in normalized["history"] if item["id"] == report_run_dir.name)
+        self.assertEqual("success", normalized_history_item["reportStatus"])
+        self.assertIn("Run History", history_title)
+        self.assertIn("Final run report", history_html)
+        self.assertIn("QA validation report", history_html)
+        self.assertIn("Fast web/worktree regression was not triggered by the task file scope.", history_html)
+        self.assertIn("qa_verified", history_html)
+        self.assertIn("Read-only web console tests passed.", history_html)
+        self.assertIn("history-report__attempts", history_html)
+
         self.assertGreaterEqual(len(payload["notifications"]), 1)
         kinds = {item["kind"] for item in payload["notifications"]}
         self.assertIn("run_start", kinds)
         self.assertIn("task_done", kinds)
+
+    def test_api_history_and_history_view_show_missing_report_state(self) -> None:
+        missing_run_dir = self._make_live_run_dir("20260426-130500")
+        _write_run_bundle(
+            missing_run_dir,
+            status="success",
+            final_rc=0,
+            final_reason="project_complete",
+            branch="main",
+            write_reports=False,
+        )
+
+        from fastapi.testclient import TestClient
+
+        client = TestClient(self._create_app(self.repo))
+        status_payload = client.get("/api/status").json()
+        history_payload = client.get("/api/history").json()
+        history_item = next(item for item in history_payload["items"] if item["id"] == missing_run_dir.name)
+
+        self.assertEqual({}, history_item["qaValidationReport"])
+        self.assertEqual({}, history_item["finalRunReport"])
+        self.assertEqual("", history_item["reportStatus"])
+        self.assertEqual("", history_item["qaValidationReportStatus"])
+        self.assertIn("QA_VALIDATION_REPORT.json", history_item["reportArtifacts"]["qaValidationJson"])
+        self.assertIn("FINAL_RUN_REPORT.json", history_item["reportArtifacts"]["finalRunJson"])
+
+        normalized, history_html, _history_title = self._render_history_view(status_payload)
+        normalized_history_item = next(item for item in normalized["history"] if item["id"] == missing_run_dir.name)
+        self.assertEqual("", normalized_history_item["reportStatus"])
+        self.assertIn("No report artifact is available yet.", history_html)
+        self.assertIn("history-report--empty", history_html)
 
     def test_api_status_long_running_stage_summary_covers_recent_pm_dev_qa_output(self) -> None:
         for stage_name in ("PM", "Dev", "QA"):

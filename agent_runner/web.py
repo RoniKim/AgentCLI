@@ -163,6 +163,10 @@ RUN_DIR_ARTIFACT_NAMES = {
     "cycle_summary.log",
     "last_run_summary.json",
     "metrics.jsonl",
+    "FINAL_RUN_REPORT.json",
+    "FINAL_RUN_REPORT.md",
+    "QA_VALIDATION_REPORT.json",
+    "QA_VALIDATION_REPORT.md",
     RUNNER_CONTROL_EVENT_FILE,
     "run_summary.json",
     "WORKTREE_APPLY_FAILURE.md",
@@ -1296,6 +1300,11 @@ def _redact_web_history_item(item: dict[str, Any]) -> dict[str, Any]:
         summary = redacted.get(key)
         if isinstance(summary, dict):
             redacted[key] = _redact_web_history_summary(summary)
+            redaction_fields.append(key)
+    for key in ("qaValidationReport", "qa_validation_report", "finalRunReport", "final_run_report"):
+        report = redacted.get(key)
+        if isinstance(report, dict):
+            redacted[key] = _redact_web_history_summary(report)
             redaction_fields.append(key)
     if redaction_fields:
         redacted["redaction"] = _web_redaction_meta(*redaction_fields)
@@ -5800,6 +5809,13 @@ def _history_item(
 
     branch_value = _pick_text(run_summary.get("branch"), last_summary.get("branch"), branch, "HEAD")
     worktree_outcome = _history_worktree_outcome(run_dir)
+    qa_validation_report = _safe_json(run_dir / "QA_VALIDATION_REPORT.json", {})
+    final_run_report = _safe_json(run_dir / "FINAL_RUN_REPORT.json", {})
+    qa_validation_report = qa_validation_report if isinstance(qa_validation_report, dict) else {}
+    final_run_report = final_run_report if isinstance(final_run_report, dict) else {}
+    report_summary = _pick_text(final_run_report.get("summary"), "")
+    report_status = _pick_text(final_run_report.get("status"), "")
+    qa_report_status = _pick_text(qa_validation_report.get("status"), "")
 
     last_cycle = _tail_text(run_dir / "cycle_summary.log", 1).strip()
     return {
@@ -5843,6 +5859,21 @@ def _history_item(
         "runSummary": run_summary,
         "lastRunSummary": last_summary,
         "worktreeOutcome": worktree_outcome,
+        "qaValidationReport": qa_validation_report,
+        "qa_validation_report": qa_validation_report,
+        "finalRunReport": final_run_report,
+        "final_run_report": final_run_report,
+        "reportSummary": report_summary,
+        "reportStatus": report_status,
+        "qaValidationReportStatus": qa_report_status,
+        "qa_validation_report_status": qa_report_status,
+        "reportArtifacts": {
+            "qaValidationJson": (run_dir / "QA_VALIDATION_REPORT.json").as_posix(),
+            "qaValidationMarkdown": (run_dir / "QA_VALIDATION_REPORT.md").as_posix(),
+            "finalRunJson": (run_dir / "FINAL_RUN_REPORT.json").as_posix(),
+            "finalRunMarkdown": (run_dir / "FINAL_RUN_REPORT.md").as_posix(),
+            "shutdownReport": (run_dir / "SHUTDOWN_REPORT.md").as_posix(),
+        },
     }
 
 

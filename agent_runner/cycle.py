@@ -74,7 +74,7 @@ from .prompts import (
     PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT,
     PM_TURN_BUDGET_WARNING,
 )
-from .reporting import collect_shutdown_context, build_local_shutdown_report
+from .reporting import collect_shutdown_context, build_local_shutdown_report, write_run_report_artifacts
 from .run_dir import make_run_dir, find_latest_run_dir
 from .state import (
     TaskItem,
@@ -546,6 +546,16 @@ async def main_async(args: argparse.Namespace) -> int:
             """
             report_path = run_dir / "SHUTDOWN_REPORT.md"
             ctx_path = run_dir / "SHUTDOWN_CONTEXT.json"
+            report_artifacts: dict[str, Any] = {}
+            try:
+                report_artifacts = write_run_report_artifacts(
+                    repo=repo,
+                    run_dir=run_dir,
+                    stop_reason=stop_reason,
+                    last_task_id=last_task_id,
+                )
+            except Exception as _report_artifacts_ex:
+                eprint(f"[WARN] Failed to write run reports: {_report_artifacts_ex}")
 
             # Build context JSON (best-effort)
             ctx_obj: dict[str, Any]
@@ -554,6 +564,10 @@ async def main_async(args: argparse.Namespace) -> int:
                 ctx_obj["stop_reason"] = stop_reason
                 if last_task_id:
                     ctx_obj["last_task_id"] = last_task_id
+                if report_artifacts:
+                    ctx_obj["qa_validation_report"] = report_artifacts.get("qa_validation_report", {})
+                    ctx_obj["final_run_report"] = report_artifacts.get("final_run_report", {})
+                    ctx_obj["report_artifacts"] = report_artifacts.get("artifacts", {})
                 ctx_path.write_text(
                     json.dumps(ctx_obj, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
@@ -2993,7 +3007,14 @@ async def main_async(args: argparse.Namespace) -> int:
                 "warnings_count": warnings_count,
                 "duration_seconds": cycle_dt,
                 "build_enabled": build_enabled,
+                "build_cmd": list(getattr(args, "build_cmd", []) or []),
+                "legacy_build_target": str(getattr(args, "dotnet_build_target", "") or ""),
                 "run_tests": run_tests,
+                "test_cmd": list(getattr(args, "test_cmd", []) or []),
+                "legacy_test_target": str(getattr(args, "dotnet_test_target", "") or ""),
+                "legacy_test_filter": str(getattr(args, "dotnet_test_filter", "") or ""),
+                "qa_always": bool(getattr(args, "qa_always", False)),
+                "qa_to_backlog": bool(getattr(args, "qa_to_backlog", False)),
                 "policy_scan_enabled": policy_scan_enabled,
             }
             last_run_summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8", errors="replace")

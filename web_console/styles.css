@@ -2451,6 +2451,169 @@ a {
   padding: 14px;
 }
 
+.history-report-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.history-report {
+  display: grid;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.01));
+  min-width: 0;
+}
+
+.history-report--empty {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.history-report__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.history-report__title {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.35;
+  font-weight: 600;
+}
+
+.history-report__copy {
+  margin-top: 4px;
+  color: var(--text-sub);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.history-report__section-title {
+  color: var(--text-sub);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.2;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.history-report__attempts {
+  display: grid;
+  gap: 10px;
+}
+
+.history-report__attempt {
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  background: rgba(255, 255, 255, 0.015);
+  min-width: 0;
+}
+
+.history-report__attempt-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.history-report__attempt-title {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.history-report__attempt-index {
+  color: var(--text-sub);
+  font-weight: 500;
+}
+
+.history-report__commands {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.history-report__command {
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.history-report__command:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.history-report__bullet {
+  margin-top: 6px;
+  flex: 0 0 auto;
+}
+
+.history-report__command-body {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.history-report__command-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.history-report__command-title {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.35;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.history-report__command-meta,
+.history-report__command-cmd,
+.history-report__command-summary,
+.history-report__command-rationale {
+  color: var(--text-sub);
+  font-size: 11.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.history-report__command-cmd {
+  font-family: var(--mono);
+  color: var(--text-dim);
+}
+
+.history-report__command-summary {
+  color: var(--text-dim);
+}
+
+.history-report__command-rationale {
+  color: var(--warn);
+}
+
+.history-report__failures {
+  display: grid;
+  gap: 8px;
+}
+
 .notification-layout {
   display: grid;
   gap: 14px;
@@ -4161,6 +4324,13 @@ a {
   .review-file,
   .config-row {
     grid-template-columns: 1fr;
+  }
+
+  .history-report__head,
+  .history-report__attempt-head,
+  .history-report__command-head {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .runner-control__details {

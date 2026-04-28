@@ -558,10 +558,25 @@
         noRunsYet: 'No run history yet.',
         emptyState: 'Run history is empty.',
         selectedRun: 'Selected run',
+        finalRunReport: 'Final run report',
+        qaValidationReport: 'QA validation report',
+        reportSummary: 'Report summary',
+        reportStatus: 'Report status',
+        reportMissing: 'No report artifact is available yet.',
+        reportUnavailable: 'Report unavailable',
+        reportPassed: 'Passed',
+        reportFailed: 'Failed',
+        reportSkipped: 'Skipped',
+        reportStopped: 'Stopped',
+        attempts: 'Attempts',
         persistedSummary: 'Persisted summary',
         shutdownReason: 'Shutdown reason',
         worktreeOutcome: 'Worktree outcome',
         noSummaries: 'No persisted run summaries are available yet.',
+        validationCommands: 'Validation commands',
+        validationArtifacts: 'Validation artifacts',
+        skippedRationale: 'Skipped rationale',
+        nextActions: 'Next actions',
         success: 'Success',
         tasks: 'Tasks',
         budgetCap: 'Budget cap',
@@ -1158,10 +1173,25 @@
         noRunsYet: '아직 실행 기록이 없습니다.',
         emptyState: '실행 기록이 비어 있습니다.',
         selectedRun: '선택된 실행',
+        finalRunReport: '최종 실행 보고서',
+        qaValidationReport: 'QA 검증 보고서',
+        reportSummary: '보고서 요약',
+        reportStatus: '보고서 상태',
+        reportMissing: '아직 보고서 아티팩트가 없습니다.',
+        reportUnavailable: '보고서 없음',
+        reportPassed: '성공',
+        reportFailed: '실패',
+        reportSkipped: '건너뜀',
+        reportStopped: '중단',
+        attempts: '시도 횟수',
         persistedSummary: '저장된 요약',
         shutdownReason: '종료 사유',
         worktreeOutcome: '워크트리 결과',
         noSummaries: '아직 저장된 실행 요약이 없습니다.',
+        validationCommands: '검증 명령',
+        validationArtifacts: '검증 아티팩트',
+        skippedRationale: '건너뜀 사유',
+        nextActions: '다음 조치',
         success: '성공',
         tasks: '작업',
         budgetCap: '예산 상한',
@@ -5119,6 +5149,15 @@
       runSummary,
       lastRunSummary,
       worktreeOutcome: toText(raw.worktreeOutcome || raw.worktree_outcome, 'none'),
+      qaValidationReport: toObject(raw.qaValidationReport || raw.qa_validation_report),
+      qa_validation_report: toObject(raw.qa_validation_report || raw.qaValidationReport),
+      finalRunReport: toObject(raw.finalRunReport || raw.final_run_report),
+      final_run_report: toObject(raw.final_run_report || raw.finalRunReport),
+      reportSummary: toText(raw.reportSummary || raw.report_summary || raw.finalRunReport?.summary || raw.final_run_report?.summary, ''),
+      reportStatus: toText(raw.reportStatus || raw.report_status || raw.finalRunReport?.status || raw.final_run_report?.status, ''),
+      qaValidationReportStatus: toText(raw.qaValidationReportStatus || raw.qa_validation_report_status || raw.qaValidationReport?.status || raw.qa_validation_report?.status, ''),
+      qa_validation_report_status: toText(raw.qa_validation_report_status || raw.qaValidationReportStatus || raw.qaValidationReport?.status || raw.qa_validation_report?.status, ''),
+      reportArtifacts: toObject(raw.reportArtifacts || raw.report_artifacts),
     };
   }
 
@@ -9113,7 +9152,275 @@
     if (counts.cycles) {
       parts.push(t('history.cycles', { count: counts.cycles }));
     }
+    const reportSummary = toText(toObject(raw.finalRunReport).summary || toObject(raw.final_run_report).summary, '');
+    if (reportSummary) {
+      parts.push(`${t('history.reportSummary')}: ${compactText(reportSummary, 120)}`);
+    }
     return parts.join(' | ') || t('history.noPersistedSummary');
+  }
+
+  function historyReportStatusLabel(status) {
+    switch (toText(status, '').toLowerCase()) {
+      case 'completed':
+      case 'success':
+      case 'ok':
+      case 'passed':
+        return t('history.reportPassed');
+      case 'failed':
+        return t('history.reportFailed');
+      case 'skipped':
+        return t('history.reportSkipped');
+      case 'stopped':
+        return t('history.reportStopped');
+      case 'missing':
+      case '':
+        return t('history.reportUnavailable');
+      default:
+        return t('history.reportUnavailable');
+    }
+  }
+
+  function historyReportStatusClass(status) {
+    switch (toText(status, '').toLowerCase()) {
+      case 'completed':
+      case 'success':
+      case 'ok':
+      case 'passed':
+        return 'chip--accent';
+      case 'failed':
+        return 'chip--err';
+      case 'skipped':
+        return 'chip--info';
+      case 'stopped':
+        return 'chip--warn';
+      case 'missing':
+      case '':
+        return 'chip--dim';
+      default:
+        return 'chip--info';
+    }
+  }
+
+  function historyReportSummary(report) {
+    const raw = toObject(report);
+    const summaryText = raw.summary_text || raw.summaryText || raw.summaryTextPreview || raw.summary_text_preview;
+    if (summaryText) {
+      return toText(summaryText, '');
+    }
+    const summary = raw.summary;
+    if (typeof summary === 'string') {
+      return toText(summary, '');
+    }
+    return toText(raw.summaryLine || raw.summary_line || '', '');
+  }
+
+  function historyReportCounts(report) {
+    const raw = toObject(report);
+    const summary = toObject(raw.summary);
+    return {
+      attempts: toNumber(summary.attempts ?? summary.task_attempts ?? summary.taskAttempts ?? raw.attempts?.length ?? 0, raw.attempts?.length || 0),
+      commandsTotal: toNumber(summary.commands_total ?? summary.commandsTotal ?? 0, 0),
+      commandsExecuted: toNumber(summary.commands_executed ?? summary.commandsExecuted ?? 0, 0),
+      commandsPassed: toNumber(summary.commands_passed ?? summary.commandsPassed ?? 0, 0),
+      commandsFailed: toNumber(summary.commands_failed ?? summary.commandsFailed ?? 0, 0),
+      commandsStopped: toNumber(summary.commands_stopped ?? summary.commandsStopped ?? 0, 0),
+      commandsSkipped: toNumber(summary.commands_skipped ?? summary.commandsSkipped ?? 0, 0),
+    };
+  }
+
+  function historyReportArtifacts(report) {
+    const raw = toObject(report);
+    const artifacts = toObject(raw.artifacts);
+    const validation = toObject(raw.validation);
+    return {
+      qaJson: toText(raw.artifacts?.json || artifacts.json || validation.report_path || validation.reportPath || raw.reportPath || '', ''),
+      qaMarkdown: toText(raw.artifacts?.markdown || artifacts.markdown || validation.reportMarkdownPath || validation.report_markdown_path || '', ''),
+      finalJson: toText(raw.artifacts?.final_run_json || artifacts.final_run_json || raw.artifactPath || '', ''),
+      finalMarkdown: toText(raw.artifacts?.final_run_markdown || artifacts.final_run_markdown || '', ''),
+      shutdownReport: toText(raw.artifacts?.shutdown_report || artifacts.shutdown_report || '', ''),
+    };
+  }
+
+  function historyReportCommandRows(report) {
+    const raw = toObject(report);
+    const attempts = toArray(raw.attempts);
+    const rows = [];
+    for (const attempt of attempts) {
+      const attemptRaw = toObject(attempt);
+      rows.push(...toArray(attemptRaw.commands));
+      rows.push(...toArray(attemptRaw.skipped_commands));
+    }
+    return rows.filter((item) => item && typeof item === 'object');
+  }
+
+  function historyReportCommandStatus(command) {
+    const raw = toObject(command);
+    return toText(raw.status || raw.commandStatus || '', 'missing');
+  }
+
+  function historyReportCommandMeta(command) {
+    const raw = toObject(command);
+    const parts = [];
+    const gate = toText(raw.gate || raw.kind, '');
+    if (gate) {
+      parts.push(gate);
+    }
+    const group = toText(raw.groupName || raw.group_name, '');
+    if (group) {
+      parts.push(`${t('common.of')} ${group}`);
+    }
+    const rc = raw.rc;
+    if (rc != null && rc !== '') {
+      parts.push(`rc=${rc}`);
+    }
+    const elapsed = toNumber(raw.elapsedSec ?? raw.elapsed_sec, NaN);
+    if (!Number.isNaN(elapsed) && elapsed >= 0) {
+      parts.push(fmtDuration(elapsed));
+    }
+    const artifact = toText(raw.artifactPath || raw.artifact_path || raw.groupArtifactPath || raw.group_artifact_path, '');
+    if (artifact) {
+      parts.push(compactText(artifact, 90));
+    }
+    return parts.join(' | ');
+  }
+
+  function renderHistoryReportCommand(command) {
+    const raw = toObject(command);
+    const status = historyReportCommandStatus(raw);
+    const name = toText(raw.name || raw.gate || raw.kind, t('common.unknown'));
+    const cmdText = fmtList(toArray(raw.cmd || []));
+    const summary = historyReportSummary(raw);
+    const skippedRationale = toText(raw.skippedRationale || raw.skipped_rationale, '');
+    const failureSummary = toText(raw.failureSummary || raw.failure_summary, '');
+    const meta = historyReportCommandMeta(raw);
+    return `
+      <div class="compact-list__item history-report__command">
+        <span class="compact-list__bullet history-report__bullet"></span>
+        <div class="history-report__command-body">
+          <div class="history-report__command-head">
+            <div class="history-report__command-title">${escapeHTML(name)}</div>
+            ${chip(historyReportStatusLabel(status), historyReportStatusClass(status))}
+          </div>
+          ${meta ? `<div class="history-report__command-meta">${escapeHTML(meta)}</div>` : ''}
+          ${cmdText ? `<div class="history-report__command-cmd">${escapeHTML(compactText(cmdText, 220))}</div>` : ''}
+          ${summary ? `<div class="history-report__command-summary">${escapeHTML(summary)}</div>` : ''}
+          ${failureSummary && status === 'failed' ? `<div class="history-report__command-rationale">${escapeHTML(failureSummary)}</div>` : ''}
+          ${skippedRationale ? `<div class="history-report__command-rationale">${escapeHTML(skippedRationale)}</div>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderHistoryReportAttempt(attempt) {
+    const raw = toObject(attempt);
+    const commands = toArray(raw.commands);
+    const skippedCommands = toArray(raw.skipped_commands || raw.skippedCommands);
+    const counts = toObject(raw.commandCounts || raw.command_counts);
+    const title = toText(raw.taskTitle || raw.task_title || raw.taskId || raw.task_id, t('common.unknown'));
+    const status = toText(raw.status, 'missing');
+    const reason = toText(raw.reason, '');
+    const detail = toText(raw.detail, '');
+    const artifactPath = toText(raw.artifactPath || raw.artifact_path, '');
+    const validationPath = toText(raw.validationPath || raw.validation_path, '');
+    const elapsed = toNumber(raw.elapsedSec ?? raw.elapsed_sec, 0);
+    return `
+      <div class="history-report__attempt">
+        <div class="history-report__attempt-head">
+          <div class="history-report__attempt-title">${escapeHTML(title)}${raw.attempt != null ? ` <span class="history-report__attempt-index">${escapeHTML(t('history.attemptLabel'))} ${escapeHTML(String(raw.attempt))}</span>` : ''}</div>
+          ${chip(historyReportStatusLabel(status), historyReportStatusClass(status))}
+        </div>
+        <div class="compact-list">
+          ${compactFactItem(t('history.reportStatus'), historyReportStatusLabel(status), reason || detail || t('history.reportMissing'))}
+          ${compactFactItem(t('history.validationArtifacts'), artifactPath || t('common.none'), validationPath || t('common.none'))}
+          ${compactFactItem(t('history.validationCommands'), `${toNumber(counts.executed ?? commands.length, commands.length)}/${toNumber(counts.total ?? (commands.length + skippedCommands.length), commands.length + skippedCommands.length)}`, `${t('common.failed')} ${toNumber(counts.failed ?? 0, 0)} | ${t('common.skipped')} ${toNumber(counts.skipped ?? skippedCommands.length, skippedCommands.length)}`)}
+        </div>
+        <div class="history-report__commands">
+          ${commands.length ? commands.map((command) => renderHistoryReportCommand(command)).join('') : ''}
+          ${skippedCommands.length ? skippedCommands.map((command) => renderHistoryReportCommand(command)).join('') : ''}
+          ${!commands.length && !skippedCommands.length ? `<div class="history-details__empty">${escapeHTML(t('history.reportMissing'))}</div>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderHistoryReportPanel(title, report, kind = 'final') {
+    const raw = toObject(report);
+    const status = toText(raw.status, '');
+    const summary = historyReportSummary(raw);
+    const attempts = toArray(raw.attempts);
+    const counts = historyReportCounts(raw);
+    const artifacts = historyReportArtifacts(raw);
+    const missing = !status && !summary && !attempts.length;
+    const reportTitle = kind === 'qa' ? t('history.qaValidationReport') : t('history.finalRunReport');
+    if (missing) {
+      return `
+        <div class="history-report history-report--empty">
+          <div class="history-report__head">
+            <div>
+              <div class="history-report__title">${escapeHTML(title || reportTitle)}</div>
+              <div class="history-report__copy">${escapeHTML(t('history.reportMissing'))}</div>
+            </div>
+            ${chip(historyReportStatusLabel('missing'), historyReportStatusClass('missing'))}
+          </div>
+          <div class="history-details__empty">${escapeHTML(t('history.reportMissing'))}</div>
+        </div>
+      `;
+    }
+
+    const nextActions = toArray(raw.nextActions || raw.next_actions);
+    const failures = toArray(raw.failures);
+    const taskCounts = toObject(raw.tasks);
+    const validation = toObject(raw.validation);
+    const taskDone = toNumber(taskCounts.done ?? raw.tasksDone ?? counts.attempts, counts.attempts);
+    const taskTotal = toNumber(taskCounts.total ?? raw.tasksTotal ?? counts.attempts, counts.attempts);
+    const taskFailed = toNumber(taskCounts.failed ?? raw.tasksFailed ?? 0, 0);
+    const taskSkipped = toNumber(taskCounts.skipped ?? raw.tasksSkipped ?? 0, 0);
+    const primaryLabel = kind === 'qa' ? t('history.attempts') : t('history.tasks');
+    const primaryValue = kind === 'qa' ? `${counts.attempts}` : `${taskDone}/${taskTotal}`;
+    const primaryDetail = kind === 'qa'
+      ? `${t('history.validationCommands')} ${toNumber(validation.commands_passed ?? counts.commandsPassed, counts.commandsPassed)}/${toNumber(validation.commands_total ?? counts.commandsTotal, counts.commandsTotal)}`
+      : `${t('common.failed')} ${taskFailed} | ${t('common.skipped')} ${taskSkipped}`;
+    return `
+      <div class="history-report history-report--${escapeHTML(kind)}">
+        <div class="history-report__head">
+          <div>
+            <div class="history-report__title">${escapeHTML(title || reportTitle)}</div>
+            <div class="history-report__copy">${escapeHTML(summary || t('history.reportUnavailable'))}</div>
+          </div>
+          ${chip(historyReportStatusLabel(status || (kind === 'qa' ? raw.status : validation.status) || 'missing'), historyReportStatusClass(status || (kind === 'qa' ? raw.status : validation.status) || 'missing'))}
+        </div>
+        <div class="kpi-grid kpi-grid--three">
+          ${kpiCard(primaryLabel, primaryValue, primaryDetail)}
+          ${kpiCard(t('nav.project'), projectStatusLabel(toText(raw.goals?.projectStatus || raw.goals?.project_status || (raw.goals?.project_complete ? 'complete' : 'incomplete'), raw.goals?.project_complete ? 'complete' : 'incomplete')), t('history.reportStatus'))}
+          ${kpiCard(t('history.validationCommands'), `${toNumber(validation.commands_passed ?? counts.commandsPassed, counts.commandsPassed)}/${toNumber(validation.commands_total ?? counts.commandsTotal, counts.commandsTotal)}`, `${t('common.failed')} ${toNumber(validation.commands_failed ?? counts.commandsFailed, counts.commandsFailed)} | ${t('common.skipped')} ${toNumber(validation.commands_skipped ?? counts.commandsSkipped, counts.commandsSkipped)}`)}
+        </div>
+        <div class="compact-list">
+          ${compactFactItem(t('history.reportSummary'), summary || t('history.reportUnavailable'), t('history.reportStatus') + ': ' + historyReportStatusLabel(status || (kind === 'qa' ? raw.status : validation.status) || 'missing'))}
+          ${compactFactItem(t('history.validationArtifacts'), fmtList([artifacts.qaJson, artifacts.qaMarkdown, artifacts.finalJson, artifacts.finalMarkdown].filter(Boolean)) || t('common.none'), artifacts.shutdownReport || t('common.none'))}
+          ${nextActions.length ? compactFactItem(t('history.nextActions'), nextActions.join(' | '), t('history.reportStatus')) : ''}
+        </div>
+        ${failures.length ? `
+          <div class="history-report__failures">
+            <div class="history-report__section-title">${escapeHTML(t('history.reportFailed'))}</div>
+            <div class="compact-list">
+              ${failures.map((failure) => {
+                const item = toObject(failure);
+                const label = toText(item.taskTitle || item.task_title || item.taskId || item.task_id, t('common.unknown'));
+                const reasonText = toText(item.reason, '');
+                const detailText = toText(item.detail, '');
+                return compactFactItem(label, reasonText || t('history.reportFailed'), detailText || t('common.none'));
+              }).join('')}
+            </div>
+          </div>
+        ` : ''}
+        ${kind === 'qa' && attempts.length ? `
+          <div class="history-report__attempts">
+            <div class="history-report__section-title">${escapeHTML(t('history.attempts'))}</div>
+            ${attempts.map((attempt) => renderHistoryReportAttempt(attempt)).join('')}
+          </div>
+        ` : ''}
+      </div>
+    `;
   }
 
   function historyWorktreeOutcomeLabel(outcome) {
@@ -14932,6 +15239,10 @@
     const selectedWorktreeOutcome = selected ? historyWorktreeOutcomeLabel(selected.worktreeOutcome) : t('common.none');
     const selectedShutdownReason = selected ? toText(selected.shutdownReason || selected.stopReason || '', '') : '';
     const selectedFinalReason = selected ? toText(selected.finalReason, '') : '';
+    const selectedFinalRunReport = selected ? toObject(selected.finalRunReport || selected.final_run_report) : {};
+    const selectedQaValidationReport = selected ? toObject(selected.qaValidationReport || selected.qa_validation_report) : {};
+    const selectedFinalReportStatus = selected ? toText(selectedFinalRunReport.status, '') : '';
+    const selectedQaReportStatus = selected ? toText(selectedQaValidationReport.status, '') : '';
     const selectedRunDir = selected ? selected.runDir || t('common.unknown') : t('common.unknown');
     const selectedExecutionStatus = selected ? toText(selected.executionStatus || selected.status, selected.status || '') : '';
     const selectedProjectStatus = selected ? toText(selected.projectStatus || (selected.projectComplete ? 'complete' : 'incomplete'), selected.projectComplete ? 'complete' : 'incomplete') : '';
@@ -14978,6 +15289,8 @@
                         <div class="history-details__chips">
                           <span class="${executionStatusClass(selectedExecutionStatus)}">${escapeHTML(`${t('runner.runStatus')}: ${executionStatusLabel(selectedExecutionStatus)}`)}</span>
                           <span class="${projectStatusClass(selectedProjectStatus)}">${escapeHTML(`${t('nav.project')}: ${projectStatusLabel(selectedProjectStatus)}`)}</span>
+                          ${chip(historyReportStatusLabel(selectedFinalReportStatus || 'missing'), historyReportStatusClass(selectedFinalReportStatus || 'missing'))}
+                          ${chip(historyReportStatusLabel(selectedQaReportStatus || 'missing'), historyReportStatusClass(selectedQaReportStatus || 'missing'))}
                         </div>
                         <div class="kpi-grid kpi-grid--four">
                           ${kpiCard(t('history.currentState'), runStatusLabel(selected.status, selected.finalReason), t('history.currentState'), ['success', 'completed'].includes(toText(selected.status, '')))}
@@ -14992,6 +15305,10 @@
                           ${compactFactItem(t('history.shutdownReason'), selectedShutdownReason || t('common.unavailable'), t('history.readOnlyRunArtifacts'))}
                           ${compactFactItem(t('history.persistedSummary'), selectedSummary, t('history.readOnlyRunArtifacts'))}
                           ${compactFactItem(t('history.worktreeOutcome'), selectedWorktreeOutcome, t('history.worktreeOutcomeMeta'))}
+                        </div>
+                        <div class="history-report-grid">
+                          ${renderHistoryReportPanel(t('history.finalRunReport'), selectedFinalRunReport, 'final')}
+                          ${renderHistoryReportPanel(t('history.qaValidationReport'), selectedQaValidationReport, 'qa')}
                         </div>
                         <div class="summary-note">${escapeHTML(t('history.persistedSummariesDriveThisView'))}</div>
                       `
