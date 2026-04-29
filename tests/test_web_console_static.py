@@ -233,6 +233,17 @@ class WebConsoleStaticTests(unittest.TestCase):
 
     def test_styles_keep_desktop_routes_neutral_and_overflow_safe(self) -> None:
         neutral_base_tokens = [
+            "--bg: #0a0c0a",
+            "--surface: #10130f",
+            "--surface-2: #161a14",
+            "--surface-3: #0d100d",
+            "--border: #1f2620",
+            "--border-hi: #2a3328",
+            "--text: #c8d2be",
+            "--text-dim: #7a8275",
+            "--text-sub: #505a4c",
+        ]
+        old_blue_tint_tokens = [
             "--bg: #090b10",
             "--surface: #10131a",
             "--surface-2: #171b24",
@@ -242,16 +253,6 @@ class WebConsoleStaticTests(unittest.TestCase):
             "--text: #d0d5df",
             "--text-dim: #858d9b",
             "--text-sub: #5b6472",
-        ]
-        old_green_tint_tokens = [
-            "--bg: #0a0c0a",
-            "--surface: #10130f",
-            "--surface-2: #161a14",
-            "--border: #1f2620",
-            "--border-hi: #2a3328",
-            "--text: #c8d2be",
-            "--text-dim: #7a8275",
-            "--text-sub: #505a4c",
         ]
         desktop_layout_tokens = [
             ".view,\n.view__body,\n.view-grid,\n.panel",
@@ -271,7 +272,7 @@ class WebConsoleStaticTests(unittest.TestCase):
 
         for token in neutral_base_tokens + desktop_layout_tokens:
             self.assertIn(token, self.styles_css)
-        for token in old_green_tint_tokens:
+        for token in old_blue_tint_tokens:
             self.assertNotIn(token, self.styles_css)
 
         token_block = self.styles_css.split("}", 1)[0]

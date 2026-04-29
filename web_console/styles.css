@@ -1,13 +1,13 @@
 :root {
-  --bg: #090b10;
-  --surface: #10131a;
-  --surface-2: #171b24;
-  --surface-3: #0d1016;
-  --border: #232937;
-  --border-hi: #303849;
-  --text: #d0d5df;
-  --text-dim: #858d9b;
-  --text-sub: #5b6472;
+  --bg: #0a0c0a;
+  --surface: #10130f;
+  --surface-2: #161a14;
+  --surface-3: #0d100d;
+  --border: #1f2620;
+  --border-hi: #2a3328;
+  --text: #c8d2be;
+  --text-dim: #7a8275;
+  --text-sub: #505a4c;
   --accent: #7ee38a;
   --accent-soft: rgba(126, 227, 138, 0.12);
   --warn: #f3c26b;
@@ -114,7 +114,7 @@ a {
   gap: 12px;
   padding: 0 14px 0 16px;
   border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, #121620 0%, #0d1016 100%);
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-3) 100%);
   font-family: var(--mono);
   min-width: 0;
 }
@@ -4535,6 +4535,11 @@ select.field-control,
     grid-template-columns: 1fr;
   }
 
+  .runner-control__preview-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
   .stop-progress__grid,
   .stop-progress__hint-grid {
     grid-template-columns: 1fr;
@@ -4616,6 +4621,21 @@ select.field-control,
   .log-row__stage,
   .log-row__level {
     white-space: normal;
+  }
+
+  .mobile-workflow__route-grid,
+  .mobile-workflow__action-grid,
+  .mobile-workflow__confirm-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .mobile-workflow__route-grid .nav-item {
+    min-height: 58px;
+    justify-content: flex-start;
+  }
+
+  .mobile-workflow .runner-control__buttons {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -442,6 +442,14 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
         with urlopen(f"{self.server_url}/api/status", timeout=5) as response:
             return json.loads(response.read().decode("utf-8"))
 
+    def _capture_screenshot(self, page, name: str) -> Path:
+        screenshot_dir = self._tmp_root / "web_console_screenshots" / self._testMethodName
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        path = screenshot_dir / name
+        page.screenshot(path=path.as_posix(), full_page=True)
+        self.assertTrue(path.exists() and path.stat().st_size > 0, f"Screenshot was not written: {path}")
+        return path
+
     def test_primary_desktop_routes_have_no_horizontal_overflow_and_stable_controls(self) -> None:
         self._start_server()
 
@@ -467,13 +475,23 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             page.set_viewport_size({"width": 1440, "height": 1024})
             page.locator('#topbar [data-action="set-locale-ko"]').click()
             self.expect(page.locator("html")).to_have_attribute("lang", "ko")
+            self._capture_screenshot(page, "desktop-dashboard-ko.png")
 
             for route in self.DESKTOP_PRIMARY_ROUTES:
                 page.locator(f'#sidebar [data-nav="{route}"]').click()
                 self.expect(page.locator("#main")).to_have_attribute("data-view", route)
                 if route == "prompts":
                     self.expect(page.locator("[data-prompt-editor-root]")).to_have_attribute("data-prompt-loading", "false")
+                if route == "pipeline":
+                    self._capture_screenshot(page, "desktop-pipeline-ko.png")
                 self._assert_desktop_route_layout(page, route)
+
+            page.locator('#topbar [data-action="open-palette"]').click()
+            palette = page.locator("[data-overlay='palette']")
+            self.expect(palette).to_be_visible()
+            self._capture_screenshot(page, "desktop-palette-ko.png")
+            page.keyboard.press("Escape")
+            self.expect(palette).to_be_hidden()
         finally:
             self._close_playwright(manager)
 
@@ -649,7 +667,8 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(mobile_root.locator("[data-mobile-editor-panel]")).to_be_visible()
             self.expect(mobile_root.locator("[data-mobile-confirmation-panel]")).to_be_visible()
             self.expect(mobile_root.locator("[data-mobile-notification-panel]")).to_be_visible()
-            self.assertGreaterEqual(mobile_root.locator("[data-mobile-route-grid] [data-nav]").count(), 10)
+            self.assertEqual(10, mobile_root.locator("[data-mobile-route-grid] [data-nav]").count())
+            self._capture_screenshot(page, "mobile-workflow-en.png")
 
             mobile_root.locator('[data-mobile-route-grid] [data-nav="logs"]').click()
             self.expect(page.locator("#main")).to_have_attribute("data-view", "logs")
@@ -659,11 +678,58 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(page.locator("#main")).to_have_attribute("data-view", "mobile")
             mobile_root = page.locator("[data-mobile-workflow-root]")
 
+            layout = page.evaluate(
+                """() => {
+                    const visible = (el) => {
+                        const style = getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                    };
+                    const rects = (selector) => Array.from(document.querySelectorAll(selector))
+                        .filter(visible)
+                        .map((el) => {
+                            const rect = el.getBoundingClientRect();
+                            return {
+                                top: Math.round(rect.top * 10) / 10,
+                                bottom: Math.round(rect.bottom * 10) / 10,
+                                left: Math.round(rect.left * 10) / 10,
+                                right: Math.round(rect.right * 10) / 10,
+                                width: Math.round(rect.width * 10) / 10,
+                                height: Math.round(rect.height * 10) / 10,
+                                text: (el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 120),
+                            };
+                        });
+                    return {
+                        panels: rects('[data-mobile-workflow-root] .panel'),
+                        routeButtons: rects('[data-mobile-route-grid] [data-nav]'),
+                        editorButtons: rects('[data-mobile-editor-panel] .button'),
+                        confirmButtons: rects('[data-mobile-confirmation-panel] .button'),
+                        runnerButtons: rects('[data-mobile-workflow-root] .runner-control__buttons .button'),
+                    };
+                }"""
+            )
+
             route_heights = mobile_root.locator("[data-mobile-route-grid] [data-nav]").evaluate_all(
                 """(els) => els.map((el) => el.getBoundingClientRect().height)"""
             )
             self.assertTrue(route_heights)
             self.assertGreaterEqual(min(route_heights), 58)
+            self.assertEqual(10, len(layout["routeButtons"]))
+
+            def assert_stack(name: str, rects: list[dict[str, object]]) -> None:
+                ordered = sorted(rects, key=lambda rect: (float(rect["top"]), float(rect["left"])))
+                for previous, current in zip(ordered, ordered[1:]):
+                    self.assertLessEqual(
+                        float(previous["bottom"]),
+                        float(current["top"]) + 2,
+                        f"{name} overlaps vertically: {ordered}",
+                    )
+
+            assert_stack("mobile panels", layout["panels"])
+            assert_stack("route buttons", layout["routeButtons"])
+            assert_stack("editor buttons", layout["editorButtons"])
+            assert_stack("confirmation buttons", layout["confirmButtons"])
+            assert_stack("runner buttons", layout["runnerButtons"])
 
             mobile_root.locator('[data-mobile-editor-panel] [data-action="nav-goals"]').click()
             self.expect(page.locator("#main")).to_have_attribute("data-view", "goals")
@@ -701,6 +767,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             )
             self.assertLessEqual(dimensions["scrollWidth"], dimensions["innerWidth"])
             self.assertGreaterEqual(min(dimensions["confirmHeights"]), 34)
+            self._capture_screenshot(page, "mobile-workflow-390.png")
 
             page.locator('#sidebar [data-nav="dashboard"]').click()
             self.expect(page.locator("#main")).to_have_attribute("data-view", "dashboard")

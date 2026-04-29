@@ -42,6 +42,7 @@
     'landing',
     'mobile',
   ];
+  const MOBILE_WORKFLOW_ROUTES = VIEW_ORDER.filter((view) => view !== 'landing' && view !== 'mobile');
   const WORKTREE_DIAGNOSTIC_CATEGORY_ORDER = [
     'active',
     'pending',
@@ -822,13 +823,13 @@
       },
       mobile: {
         title: 'Mobile workflow',
-        workflowSummary: 'Dense mobile surface for navigation, filters, editors, and confirmations.',
-        routesTitle: 'Routes',
-        routesCopy: 'Jump to the primary console routes from a narrow screen.',
+        workflowSummary: 'Compact mobile control surface for navigation, filters, editors, and confirmations.',
+        routesTitle: 'Operational routes',
+        routesCopy: 'Jump to the live console routes from a narrow screen.',
         filtersTitle: 'Live filters',
         filtersCopy: 'Adjust the live tail without leaving mobile.',
         editorsTitle: 'Editors',
-        editorsCopy: 'Open Goals, Config, and Prompts directly.',
+        editorsCopy: 'Open Goals, Config, and Prompts without leaving mobile.',
         confirmationsTitle: 'Confirmations',
         confirmationsCopy: 'Trigger runner and worktree confirmations from mobile.',
         notificationsTitle: 'Notifications',
@@ -1385,13 +1386,13 @@
       },
       mobile: {
         title: '모바일 워크플로',
-        workflowSummary: '내비게이션, 필터, 편집기, 확인 흐름을 한 화면에 압축합니다.',
-        routesTitle: '라우트',
-        routesCopy: '좁은 화면에서 주요 콘솔 라우트를 엽니다.',
+        workflowSummary: '내비게이션, 필터, 편집기, 확인 흐름을 압축한 모바일 제어면입니다.',
+        routesTitle: '운영 라우트',
+        routesCopy: '좁은 화면에서 라이브 콘솔 라우트로 바로 이동합니다.',
         filtersTitle: '라이브 필터',
         filtersCopy: '모바일을 벗어나지 않고 live tail을 조정합니다.',
         editorsTitle: '편집기',
-        editorsCopy: '목표, 설정, 프롬프트를 바로 엽니다.',
+        editorsCopy: '모바일을 벗어나지 않고 목표, 설정, 프롬프트를 엽니다.',
         confirmationsTitle: '확인',
         confirmationsCopy: '모바일에서 실행기와 워크트리 확인을 수행합니다.',
         notificationsTitle: '알림',
@@ -16238,7 +16239,7 @@
   function renderMobile() {
     const liveTail = ensureLogTailState();
     const latestNotifications = toArray(state.notifications).slice(0, 4);
-    const routeButtons = VIEW_ORDER
+    const routeButtons = MOBILE_WORKFLOW_ROUTES
       .map((view) => navButton({
         view,
         label: viewLabel(view),
