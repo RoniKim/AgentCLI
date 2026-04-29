@@ -1596,6 +1596,7 @@ class WebConsoleSafetyTests(unittest.TestCase):
         try:
             actual_create_time = _pid_create_time_ticks(proc.pid)
             self.assertIsNotNone(actual_create_time)
+            bogus_executable = (self._tmp / "bogus" / "web-console.exe").as_posix()
             _write(
                 self._web_instance_lock_path(),
                 json.dumps(
@@ -1604,6 +1605,8 @@ class WebConsoleSafetyTests(unittest.TestCase):
                         "repo_root": self.repo.as_posix(),
                         "pid": proc.pid,
                         "pid_create_time": int(actual_create_time) + 1,
+                        "process_executable": bogus_executable,
+                        "processExecutable": bogus_executable,
                         "created_at": "2026-04-29T00:00:00Z",
                         "host": "127.0.0.1",
                         "port": 8124,
@@ -1629,6 +1632,62 @@ class WebConsoleSafetyTests(unittest.TestCase):
             self.assertEqual("primary", payload["web_instance"]["state"])
             self.assertEqual("read_write", payload["web_instance"]["mode"])
             self.assertTrue(payload["web_instance"]["stale_reclaimed"])
+            self.assertTrue(payload["web_instance"]["liveness"]["deterministic"])
+            self.assertIn(payload["web_instance"]["liveness"]["reason"], {"pid_reused", "process_executable_mismatch"})
+            self.assertTrue(payload["runner_control"]["enabled"])
+            self.assertTrue(payload["runner_control"]["actions"]["start"]["enabled"])
+
+            lock_payload = json.loads(self._web_instance_lock_path().read_text(encoding="utf-8", errors="replace"))
+            self.assertEqual(os.getpid(), lock_payload["pid"])
+            self.assertEqual("enabled", lock_payload["runner_control_state"])
+            self.assertNotEqual(proc.pid, lock_payload["pid"])
+        finally:
+            self._terminate_sleep_process(proc)
+
+    def test_stale_web_instance_lock_with_reused_pid_executable_mismatch_is_reclaimed(self) -> None:
+        from agent_runner.process_guard import _pid_create_time_ticks
+
+        proc = self._spawn_sleep_process()
+        try:
+            actual_create_time = _pid_create_time_ticks(proc.pid)
+            self.assertIsNotNone(actual_create_time)
+            bogus_executable = (self._tmp / "bogus" / "web-console.exe").as_posix()
+            _write(
+                self._web_instance_lock_path(),
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "repo_root": self.repo.as_posix(),
+                        "pid": proc.pid,
+                        "process_executable": bogus_executable,
+                        "processExecutable": bogus_executable,
+                        "created_at": "2026-04-29T00:00:00Z",
+                        "host": "127.0.0.1",
+                        "port": 8125,
+                        "hostname": "stale-owner",
+                        "state": "primary",
+                        "mode": "read_write",
+                        "runner_control_state": "enabled",
+                        "runner_control_enabled": True,
+                        "runner_control_requested": True,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+            )
+
+            client, _ = _create_client(
+                self.repo,
+                enable_runner_controls=True,
+                config_path=self.config_path,
+            )
+            payload = client.get("/api/status").json()
+            self.assertEqual("primary", payload["web_instance"]["state"])
+            self.assertEqual("read_write", payload["web_instance"]["mode"])
+            self.assertTrue(payload["web_instance"]["stale_reclaimed"])
+            self.assertTrue(payload["web_instance"]["liveness"]["deterministic"])
+            self.assertEqual("process_executable_mismatch", payload["web_instance"]["liveness"]["reason"])
             self.assertTrue(payload["runner_control"]["enabled"])
             self.assertTrue(payload["runner_control"]["actions"]["start"]["enabled"])
 

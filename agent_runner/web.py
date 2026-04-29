@@ -11,6 +11,7 @@ import shutil
 import socket
 import threading
 import time
+import sys
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,7 +61,7 @@ from .prompts import (
     REPORTER_INSTRUCTIONS_DEFAULT,
     _read_text_robust,
 )
-from .process_guard import _pid_alive, _pid_create_time_ticks, _pid_signature_matches, init_process_guard, terminate_all_children
+from .process_guard import _pid_alive, _pid_create_time_ticks, _pid_executable_path, init_process_guard, terminate_all_children
 from .run_dir import find_latest_run_dir
 from .shared import coerce_roles_arg
 from .remote.controller import (
@@ -7157,6 +7158,31 @@ def _current_process_create_time() -> int | None:
         return None
 
 
+def _web_instance_normalize_executable(value: object) -> str:
+    text = _path_text(value)
+    if not text:
+        return ""
+    return text.lower() if os.name == "nt" else text
+
+
+def _current_process_executable_path() -> str:
+    try:
+        path = _pid_executable_path(os.getpid())
+    except Exception:
+        path = None
+    if not path:
+        path = getattr(sys, "executable", "")
+    return _web_instance_normalize_executable(path)
+
+
+def _web_instance_signature_executable(existing: dict[str, Any]) -> str:
+    for key in ("process_executable", "processExecutable", "executable", "exe", "process_path", "processPath"):
+        value = existing.get(key)
+        if value not in (None, "", False):
+            return _web_instance_normalize_executable(value)
+    return ""
+
+
 def _web_instance_payload(
     repo_root: Path,
     *,
@@ -7177,6 +7203,7 @@ def _web_instance_payload(
 ) -> dict[str, Any]:
     pid = int(os.getpid())
     pid_create_time = _current_process_create_time()
+    process_executable = _current_process_executable_path()
     payload = {
         "schema_version": 1,
         "schemaVersion": 1,
@@ -7193,6 +7220,8 @@ def _web_instance_payload(
         "pid": pid,
         "pid_create_time": pid_create_time,
         "pidCreateTime": pid_create_time,
+        "process_executable": process_executable,
+        "processExecutable": process_executable,
         "created_at": str(created_at or now_iso()),
         "createdAt": str(created_at or now_iso()),
         "host": str(bind_host or "").strip() or "127.0.0.1",
@@ -7229,7 +7258,13 @@ def _read_web_instance_lock(path: Path) -> dict[str, Any]:
     return {}
 
 
-def _web_instance_same_owner(existing: dict[str, Any], *, pid: int, pid_create_time: int | None) -> bool:
+def _web_instance_same_owner(
+    existing: dict[str, Any],
+    *,
+    pid: int,
+    pid_create_time: int | None,
+    process_executable: str = "",
+) -> bool:
     existing_pid = _coerce_optional_int(existing.get("pid"))
     if existing_pid is None or existing_pid != int(pid):
         return False
@@ -7238,9 +7273,13 @@ def _web_instance_same_owner(existing: dict[str, Any], *, pid: int, pid_create_t
         if existing.get("pid_create_time") is not None
         else existing.get("pidCreateTime")
     )
-    if existing_create_time is None or pid_create_time is None:
-        return True
-    return existing_create_time == int(pid_create_time)
+    if existing_create_time is not None and pid_create_time is not None and existing_create_time != int(pid_create_time):
+        return False
+    existing_executable = _web_instance_signature_executable(existing)
+    current_executable = _web_instance_normalize_executable(process_executable)
+    if existing_executable and current_executable and existing_executable != current_executable:
+        return False
+    return True
 
 
 def _web_instance_lock_liveness(existing: dict[str, Any]) -> dict[str, Any]:
@@ -7250,41 +7289,64 @@ def _web_instance_lock_liveness(existing: dict[str, Any]) -> dict[str, Any]:
         if existing.get("pid_create_time") is not None
         else existing.get("pidCreateTime")
     )
+    recorded_executable = _web_instance_signature_executable(existing)
+
+    def _result(
+        *,
+        live: bool,
+        deterministic: bool,
+        reason: str,
+        live_create_time: int | None = None,
+        live_executable: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "live": bool(live),
+            "deterministic": bool(deterministic),
+            "reason": str(reason),
+            "pid": pid,
+            "pid_create_time": recorded_create_time,
+            "pidCreateTime": recorded_create_time,
+            "live_pid_create_time": live_create_time,
+            "livePidCreateTime": live_create_time,
+            "process_executable": recorded_executable,
+            "processExecutable": recorded_executable,
+            "live_process_executable": live_executable,
+            "liveProcessExecutable": live_executable,
+        }
+
     if pid <= 0:
-        return {
-            "live": False,
-            "deterministic": True,
-            "reason": "missing_pid",
-            "pid": pid,
-            "pid_create_time": recorded_create_time,
-            "pidCreateTime": recorded_create_time,
-        }
+        return _result(live=False, deterministic=True, reason="missing_pid")
     if not _pid_alive(pid):
-        return {
-            "live": False,
-            "deterministic": True,
-            "reason": "pid_not_alive",
-            "pid": pid,
-            "pid_create_time": recorded_create_time,
-            "pidCreateTime": recorded_create_time,
-        }
-    if recorded_create_time is not None and not _pid_signature_matches(pid, recorded_create_time):
-        return {
-            "live": False,
-            "deterministic": True,
-            "reason": "pid_reused",
-            "pid": pid,
-            "pid_create_time": recorded_create_time,
-            "pidCreateTime": recorded_create_time,
-        }
-    return {
-        "live": True,
-        "deterministic": recorded_create_time is not None,
-        "reason": "pid_alive_signature_match" if recorded_create_time is not None else "pid_alive_signature_unavailable",
-        "pid": pid,
-        "pid_create_time": recorded_create_time,
-        "pidCreateTime": recorded_create_time,
-    }
+        return _result(live=False, deterministic=True, reason="pid_not_alive")
+    live_create_time = _pid_create_time_ticks(pid)
+    live_executable = _web_instance_normalize_executable(_pid_executable_path(pid))
+    if recorded_create_time is not None and live_create_time is not None and recorded_create_time != live_create_time:
+        return _result(
+            live=False,
+            deterministic=True,
+            reason="pid_reused",
+            live_create_time=live_create_time,
+            live_executable=live_executable,
+        )
+    if recorded_executable and live_executable and recorded_executable != live_executable:
+        return _result(
+            live=False,
+            deterministic=True,
+            reason="process_executable_mismatch",
+            live_create_time=live_create_time,
+            live_executable=live_executable,
+        )
+    deterministic = bool(
+        (recorded_create_time is not None and live_create_time is not None)
+        or (recorded_executable and live_executable)
+    )
+    return _result(
+        live=True,
+        deterministic=deterministic,
+        reason="pid_alive_signature_match" if deterministic else "pid_alive_signature_unavailable",
+        live_create_time=live_create_time,
+        live_executable=live_executable,
+    )
 
 
 def _web_instance_duplicate_reason(existing: dict[str, Any]) -> str:
@@ -7314,6 +7376,7 @@ class _RepoWebInstanceLock:
         self.created_at = now_iso()
         self.pid = int(os.getpid())
         self.pid_create_time = _current_process_create_time()
+        self.process_executable = _current_process_executable_path()
         self.state = "primary"
         self.mode = "read_write"
         self.reason = ""
@@ -7403,7 +7466,12 @@ class _RepoWebInstanceLock:
                 return
             except FileExistsError:
                 existing = _read_web_instance_lock(self.path)
-                if _web_instance_same_owner(existing, pid=self.pid, pid_create_time=self.pid_create_time):
+                if _web_instance_same_owner(
+                    existing,
+                    pid=self.pid,
+                    pid_create_time=self.pid_create_time,
+                    process_executable=self.process_executable,
+                ):
                     self.same_owner = True
                     self.state = "primary"
                     self.mode = "read_write"
@@ -7458,6 +7526,8 @@ class _RepoWebInstanceLock:
                 "pid": self.pid,
                 "pid_create_time": self.pid_create_time,
                 "pidCreateTime": self.pid_create_time,
+                "process_executable": self.process_executable,
+                "processExecutable": self.process_executable,
                 "created_at": self.created_at,
                 "createdAt": self.created_at,
                 "host": self.bind_host,
@@ -7510,7 +7580,12 @@ class _RepoWebInstanceLock:
             return
         try:
             existing = _read_web_instance_lock(self.path)
-            if not existing or _web_instance_same_owner(existing, pid=self.pid, pid_create_time=self.pid_create_time):
+            if not existing or _web_instance_same_owner(
+                existing,
+                pid=self.pid,
+                pid_create_time=self.pid_create_time,
+                process_executable=self.process_executable,
+            ):
                 self.path.unlink(missing_ok=True)
         except Exception:
             pass

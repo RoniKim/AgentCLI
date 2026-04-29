@@ -168,6 +168,7 @@ def _init_kernel32_types() -> None:
     kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
     kernel32.TerminateProcess.restype = ctypes.c_int
     kernel32.TerminateProcess.argtypes = [_HANDLE, ctypes.c_uint]
+    kernel32.QueryFullProcessImageNameW.restype = ctypes.c_int
     kernel32.WaitForSingleObject.restype = ctypes.c_uint32
     kernel32.WaitForSingleObject.argtypes = [_HANDLE, ctypes.c_uint32]
     kernel32.GetProcessTimes.restype = ctypes.c_int
@@ -306,6 +307,35 @@ def _pid_create_time_ticks(pid: int) -> Optional[int]:
             return _filetime_to_int(creation)
         finally:
             kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
+
+def _pid_executable_path(pid: int) -> Optional[str]:
+    """Return the executable path for a live process PID when available."""
+    if pid <= 0:
+        return None
+    try:
+        if sys.platform == "win32":
+            _init_kernel32_types()
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not handle:
+                return None
+            try:
+                buffer = ctypes.create_unicode_buffer(32768)
+                size = ctypes.c_uint32(len(buffer))
+                ok = kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size))
+                if not ok:
+                    return None
+                path = str(buffer.value or "").strip()
+                return Path(path).expanduser().as_posix() if path else None
+            finally:
+                kernel32.CloseHandle(handle)
+
+        exe_path = os.readlink(f"/proc/{pid}/exe")
+        exe_path = str(exe_path or "").strip()
+        return Path(exe_path).expanduser().as_posix() if exe_path else None
     except Exception:
         return None
 
