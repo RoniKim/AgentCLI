@@ -165,6 +165,10 @@
         reconnecting: 'Reconnecting',
         reconnectingCopy: 'Last updated {timestamp}. Retrying the live snapshot.',
         staleCopy: 'Last updated {timestamp}. The controller and process table are out of sync.',
+        backendUnavailable: 'Backend unavailable',
+        backendUnavailableCopy: 'Last updated {timestamp}. The backend is unavailable, so the console is retrying the live snapshot.',
+        permissionDenied: 'Permission denied',
+        permissionDeniedCopy: 'Last updated {timestamp}. The backend rejected this snapshot request.',
         partial: 'Partial snapshot',
         loadingReadOnly: 'Loading read-only snapshot',
         controlsDisabled: 'Controls disabled',
@@ -915,6 +919,14 @@
         error: 'API 오류',
         fallback: '대체 데이터',
         stale: '오래된 스냅샷',
+        lastUpdated: '마지막 업데이트',
+        reconnecting: '재연결 중',
+        reconnectingCopy: '마지막 업데이트 {timestamp}. 라이브 스냅샷을 다시 시도하고 있습니다.',
+        staleCopy: '마지막 업데이트 {timestamp}. 컨트롤러와 프로세스 상태가 서로 다릅니다.',
+        backendUnavailable: '백엔드 사용 불가',
+        backendUnavailableCopy: '마지막 업데이트 {timestamp}. 백엔드를 사용할 수 없어 라이브 스냅샷을 다시 시도하고 있습니다.',
+        permissionDenied: '권한 거부됨',
+        permissionDeniedCopy: '마지막 업데이트 {timestamp}. 백엔드가 이 스냅샷 요청을 거부했습니다.',
         partial: '부분 스냅샷',
         loadingReadOnly: '읽기 전용 스냅샷 로딩 중',
         controlsDisabled: '컨트롤 비활성화',
@@ -2839,14 +2851,23 @@
     err: 'status-chip--err',
     reconnecting: 'status-chip--reconnecting',
     stale: 'status-chip--stale',
+    'backend-unavailable': 'status-chip--backend-unavailable',
+    'permission-denied': 'status-chip--permission-denied',
   };
 
   const SECTION_NOTICE_CLASS_NAMES = {
     info: 'section-banner--info',
     warn: 'section-banner--warn',
     err: 'section-banner--err',
+    loading: 'section-banner--loading',
+    partial: 'section-banner--partial',
+    empty: 'section-banner--empty',
+    fallback: 'section-banner--fallback',
+    disabled: 'section-banner--disabled',
     reconnecting: 'section-banner--reconnecting',
     stale: 'section-banner--stale',
+    'backend-unavailable': 'section-banner--backend-unavailable',
+    'permission-denied': 'section-banner--permission-denied',
   };
 
   const RUN_BANNER_CLASS_NAMES = {
@@ -2876,6 +2897,24 @@
   function sectionNoticeClass(tone) {
     const normalized = toText(tone, 'info');
     return SECTION_NOTICE_CLASS_NAMES[normalized] || SECTION_NOTICE_CLASS_NAMES.info;
+  }
+
+  function normalizeSnapshotErrorKind(statusCode) {
+    const status = toNumber(statusCode, 0);
+    if (status === 401 || status === 403) {
+      return 'permission-denied';
+    }
+    if (status === 502 || status === 503 || status === 504) {
+      return 'backend-unavailable';
+    }
+    return 'error';
+  }
+
+  function normalizeSectionStatus(rawStatus) {
+    const status = toText(rawStatus, 'ready').toLowerCase().replace(/_/g, '-');
+    if (status === 'backend unavailable') return 'backend-unavailable';
+    if (status === 'permission denied') return 'permission-denied';
+    return status || 'ready';
   }
 
   function severityClass(level) {
@@ -4720,7 +4759,7 @@
   }
 
   function buildSectionState(kind, rawStatus, message, source = 'api') {
-    const status = toText(rawStatus, 'ready');
+    const status = normalizeSectionStatus(rawStatus);
     return {
       kind,
       status,
@@ -8418,7 +8457,8 @@
 
   function snapshotRefreshDisplay(refresh = state.snapshotRefresh) {
     const current = toObject(refresh);
-    const status = toText(current.status, state.snapshotStatus || 'loading');
+    const status = normalizeSectionStatus(current.status || state.snapshotStatus || 'loading');
+    const errorKind = normalizeSnapshotErrorKind(current.lastErrorStatus);
     const lastUpdatedAt = toNumber(current.lastUpdatedAt || state.lastSnapshotAt || 0, 0);
     const timestampText = lastUpdatedAt ? fmtDateTime(lastUpdatedAt) : t('common.unavailable');
     const staleReasons = toArray(current.staleReasons).map((reason) => toText(reason, '')).filter(Boolean);
@@ -8441,18 +8481,37 @@
       copy = lastUpdatedAt ? `${t('snapshot.lastUpdated')} ${timestampText}` : t('snapshot.fallback');
       tone = 'warn';
       effectiveStatus = 'fallback';
+    } else if (status === 'backend-unavailable' || (status === 'error' && errorKind === 'backend-unavailable')) {
+      label = t('snapshot.backendUnavailable');
+      copy = t('snapshot.backendUnavailableCopy', { timestamp: timestampText });
+      tone = 'backend-unavailable';
+      effectiveStatus = 'backend-unavailable';
+    } else if (status === 'permission-denied' || (status === 'error' && errorKind === 'permission-denied')) {
+      label = t('snapshot.permissionDenied');
+      copy = t('snapshot.permissionDeniedCopy', { timestamp: timestampText });
+      tone = 'permission-denied';
+      effectiveStatus = 'permission-denied';
     } else if (status === 'error') {
       label = t('snapshot.error');
       copy = lastUpdatedAt ? `${t('snapshot.lastUpdated')} ${timestampText}` : t('snapshot.error');
       tone = 'err';
       effectiveStatus = 'error';
     } else if (status === 'reconnecting') {
-      label = hasStaleSignal ? t('snapshot.stale') : t('snapshot.reconnecting');
-      copy = hasStaleSignal
-        ? t('snapshot.staleCopy', { timestamp: timestampText })
-        : t('snapshot.reconnectingCopy', { timestamp: timestampText });
-      tone = hasStaleSignal ? 'stale' : 'reconnecting';
-      effectiveStatus = hasStaleSignal ? 'stale' : 'reconnecting';
+      if (!hasStaleSignal && errorKind === 'permission-denied') {
+        label = t('snapshot.permissionDenied');
+        copy = t('snapshot.permissionDeniedCopy', { timestamp: timestampText });
+        tone = 'permission-denied';
+        effectiveStatus = 'permission-denied';
+      } else {
+        label = hasStaleSignal ? t('snapshot.stale') : t('snapshot.reconnecting');
+        copy = hasStaleSignal
+          ? t('snapshot.staleCopy', { timestamp: timestampText })
+          : errorKind === 'backend-unavailable'
+            ? t('snapshot.backendUnavailableCopy', { timestamp: timestampText })
+            : t('snapshot.reconnectingCopy', { timestamp: timestampText });
+        tone = hasStaleSignal ? 'stale' : 'reconnecting';
+        effectiveStatus = hasStaleSignal ? 'stale' : 'reconnecting';
+      }
     } else if (status === 'stale' || hasStaleSignal) {
       label = t('snapshot.stale');
       copy = t('snapshot.staleCopy', { timestamp: timestampText });
@@ -8470,6 +8529,7 @@
       timestampText,
       stale: hasStaleSignal || effectiveStatus === 'stale',
       staleReasons,
+      errorKind,
     };
   }
 
@@ -8478,7 +8538,11 @@
     if (display.status === 'ready') {
       return;
     }
-    const sectionStatus = display.status === 'error' ? 'error' : display.status;
+    const sectionStatus = display.status === 'reconnecting' && display.errorKind === 'backend-unavailable'
+      ? 'backend-unavailable'
+      : display.status === 'error' && display.errorKind !== 'error'
+        ? display.errorKind
+        : normalizeSectionStatus(display.status);
     const source = state.sourceMode === 'fallback' ? 'fallback' : 'api';
     const message = display.copy || display.lastUpdatedLabel || fallbackSectionMessage('activeRun');
     const sectionKeys = Object.keys(state.sectionState || {});
@@ -8526,40 +8590,57 @@
     if (!section || section.status === 'ready') {
       return '';
     }
+    const status = normalizeSectionStatus(section.status);
     const tone =
-      section.status === 'error'
+      status === 'error'
         ? 'err'
-        : section.status === 'reconnecting'
+        : status === 'backend-unavailable'
+          ? 'backend-unavailable'
+          : status === 'permission-denied'
+            ? 'permission-denied'
+            : status === 'reconnecting'
           ? 'reconnecting'
-          : section.status === 'stale'
+          : status === 'stale'
             ? 'stale'
-            : section.status === 'disabled' || section.status === 'loading' || section.status === 'fallback' || section.status === 'empty' || section.status === 'partial'
-          ? 'warn'
-          : 'info';
+            : status === 'loading'
+              ? 'loading'
+              : status === 'partial'
+                ? 'partial'
+                : status === 'empty'
+                  ? 'empty'
+                  : status === 'fallback'
+                    ? 'fallback'
+                    : status === 'disabled'
+                      ? 'disabled'
+                      : 'info';
     const label =
-      section.status === 'loading'
+      status === 'loading'
         ? t('snapshot.loadingReadOnly')
-        : section.status === 'disabled'
+        : status === 'disabled'
           ? t('snapshot.controlsDisabled')
-          : section.status === 'reconnecting'
-            ? t('snapshot.reconnecting')
-          : section.status === 'stale'
+          : status === 'backend-unavailable'
+            ? t('snapshot.backendUnavailable')
+            : status === 'permission-denied'
+              ? t('snapshot.permissionDenied')
+              : status === 'reconnecting'
+             ? t('snapshot.reconnecting')
+          : status === 'stale'
             ? t('snapshot.stale')
-          : section.status === 'fallback'
-          ? t('snapshot.fallback')
-          : section.status === 'partial'
+          : status === 'fallback'
+            ? t('snapshot.fallback')
+            : status === 'partial'
             ? t('snapshot.partial')
-              : section.status === 'empty'
+              : status === 'empty'
                 ? t('snapshot.emptyState')
-              : section.status;
+                : status;
     const message =
-      section.status === 'loading'
+      status === 'loading'
         ? t('snapshot.loadingReadOnly')
-        : section.status === 'disabled'
+        : status === 'disabled'
           ? t('snapshot.controlsDisabled')
           : section.message || fallbackSectionMessage(sectionKey);
     return `
-      <div class="modal-banner section-banner ${sectionNoticeClass(tone)}">
+      <div class="modal-banner section-banner ${sectionNoticeClass(tone)}" data-section-state="${escapeHTML(status)}">
         <span class="dot" style="background: currentColor;"></span>
         <div>
           <div class="section-banner__title">${escapeHTML(label)}</div>
@@ -11340,6 +11421,7 @@
             <select
               id="prompt-backup-selection"
               class="field-control prompt-editor__input prompt-backup-select"
+              aria-label="${escapeHTML(t('prompts.restoreBackup'))}"
               data-prompt-backup-select
               ${backupSelectAttrs}
             >
@@ -11352,6 +11434,7 @@
             <input
               id="prompt-restore-confirmation"
               class="field-control prompt-editor__input prompt-backup-confirm"
+              aria-label="${escapeHTML(t('prompts.restoreConfirmation'))}"
               data-prompt-restore-confirmation
               type="text"
               value="${escapeHTML(editor.restoreConfirmation || '')}"
@@ -12623,6 +12706,7 @@
                 <input
                   type="text"
                   class="field-control worktree-action__input"
+                  aria-label="${escapeHTML(t('worktree.confirmationPhrase'))}"
                   data-worktree-action-confirmation
                   value="${escapeHTML(actionState.confirmation || '')}"
                   placeholder="${escapeHTML(confirmation)}"
@@ -12781,7 +12865,7 @@
         <span class="status-chip">${escapeHTML(elapsedLabel)} ${escapeHTML(elapsed)}</span>
       </div>
       <div class="topbar__actions">
-        <span class="status-chip status-chip--snapshot ${snapshotTone}" title="${escapeHTML(snapshotDisplay.copy || snapshotDisplay.lastUpdatedLabel || '')}">
+        <span class="status-chip status-chip--snapshot ${snapshotTone}" data-snapshot-state="${escapeHTML(snapshotDisplay.errorKind && snapshotDisplay.status === 'reconnecting' ? snapshotDisplay.errorKind : snapshotDisplay.status)}" title="${escapeHTML(snapshotDisplay.copy || snapshotDisplay.lastUpdatedLabel || '')}">
           <span class="dot" style="color: currentColor; background: currentColor;"></span>
           <span class="status-chip__label">${escapeHTML(snapshotDisplay.label)}</span>
           <span class="status-chip__meta">${escapeHTML(snapshotDisplay.lastUpdatedLabel)}</span>
@@ -13253,6 +13337,7 @@
   function createBlankSnapshotRefreshState() {
     return {
       status: 'loading',
+      errorKind: '',
       active: false,
       inFlight: false,
       requestSeq: 0,
@@ -13919,6 +14004,7 @@
       <input
         type="number"
         class="field-control"
+        aria-label="${escapeHTML(t('runner.maxCycles'))}"
         min="${escapeHTML(toText(schema.loop_max_cycles?.min, '0'))}"
         step="1"
         value="${escapeHTML(toText(values.loop_max_cycles, '0'))}"
@@ -13927,14 +14013,14 @@
       >
     `;
     const profileControl = `
-      <select class="field-control" data-runner-option-field="profile" ${disabled ? 'disabled' : ''}>
+      <select class="field-control" aria-label="${escapeHTML(t('runner.profile'))}" data-runner-option-field="profile" ${disabled ? 'disabled' : ''}>
         ${profileOptions
           .map((option) => `<option value="${escapeHTML(option)}" ${String(option) === String(values.profile) ? 'selected' : ''}>${escapeHTML(option)}</option>`)
           .join('')}
       </select>
     `;
     const backendControl = `
-      <select class="field-control" data-runner-option-field="execution_backend" ${disabled ? 'disabled' : ''}>
+      <select class="field-control" aria-label="${escapeHTML(t('runner.backend'))}" data-runner-option-field="execution_backend" ${disabled ? 'disabled' : ''}>
         ${backendOptions
           .map((option) => `<option value="${escapeHTML(option)}" ${String(option) === String(values.execution_backend) ? 'selected' : ''}>${escapeHTML(option)}</option>`)
           .join('')}
@@ -13944,6 +14030,7 @@
       <input
         type="text"
         class="field-control"
+        aria-label="${escapeHTML(t('runner.configPath'))}"
         value="${escapeHTML(configPathValue)}"
         placeholder="${escapeHTML(configPathPlaceholder)}"
         autocomplete="off"
@@ -14987,12 +15074,13 @@
     const schema = state.configSchema[path];
     const value = getAt(state.configDraft, path);
     const disabled = configMutationInFlight();
+    const fieldLabel = escapeHTML(schema?.label || path);
     if (!schema) {
       return `<div class="field-error">${escapeHTML(t('config.missingSchema', { path }))}</div>`;
     }
     if (schema.kind === 'bool') {
       return `
-        <button type="button" class="control-chip ${value ? 'control-chip--active' : ''}" data-config-toggle="${escapeHTML(path)}" ${disabled ? 'disabled' : ''}>
+        <button type="button" class="control-chip ${value ? 'control-chip--active' : ''}" data-config-toggle="${escapeHTML(path)}" aria-label="${fieldLabel}" ${disabled ? 'disabled' : ''}>
           <span class="dot" style="background:${value ? 'var(--accent)' : 'var(--text-sub)'}"></span>
           ${escapeHTML(value ? t('common.enabled') : t('common.disabled'))}
         </button>
@@ -15000,7 +15088,7 @@
     }
     if (schema.kind === 'enum') {
       return `
-        <select class="field-control" data-config-field="${escapeHTML(path)}" ${disabled ? 'disabled' : ''}>
+        <select class="field-control" aria-label="${fieldLabel}" data-config-field="${escapeHTML(path)}" ${disabled ? 'disabled' : ''}>
           ${schema.options
             .map((option) => `<option value="${escapeHTML(option)}" ${option === value ? 'selected' : ''}>${escapeHTML(option)}</option>`)
             .join('')}
@@ -15021,7 +15109,7 @@
         <div class="modal-tabs">
           ${schema.options
             .map((option) => `
-              <button type="button" class="modal-tab ${set.has(String(option).toLowerCase()) ? 'modal-tab--active' : ''}" data-config-multi="${escapeHTML(path)}" data-config-value="${escapeHTML(option)}" ${disabled ? 'disabled' : ''}>${escapeHTML(option)}</button>
+              <button type="button" class="modal-tab ${set.has(String(option).toLowerCase()) ? 'modal-tab--active' : ''}" data-config-multi="${escapeHTML(path)}" data-config-value="${escapeHTML(option)}" aria-label="${fieldLabel} ${escapeHTML(option)}" ${disabled ? 'disabled' : ''}>${escapeHTML(option)}</button>
             `)
             .join('')}
         </div>
@@ -15033,6 +15121,7 @@
         <textarea
           class="field-control field-control--textarea"
           rows="3"
+          aria-label="${fieldLabel}"
           placeholder="${escapeHTML(schema.item_kind === 'int' || schema.itemKind === 'int' ? t('config.listPlaceholderNumbers') : t('config.listPlaceholderValues'))}"
           data-config-field="${escapeHTML(path)}"
           ${disabled ? 'disabled' : ''}
@@ -15044,6 +15133,7 @@
         <input
           class="field-control"
           type="number"
+          aria-label="${fieldLabel}"
           value="${escapeHTML(value)}"
           min="${schema.min != null ? escapeHTML(schema.min) : ''}"
           max="${schema.max != null ? escapeHTML(schema.max) : ''}"
@@ -15058,6 +15148,7 @@
       <input
         class="field-control ${schema.redacted ? 'field-control--secret' : ''}"
         type="${inputType}"
+        aria-label="${fieldLabel}"
         value="${escapeHTML(value)}"
         placeholder="${schema.redacted ? escapeHTML(t('common.unavailable')) : ''}"
         autocomplete="off"
@@ -15410,6 +15501,7 @@
                 id="prompt-editor-file"
                 class="field-control prompt-editor__input"
                 type="text"
+                aria-label="${escapeHTML(t('prompts.filename'))}"
                 data-prompt-editor-field="file"
                 value="${escapeHTML(editor.promptId ? editor.draftFile || '' : '')}"
                 ${editorDisabled ? 'disabled' : ''}
@@ -15423,6 +15515,7 @@
               <textarea
                 id="prompt-editor-content"
                 class="field-control field-control--textarea prompt-editor__textarea"
+                aria-label="${escapeHTML(t('prompts.content'))}"
                 data-prompt-editor-field="content"
                 rows="18"
                 ${editorDisabled ? 'disabled' : ''}
@@ -16446,6 +16539,7 @@
             <input
               type="text"
               class="palette-input"
+              aria-label="${escapeHTML(t('topbar.commandPaletteTitle'))}"
               placeholder="${escapeHTML(t('palette.placeholder'))}"
               value="${escapeHTML(state.paletteQuery)}"
               data-palette-input
@@ -16498,11 +16592,11 @@
               </div>
               <div class="modal-field">
                 <div class="modal-field__label">${escapeHTML(t('goals.goal'))}</div>
-                <textarea class="field-control field-control--textarea" rows="2" data-goal-field="text">${escapeHTML(draft.text)}</textarea>
+                <textarea class="field-control field-control--textarea" rows="2" aria-label="${escapeHTML(t('goals.goal'))}" data-goal-field="text">${escapeHTML(draft.text)}</textarea>
               </div>
               <div class="modal-field">
                 <div class="modal-field__label">${escapeHTML(t('goals.note'))}</div>
-                <textarea class="field-control field-control--textarea" rows="3" data-goal-field="note">${escapeHTML(draft.note || '')}</textarea>
+                <textarea class="field-control field-control--textarea" rows="3" aria-label="${escapeHTML(t('goals.note'))}" data-goal-field="note">${escapeHTML(draft.note || '')}</textarea>
               </div>
               ${editor.error ? `<div class="field-error">${escapeHTML(editor.error)}</div>` : `<div class="modal-copy">${escapeHTML(t('goals.draftStaysLocal'))}</div>`}
               <div class="modal-actions">
@@ -16631,6 +16725,7 @@
               <input
                 type="text"
                 class="field-control"
+                aria-label="${escapeHTML(t('runner.confirmationPhrase'))}"
                 data-stop-confirmation
                 value="${escapeHTML(state.stopConfirmation)}"
                 placeholder="${escapeHTML(confirmation)}"
@@ -17439,6 +17534,7 @@
             <input
               type="text"
               class="palette-input"
+              aria-label="${escapeHTML(t('topbar.commandPaletteTitle'))}"
               placeholder="${escapeHTML(t('palette.placeholder'))}"
               value="${escapeHTML(state.paletteQuery)}"
               data-palette-input
@@ -17491,11 +17587,11 @@
               </div>
               <div class="modal-field">
                 <div class="modal-field__label">${escapeHTML(t('goals.goal'))}</div>
-                <textarea class="field-control field-control--textarea" rows="2" data-goal-field="text">${escapeHTML(draft.text)}</textarea>
+                <textarea class="field-control field-control--textarea" rows="2" aria-label="${escapeHTML(t('goals.goal'))}" data-goal-field="text">${escapeHTML(draft.text)}</textarea>
               </div>
               <div class="modal-field">
                 <div class="modal-field__label">${escapeHTML(t('goals.note'))}</div>
-                <textarea class="field-control field-control--textarea" rows="3" data-goal-field="note">${escapeHTML(draft.note || '')}</textarea>
+                <textarea class="field-control field-control--textarea" rows="3" aria-label="${escapeHTML(t('goals.note'))}" data-goal-field="note">${escapeHTML(draft.note || '')}</textarea>
               </div>
               ${editor.error ? `<div class="field-error">${escapeHTML(editor.error)}</div>` : `<div class="modal-copy">${escapeHTML(t('goals.draftStaysLocal'))}</div>`}
               <div class="modal-actions">
@@ -18644,6 +18740,7 @@
       nextRefresh.lastErrorAt = 0;
       nextRefresh.lastErrorStatus = 0;
       nextRefresh.lastError = '';
+      nextRefresh.errorKind = '';
       nextRefresh.retryCount = 0;
       nextRefresh.retryDelayMs = SNAPSHOT_POLL_MS;
       nextRefresh.nextRefreshAt = 0;
@@ -18672,6 +18769,8 @@
       nextRefresh.lastErrorAt = nowMs();
       nextRefresh.lastErrorStatus = toNumber(error?.status || error?.response?.status, 0);
       nextRefresh.lastError = toText(error?.message || error, '');
+      const errorKind = normalizeSnapshotErrorKind(nextRefresh.lastErrorStatus);
+      nextRefresh.errorKind = errorKind;
       nextRefresh.retryCount = toNumber(nextRefresh.retryCount, 0) + 1;
       const baseDelay = Math.max(nextRefresh.retryDelayMs || SNAPSHOT_POLL_MS, SNAPSHOT_POLL_MS);
       nextRefresh.retryDelayMs = Math.min(nextRefresh.maxRetryDelayMs || SNAPSHOT_RECONNECT_MAX_MS, baseDelay * 2);
@@ -18708,17 +18807,28 @@
       }
 
       if (state.lastSnapshotAt) {
-        nextRefresh.status = 'reconnecting';
+        nextRefresh.status = errorKind === 'permission-denied' ? 'permission-denied' : 'reconnecting';
         nextRefresh.stale = Boolean(nextRefresh.staleReasons.length);
         nextRefresh.staleReasons = toArray(nextRefresh.staleReasons).map((reason) => toText(reason, '')).filter(Boolean);
-        state.snapshotStatus = 'stale';
-        state.snapshotLabel = t('snapshot.stale');
+        if (errorKind === 'permission-denied') {
+          nextRefresh.stale = false;
+          nextRefresh.staleReasons = [];
+          state.snapshotStatus = 'permission-denied';
+          state.snapshotLabel = t('snapshot.permissionDenied');
+        } else {
+          state.snapshotStatus = errorKind === 'backend-unavailable' ? 'backend-unavailable' : 'stale';
+          state.snapshotLabel = errorKind === 'backend-unavailable' ? t('snapshot.backendUnavailable') : t('snapshot.stale');
+        }
       } else {
-        nextRefresh.status = 'error';
+        nextRefresh.status = errorKind;
         nextRefresh.stale = false;
         nextRefresh.staleReasons = [];
-        state.snapshotStatus = 'error';
-        state.snapshotLabel = t('snapshot.error');
+        state.snapshotStatus = errorKind;
+        state.snapshotLabel = errorKind === 'backend-unavailable'
+          ? t('snapshot.backendUnavailable')
+          : errorKind === 'permission-denied'
+            ? t('snapshot.permissionDenied')
+            : t('snapshot.error');
       }
       renderSnapshotRefreshUI();
       if (nextRefresh.active) {
