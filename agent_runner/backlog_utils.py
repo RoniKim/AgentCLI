@@ -95,6 +95,23 @@ def normalize_backlog_tasks(
     next_num = 1
     out: list[dict[str, Any]] = []
     id_remap: dict[str, str] = {}  # old_id -> new_id for dependency fixup
+
+    def _clean_goal_trace(value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, dict):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        traces: list[dict[str, Any]] = []
+        for trace in value:
+            if not isinstance(trace, dict):
+                continue
+            goal_ref = str(trace.get("goal_ref") or trace.get("goal_id") or "").strip()
+            goal_text = str(trace.get("goal_text") or trace.get("text") or "").strip()
+            if not goal_ref and not goal_text:
+                continue
+            traces.append(dict(trace))
+        return traces
+
     for t in filtered:
         tid = str(t.get("id") or "").strip()
         m = re.match(r"^T(\d+)$", tid)
@@ -129,7 +146,7 @@ def normalize_backlog_tasks(
             depends_on = [str(d).strip() for d in depends_on_val if str(d).strip()]
         else:
             depends_on = []
-        out.append({
+        normalized_task = {
             "id": fixed_id,
             "title": str(t.get("title") or fixed_id).strip() or fixed_id,
             "prompt": str(t.get("prompt") or "").strip() or f"Implement {fixed_id}.",
@@ -138,7 +155,14 @@ def normalize_backlog_tasks(
             "skills": skills,
             "skills_rationale": None if t.get("skills_rationale") is None else str(t.get("skills_rationale")),
             "depends_on": depends_on,
-        })
+        }
+        goal_trace = _clean_goal_trace(t.get("goal_trace"))
+        if goal_trace:
+            normalized_task["goal_trace"] = goal_trace
+        for key in ("split_from_task_id", "split_reason", "split_index", "split_count"):
+            if key in t:
+                normalized_task[key] = t[key]
+        out.append(normalized_task)
 
     # Remap depends_on references when task IDs were normalized
     if id_remap:

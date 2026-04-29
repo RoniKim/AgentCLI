@@ -29,6 +29,7 @@ from .utils import eprint, now_iso
 
 
 GOALS_INCOMPLETE_STATUS = "goals_incomplete"
+MAX_GOAL_TRACES_PER_TASK = 2
 
 
 def goals_path(repo: Path) -> Path:
@@ -440,6 +441,80 @@ def _goal_gate_trace_for_task(
     return traces
 
 
+def _short_task_text(text: Any, *, max_len: int = 120) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(normalized) <= max_len:
+        return normalized
+    return normalized[: max(0, max_len - 3)].rstrip() + "..."
+
+
+def _goal_scope_lines(traces: list[Dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for trace in traces:
+        ref = str(trace.get("goal_ref") or trace.get("goal_id") or "").strip()
+        text = _short_task_text(trace.get("goal_text") or trace.get("text") or "", max_len=180)
+        if ref and text:
+            lines.append(f"- {ref}: {text}")
+        elif ref:
+            lines.append(f"- {ref}")
+        elif text:
+            lines.append(f"- {text}")
+    return lines
+
+
+def _split_oversized_goal_task(
+    task: Dict[str, Any],
+    matches: list[Dict[str, Any]],
+    *,
+    max_goal_traces_per_task: int = MAX_GOAL_TRACES_PER_TASK,
+) -> list[Dict[str, Any]]:
+    """Split a PM task that bundled too many GOALS into reviewable chunks."""
+    max_goals = max(1, int(max_goal_traces_per_task or MAX_GOAL_TRACES_PER_TASK))
+    if len(matches) <= max_goals:
+        next_task = dict(task)
+        next_task["goal_trace"] = [dict(trace) for trace in matches]
+        return [next_task]
+
+    original_id = str(task.get("id") or "T").strip() or "T"
+    original_title = _short_task_text(task.get("title") or original_id, max_len=160)
+    original_prompt = str(task.get("prompt") or "").strip()
+    original_done_when = str(task.get("done_when") or "").strip()
+    chunks = [matches[index : index + max_goals] for index in range(0, len(matches), max_goals)]
+    split_tasks: list[Dict[str, Any]] = []
+
+    for index, chunk in enumerate(chunks, start=1):
+        primary = chunk[0] if chunk else {}
+        primary_text = _short_task_text(primary.get("goal_text") or primary.get("text") or original_title, max_len=110)
+        task_id = original_id if index == 1 else f"{original_id}-{index}"
+        scope_lines = "\n".join(_goal_scope_lines([dict(trace) for trace in chunk]))
+        next_task = dict(task)
+        next_task["id"] = task_id
+        next_task["title"] = primary_text or original_title
+        next_task["prompt"] = (
+            "AgentCLI split this PM task because the original task matched too many unchecked GOALS items.\n"
+            "Implement ONLY the GOALS scope below in this task; leave the remaining original scope for the sibling tasks.\n\n"
+            f"GOALS scope:\n{scope_lines}\n\n"
+            f"Original task title: {original_title}\n\n"
+            f"Original prompt:\n{original_prompt}"
+        ).strip()
+        next_task["done_when"] = (
+            "Only the listed GOALS scope is implemented and validated; unrelated sibling GOALS remain untouched."
+            if not original_done_when
+            else (
+                "Only the listed GOALS scope is implemented and validated. "
+                f"Original done_when context: {original_done_when}"
+            )
+        )
+        next_task["goal_trace"] = [dict(trace) for trace in chunk]
+        next_task["split_from_task_id"] = original_id
+        next_task["split_reason"] = "oversized_goal_bundle"
+        next_task["split_index"] = index
+        next_task["split_count"] = len(chunks)
+        split_tasks.append(next_task)
+
+    return split_tasks
+
+
 def gate_pm_tasks_against_goals(
     repo: Path,
     tasks: list[Dict[str, Any]],
@@ -462,6 +537,7 @@ def gate_pm_tasks_against_goals(
 
     accepted_tasks: list[Dict[str, Any]] = []
     rejected_tasks: list[Dict[str, Any]] = []
+    split_tasks: list[Dict[str, Any]] = []
     goal_path_str = goal_path.as_posix() if goal_path else ""
 
     for raw_task in tasks:
@@ -484,11 +560,22 @@ def gate_pm_tasks_against_goals(
                     }
                 )
                 continue
-            task["goal_trace"] = accepted_matches
+            emitted = _split_oversized_goal_task(task, accepted_matches)
         else:
-            task["goal_trace"] = all_matches if all_matches else list(task.get("goal_trace") or [])
+            emitted = _split_oversized_goal_task(task, all_matches) if all_matches else [task]
 
-        accepted_tasks.append(task)
+        if len(emitted) > 1:
+            split_tasks.append(
+                {
+                    "id": str(task.get("id") or "").strip(),
+                    "title": str(task.get("title") or "").strip(),
+                    "matched_goal_refs": [trace["goal_ref"] for trace in (accepted_matches or all_matches)],
+                    "emitted_task_count": len(emitted),
+                    "max_goal_traces_per_task": MAX_GOAL_TRACES_PER_TASK,
+                    "reason": "oversized_goal_bundle",
+                }
+            )
+        accepted_tasks.extend(emitted)
 
     if gate_required:
         if rejected_tasks and not accepted_tasks:
@@ -518,6 +605,7 @@ def gate_pm_tasks_against_goals(
                 "gate_required": gate_required,
                 "accepted_count": len(accepted_tasks),
                 "rejected_count": len(rejected_tasks),
+                "split_count": len(split_tasks),
                 "unmet_p0_goal_refs": [item["goal_ref"] for item in unmet_p0_items],
                 "unmet_p0_goal_texts": [item["goal_text"] for item in unmet_p0_items],
             },
@@ -531,6 +619,8 @@ def gate_pm_tasks_against_goals(
         "message": message,
         "accepted_tasks": accepted_tasks,
         "rejected_tasks": rejected_tasks,
+        "split_tasks": split_tasks,
+        "max_goal_traces_per_task": MAX_GOAL_TRACES_PER_TASK,
         "error": error,
     }
 

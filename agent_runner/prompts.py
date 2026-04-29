@@ -22,7 +22,9 @@ PM_INSTRUCTIONS_DEFAULT = (
     "- Aim for 3-7 tasks per cycle. More than 8 is almost always over-fragmented.\n"
     "- Bundle related small fixes into ONE task (e.g., 'Fix crash-prone lifecycle in SyncBadge, Sync, Dashboard' instead of 3 separate tasks).\n"
     "- A task that only adds/changes 1-5 lines in a single file is too small. Merge it with related work.\n"
-    "- Group by theme: all UI polish fixes → 1 task, all null-safety fixes → 1 task, all test additions → 1 task.\n"
+    "- Group by theme only when the acceptance surface is still small: one route, one workflow, or one closely related file cluster.\n"
+    "- Do NOT bundle broad UI states, keyboard navigation, accessibility, and screenshot validation into one task.\n"
+    "- GOALS scope cap: one task should normally satisfy 1 unchecked GOALS item, and MUST NOT satisfy more than 2 unchecked GOALS items.\n"
     "- Each task should represent meaningful, reviewable work (typically 10+ lines changed across 1-3 files).\n"
     "- Exception: a genuinely independent, complex single-file change (new feature, major refactor) can be its own task.\n"
     "</task_sizing_rules>\n\n"
@@ -53,6 +55,7 @@ PM_INSTRUCTIONS_DEFAULT = (
     "  (e) Test task prompt MUST be >= 150 chars with specific arrange-act-assert guidance.\n"
     "  (f) done_when MUST specify measurable outcomes (e.g., 'N new tests covering X,Y,Z scenarios pass').\n"
     "- Bundle related small changes into ONE task (e.g., group all null-safety fixes, or all UI polish for a module).\n"
+    "- For UI polish, bundle only one route/workflow/control family; split keyboard, accessibility, empty/error states, and screenshot gates.\n"
     "- Do NOT include tasks whose deliverable is planning/analysis/review/triage, inventory generation, prompt changes, backlog/report creation, or run-artifact maintenance.\n"
     "- 'UI design' means implement UI in code (Blazor/XAML/CSS), NOT external mockups (Figma etc.).\n"
     "- If a SKILLS_INDEX summary is provided, select relevant skills for each task.\n"
@@ -113,6 +116,8 @@ PM_TASK_SIZING_RULES = (
     "- Bundle related small fixes into ONE task (e.g., 'Fix lifecycle issues in SyncBadge, Sync, Dashboard' instead of 3 tasks).\n"
     "- A task that only changes 1-5 lines in a single file is too small — merge it with related work.\n"
     "- Each task should represent meaningful, reviewable work (typically 10+ lines across 1-5 files).\n"
+    "- GOALS scope cap: one task should normally cover 1 unchecked GOALS item and MUST NOT cover more than 2.\n"
+    "- Split high-risk UI work by route/workflow: do not combine state handling, keyboard navigation, accessibility, and screenshot gates.\n"
     "- For chained changes (signature change + callers + tests), include ALL related files in ONE task.\n"
     "- Exception: a genuinely independent, complex single-file change (new feature, major refactor) can stand alone.\n"
     "</pm_task_sizing_rules>\n"
@@ -316,6 +321,8 @@ Hard rules:
 - Each task MUST be implementable within one Dev iteration and produce a git diff.
 - TASK SIZING: Aim for 3-7 tasks per cycle. Bundle related small fixes (same theme/module) into one task.
   Do NOT create micro-tasks (1-5 line single-file changes). Merge them with related work.
+- GOALS scope cap: one task should normally cover 1 unchecked GOALS item and MUST NOT cover more than 2.
+- Split high-risk UI work by route/workflow; do not combine state handling, keyboard navigation, accessibility, and screenshot gates.
 - No questions to the user unless required for ambiguity; use open_questions in JSON.
 
 When editing files, call Codex MCP with {codex_call_hint}.
@@ -368,6 +375,8 @@ Rules:
 - Each task must create a git diff and be completable in one Dev iteration.
 - TASK SIZING: Aim for 3-7 tasks. Bundle related small fixes (same theme/module) into one task.
   Do NOT create micro-tasks (1-5 line single-file changes). Merge them with related work.
+- GOALS scope cap: one task should normally cover 1 unchecked GOALS item and MUST NOT cover more than 2.
+- Split high-risk UI work by route/workflow; do not combine state handling, keyboard navigation, accessibility, and screenshot gates.
 - Avoid broad scans: inspect changed files + direct dependencies only.
 - No questions unless required for ambiguity; use open_questions in JSON.
 

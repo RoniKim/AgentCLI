@@ -224,6 +224,20 @@
 - [ ] Web runner start rejects `run_dir` values outside the active repo's approved AgentCLI run root and rejects `config_path` values outside approved config roots.
 - [ ] LAN mode blocks raw prompt reads and keeps mutating actions disabled until authentication exists or a stronger trusted-operator gate is implemented.
 
+### P0-T. Local PR Queue And Deferred Validation
+
+- [x] GOALS-constrained PM task generation prevents oversized task bundles by splitting tasks that match more than two unchecked GOALS items while preserving `goal_trace`.
+- [ ] Runner can create a local PR review packet for each completed task or run without mutating source `main`.
+- [ ] Task branches are preserved and indexed after worktree cleanup.
+- [ ] PR queue records base/head refs, branch, commits, changed files, GOALS trace, QA notes, validation status, and merge preflight state.
+- [ ] Dev-stage test skipping is recorded as `validation_pending`, `tests_skipped`, or `no_tests_found`, never as success.
+- [ ] Full validation runs on demand in an isolated temporary worktree.
+- [ ] Merge requires validation result plus explicit user approval.
+- [ ] Web PR Queue shows diff, QA notes, validation logs, merge preflight, and blocking reasons.
+- [ ] Shell commands support listing, validating, rebasing, merging, and discarding queued PRs.
+- [ ] Telegram can list queued PRs and report validation/merge status.
+- [ ] Stale branches, missing patch artifacts, and deleted worktrees are reconciled without corrupting the queue.
+
 ## P1 (Should-Have)
 
 - [ ] Run History supports comparing two runs side-by-side with commits, task outcomes, token/quota usage, validation results, and worktree outcomes.

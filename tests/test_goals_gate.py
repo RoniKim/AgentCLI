@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 
 from agent_runner.goals import gate_pm_tasks_against_goals
+from agent_runner.backlog_utils import normalize_backlog_tasks
 from agent_runner.gitops import create_task_branch, format_task_commit_message
 from agent_runner.metrics import MetricsLogger
 from agent_runner.state import load_backlog_json, write_backlog_files
@@ -118,6 +119,43 @@ class GoalsGateTests(unittest.TestCase):
         self.assertEqual(1, len(loaded_tasks))
         self.assertEqual("P0-L4", loaded_tasks[0].goal_trace[0]["goal_ref"])
         self.assertEqual("Ship web console gate", loaded_tasks[0].goal_trace[0]["goal_text"])
+
+    def test_goal_gate_splits_oversized_goal_bundles(self) -> None:
+        goals_text = """# Project Goals
+
+## P0
+- [ ] Goal alpha
+- [ ] Goal beta
+- [ ] Goal gamma
+- [ ] Goal delta
+- [ ] Goal epsilon
+
+## P1
+- [ ] Later
+"""
+        (self.repo / ".doc" / "GOALS.md").write_text(goals_text, encoding="utf-8")
+        task = {
+            "id": "T1",
+            "title": "Goal alpha Goal beta Goal gamma Goal delta Goal epsilon",
+            "prompt": "Implement Goal alpha, Goal beta, Goal gamma, Goal delta, and Goal epsilon.",
+            "done_when": "All five goals are satisfied.",
+        }
+
+        gate = gate_pm_tasks_against_goals(self.repo, [task], completion_level="p0")
+
+        self.assertEqual("accepted", gate["status"])
+        self.assertEqual(3, len(gate["accepted_tasks"]))
+        self.assertEqual(1, len(gate["split_tasks"]))
+        self.assertEqual(2, gate["max_goal_traces_per_task"])
+        self.assertEqual([2, 2, 1], [len(t["goal_trace"]) for t in gate["accepted_tasks"]])
+        self.assertTrue(all(t.get("split_reason") == "oversized_goal_bundle" for t in gate["accepted_tasks"]))
+        self.assertIn("Implement ONLY the GOALS scope", gate["accepted_tasks"][0]["prompt"])
+
+        normalized = normalize_backlog_tasks(gate["accepted_tasks"], self.run_dir)
+        self.assertEqual(["T1", "T2", "T3"], [task["id"] for task in normalized])
+        self.assertEqual([2, 2, 1], [len(t.get("goal_trace") or []) for t in normalized])
+        self.assertEqual("P0-L4", normalized[0]["goal_trace"][0]["goal_ref"])
+        self.assertEqual("P0-L8", normalized[2]["goal_trace"][0]["goal_ref"])
 
     def test_task_branch_and_commit_message_include_goal_trace(self) -> None:
         gate = gate_pm_tasks_against_goals(self.repo, self._pm_tasks(), completion_level="p0")
