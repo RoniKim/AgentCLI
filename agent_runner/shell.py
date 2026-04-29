@@ -27,7 +27,7 @@ from .run_dir import make_run_dir
 from .run_dir import find_latest_run_dir
 from .logger import close_all_loggers
 from .todo import ensure_todo_file, read_current_todo, set_current_todo, open_path
-from .preflight import run_preflight
+from .preflight import check_runner_start_readiness, format_runner_start_readiness, run_preflight
 from .process_guard import init_process_guard, terminate_all_children
 from .stop_progress import clear_stop_progress, read_stop_progress, write_stop_progress
 from .utils import STOP_REASON_STOP_FILE
@@ -517,12 +517,17 @@ class RunnerShell:
                     self.run_dir = Path(run_dir).expanduser().resolve()
                 except Exception:
                     pass
+            readiness = result.get("readiness") if isinstance(result.get("readiness"), dict) else {}
+            for line in format_runner_start_readiness(readiness):
+                print(line)
             if result.get("ok", False):
                 print("[OK] Runner started in background.")
                 print(f" - run_dir: {result.get('run_dir') or '(unknown)'}")
                 print(f" - stop:   /stop  (creates {self.effective().get('stop_file') or 'STOP'})")
                 print(" - status: /status\n")
             else:
+                if not bool(readiness.get("ok")):
+                    return
                 print(f"[ERR] {result.get('message') or 'Failed to start runner.'}")
             return
 
@@ -543,6 +548,25 @@ class RunnerShell:
         run_dir.mkdir(parents=True, exist_ok=True)
 
         stop_file = str(self.effective().get("stop_file") or "STOP")
+        readiness = check_runner_start_readiness(self.repo, run_dir, stop_file=stop_file)
+        for line in format_runner_start_readiness(readiness):
+            print(line)
+        if not bool(readiness.get("ok")):
+            message = str(readiness.get("message") or "Runner start blocked by readiness checks.")
+            self._record_runner_control_event(
+                run_dir,
+                action="start",
+                status="error",
+                message="",
+                error=message,
+                ok=False,
+                running=False,
+                phase="readiness",
+                details={"readiness": readiness},
+                result={"ok": False, "message": message, "readiness": readiness},
+            )
+            return
+
         stop_path = run_dir / stop_file
         try:
             if stop_path.exists():
@@ -603,7 +627,7 @@ class RunnerShell:
             error="",
             ok=True,
             running=True,
-            result={"ok": True, "runner_mode": self.runner_mode, "run_dir": run_dir.as_posix()},
+            result={"ok": True, "runner_mode": self.runner_mode, "run_dir": run_dir.as_posix(), "readiness": readiness},
         )
 
         print("[OK] Runner started in background.")

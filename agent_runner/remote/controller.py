@@ -15,6 +15,7 @@ from ..cli import DEFAULTS
 from ..config import AGENT_WORK_DIR, default_config_path, resolve_config_path, resolve_prompts_dir
 from ..logger import close_all_loggers
 from ..process_guard import register_pid, terminate_all_children, terminate_process_tree, tracked_pid_details, unregister_pid_if_exited
+from ..preflight import check_runner_start_readiness
 from ..run_dir import find_latest_run_dir, make_run_dir
 from ..runner_entry import run as run_runner
 from ..stop_progress import (
@@ -1441,6 +1442,39 @@ class RunnerController:
             self.run_dir = run_dir
             eff["run_dir"] = run_dir.as_posix()
 
+            readiness = check_runner_start_readiness(
+                self.repo,
+                run_dir,
+                stop_file=self._stop_file_name(),
+            )
+            if not bool(readiness.get("ok")):
+                message = str(readiness.get("message") or "Runner start blocked by readiness checks.")
+                error = {
+                    "code": "runner_start_readiness_failed",
+                    "message": message,
+                    "details": {"readiness": readiness},
+                }
+                self._record_runner_control_event(
+                    run_dir,
+                    action=control_action,
+                    status="error",
+                    message="",
+                    error=message,
+                    ok=False,
+                    running=False,
+                    phase="readiness",
+                    details={"readiness": readiness},
+                    result={"ok": False, "message": message, "readiness": readiness},
+                )
+                return {
+                    "ok": False,
+                    "message": message,
+                    "error": error,
+                    "readiness": readiness,
+                    "run_dir": run_dir.as_posix(),
+                    **context,
+                }
+
             self._record_runner_control_event(
                 run_dir,
                 action=control_action,
@@ -1502,6 +1536,7 @@ class RunnerController:
                     "ok": True,
                     "runner_mode": self.runner_mode,
                     "run_dir": run_dir.as_posix(),
+                    "readiness": readiness,
                 },
             )
 
@@ -1515,6 +1550,7 @@ class RunnerController:
                 "message": "\ub7ec\ub108\uac00 \uc2dc\uc791\ub418\uc5c8\uc2b5\ub2c8\ub2e4.",
                 "runner_mode": self.runner_mode,
                 "run_dir": run_dir.as_posix(),
+                "readiness": readiness,
                 **context,
             }
         finally:

@@ -7865,6 +7865,14 @@ def create_app(
                     raise
             return controller.stop(wait=wait)
 
+        def _runner_start_failure_details(result: dict[str, Any], default_code: str) -> tuple[str, dict[str, Any] | None]:
+            error = result.get("error") if isinstance(result.get("error"), dict) else {}
+            error_code = str(error.get("code") or default_code).strip() or default_code
+            details = error.get("details") if isinstance(error.get("details"), dict) else None
+            if details is None and isinstance(result.get("readiness"), dict):
+                details = {"readiness": dict(result.get("readiness") or {})}
+            return error_code, details
+
         try:
             body = await _runner_control_body(request)
             if body is None:
@@ -7992,6 +8000,7 @@ def create_app(
                 result = _invoke_runner_start(start_overrides, control_action=normalized_action)
                 if not bool(result.get("ok")):
                     message = str(result.get("message") or "Runner start failed.")
+                    error_code, error_details = _runner_start_failure_details(result, "runner_start_failed")
                     control_state["last_action"] = normalized_action
                     control_state["last_message"] = ""
                     control_state["last_error"] = message
@@ -8000,7 +8009,7 @@ def create_app(
                         status="error",
                         message="",
                         error=message,
-                        details={"result": result},
+                        details=error_details or {"result": result},
                         result=result if isinstance(result, dict) else None,
                         controller_status=current_status,
                     )
@@ -8010,7 +8019,8 @@ def create_app(
                         ok=False,
                         status="error",
                         message=message,
-                        error_code="runner_start_failed",
+                        error_code=error_code,
+                        details=error_details,
                         result=result,
                         busy_override=False,
                     )
@@ -8168,6 +8178,7 @@ def create_app(
             result = _invoke_runner_start(start_overrides, control_action=normalized_action)
             if not bool(result.get("ok")):
                 message = str(result.get("message") or f"Runner {flow_name} failed.")
+                error_code, error_details = _runner_start_failure_details(result, f"runner_{flow_name}_failed")
                 control_state["last_action"] = normalized_action
                 control_state["last_message"] = ""
                 control_state["last_error"] = message
@@ -8176,7 +8187,7 @@ def create_app(
                     status="error",
                     message="",
                     error=message,
-                    details={"stop": stop_result, "start": result},
+                    details=error_details or {"stop": stop_result, "start": result},
                     result={"stop": stop_result, "start": result},
                     controller_status=current_status,
                 )
@@ -8186,7 +8197,8 @@ def create_app(
                     ok=False,
                     status="error",
                     message=message,
-                    error_code=f"runner_{flow_name}_failed",
+                    error_code=error_code,
+                    details=error_details,
                     result={"stop": stop_result, "start": result},
                     busy_override=False,
                 )

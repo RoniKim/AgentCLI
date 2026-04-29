@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import threading
 import time
 import unittest
@@ -24,6 +26,33 @@ def _scratch_dir(name: str) -> Path:
     path = root / f"{name}_{uuid.uuid4().hex}"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+    )
+    return completed.stdout.strip()
+
+
+def _prepare_start_ready_repo(repo: Path) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "agentcli-tests@example.com")
+    _git(repo, "config", "user.name", "AgentCLI Tests")
+    (repo / "README.md").write_text("ready\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "base")
+    python_rel = Path("Scripts/python.exe") if os.name == "nt" else Path("bin/python")
+    python_path = repo / ".venv" / python_rel
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.write_text("", encoding="utf-8")
 
 
 class StopProgressTests(unittest.TestCase):
@@ -157,7 +186,7 @@ class StopProgressTests(unittest.TestCase):
 
     def test_controller_start_creates_fresh_run_dir_by_default_and_reuses_only_when_explicit(self) -> None:
         repo = _scratch_dir("controller_start") / "repo"
-        repo.mkdir(parents=True, exist_ok=True)
+        _prepare_start_ready_repo(repo)
         controller = RunnerController(
             repo=repo,
             base_args=argparse.Namespace(

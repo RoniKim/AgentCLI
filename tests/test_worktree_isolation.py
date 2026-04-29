@@ -27,8 +27,10 @@ from agent_runner.gitops import (
     default_worktree_dir,
     scan_worktree_diagnostics,
 )
+from agent_runner.preflight import check_runner_start_readiness
+from agent_runner.remote.controller import read_runner_control_event
 from agent_runner.shell import RunnerShell
-from agent_runner.stop_progress import read_stop_progress
+from agent_runner.stop_progress import read_stop_progress, write_stop_progress
 from agent_runner.utils import run_cmd
 
 
@@ -71,6 +73,13 @@ class WorktreeIsolationTests(unittest.TestCase):
 
     def _source_branch(self) -> str:
         return self._git("rev-parse", "--abbrev-ref", "HEAD").strip()
+
+    def _ensure_source_venv(self) -> Path:
+        python_rel = Path("Scripts/python.exe") if os.name == "nt" else Path("bin/python")
+        python_path = self.repo / ".venv" / python_rel
+        python_path.parent.mkdir(parents=True, exist_ok=True)
+        python_path.write_text("", encoding="utf-8")
+        return python_path
 
     def _load_contract(self) -> dict[str, object]:
         return json.loads(self.contract_path.read_text(encoding="utf-8"))
@@ -496,7 +505,98 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertIn("issues: none", output)
         self.assertEqual(before, after)
 
+    def test_runner_start_readiness_reports_missing_source_venv_and_records_shell_event(self) -> None:
+        self._init_repo()
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        stream = io.StringIO()
+
+        with (
+            redirect_stdout(stream),
+            patch("agent_runner.shell.run_runner", side_effect=AssertionError("runner should not start")),
+        ):
+            shell.start(["--run-dir", self.run_dir.as_posix()])
+            if shell._runner_thread is not None:
+                shell._runner_thread.join(timeout=2)
+
+        output = stream.getvalue()
+        self.assertIn("Runner start blocked by readiness checks.", output)
+        self.assertIn("missing_source_venv", output)
+        event = read_runner_control_event(self.run_dir)
+        self.assertEqual("error", event["status"])
+        self.assertEqual("readiness", event["phase"])
+        readiness = event["result"]["readiness"]
+        blocker_codes = {item["code"] for item in readiness["blockers"]}
+        self.assertIn("missing_source_venv", blocker_codes)
+
+    def test_runner_start_readiness_reports_git_safe_directory_blocker_when_git_status_is_dubious(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
+        dubious_output = (
+            "fatal: detected dubious ownership in repository at 'C:/temp/repo'\n"
+            "To add an exception for this directory, call:\n\n"
+            "\tgit config --global --add safe.directory C:/temp/repo\n"
+        )
+
+        with patch("agent_runner.preflight.run_cmd", return_value=(128, dubious_output)):
+            readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        blocker_codes = {item["code"] for item in readiness["blockers"]}
+        self.assertFalse(readiness["ok"])
+        self.assertIn("git_safe_directory_required", blocker_codes)
+        blocker = next(item for item in readiness["blockers"] if item["code"] == "git_safe_directory_required")
+        self.assertEqual("C:/temp/repo", blocker["details"]["safe_directory_hint"])
+
+    def test_runner_start_readiness_reports_stale_stop_and_runner_wait_artifacts(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
+        (self.run_dir / "STOP").write_text("stop_file\n", encoding="utf-8")
+        write_stop_progress(
+            self.run_dir,
+            phase="runner_wait",
+            message="Waiting for runner shutdown and final artifacts.",
+            requested_at_monotonic=0.0,
+            running=True,
+            runner_alive=True,
+        )
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        blocker_codes = {item["code"] for item in readiness["blockers"]}
+        self.assertFalse(readiness["ok"])
+        self.assertIn("stale_stop_artifact", blocker_codes)
+        self.assertIn("stale_runner_wait_artifact", blocker_codes)
+
+    def test_runner_start_readiness_warns_when_generated_worktree_is_already_merged(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
+        generated_worktree = default_worktree_dir(self.repo, self.run_dir)
+        create_worktree(self.repo, generated_worktree, run_dir=self.run_dir)
+        (generated_worktree / "merged.txt").write_text("from worktree\n", encoding="utf-8")
+        self._git("add", "merged.txt", cwd=generated_worktree)
+        self._git("commit", "-m", "worktree change", cwd=generated_worktree)
+        worktree_head = self._git("rev-parse", "HEAD", cwd=generated_worktree).strip()
+        self._git("merge", "--ff-only", worktree_head)
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        warning_codes = {item["code"] for item in readiness["warnings"]}
+        self.assertTrue(readiness["ok"])
+        self.assertIn("generated_worktree_already_merged", warning_codes)
+
+    def test_runner_start_readiness_reports_clean_ready_state(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        self.assertTrue(readiness["ok"])
+        self.assertEqual([], readiness["blockers"])
+        self.assertEqual([], readiness["warnings"])
+
     def test_shell_start_creates_fresh_run_dir_by_default_and_resumes_latest_explicitly(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
         shell = RunnerShell()
         shell.set_repo(self.repo.as_posix())
         captured_run_dirs: list[Path] = []

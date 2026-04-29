@@ -19,6 +19,7 @@ WEB_CONSOLE = ROOT / "web_console"
 
 
 from agent_runner.gitops import WorktreeCleanupError
+from agent_runner.stop_progress import write_stop_progress
 
 
 def _write(path: Path, text: str) -> None:
@@ -398,6 +399,22 @@ class WebConsoleSafetyTests(unittest.TestCase):
             check=True,
         )
         return completed.stdout.strip()
+
+    def _init_repo(self) -> str:
+        self._git("init")
+        self._git("config", "user.email", "agentcli-tests@example.com")
+        self._git("config", "user.name", "AgentCLI Tests")
+        _write(self.repo / "README.md", "base\n")
+        self._git("add", "README.md")
+        self._git("commit", "-m", "base")
+        return self._git("rev-parse", "HEAD")
+
+    def _ensure_source_venv(self) -> Path:
+        python_rel = Path("Scripts/python.exe") if os.name == "nt" else Path("bin/python")
+        python_path = self.repo / ".venv" / python_rel
+        python_path.parent.mkdir(parents=True, exist_ok=True)
+        python_path.write_text("", encoding="utf-8")
+        return python_path
 
     def _prepare_pending_worktree(self, *, source_text: str = 'print("before")\n', updated_text: str = 'print("after")\n') -> dict[str, object]:
         from agent_runner.gitops import handle_worktree_patch
@@ -1727,6 +1744,64 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("error", event["current_event"]["status"])
         self.assertEqual(1, len(event["history"]))
         self.assertEqual("error", event["history"][0]["status"])
+
+    def test_runner_start_response_surfaces_exact_readiness_blockers(self) -> None:
+        from fastapi.testclient import TestClient
+        import agent_runner.web as web_module
+        from agent_runner.remote.controller import RunnerController, read_runner_control_event
+
+        self._init_repo()
+        (self.run_dir / "STOP").write_text("stop_file\n", encoding="utf-8")
+        write_stop_progress(
+            self.run_dir,
+            phase="runner_wait",
+            message="Waiting for runner shutdown and final artifacts.",
+            requested_at_monotonic=0.0,
+            running=True,
+            runner_alive=True,
+        )
+        controller = RunnerController(
+            repo=self.repo,
+            base_args=SimpleNamespace(
+                config_path=self.config_path.as_posix(),
+                config=self.config_path.as_posix(),
+                stop_file="STOP",
+            ),
+        )
+
+        with patch.object(web_module, "_build_runner_controller", return_value=controller):
+            app = web_module.create_app(
+                self.repo,
+                web_dir=WEB_CONSOLE,
+                enable_runner_controls=True,
+                config_path=str(self.config_path),
+            )
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/runner/start",
+                    json={
+                        "confirmation": "START RUNNER",
+                        "start_options": {
+                            "run_dir": self.run_dir.as_posix(),
+                        },
+                    },
+                )
+
+        self.assertEqual(409, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("runner_start_readiness_failed", payload["error"]["code"])
+        readiness = payload["error"]["details"]["readiness"]
+        blocker_codes = {item["code"] for item in readiness["blockers"]}
+        self.assertIn("missing_source_venv", blocker_codes)
+        self.assertIn("stale_stop_artifact", blocker_codes)
+        self.assertIn("stale_runner_wait_artifact", blocker_codes)
+        self.assertEqual(self.run_dir.as_posix(), payload["result"]["run_dir"])
+
+        event = read_runner_control_event(self.run_dir)
+        self.assertEqual("error", event["status"])
+        self.assertEqual("readiness", event["phase"])
+        self.assertEqual("runner_start_readiness_failed", event["result"]["error"]["code"])
 
     def test_worktree_actions_require_opt_in_and_report_pending_state(self) -> None:
         from agent_runner.web import build_snapshot
