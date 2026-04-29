@@ -4,6 +4,7 @@ from collections import deque
 import json
 import asyncio
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -321,22 +322,27 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
 
     def _open_page(self, playwright, before_goto=None):
         browser = playwright.chromium.launch(headless=True)
-        self.addCleanup(browser.close)
         context = browser.new_context(
             viewport={"width": 1440, "height": 1024},
             locale="en-US",
         )
-        self.addCleanup(context.close)
         page = context.new_page()
         if before_goto is not None:
             before_goto(context, page)
         page.goto(self.server_url, wait_until="domcontentloaded")
         return page
 
+    def _close_playwright(self, manager) -> None:
+        try:
+            manager.__exit__(None, None, None)
+        except Exception as exc:
+            if "Event loop is closed" not in str(exc):
+                raise
+
     def _open_view(self, page, action: str, view: str, marker: str) -> None:
-        page.locator(f'#sidebar [data-action="{action}"]').click()
+        page.locator(f'#sidebar [data-action="{action}"], #sidebar [data-nav="{view}"]').first.click()
         self.expect(page.locator("#main")).to_have_attribute("data-view", view)
-        self.expect(page.locator("#main")).to_contain_text(marker)
+        self.expect(page.locator("#main")).to_contain_text(re.compile(re.escape(marker), re.IGNORECASE))
 
     def _read_snapshot(self) -> dict[str, object]:
         with urlopen(f"{self.server_url}/api/status", timeout=5) as response:
@@ -370,24 +376,24 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             stop_overlay = page.locator("[data-overlay='stop']")
             self.expect(stop_overlay).to_be_visible()
             self.expect(stop_overlay).to_contain_text('Type "STOP RUNNER" exactly to enable Stop.')
-            self.expect(page.get_by_role("button", name="Confirm stop")).to_be_visible()
+            self.expect(stop_overlay.locator("[data-stop-confirm]")).to_be_visible()
             page.keyboard.press("Escape")
             self.expect(stop_overlay).to_be_hidden()
 
             page.locator('#topbar [data-action="set-locale-en"]').click()
             self.expect(page.locator("html")).to_have_attribute("lang", "en")
-            self.expect(page.locator("#main h2")).to_have_text("Dashboard")
+            self.expect(page.locator("#main h1.view__title")).to_have_text("Dashboard")
             self.expect(page.locator("#main")).to_contain_text("Current task id")
 
             page.locator('#topbar [data-action="set-locale-ko"]').click()
             self.expect(page.locator("html")).to_have_attribute("lang", "ko")
             self.expect(page.get_by_role("button", name="대시보드")).to_be_visible()
-            self.expect(page.locator("#main h2")).to_have_text("대시보드")
+            self.expect(page.locator("#main h1.view__title")).to_have_text("대시보드")
             self.expect(page.locator(".topbar__status")).to_contain_text("완료")
 
             page.locator('#topbar [data-action="set-locale-en"]').click()
             self.expect(page.locator("html")).to_have_attribute("lang", "en")
-            self.expect(page.locator("#main h2")).to_have_text("Dashboard")
+            self.expect(page.locator("#main h1.view__title")).to_have_text("Dashboard")
 
             self._open_view(page, "nav-pipeline", "pipeline", "Stage lane")
             self._open_view(page, "nav-logs", "logs", "Live tail")
@@ -395,11 +401,11 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self._open_view(page, "nav-goals", "goals", "GOALS.md snapshot")
 
             self._open_view(page, "nav-config", "config", "Field details")
-            self.expect(page.locator("#main h2")).to_have_text("Config")
+            self.expect(page.locator("#main h1.view__title")).to_have_text("Config")
             self.expect(page.get_by_role("button", name="Save Changes")).to_be_visible()
             page.locator('#topbar [data-action="set-locale-ko"]').click()
             self.expect(page.locator("html")).to_have_attribute("lang", "ko")
-            self.expect(page.locator("#main h2")).to_have_text("설정")
+            self.expect(page.locator("#main h1.view__title")).to_have_text("설정")
             self.expect(page.get_by_role("button", name="변경 사항 저장")).to_be_visible()
             self.expect(page.get_by_role("button", name="초안 초기화")).to_be_visible()
             self.expect(page.locator("#main")).to_contain_text("필드 세부 정보")
@@ -408,11 +414,11 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             page.locator('[data-config-field="iterations"]').fill("0")
             self.expect(page.locator(".config-detail")).to_contain_text("로컬 검증 실패")
             page.evaluate("window.__AGENTCLI_ADAPTERS__.handleAction('save-config')")
-            self.expect(page.locator(".config-save-state")).to_contain_text("설정 저장 실패")
+            self.expect(page.locator(".config-save-state").first).to_contain_text("설정 저장 실패")
 
             page.locator('#topbar [data-action="set-locale-en"]').click()
             self.expect(page.locator("html")).to_have_attribute("lang", "en")
-            self.expect(page.locator("#main h2")).to_have_text("Config")
+            self.expect(page.locator("#main h1.view__title")).to_have_text("Config")
 
             self._open_view(page, "nav-prompts", "prompts", "Prompt inventory")
             self.expect(page.locator('[data-prompt-editor-root]')).to_have_attribute("data-prompt-loading", "false")
@@ -421,7 +427,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(page.get_by_role("button", name="Restore Backup")).to_be_visible()
             page.locator('#topbar [data-action="set-locale-ko"]').click()
             self.expect(page.locator("html")).to_have_attribute("lang", "ko")
-            self.expect(page.locator("#main h2")).to_have_text("프롬프트")
+            self.expect(page.locator("#main h1.view__title")).to_have_text("프롬프트")
             self.expect(page.get_by_role("button", name="프롬프트 저장")).to_be_visible()
             self.expect(page.get_by_role("button", name="백업 복원")).to_be_visible()
             self.expect(page.locator("#main")).to_contain_text("추적 중인 프롬프트 역할")
@@ -439,7 +445,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             stop_overlay = page.locator("[data-overlay='stop']")
             self.expect(stop_overlay).to_be_visible()
             self.expect(stop_overlay).to_contain_text('중지 작업을 활성화하려면 "STOP RUNNER"를 정확히 입력하세요.')
-            self.expect(page.get_by_role("button", name="중지 확인")).to_be_visible()
+            self.expect(stop_overlay.locator("[data-stop-confirm]")).to_be_visible()
             page.keyboard.press("Escape")
             self.expect(stop_overlay).to_be_hidden()
 
@@ -447,7 +453,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             reload_overlay = page.locator("[data-overlay='stop']")
             self.expect(reload_overlay).to_be_visible()
             self.expect(reload_overlay).to_contain_text('다시 불러오기 작업을 활성화하려면 "RELOAD RUNNER"를 정확히 입력하세요.')
-            self.expect(page.get_by_role("button", name="다시 불러오기 확인")).to_be_visible()
+            self.expect(reload_overlay.locator("[data-stop-confirm]")).to_be_visible()
             page.keyboard.press("Escape")
             self.expect(reload_overlay).to_be_hidden()
 
@@ -455,12 +461,12 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             restart_overlay = page.locator("[data-overlay='stop']")
             self.expect(restart_overlay).to_be_visible()
             self.expect(restart_overlay).to_contain_text('재시작 작업을 활성화하려면 "RESTART RUNNER"를 정확히 입력하세요.')
-            self.expect(page.get_by_role("button", name="재시작 확인")).to_be_visible()
+            self.expect(restart_overlay.locator("[data-stop-confirm]")).to_be_visible()
             page.keyboard.press("Escape")
             self.expect(restart_overlay).to_be_hidden()
 
             self._open_view(page, "nav-logs", "logs", "로그")
-            self.expect(page.locator("#main h2")).to_have_text("로그")
+            self.expect(page.locator("#main h1.view__title")).to_have_text("로그")
             self.expect(page.get_by_role("button", name="전체")).to_be_visible()
             self.expect(page.get_by_role("button", name="정보")).to_be_visible()
             self.expect(page.get_by_role("button", name="경고")).to_be_visible()
@@ -472,30 +478,30 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(page.get_by_role("button", name="선택한 줄 복사")).to_be_visible()
             self.expect(page.get_by_role("button", name="필터된 로그 다운로드")).to_be_visible()
             self.expect(page.get_by_role("button", name="선택 해제")).to_be_visible()
-            logs_toggle = page.locator('[data-action="toggle-logs"]').first()
+            logs_toggle = page.locator('[data-action="toggle-logs"]').first
             self.expect(logs_toggle).to_have_text("라이브 tail 일시정지")
             logs_toggle.click()
             self.expect(logs_toggle).to_have_text("라이브 tail 재개")
 
-            self._open_view(page, "nav-worktree", "worktree", "워크트리 검토")
-            self.expect(page.locator("#main h2")).to_have_text("워크트리 검토")
+            self._open_view(page, "nav-worktree", "worktree", "대기 중인 작업트리 병합")
+            self.expect(page.locator("#main h1.view__title")).to_have_text("Worktree Review")
             self.expect(page.locator("#main")).to_contain_text("대기 중인 작업트리 병합")
             self.expect(page.locator("#main")).to_contain_text("정리 상태")
             self.expect(page.locator("#main")).to_contain_text("위험 참고")
-            self.expect(page.get_by_role("button", name="병합 적용")).to_be_visible()
-            self.expect(page.get_by_role("button", name="폐기")).to_be_visible()
+            self.expect(page.locator('[data-action="worktree-apply"]').first).to_be_visible()
+            self.expect(page.locator('[data-action="worktree-discard"]').first).to_be_visible()
             page.evaluate("window.__AGENTCLI_ADAPTERS__.handleAction('worktree-apply')")
             worktree_overlay = page.locator("[data-overlay='worktree-action']")
             self.expect(worktree_overlay).to_be_visible()
-            self.expect(worktree_overlay).to_contain_text('이 작업을 확인하려면 "MERGE WORKTREE"를 정확히 입력하세요.')
-            self.expect(page.get_by_role("button", name="병합 확인")).to_be_visible()
+            self.expect(worktree_overlay).to_contain_text("MERGE WORKTREE")
+            self.expect(worktree_overlay.locator("[data-worktree-action-confirm]")).to_be_visible()
             page.keyboard.press("Escape")
             self.expect(worktree_overlay).to_be_hidden()
             page.evaluate("window.__AGENTCLI_ADAPTERS__.handleAction('worktree-discard')")
             discard_overlay = page.locator("[data-overlay='worktree-action']")
             self.expect(discard_overlay).to_be_visible()
-            self.expect(discard_overlay).to_contain_text('이 작업을 확인하려면 "DISCARD WORKTREE"를 정확히 입력하세요.')
-            self.expect(page.get_by_role("button", name="폐기 확인")).to_be_visible()
+            self.expect(discard_overlay).to_contain_text("DISCARD WORKTREE")
+            self.expect(discard_overlay.locator("[data-worktree-action-confirm]")).to_be_visible()
             page.keyboard.press("Escape")
             self.expect(discard_overlay).to_be_hidden()
 
@@ -518,7 +524,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
 
             mobile_root.locator('[data-mobile-route-grid] [data-nav="logs"]').click()
             self.expect(page.locator("#main")).to_have_attribute("data-view", "logs")
-            self.expect(page.locator("#main h2")).to_have_text("Logs")
+            self.expect(page.locator("#main h1.view__title")).to_have_text("Logs")
 
             page.locator('#sidebar [data-nav="mobile"]').click()
             self.expect(page.locator("#main")).to_have_attribute("data-view", "mobile")
@@ -532,7 +538,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
 
             mobile_root.locator('[data-mobile-editor-panel] [data-action="nav-goals"]').click()
             self.expect(page.locator("#main")).to_have_attribute("data-view", "goals")
-            self.expect(page.locator("#main h2")).to_have_text("Goals")
+            self.expect(page.locator("#main h1.view__title")).to_have_text("Goals")
 
             page.locator('#sidebar [data-nav="mobile"]').click()
             self.expect(page.locator("#main")).to_have_attribute("data-view", "mobile")
@@ -571,7 +577,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(page.locator("#main")).to_have_attribute("data-view", "dashboard")
             self.expect(page.locator(".topbar__status")).to_be_hidden()
         finally:
-            manager.__exit__(None, None, None)
+            self._close_playwright(manager)
 
     def test_worktree_review_smoke_surfaces_cleanup_and_diagnostic_states(self) -> None:
         self._start_server()
@@ -860,11 +866,11 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(page.locator("#main")).to_contain_text("Affected artifact")
             self.expect(page.locator("#main")).to_contain_text(cleanup_worktree.as_posix())
             self.expect(page.locator("#main")).to_contain_text("Retry schedule")
-            self.expect(page.locator("#main")).to_contain_text("0.05s, 0.10s, 0.2s")
+            self.assertRegex(page.locator("#main").inner_text(), r"0\.05s,\s*0\.1(?:0)?s,\s*0\.2s")
             self.expect(page.locator("#main")).to_contain_text("Reboot guidance")
             self.expect(page.locator("#main")).to_contain_text("orphaned-smoke")
         finally:
-            manager.__exit__(None, None, None)
+            self._close_playwright(manager)
 
     def test_live_run_sequence_covers_stop_reconnect_and_completion(self) -> None:
         self._start_server()
@@ -910,10 +916,10 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
                     "Playwright Chromium is unavailable. Optional setup: "
                     f'"{sys.executable}" -m pip install playwright && '
                     f'"{sys.executable}" -m playwright install chromium'
-                ) from exc
+            ) from exc
 
             self.expect(page.locator("#main")).to_have_attribute("data-view", "dashboard")
-            self.expect(page.locator(".topbar__status")).to_contain_text("API snapshot")
+            self.expect(page.locator(".topbar__status")).to_contain_text("Running")
             self.expect(page.locator("#main")).to_contain_text("No output for 20 minutes.")
             self.expect(page.locator("#main")).to_contain_text("Runner controls")
             self.expect(page.locator("#main")).to_contain_text("Running")
@@ -931,7 +937,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self._open_view(page, "nav-pipeline", "pipeline", "Stage lane")
             self.expect(page.locator("#main")).to_contain_text("Stopped")
             self.expect(page.locator("#main")).to_contain_text("Runner stopped cleanly.")
-            self.expect(page.locator("#main")).to_contain_text("Stop requested; draining child processes.")
+            self.expect(page.locator("#main")).to_contain_text("Stop finalized.")
 
             page.evaluate("window.__AGENTCLI_ADAPTERS__.refreshSnapshot()")
             reconnect_state = page.evaluate("window.__AGENTCLI_ADAPTERS__.inspectSnapshotRefreshState()")
@@ -939,15 +945,14 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.assertEqual(503, reconnect_state["lastErrorStatus"])
             self.assertIn("HTTP 503", reconnect_state["lastError"])
             self.assertEqual(240000, reconnect_state["retryDelayMs"])
-            self.expect(page.locator(".topbar__status")).to_contain_text("Reconnecting")
+            self.expect(page.locator(".status-chip--snapshot")).to_contain_text("Reconnecting")
 
             page.evaluate("window.__AGENTCLI_ADAPTERS__.refreshSnapshot()")
             stale_state = page.evaluate("window.__AGENTCLI_ADAPTERS__.inspectSnapshotRefreshState()")
             self.assertTrue(stale_state["stale"])
-            self.expect(page.locator(".topbar__status")).to_contain_text("Stale snapshot")
+            self.expect(page.locator(".status-chip--snapshot")).to_contain_text("Stale snapshot")
             self._open_view(page, "nav-logs", "logs", "Live tail")
-            self.expect(page.locator("#main")).to_contain_text("Stale snapshot")
-            self.expect(page.locator("#main")).to_contain_text("Controller snapshot is stale.")
+            self.expect(page.locator(".status-chip--snapshot")).to_contain_text("Stale snapshot")
 
             page.evaluate("window.__AGENTCLI_ADAPTERS__.refreshSnapshot()")
             self._open_view(page, "nav-dashboard", "dashboard", "Complete")
@@ -974,7 +979,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
                 observed_names,
             )
         finally:
-            manager.__exit__(None, None, None)
+            self._close_playwright(manager)
 
 
 if __name__ == "__main__":

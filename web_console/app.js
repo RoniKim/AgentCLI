@@ -353,6 +353,10 @@
         inProgress: 'In progress',
         done: 'Done',
         failed: 'Failed',
+        reviewRequired: 'Review required',
+        blockedEnv: 'Environment blocked',
+        testContractChanged: 'Test contract changed',
+        regressionFailed: 'Regression failed',
         noTasksInBucket: 'No tasks in this bucket.',
         noArtifacts: 'No backlog artifacts were published yet.',
         dependenciesUnavailable: 'Dependencies unavailable',
@@ -372,6 +376,10 @@
         queued: 'queued',
         completed: 'completed',
         needsAttention: 'needs attention',
+        manualReview: 'manual review',
+        environment: 'environment',
+        contract: 'test contract',
+        regression: 'regression',
       },
       goals: {
         title: 'Goals',
@@ -1028,6 +1036,10 @@
         inProgress: '진행 중',
         done: '완료',
         failed: '실패',
+        reviewRequired: '수동 검토',
+        blockedEnv: '환경 차단',
+        testContractChanged: '테스트 계약 변경',
+        regressionFailed: '회귀 실패',
         noTasksInBucket: '이 버킷에 작업이 없습니다.',
         noArtifacts: '아직 백로그 산출물이 게시되지 않았습니다.',
         dependenciesUnavailable: '의존성 없음',
@@ -1041,6 +1053,10 @@
         queued: '대기 중',
         completed: '완료',
         needsAttention: '확인 필요',
+        manualReview: '수동 검토',
+        environment: '환경',
+        contract: '테스트 계약',
+        regression: '회귀',
       },
       goals: {
         title: '목표',
@@ -4575,6 +4591,15 @@
       fail: 'failed',
       failed: 'failed',
       error: 'failed',
+      review: 'review_required',
+      review_required: 'review_required',
+      reviewrequired: 'review_required',
+      blocked_env: 'blocked_env',
+      blockedenvironment: 'blocked_env',
+      test_contract_changed: 'test_contract_changed',
+      testcontractchanged: 'test_contract_changed',
+      regression_failed: 'regression_failed',
+      regressionfailed: 'regression_failed',
       running: 'in_progress',
       active: 'in_progress',
       in_progress: 'in_progress',
@@ -4590,6 +4615,12 @@
         return 'chip--accent';
       case 'in_progress':
         return 'chip--warn';
+      case 'review_required':
+      case 'test_contract_changed':
+        return 'chip--warn';
+      case 'blocked_env':
+        return 'chip--info';
+      case 'regression_failed':
       case 'failed':
         return 'chip--err';
       default:
@@ -4605,6 +4636,14 @@
         return t('backlog.inProgress');
       case 'failed':
         return t('backlog.failed');
+      case 'review_required':
+        return t('backlog.reviewRequired');
+      case 'blocked_env':
+        return t('backlog.blockedEnv');
+      case 'test_contract_changed':
+        return t('backlog.testContractChanged');
+      case 'regression_failed':
+        return t('backlog.regressionFailed');
       case 'active':
         return t('backlog.active');
       default:
@@ -4754,6 +4793,9 @@
       id: toText(raw.id, 'task'),
       title: toText(raw.title, 'Untitled task'),
       status: normalizeBacklogStatus(raw.status, 'pending'),
+      taskStatus: normalizeBacklogStatus(raw.task_status || raw.taskStatus || raw.outcome_status || raw.outcomeStatus || raw.status, 'pending'),
+      reviewRequired: Boolean(raw.review_required ?? raw.reviewRequired ?? failure.review_required ?? failure.reviewRequired),
+      autoMergeAllowed: Boolean(raw.auto_merge_allowed ?? raw.autoMergeAllowed ?? failure.auto_merge_allowed ?? failure.autoMergeAllowed),
       priority: toText(raw.priority, 'P1'),
       tags: toArray(raw.tags).map((tag) => toText(tag)).filter(Boolean),
       estimate: toText(raw.estimate, 'M'),
@@ -4766,6 +4808,10 @@
       attempt: toMaybeNumber(raw.attempt),
       failure: {
         reason: toText(failure.reason || raw.failure_reason || raw.failureReason, ''),
+        status: normalizeBacklogStatus(failure.status || failure.task_status || failure.taskStatus || raw.task_status || raw.taskStatus || raw.status, 'pending'),
+        taskStatus: normalizeBacklogStatus(failure.task_status || failure.taskStatus || raw.task_status || raw.taskStatus || raw.status, 'pending'),
+        reviewRequired: Boolean(failure.review_required ?? failure.reviewRequired ?? raw.review_required ?? raw.reviewRequired),
+        autoMergeAllowed: Boolean(failure.auto_merge_allowed ?? failure.autoMergeAllowed ?? raw.auto_merge_allowed ?? raw.autoMergeAllowed),
         detail: toText(failure.detail || raw.failure_detail || raw.failureDetail, ''),
         cycle: toMaybeNumber(failure.cycle ?? raw.failure_cycle ?? raw.failureCycle),
         step: toMaybeNumber(failure.step ?? raw.failure_step ?? raw.failureStep),
@@ -14653,6 +14699,10 @@
       { key: 'pending', label: t('backlog.pending') },
       { key: 'in_progress', label: t('backlog.inProgress') },
       { key: 'done', label: t('backlog.done') },
+      { key: 'review_required', label: t('backlog.reviewRequired') },
+      { key: 'blocked_env', label: t('backlog.blockedEnv') },
+      { key: 'test_contract_changed', label: t('backlog.testContractChanged') },
+      { key: 'regression_failed', label: t('backlog.regressionFailed') },
       { key: 'failed', label: t('backlog.failed') },
     ];
     const selected = currentBacklogTask();
@@ -14667,7 +14717,7 @@
           .map((bucket) => `
             <section class="column">
               <div class="column__head">
-                <span class="chip ${bucket.key === 'done' ? 'chip--accent' : bucket.key === 'in_progress' ? 'chip--warn' : bucket.key === 'failed' ? 'chip--err' : 'chip--info'}">${escapeHTML(bucket.label)}</span>
+                <span class="chip ${backlogStatusToneClass(bucket.key)}">${escapeHTML(bucket.label)}</span>
                 <span class="column__count">${escapeHTML(bucket.tasks.length)}</span>
               </div>
               <div class="column__body">
@@ -14722,7 +14772,7 @@
                 ${kpiCard(t('backlog.pending'), String(state.backlog.filter((task) => task.status === 'pending').length), t('backlog.queued'))}
                 ${kpiCard(t('backlog.inProgress'), String(state.backlog.filter((task) => task.status === 'in_progress').length), t('backlog.active'), true)}
                 ${kpiCard(t('backlog.done'), String(state.backlog.filter((task) => task.status === 'done').length), t('backlog.completed'))}
-                ${kpiCard(t('backlog.failed'), String(state.backlog.filter((task) => task.status === 'failed').length), t('backlog.needsAttention'))}
+                ${kpiCard(t('backlog.needsAttention'), String(state.backlog.filter((task) => ['failed', 'review_required', 'blocked_env', 'test_contract_changed', 'regression_failed'].includes(task.status)).length), t('backlog.manualReview'))}
               </div>
               <div style="margin-top:12px;">${detail}</div>
             `
@@ -18506,7 +18556,9 @@
         cache: 'no-store',
       });
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        const error = new Error(`HTTP ${response.status}`);
+        error.status = response.status;
+        throw error;
       }
       const snapshot = await response.json();
       const normalized = normalizeApiSnapshot(snapshot);

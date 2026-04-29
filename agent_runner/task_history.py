@@ -361,6 +361,7 @@ def _build_failed_task_item(
         title = task_id or _text(row.get("task_title") or row.get("taskTitle"), "unknown")
 
     reason = _text(row.get("reason"), "unknown")
+    task_status = _text(row.get("status") or row.get("task_status") or row.get("taskStatus") or row.get("outcome_status") or row.get("outcomeStatus"), "")
     detail = _text(row.get("detail"), "", max_chars=_MAX_PROMPT_TEXT_LEN)
     current_attempt = _int(row.get("attempt"), 0)
     max_attempts = _int(row.get("max_attempts"), 0)
@@ -421,6 +422,9 @@ def _build_failed_task_item(
         "task_title": title,
         "taskTitle": title,
         "reason": reason,
+        "status": task_status or "failed",
+        "task_status": task_status or "failed",
+        "taskStatus": task_status or "failed",
         "detail": detail,
         "attempts": attempts,
         "artifact_links": artifact_links,

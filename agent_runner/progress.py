@@ -185,12 +185,20 @@ def print_cycle_report(
 
             dur_str = _fmt_duration(dur) if dur >= 0 else "-"
 
-            if status == "done":
+            if status in {"done", "completed"}:
                 mark = "+"
                 detail = ""
-            elif status == "failed":
+            elif status in {"failed", "regression_failed"}:
                 mark = "x"
+                detail = f" [{reason or status}"
+                if max_att > 1:
+                    detail += f" {att}/{max_att}"
+                detail += "]"
+            elif status in {"review_required", "test_contract_changed", "blocked_env"}:
+                mark = "!"
                 detail = f" [{reason}"
+                if status and status != reason:
+                    detail += f" => {status}"
                 if max_att > 1:
                     detail += f" {att}/{max_att}"
                 detail += "]"

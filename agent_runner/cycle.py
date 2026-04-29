@@ -179,6 +179,12 @@ from .shared import (
     coerce_roles_arg as _coerce_roles_arg,
 )
 from .task_history import format_history_block as _format_history_block, format_split_history_blocks as _format_split_history_blocks, count_unresolved_failures as _count_unresolved_failures, count_consecutive_title_failures as _count_consecutive_title_failures
+from .task_status import (
+    TASK_STATUS_COMPLETED,
+    classify_task_failure,
+    is_auto_retry_allowed,
+    is_manual_review_required,
+)
 from .progress import print_cycle_report, TokenTracker
 from .codex_exec import codex_exec, CodexExecResult
 
@@ -1598,12 +1604,24 @@ async def main_async(args: argparse.Namespace) -> int:
                 status: str,
                 reason: str,
                 detail: str = "",
+                task_status: str = "",
             ) -> Path:
                 """Persist a structured per-attempt validation artifact."""
                 artifact_path = attempt_dir / "validation.json"
                 validation_status = str(status or "").strip() or "unknown"
                 validation_reason = str(reason or "").strip()
                 validation_detail = str(detail or "").strip()
+                outcome_status = str(task_status or "").strip()
+                if not outcome_status:
+                    outcome_status = (
+                        TASK_STATUS_COMPLETED
+                        if validation_status in {"passed", TASK_STATUS_COMPLETED}
+                        else classify_task_failure(
+                            validation_reason,
+                            validations=validations,
+                            detail=validation_detail,
+                        )
+                    )
                 fast_validation = next((record for record in validations if str(record.get("gate") or "") == "fast_web_worktree_regression"), {})
                 selected_fast_suite = list(fast_validation.get("suite_files") or fast_validation.get("suiteFiles") or [])
                 trigger_files = list(fast_validation.get("trigger_files") or fast_validation.get("triggerFiles") or [])
@@ -1622,6 +1640,14 @@ async def main_async(args: argparse.Namespace) -> int:
                     "step": step,
                     "attempt": attempt,
                     "status": validation_status,
+                    "task_status": outcome_status,
+                    "taskStatus": outcome_status,
+                    "outcome_status": outcome_status,
+                    "outcomeStatus": outcome_status,
+                    "review_required": is_manual_review_required(outcome_status),
+                    "reviewRequired": is_manual_review_required(outcome_status),
+                    "auto_merge_allowed": outcome_status == TASK_STATUS_COMPLETED,
+                    "autoMergeAllowed": outcome_status == TASK_STATUS_COMPLETED,
                     "reason": validation_reason,
                     "detail": validation_detail,
                     "validation_status": validation_status,
@@ -1651,6 +1677,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 summary_lines = [
                     f"validation_status={validation_status}",
+                    f"task_status={outcome_status}",
                     f"reason={validation_reason or 'ok'}",
                 ]
                 if selected_fast_suite:
@@ -1871,6 +1898,36 @@ async def main_async(args: argparse.Namespace) -> int:
                 _prev_gate_error: str = ""  # Carried across attempts for gate-aware retry
                 _prev_gate_error_label: str = ""
 
+                def _task_failure_status(
+                    reason: str,
+                    *,
+                    validations: list[dict[str, Any]] | None = None,
+                    detail: str = "",
+                ) -> str:
+                    return classify_task_failure(reason, validations=validations or [], detail=detail)
+
+                def _task_failure_entry(
+                    reason: str,
+                    *,
+                    validations: list[dict[str, Any]] | None = None,
+                    detail: str = "",
+                    **extra: Any,
+                ) -> dict[str, Any]:
+                    task_status = _task_failure_status(reason, validations=validations, detail=detail)
+                    entry: dict[str, Any] = {
+                        "task": next_task.id,
+                        "reason": reason,
+                        "status": task_status,
+                        "task_status": task_status,
+                        "outcome_status": task_status,
+                        "review_required": is_manual_review_required(task_status),
+                        "auto_merge_allowed": False,
+                    }
+                    if detail:
+                        entry["detail"] = detail
+                    entry.update(extra)
+                    return entry
+
                 def _isolate_or_stop(reason: str) -> tuple[bool, str]:
                     """Isolate failed task work: abandon branch (non-destructive) or restore checkpoint (fallback)."""
                     if tb:
@@ -1891,7 +1948,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         except Exception as ex:
                             detail = str(ex)
                             eprint(f"[WARN] abandon_task_branch failed: {detail}")
-                            state.setdefault("failed", []).append({"task": next_task.id, "reason": "abandon_failed", "detail": detail})
+                            state.setdefault("failed", []).append(_task_failure_entry("abandon_failed", detail=detail))
                             save_state(state_path, state)
                             _record_history(next_task.id, next_task.title, "failed", reason="abandon_failed", detail=detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                             metrics.event(
@@ -1935,7 +1992,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         detail = str(ex)
                         blocked = "blocked" in detail.lower()
                         fail_reason = "rollback_blocked" if blocked else "rollback_failed"
-                        state.setdefault("failed", []).append({"task": next_task.id, "reason": fail_reason, "detail": detail})
+                        state.setdefault("failed", []).append(_task_failure_entry(fail_reason, detail=detail))
                         save_state(state_path, state)
                         _record_history(next_task.id, next_task.title, "failed", reason=fail_reason, detail=detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                         metrics.event(
@@ -2210,7 +2267,8 @@ async def main_async(args: argparse.Namespace) -> int:
 
                     # Non-max-turn exceptions are treated as fatal (rollback + stop)
                     if dev_exc and not dev_is_max_turns:
-                        state.setdefault("failed", []).append({"task": next_task.id, "reason": "exception", "detail": str(dev_exc)})
+                        task_status = _task_failure_status("exception", detail=str(dev_exc))
+                        state.setdefault("failed", []).append(_task_failure_entry("exception", detail=str(dev_exc)))
                         save_state(state_path, state)
                         _record_history(next_task.id, next_task.title, "failed", reason="exception", detail=str(dev_exc), files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                         metrics.event(
@@ -2220,6 +2278,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             task_id=next_task.id,
                             rc=1,
                             reason="exception",
+                            task_status=task_status,
                             goal_trace=task_goal_trace,
                             goal_ref=task_goal_ref,
                             goal_text=task_goal_text,
@@ -2228,6 +2287,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             task_id=next_task.id,
                             success=False,
                             reason="exception",
+                            task_status=task_status,
                             exception=str(dev_exc),
                             goal_trace=task_goal_trace,
                             goal_ref=task_goal_ref,
@@ -2266,13 +2326,11 @@ async def main_async(args: argparse.Namespace) -> int:
                         dep_summary_path = run_dir / "DEPENDENCIES_NEEDED.md"
                         with open(dep_summary_path, "a", encoding="utf-8") as f:
                             f.write(f"\n## {next_task.id}: {next_task.title}\n\n{dep_content.strip()}\n\n---\n")
-                        state.setdefault("failed", []).append({
-                            "task": next_task.id,
-                            "reason": "needs_dependency",
-                            "detail": dep_content.strip()[:500],
-                        })
+                        dep_detail = dep_content.strip()[:500]
+                        task_status = _task_failure_status("needs_dependency", detail=dep_detail)
+                        state.setdefault("failed", []).append(_task_failure_entry("needs_dependency", detail=dep_detail))
                         save_state(state_path, state)
-                        _record_history(next_task.id, next_task.title, "failed", reason="needs_dependency", detail=dep_content.strip()[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
+                        _record_history(next_task.id, next_task.title, "failed", reason="needs_dependency", detail=dep_detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                         metrics.event(
                             "task_end",
                             cycle=cycle_idx,
@@ -2280,6 +2338,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             task_id=next_task.id,
                             rc=1,
                             reason="needs_dependency",
+                            task_status=task_status,
                             was_max_turns=dev_is_max_turns,
                             goal_trace=task_goal_trace,
                             goal_ref=task_goal_ref,
@@ -2289,6 +2348,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             task_id=next_task.id,
                             success=False,
                             reason="needs_dependency",
+                            task_status=task_status,
                             goal_trace=task_goal_trace,
                             goal_ref=task_goal_ref,
                             goal_text=task_goal_text,
@@ -2331,7 +2391,8 @@ async def main_async(args: argparse.Namespace) -> int:
 
                         if is_blocked:
                             eprint(f"[SKIP] Task {next_task.id} appears blocked (dependency/resource missing). Skipping...")
-                            state.setdefault("failed", []).append({"task": next_task.id, "reason": "blocked_dependency"})
+                            task_status = _task_failure_status("blocked_dependency", detail=dev_log)
+                            state.setdefault("failed", []).append(_task_failure_entry("blocked_dependency", detail=dev_log[:500]))
                             save_state(state_path, state)
                             _record_history(next_task.id, next_task.title, "failed", reason="blocked_dependency", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                             metrics.event(
@@ -2341,6 +2402,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 task_id=next_task.id,
                                 rc=1,
                                 reason="blocked_dependency",
+                                task_status=task_status,
                                 was_max_turns=dev_is_max_turns,
                                 goal_trace=task_goal_trace,
                                 goal_ref=task_goal_ref,
@@ -2350,6 +2412,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 task_id=next_task.id,
                                 success=False,
                                 reason="blocked_dependency",
+                                task_status=task_status,
                                 was_max_turns=dev_is_max_turns,
                                 goal_trace=task_goal_trace,
                                 goal_ref=task_goal_ref,
@@ -2368,7 +2431,8 @@ async def main_async(args: argparse.Namespace) -> int:
                         if dev_auto_escalate and (attempt + 1) < max_attempts and "no_diff" in dev_escalate_on:
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="no_diff")
                             continue
-                        state.setdefault("failed", []).append({"task": next_task.id, "reason": "no_diff"})
+                        task_status = _task_failure_status("no_diff", detail=dev_log)
+                        state.setdefault("failed", []).append(_task_failure_entry("no_diff", detail=dev_log[:500]))
                         save_state(state_path, state)
                         _record_history(next_task.id, next_task.title, "failed", reason="no_diff", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                         metrics.event(
@@ -2378,6 +2442,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             task_id=next_task.id,
                             rc=1,
                             reason="no_diff",
+                            task_status=task_status,
                             goal_trace=task_goal_trace,
                             goal_ref=task_goal_ref,
                             goal_text=task_goal_text,
@@ -2386,6 +2451,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             task_id=next_task.id,
                             success=False,
                             reason="no_diff",
+                            task_status=task_status,
                             was_max_turns=dev_is_max_turns,
                             goal_trace=task_goal_trace,
                             goal_ref=task_goal_ref,
@@ -2460,7 +2526,14 @@ async def main_async(args: argparse.Namespace) -> int:
                             except Exception as _cp_ex:
                                 eprint(f"[WARN] Incremental checkpoint failed: {_cp_ex}")
                         if not ok:
-                            if dev_auto_escalate and (attempt + 1) < max_attempts and "build_failed" in dev_escalate_on:
+                            build_detail = str(build_validation.get("failure_summary") or build_validation.get("summary") or "")
+                            task_status = _task_failure_status("build_failed", validations=validation_records, detail=build_detail)
+                            if (
+                                is_auto_retry_allowed(task_status)
+                                and dev_auto_escalate
+                                and (attempt + 1) < max_attempts
+                                and "build_failed" in dev_escalate_on
+                            ):
                                 # Capture build errors for injection into the next attempt's prompt.
                                 try:
                                     _berr_raw = (attempt_dir / "build.txt").read_text(encoding="utf-8", errors="replace")
@@ -2476,11 +2549,12 @@ async def main_async(args: argparse.Namespace) -> int:
                                     validations=validation_records,
                                     status="failed",
                                     reason="build_failed",
-                                    detail=str(build_validation.get("failure_summary") or build_validation.get("summary") or ""),
+                                    detail=build_detail,
+                                    task_status=task_status,
                                 )
                                 metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="build_failed")
                                 continue
-                            state.setdefault("failed", []).append({"task": next_task.id, "reason": "build_failed"})
+                            state.setdefault("failed", []).append(_task_failure_entry("build_failed", validations=validation_records, detail=build_detail))
                             save_state(state_path, state)
                             _record_history(next_task.id, next_task.title, "failed", reason="build_failed", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                             logger.gate_event("build", next_task.id, passed=False)
@@ -2490,7 +2564,8 @@ async def main_async(args: argparse.Namespace) -> int:
                                 validations=validation_records,
                                 status="failed",
                                 reason="build_failed",
-                                detail=str(build_validation.get("failure_summary") or build_validation.get("summary") or ""),
+                                detail=build_detail,
+                                task_status=task_status,
                             )
                             if tb or cp:
                                 ok_restore, fail_reason = _isolate_or_stop("build_failed")
@@ -2530,7 +2605,14 @@ async def main_async(args: argparse.Namespace) -> int:
                             _record_task_stop("test_gate", attempt)
                             return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
                         if not ok:
-                            if dev_auto_escalate and (attempt + 1) < max_attempts and "test_failed" in dev_escalate_on:
+                            test_detail = str(test_validation.get("failure_summary") or test_validation.get("summary") or "")
+                            task_status = _task_failure_status("test_failed", validations=validation_records, detail=test_detail)
+                            if (
+                                is_auto_retry_allowed(task_status)
+                                and dev_auto_escalate
+                                and (attempt + 1) < max_attempts
+                                and "test_failed" in dev_escalate_on
+                            ):
                                 try:
                                     _prev_gate_error = (attempt_dir / "test.txt").read_text(encoding="utf-8", errors="replace")[-4000:]
                                     _prev_gate_error_label = "TEST FAILED"
@@ -2543,11 +2625,12 @@ async def main_async(args: argparse.Namespace) -> int:
                                     validations=validation_records,
                                     status="failed",
                                     reason="test_failed",
-                                    detail=str(test_validation.get("failure_summary") or test_validation.get("summary") or ""),
+                                    detail=test_detail,
+                                    task_status=task_status,
                                 )
                                 metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="test_failed")
                                 continue
-                            state.setdefault("failed", []).append({"task": next_task.id, "reason": "test_failed"})
+                            state.setdefault("failed", []).append(_task_failure_entry("test_failed", validations=validation_records, detail=test_detail))
                             save_state(state_path, state)
                             _record_history(next_task.id, next_task.title, "failed", reason="test_failed", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                             logger.gate_event("test", next_task.id, passed=False)
@@ -2557,7 +2640,8 @@ async def main_async(args: argparse.Namespace) -> int:
                                 validations=validation_records,
                                 status="failed",
                                 reason="test_failed",
-                                detail=str(test_validation.get("failure_summary") or test_validation.get("summary") or ""),
+                                detail=test_detail,
+                                task_status=task_status,
                             )
                             if tb or cp:
                                 ok_restore, fail_reason = _isolate_or_stop("test_failed")
@@ -2623,7 +2707,9 @@ async def main_async(args: argparse.Namespace) -> int:
                             pass
 
                         if not scan_result.get("ok", True):
-                            state.setdefault("failed", []).append({"task": next_task.id, "reason": "policy_violation"})
+                            policy_detail = json.dumps(scan_result.get("fail_violations", []), ensure_ascii=False, default=str)[:1000]
+                            task_status = _task_failure_status("policy_violation", detail=policy_detail)
+                            state.setdefault("failed", []).append(_task_failure_entry("policy_violation", detail=policy_detail))
                             save_state(state_path, state)
                             _record_history(next_task.id, next_task.title, "failed", reason="policy_violation", files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts)
                             logger.gate_event("policy", next_task.id, passed=False)
@@ -2634,6 +2720,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 task_id=next_task.id,
                                 rc=1,
                                 reason="policy_violation",
+                                task_status=task_status,
                                 violations=len(scan_result.get("fail_violations", [])),
                                 goal_trace=task_goal_trace,
                                 goal_ref=task_goal_ref,
@@ -2726,11 +2813,19 @@ async def main_async(args: argparse.Namespace) -> int:
                                     )
                                 except Exception:
                                     failed_summary = str(fast_regression_log)
-                            if should_retry_fast_web_worktree_regression_failure(
+                            task_status = _task_failure_status(
+                                "fast_regression_failed",
+                                validations=validation_records,
+                                detail=failed_summary,
+                            )
+                            if (
+                                is_auto_retry_allowed(task_status)
+                                and should_retry_fast_web_worktree_regression_failure(
                                 dev_auto_escalate,
                                 attempt,
                                 max_attempts,
                                 dev_escalate_on,
+                                )
                             ):
                                 _prev_gate_error = summarize_fast_web_worktree_regression_failure(
                                     fast_regression,
@@ -2744,6 +2839,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                     task_id=next_task.id,
                                     attempt=attempt,
                                     reason="fast_regression_failed",
+                                    task_status=task_status,
                                     failed_command=failed_name,
                                     log_path=str(fast_regression_log),
                                 )
@@ -2754,13 +2850,16 @@ async def main_async(args: argparse.Namespace) -> int:
                                     status="failed",
                                     reason="fast_regression_failed",
                                     detail=failed_summary,
+                                    task_status=task_status,
                                 )
                                 continue
-                            state.setdefault("failed", []).append({
-                                "task": next_task.id,
-                                "reason": "fast_regression_failed",
-                                "detail": failed_summary[:500],
-                            })
+                            state.setdefault("failed", []).append(
+                                _task_failure_entry(
+                                    "fast_regression_failed",
+                                    validations=validation_records,
+                                    detail=failed_summary[:500],
+                                )
+                            )
                             save_state(state_path, state)
                             _record_history(
                                 next_task.id,
@@ -2776,7 +2875,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             task_results.append({
                                 "id": next_task.id,
                                 "title": next_task.title,
-                                "status": "failed",
+                                "status": task_status,
                                 "reason": "fast_regression_failed",
                                 "detail": failed_name,
                                 "duration": time.time() - task_outer_t0,
@@ -2785,6 +2884,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 "goal_text": task_goal_text,
                                 "validation_artifact": str(attempt_dir / "validation.json"),
                                 "validation_status": "failed",
+                                "task_status": task_status,
                             })
                             metrics.event(
                                 "task_end",
@@ -2793,6 +2893,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 task_id=next_task.id,
                                 rc=1,
                                 reason="fast_regression_failed",
+                                task_status=task_status,
                                 command_count=fast_command_count,
                                 goal_trace=task_goal_trace,
                                 goal_ref=task_goal_ref,
@@ -2802,6 +2903,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 task_id=next_task.id,
                                 success=False,
                                 reason="fast_regression_failed",
+                                task_status=task_status,
                                 attempt=attempt,
                                 goal_trace=task_goal_trace,
                                 goal_ref=task_goal_ref,
@@ -2814,6 +2916,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 status="failed",
                                 reason="fast_regression_failed",
                                 detail=failed_summary,
+                                task_status=task_status,
                             )
                             task_failure_reason = "fast_regression_failed"
                             if tb or cp:
@@ -2850,6 +2953,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         validations=validation_records,
                         status="passed",
                         reason="completed",
+                        task_status=TASK_STATUS_COMPLETED,
                     )
 
                 if stop_path.exists():
@@ -2915,11 +3019,12 @@ async def main_async(args: argparse.Namespace) -> int:
                             eprint(f"[WARN] abandon_task_branch failed: {_ab_ex}")
                         tb = None
                     # No success after attempts and not otherwise returned: treat as failure.
-                    state.setdefault("failed", []).append({"task": next_task.id, "reason": "exhausted_attempts"})
+                    task_status = _task_failure_status("exhausted_attempts")
+                    state.setdefault("failed", []).append(_task_failure_entry("exhausted_attempts"))
                     save_state(state_path, state)
                     _record_history(next_task.id, next_task.title, "failed", reason="exhausted_attempts", files=next_task.files, cycle=cycle_idx, attempt=max_attempts, max_attempts=max_attempts)
-                    task_results.append({"id": next_task.id, "title": next_task.title, "status": "failed", "reason": "exhausted_attempts", "duration": time.time() - task_outer_t0, "attempt": max_attempts, "max_attempts": max_attempts, "goal_trace": task_goal_trace, "goal_ref": task_goal_ref, "goal_text": task_goal_text})
-                    logger.task_end(task_id=next_task.id, success=False, reason="exhausted_attempts", attempts=max_attempts, goal_trace=task_goal_trace, goal_ref=task_goal_ref, goal_text=task_goal_text)
+                    task_results.append({"id": next_task.id, "title": next_task.title, "status": task_status, "reason": "exhausted_attempts", "duration": time.time() - task_outer_t0, "attempt": max_attempts, "max_attempts": max_attempts, "goal_trace": task_goal_trace, "goal_ref": task_goal_ref, "goal_text": task_goal_text, "task_status": task_status})
+                    logger.task_end(task_id=next_task.id, success=False, reason="exhausted_attempts", task_status=task_status, attempts=max_attempts, goal_trace=task_goal_trace, goal_ref=task_goal_ref, goal_text=task_goal_text)
                     if continuous:
                         eprint(f"[SKIP] Exhausted all attempts for {next_task.id}; skipping to next task.")
                         skipped_set.add(next_task.id)
@@ -2930,24 +3035,23 @@ async def main_async(args: argparse.Namespace) -> int:
                     logger.warning(f"Task {next_task.id} passed gates but no commits found (phantom completion)")
                     metrics.event("phantom_completion_detected", task_id=next_task.id, cycle=cycle_idx)
                     # Treat as failure - do NOT mark done
-                    state.setdefault("failed", []).append({
-                        "task": next_task.id,
-                        "reason": "no_commits",
-                        "detail": "Task passed all gates but no git commits were created (phantom completion)",
-                    })
+                    no_commits_detail = "Task passed all gates but no git commits were created (phantom completion)"
+                    task_status = _task_failure_status("no_commits", detail=no_commits_detail)
+                    state.setdefault("failed", []).append(_task_failure_entry("no_commits", detail=no_commits_detail))
                     save_state(state_path, state)
                     _record_history(next_task.id, next_task.title, "failed",
                                     reason="no_commits", files=next_task.files,
                                     cycle=cycle_idx, attempt=attempt + 1)
                     task_results.append({
                         "id": next_task.id, "title": next_task.title,
-                        "status": "failed", "reason": "no_commits",
+                        "status": task_status, "reason": "no_commits",
                         "duration": time.time() - task_outer_t0,
                         "goal_trace": task_goal_trace,
                         "goal_ref": task_goal_ref,
                         "goal_text": task_goal_text,
+                        "task_status": task_status,
                     })
-                    logger.task_end(task_id=next_task.id, success=False, reason="no_commits", goal_trace=task_goal_trace, goal_ref=task_goal_ref, goal_text=task_goal_text)
+                    logger.task_end(task_id=next_task.id, success=False, reason="no_commits", task_status=task_status, goal_trace=task_goal_trace, goal_ref=task_goal_ref, goal_text=task_goal_text)
                     if continuous:
                         eprint(f"[PHANTOM] {next_task.id} has no commits; marking failed and continuing.")
                         skipped_set.add(next_task.id)
@@ -2972,6 +3076,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     "goal_text": task_goal_text,
                     "validation_artifact": str(attempt_dir / "validation.json"),
                     "validation_status": "passed",
+                    "task_status": TASK_STATUS_COMPLETED,
                 })
 
                 # Use current-cycle task IDs to avoid cross-cycle accumulation (done=16/11 bug)

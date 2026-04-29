@@ -4083,8 +4083,13 @@ def _load_backlog_payload(
         task_id = _pick_text(item.get("task"), item.get("task_id"))
         if not task_id:
             continue
+        failure_status = _pick_text(item.get("status"), item.get("task_status"), item.get("outcome_status"))
         failed_lookup[task_id] = {
             "reason": _pick_text(item.get("reason"), item.get("status")),
+            "status": failure_status,
+            "task_status": failure_status,
+            "review_required": bool(item.get("review_required") or item.get("reviewRequired")),
+            "auto_merge_allowed": bool(item.get("auto_merge_allowed") or item.get("autoMergeAllowed")),
             "detail": _pick_text(item.get("detail"), item.get("message")),
             "attempt": _coerce_optional_int(item.get("attempt")),
             "cycle": _coerce_optional_int(item.get("cycle")),
@@ -4102,7 +4107,7 @@ def _load_backlog_payload(
         if task.id in done_ids:
             status = "done"
         elif task.id in failed_lookup:
-            status = "failed"
+            status = _pick_text(failed_lookup[task.id].get("status"), "failed")
 
         runtime = runtime_index.get(task.id, {})
         started_at = _coerce_optional_int(runtime.get("startedAt"))
@@ -4125,7 +4130,7 @@ def _load_backlog_payload(
         elif task.id in done_ids:
             status = "done"
         elif task.id in failed_lookup:
-            status = "failed"
+            status = _pick_text(failed_lookup[task.id].get("status"), "failed")
         elif runtime_status == "running" or runtime_status == "in_progress":
             status = "in_progress"
         elif runtime_status == "done":
@@ -4180,6 +4185,10 @@ def _load_backlog_payload(
                 "attempt": attempt,
                 "failure": {
                     "reason": failure_reason,
+                    "status": failure.get("status"),
+                    "task_status": failure.get("task_status"),
+                    "review_required": failure.get("review_required"),
+                    "auto_merge_allowed": failure.get("auto_merge_allowed"),
                     "detail": failure_detail,
                     "cycle": failure.get("cycle"),
                     "step": failure.get("step"),
@@ -4187,6 +4196,9 @@ def _load_backlog_payload(
                 },
                 "failure_reason": failure_reason,
                 "failure_detail": failure_detail,
+                "task_status": failure.get("task_status") or status,
+                "review_required": failure.get("review_required") if failure else status in {"review_required", "blocked_env", "test_contract_changed", "regression_failed"},
+                "auto_merge_allowed": failure.get("auto_merge_allowed") if failure else status == "done",
                 "recent_output": recent_output,
                 "cycle": runtime_cycle,
                 "step": runtime_step,
@@ -4204,7 +4216,10 @@ def _load_backlog_payload(
         "pending": len([item for item in backlog if item["status"] == "pending"]),
         "in_progress": len([item for item in backlog if item["status"] == "in_progress"]),
         "done": len([item for item in backlog if item["status"] == "done"]),
-        "failed": len([item for item in backlog if item["status"] == "failed"]),
+        "failed": len([
+            item for item in backlog
+            if item["status"] in {"failed", "review_required", "blocked_env", "test_contract_changed", "regression_failed"}
+        ]),
     }
     return {
         "items": backlog,

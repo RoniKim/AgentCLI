@@ -513,8 +513,11 @@ def build_cycle_change_summary(
     pending_worktree = _summarize_pending_worktree(repo, run_dir)
 
     task_total = len(task_results_list)
-    task_done = len([item for item in task_results_list if _text(item.get("status")) == "done"])
-    task_failed = len([item for item in task_results_list if _text(item.get("status")) == "failed"])
+    task_done = len([item for item in task_results_list if _text(item.get("status")) in {"done", "completed"}])
+    task_failed = len([
+        item for item in task_results_list
+        if _text(item.get("status")) in {"failed", "review_required", "blocked_env", "test_contract_changed", "regression_failed"}
+    ])
     task_skipped = len([item for item in task_results_list if _text(item.get("status")) == "skipped"])
     validation_passed = len([item for item in validation_results if _text(item.get("status")).lower() in {"passed", "pass", "success", "completed", "ok"}])
     validation_failed = len([item for item in validation_results if _text(item.get("status")).lower() in {"failed", "fail", "error"}])
