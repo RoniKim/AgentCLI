@@ -1315,7 +1315,7 @@ class WebConsoleStaticTests(unittest.TestCase):
             ],
             "renderWorktree": [
                 "Review required before source-repo changes",
-                "Pending merge",
+                "Pending worktree merge",
                 "No pending worktree merge is available.",
                 "no pending merge",
                 "Review checklist",

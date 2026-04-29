@@ -3449,7 +3449,21 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("20260426-120000", payload["active_run"]["id"])
         self.assertEqual(3, len(payload["stages"]))
         self.assertEqual(2, len(payload["backlog"]["items"]))
-        self.assertEqual({"pending": 1, "in_progress": 0, "done": 1, "failed": 0}, payload["backlog"]["counts"])
+        self.assertEqual(
+            {
+                "pending": 1,
+                "in_progress": 0,
+                "done": 1,
+                "failed": 0,
+                "regressed": 0,
+                "review": 0,
+                "blocked_env": 0,
+                "tasks_regressed": 0,
+                "tasks_review": 0,
+                "tasks_blocked_env": 0,
+            },
+            payload["backlog"]["counts"],
+        )
         pm_stage, dev_stage, qa_stage = payload["stages"]
         self.assertEqual("PM", pm_stage["id"])
         self.assertEqual("done", pm_stage["status"])
@@ -4463,7 +4477,21 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         history_item = next(item for item in history_payload["items"] if item["id"] == ok_run_dir.name)
 
         self.assertEqual(2, status_payload["goals"]["summary"]["unchecked"])
-        self.assertEqual({"pending": 1, "in_progress": 0, "done": 1, "failed": 0}, status_payload["backlog"]["counts"])
+        self.assertEqual(
+            {
+                "pending": 1,
+                "in_progress": 0,
+                "done": 1,
+                "failed": 0,
+                "regressed": 0,
+                "review": 0,
+                "blocked_env": 0,
+                "tasks_regressed": 0,
+                "tasks_review": 0,
+                "tasks_blocked_env": 0,
+            },
+            status_payload["backlog"]["counts"],
+        )
         self.assertEqual("completed", status_payload["progress"]["execution_status"])
         self.assertEqual("completed", status_payload["progress"]["run_status"])
         self.assertNotEqual("success", status_payload["progress"]["run_status"])
@@ -6193,7 +6221,10 @@ Another unsupported line.
             self.assertEqual("No lifecycle records were published yet.", no_run["sectionState"]["stages"]["message"])
             self.assertEqual(0, len(no_run["stages"]))
             self.assertEqual("", no_run["backlogSelectedId"])
-            self.assertEqual({"pending": 0, "in_progress": 0, "done": 0, "failed": 0}, no_run["backlogCounts"])
+            self.assertEqual(
+                {"pending": 0, "in_progress": 0, "done": 0, "failed": 0, "blocked_env": 0, "review": 0, "regressed": 0},
+                no_run["backlogCounts"],
+            )
             self.assertFalse(no_run["activeRun"]["tokensAvailable"])
             self.assertFalse(no_run["activeRun"]["budgetAvailable"])
             self.assertFalse(no_run["activeRun"]["quotaAvailable"])

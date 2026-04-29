@@ -397,6 +397,9 @@ a {
 .board-grid,
 .goal-grid,
 .config-layout,
+.config-detail,
+.config-detail__head,
+.config-detail__body,
 .prompt-layout,
 .history-layout,
 .notification-layout,
@@ -771,8 +774,13 @@ a {
 
 .status-chip__dot,
 .dot {
+  display: inline-block;
   width: 6px;
+  min-width: 6px;
+  max-width: 6px;
   height: 6px;
+  min-height: 6px;
+  max-height: 6px;
   border-radius: 999px;
   background: currentColor;
   flex: 0 0 auto;
@@ -786,7 +794,7 @@ a {
 .dot--pulse::before {
   content: "";
   position: absolute;
-  inset: -5px;
+  inset: 0;
   border-radius: 999px;
   background: rgba(126, 227, 138, 0.45);
   animation: pulse 1.6s ease-out infinite;
@@ -1819,6 +1827,8 @@ a {
 .config-detail {
   position: sticky;
   top: 14px;
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--border-hi);
   border-radius: var(--radius-2);
   background: var(--surface-2);
@@ -1835,6 +1845,8 @@ a {
 }
 
 .config-detail__title {
+  min-width: 0;
+  max-width: 100%;
   font-family: var(--mono);
   font-size: 13px;
   line-height: 1.25;
@@ -1842,6 +1854,8 @@ a {
 }
 
 .config-detail__body {
+  min-width: 0;
+  max-width: 100%;
   padding: 14px;
   display: grid;
   gap: 12px;
@@ -1958,6 +1972,7 @@ a {
 .field-control {
   width: 100%;
   max-width: 100%;
+  box-sizing: border-box;
   min-height: 30px;
   padding: 4px 8px;
   border: 1px solid var(--border-hi);
@@ -1966,6 +1981,14 @@ a {
   color: var(--text);
   font-family: var(--mono);
   font-size: 12.5px;
+}
+
+input.field-control,
+select.field-control,
+.log-tail-input {
+  height: 30px;
+  min-height: 30px;
+  max-height: 40px;
 }
 
 .field-control:focus {
@@ -2431,11 +2454,23 @@ a {
 .history-table__head,
 .history-table__row {
   display: grid;
-  grid-template-columns: 96px minmax(220px, 1.2fr) 92px 96px 120px 90px;
+  grid-template-columns:
+    minmax(80px, 0.9fr)
+    minmax(120px, 1.25fr)
+    minmax(64px, 0.72fr)
+    minmax(72px, 0.8fr)
+    minmax(80px, 0.9fr)
+    minmax(64px, 0.65fr);
   gap: 12px;
   align-items: center;
   padding: 10px 14px;
   min-width: 0;
+}
+
+.history-table__head > *,
+.history-table__row > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .history-table__head {

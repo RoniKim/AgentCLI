@@ -195,9 +195,9 @@
 
 ### P0-R. Web UI Production Polish And Accessibility
 
-- [ ] All primary routes have dense but readable desktop layouts with no nested-card clutter, no text overlap, and stable control dimensions.
+- [x] All primary routes have dense but readable desktop layouts with no nested-card clutter, no text overlap, and stable control dimensions.
 - [ ] Mobile routes match the intended operational workflow, not only a visual preview, with usable navigation, filters, editors, and confirmations.
-- [ ] Background and surface colors use a neutral charcoal base; green is reserved for success/accent/status signals rather than global page tint.
+- [x] Background and surface colors use a neutral charcoal base; green is reserved for success/accent/status signals rather than global page tint.
 - [ ] Direction A visual fidelity is reviewed against `docs/Design/project/AgentCLI Web - A.html`, covering shell/nav density, command palette, dashboard/Pipeline composition, mobile Telegram-style view, and status color semantics with desktop/mobile screenshots.
 - [ ] Design-token audit aligns production `web_console/styles.css` with Direction A's deep near-black/green terminal palette while preserving readable contrast and reserving green for success/accent/status semantics.
 - [ ] Destructive, mutating, and long-running actions use consistent confirmation, busy, disabled, success, failure, timeout, and retry states.

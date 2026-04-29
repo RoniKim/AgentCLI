@@ -633,7 +633,7 @@
       },
       worktree: {
         title: 'Worktree Review',
-        pendingMerge: 'Pending merge',
+        pendingMerge: 'Pending worktree merge',
         diagnostics: 'Diagnostics',
         diagnosticsReadOnly: 'Read-only diagnostics. Filtering never mutates files.',
         diagnosticsNoData: 'No worktree diagnostics are available yet.',
@@ -1855,7 +1855,7 @@
       reviewChecklist: 'Review checklist',
       riskNotes: 'Risk notes',
       reviewCompletedLocally: 'Worktree review marked complete locally.',
-      pendingMerge: 'Pending merge',
+      pendingMerge: '대기 중인 작업트리 병합',
       mergeActions: 'Merge actions',
       finalizedWorktree: 'Finalized worktree',
       noPendingReview: 'No pending worktree merge.',
