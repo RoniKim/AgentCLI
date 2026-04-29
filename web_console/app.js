@@ -2859,6 +2859,7 @@
     info: 'section-banner--info',
     warn: 'section-banner--warn',
     err: 'section-banner--err',
+    success: 'section-banner--success',
     loading: 'section-banner--loading',
     partial: 'section-banner--partial',
     empty: 'section-banner--empty',
@@ -2866,8 +2867,50 @@
     disabled: 'section-banner--disabled',
     reconnecting: 'section-banner--reconnecting',
     stale: 'section-banner--stale',
+    timeout: 'section-banner--timeout',
+    retry: 'section-banner--retry',
     'backend-unavailable': 'section-banner--backend-unavailable',
     'permission-denied': 'section-banner--permission-denied',
+  };
+
+  const SECTION_STATE_PRESENTATION = {
+    ready: { tone: 'info', labelKey: 'common.ready', rank: 0 },
+    empty: { tone: 'empty', labelKey: 'snapshot.emptyState', rank: 10 },
+    partial: { tone: 'partial', labelKey: 'snapshot.partial', rank: 20 },
+    fallback: { tone: 'fallback', labelKey: 'snapshot.fallback', rank: 30 },
+    disabled: { tone: 'disabled', labelKey: 'snapshot.controlsDisabled', rank: 35 },
+    loading: { tone: 'loading', labelKey: 'snapshot.loadingReadOnly', rank: 40 },
+    reconnecting: { tone: 'reconnecting', labelKey: 'snapshot.reconnecting', rank: 50 },
+    stale: { tone: 'stale', labelKey: 'snapshot.stale', rank: 60 },
+    'backend-unavailable': { tone: 'backend-unavailable', labelKey: 'snapshot.backendUnavailable', rank: 80 },
+    'permission-denied': { tone: 'permission-denied', labelKey: 'snapshot.permissionDenied', rank: 85 },
+    error: { tone: 'err', labelKey: 'snapshot.error', rank: 90 },
+  };
+
+  const ACTION_STATE_PRESENTATION = {
+    ready: { tone: 'info', buttonClass: '', labelKey: 'common.ready', rank: 0 },
+    confirmation: { tone: 'warn', buttonClass: 'button--confirming', labelKey: 'runner.confirmationRequired', rank: 20 },
+    disabled: { tone: 'disabled', buttonClass: 'button--paused', labelKey: 'common.disabled', disabled: true, rank: 30 },
+    busy: { tone: 'loading', buttonClass: 'button--loading', labelKey: 'runner.actionInFlight', busy: true, disabled: true, rank: 40 },
+    retry: { tone: 'retry', buttonClass: 'button--retry', labelKey: 'runner.retryStop', rank: 45 },
+    timeout: { tone: 'timeout', buttonClass: 'button--timeout', labelKey: 'runner.stopTimedOut', rank: 50 },
+    success: { tone: 'success', buttonClass: 'button--success', labelKey: 'runner.actionComplete', rank: 60 },
+    failure: { tone: 'err', buttonClass: 'button--failure', labelKey: 'runner.actionFailed', rank: 70 },
+  };
+
+  const ROUTE_SECTION_KEYS = {
+    dashboard: ['activeRun', 'runnerControl', 'logs', 'goals', 'notifications'],
+    pipeline: ['stages', 'activeRun'],
+    logs: ['logs'],
+    backlog: ['backlog'],
+    goals: ['goals'],
+    config: ['config', 'runnerControl'],
+    prompts: ['prompts'],
+    history: ['history'],
+    notifications: ['notifications'],
+    worktree: ['worktree'],
+    mobile: ['activeRun', 'stages', 'logs', 'backlog', 'goals', 'config', 'prompts', 'notifications', 'worktree', 'runnerControl'],
+    landing: ['activeRun'],
   };
 
   const RUN_BANNER_CLASS_NAMES = {
@@ -2915,6 +2958,137 @@
     if (status === 'backend unavailable') return 'backend-unavailable';
     if (status === 'permission denied') return 'permission-denied';
     return status || 'ready';
+  }
+
+  function normalizeActionStatus(rawStatus) {
+    const status = toText(rawStatus, 'ready').toLowerCase().replace(/_/g, '-').trim();
+    const aliases = {
+      confirm: 'confirmation',
+      confirming: 'confirmation',
+      'confirmation-required': 'confirmation',
+      waiting: 'confirmation',
+      pending: 'confirmation',
+      saving: 'busy',
+      restoring: 'busy',
+      submitting: 'busy',
+      working: 'busy',
+      running: 'busy',
+      loading: 'busy',
+      'in-flight': 'busy',
+      blocked: 'disabled',
+      unavailable: 'disabled',
+      complete: 'success',
+      completed: 'success',
+      saved: 'success',
+      restored: 'success',
+      ok: 'success',
+      error: 'failure',
+      failed: 'failure',
+      err: 'failure',
+      timedout: 'timeout',
+      'timed-out': 'timeout',
+    };
+    const normalized = aliases[status] || status || 'ready';
+    return ACTION_STATE_PRESENTATION[normalized] ? normalized : 'ready';
+  }
+
+  function sectionPresentation(sectionKey, section = {}) {
+    const current = toObject(section);
+    const status = normalizeSectionStatus(current.status || current.state || 'ready');
+    const spec = SECTION_STATE_PRESENTATION[status] || SECTION_STATE_PRESENTATION.ready;
+    return {
+      kind: sectionKey,
+      status,
+      tone: spec.tone,
+      rank: spec.rank,
+      label: spec.labelKey ? t(spec.labelKey) : status,
+      message: current.message || fallbackSectionMessage(sectionKey),
+      source: toText(current.source, 'api'),
+      className: sectionNoticeClass(spec.tone),
+    };
+  }
+
+  function routeSectionKeys(view) {
+    return ROUTE_SECTION_KEYS[view] || [view];
+  }
+
+  function routePresentation(view) {
+    const sections = routeSectionKeys(view)
+      .map((key) => sectionPresentation(key, state.sectionState?.[key] || buildSectionState(key, 'ready', '')))
+      .filter(Boolean);
+    return sections.reduce(
+      (selected, item) => (item.rank > selected.rank ? item : selected),
+      sectionPresentation(view, buildSectionState(view, 'ready', ''))
+    );
+  }
+
+  function sectionStatusShouldPreserve(existingStatus, incomingStatus) {
+    const existing = SECTION_STATE_PRESENTATION[normalizeSectionStatus(existingStatus)] || SECTION_STATE_PRESENTATION.ready;
+    const incoming = SECTION_STATE_PRESENTATION[normalizeSectionStatus(incomingStatus)] || SECTION_STATE_PRESENTATION.ready;
+    return existing.rank >= 80 && incoming.rank < existing.rank;
+  }
+
+  function actionPresentation(kind, rawStatus, message = '', options = {}) {
+    const status = normalizeActionStatus(rawStatus);
+    const spec = ACTION_STATE_PRESENTATION[status] || ACTION_STATE_PRESENTATION.ready;
+    const tone = options.tone || spec.tone;
+    const label = options.label || (spec.labelKey ? t(spec.labelKey) : status);
+    return {
+      kind,
+      status,
+      tone,
+      label,
+      message: message || '',
+      buttonClass: options.buttonClass || spec.buttonClass || '',
+      disabled: Boolean(options.disabled ?? spec.disabled),
+      busy: Boolean(options.busy ?? spec.busy),
+      retry: status === 'retry',
+      rank: spec.rank,
+    };
+  }
+
+  function actionButtonClass(presentation, baseClass = 'button--quiet') {
+    const current = presentation && typeof presentation === 'object'
+      ? presentation
+      : actionPresentation('action', presentation);
+    return [baseClass, current.buttonClass].filter(Boolean).join(' ');
+  }
+
+  function actionButtonAttrs(presentation, attrs = '') {
+    const current = presentation && typeof presentation === 'object'
+      ? presentation
+      : actionPresentation('action', presentation);
+    const parts = [
+      `data-action-state="${escapeHTML(current.status)}"`,
+      `data-action-kind="${escapeHTML(current.kind)}"`,
+    ];
+    if (current.busy) {
+      parts.push('aria-busy="true"');
+    }
+    if (current.disabled) {
+      parts.push('disabled aria-disabled="true"');
+    }
+    if (attrs) {
+      parts.push(attrs);
+    }
+    return parts.join(' ');
+  }
+
+  function renderActionStateBanner(presentation, title = '', copy = '') {
+    const current = presentation && typeof presentation === 'object'
+      ? presentation
+      : actionPresentation('action', presentation);
+    const bannerTitle = title || current.label;
+    const bannerCopy = copy || current.message;
+    return `
+      <div class="modal-banner section-banner action-state-banner ${sectionNoticeClass(current.tone)}" data-action-state="${escapeHTML(current.status)}" data-action-kind="${escapeHTML(current.kind)}">
+        <span class="dot" style="background: currentColor;"></span>
+        <div>
+          <div class="section-banner__title">${escapeHTML(bannerTitle)}</div>
+          <div class="section-banner__copy">${escapeHTML(bannerCopy)}</div>
+        </div>
+      </div>
+    `;
   }
 
   function severityClass(level) {
@@ -8173,6 +8347,14 @@
     goalItemMatchKey,
     buildGoalDraftSummary,
     buildGoalSaveRiskSummary,
+    normalizeActionStatus,
+    sectionPresentation,
+    routePresentation,
+    sectionStatusShouldPreserve,
+    actionPresentation,
+    actionButtonClass,
+    actionButtonAttrs,
+    renderActionStateBanner,
     runnerControlStartOptionsContract,
     runnerControlStartOptionsDraftFrom,
     runnerControlStartOptionsDraft,
@@ -8198,6 +8380,7 @@
     runnerControlLiveStateChips,
     runnerControlStateInfo,
     runnerControlDetailRows,
+    runnerControlActionPresentation,
     runnerControlActionEnabled,
     runnerControlActionDisabledReason,
     renderStopProgressSection,
@@ -8225,6 +8408,8 @@
     renderLogTailBanner,
     renderLogTailFilters,
     normalizeWorktreeDiagnosticsFilter,
+    worktreeActionPresentation,
+    worktreeActionButtonClass,
     setWorktreeDiagnosticsFilter,
     clearWorktreeDiagnosticsFilter,
     toggleWorktreeDiagnosticsFilter,
@@ -8547,6 +8732,10 @@
     const message = display.copy || display.lastUpdatedLabel || fallbackSectionMessage('activeRun');
     const sectionKeys = Object.keys(state.sectionState || {});
     for (const sectionKey of sectionKeys) {
+      const currentStatus = state.sectionState?.[sectionKey]?.status || state.sectionState?.[sectionKey]?.state || 'ready';
+      if (sectionStatusShouldPreserve(currentStatus, sectionStatus)) {
+        continue;
+      }
       state.sectionState[sectionKey] = buildSectionState(sectionKey, sectionStatus, message, source);
     }
   }
@@ -8559,8 +8748,9 @@
   }
 
   function viewShell(view, title, subtitle, actions, body) {
+    const route = routePresentation(view);
     return `
-      <section class="view view--${escapeHTML(view)}" data-view="${escapeHTML(view)}">
+      <section class="view view--${escapeHTML(view)}" data-view="${escapeHTML(view)}" data-route-state="${escapeHTML(route.status)}" data-state-source="${escapeHTML(route.source)}">
         <header class="view__header">
           <div class="view__title-block">
             <h1 class="view__title">${escapeHTML(title)}</h1>
@@ -8590,60 +8780,18 @@
     if (!section || section.status === 'ready') {
       return '';
     }
-    const status = normalizeSectionStatus(section.status);
-    const tone =
-      status === 'error'
-        ? 'err'
-        : status === 'backend-unavailable'
-          ? 'backend-unavailable'
-          : status === 'permission-denied'
-            ? 'permission-denied'
-            : status === 'reconnecting'
-          ? 'reconnecting'
-          : status === 'stale'
-            ? 'stale'
-            : status === 'loading'
-              ? 'loading'
-              : status === 'partial'
-                ? 'partial'
-                : status === 'empty'
-                  ? 'empty'
-                  : status === 'fallback'
-                    ? 'fallback'
-                    : status === 'disabled'
-                      ? 'disabled'
-                      : 'info';
-    const label =
-      status === 'loading'
-        ? t('snapshot.loadingReadOnly')
-        : status === 'disabled'
-          ? t('snapshot.controlsDisabled')
-          : status === 'backend-unavailable'
-            ? t('snapshot.backendUnavailable')
-            : status === 'permission-denied'
-              ? t('snapshot.permissionDenied')
-              : status === 'reconnecting'
-             ? t('snapshot.reconnecting')
-          : status === 'stale'
-            ? t('snapshot.stale')
-          : status === 'fallback'
-            ? t('snapshot.fallback')
-            : status === 'partial'
-            ? t('snapshot.partial')
-              : status === 'empty'
-                ? t('snapshot.emptyState')
-                : status;
-    const message =
-      status === 'loading'
-        ? t('snapshot.loadingReadOnly')
-        : status === 'disabled'
-          ? t('snapshot.controlsDisabled')
-          : section.message || fallbackSectionMessage(sectionKey);
+    const display = sectionPresentation(sectionKey, section);
+    const status = display.status;
+    const message = status === 'loading'
+      ? t('snapshot.loadingReadOnly')
+      : status === 'disabled'
+        ? t('snapshot.controlsDisabled')
+        : display.message;
     return `
-      <div class="modal-banner section-banner ${sectionNoticeClass(tone)}" data-section-state="${escapeHTML(status)}">
+      <div class="modal-banner section-banner state-banner ${display.className}" data-section-state="${escapeHTML(status)}" data-state-kind="${escapeHTML(sectionKey)}" data-state-source="${escapeHTML(display.source)}">
         <span class="dot" style="background: currentColor;"></span>
         <div>
-          <div class="section-banner__title">${escapeHTML(label)}</div>
+          <div class="section-banner__title">${escapeHTML(display.label)}</div>
           <div class="section-banner__copy">${escapeHTML(message)}</div>
         </div>
       </div>
@@ -10574,16 +10722,20 @@
     const messageCopy = saveState.status === 'error' && saveState.message
       ? saveState.message
       : bannerCopy;
+    const saveActionState = saveState.status === 'saving'
+      ? 'busy'
+      : saveState.status === 'success'
+        ? 'success'
+        : saveState.status === 'error'
+          ? 'failure'
+          : !configSaveEnabled() || !diffPaths.length
+            ? 'disabled'
+            : 'ready';
+    const savePresentation = actionPresentation('config-save', saveActionState, messageCopy);
 
     return `
-      <div class="config-save-state">
-        <div class="modal-banner section-banner section-banner--${bannerTone}">
-          <span class="dot" style="background: currentColor;"></span>
-          <div>
-            <div class="section-banner__title">${escapeHTML(bannerTitle)}</div>
-            <div class="section-banner__copy">${escapeHTML(messageCopy)}</div>
-          </div>
-        </div>
+      <div class="config-save-state" data-action-state="${escapeHTML(savePresentation.status)}">
+        ${renderActionStateBanner(savePresentation, bannerTitle, messageCopy)}
         ${errorCodeHTML}
         ${metaRows.length ? `<div class="config-save-state__meta">${metaRows.join('')}</div>` : ''}
       </div>
@@ -10651,13 +10803,26 @@
               : confirmationMatches
                 ? t('config.restoreCreatesBackup')
                 : t('config.restoreOverwritePhrase');
+    const restoreActionState = restoreStatus === 'restoring'
+      ? 'busy'
+      : restoreStatus === 'success'
+        ? 'success'
+        : restoreStatus === 'error'
+          ? 'failure'
+          : saveInFlight || mutationInFlight || !restoreEnabled || !backups.length
+            ? 'disabled'
+            : confirmationMatches
+              ? 'ready'
+              : 'confirmation';
+    const restorePresentation = actionPresentation('config-restore', restoreActionState, bannerCopy);
     const backupSelectAttrs = !restoreEnabled || !backups.length || mutationInFlight || restoreStatus === 'restoring'
       ? 'disabled'
       : '';
     const restoreConfirmationAttrs = !restoreEnabled || mutationInFlight || restoreStatus === 'restoring'
       ? 'disabled'
       : '';
-    const restoreButtonAttrs = restoreDisabledReason ? `disabled title="${escapeHTML(restoreDisabledReason)}"` : '';
+    const restoreButtonPresentation = actionPresentation('config-restore', restoreActionState, bannerCopy, { disabled: Boolean(restoreDisabledReason) });
+    const restoreButtonAttrs = actionButtonAttrs(restoreButtonPresentation, restoreDisabledReason ? `title="${escapeHTML(restoreDisabledReason)}"` : '');
     const backupOptions = backups.length
       ? backups.map((backup) => `
           <option value="${escapeHTML(backup.path)}"${backup.path === selectedBackupPath ? ' selected' : ''}>${escapeHTML(backup.summary || backup.name || backup.path)}</option>
@@ -10711,14 +10876,8 @@
       }
     }
     return `
-      <div class="config-save-state" data-config-restore-root data-config-restore-status="${escapeHTML(restoreStatus)}" data-config-restoring="${restoreStatus === 'restoring' ? 'true' : 'false'}">
-        <div class="modal-banner section-banner section-banner--${bannerTone}">
-          <span class="dot" style="background: currentColor;"></span>
-          <div>
-            <div class="section-banner__title">${escapeHTML(bannerTitle)}</div>
-            <div class="section-banner__copy">${escapeHTML(bannerCopy)}</div>
-          </div>
-        </div>
+      <div class="config-save-state" data-config-restore-root data-config-restore-status="${escapeHTML(restoreStatus)}" data-config-restoring="${restoreStatus === 'restoring' ? 'true' : 'false'}" data-action-state="${escapeHTML(restorePresentation.status)}">
+        ${renderActionStateBanner(restorePresentation, bannerTitle, bannerCopy)}
         <div class="config-save-state__meta" data-config-restore-meta>
           ${metaRows.join('')}
         </div>
@@ -10751,7 +10910,7 @@
             <div class="summary-note">${escapeHTML(t('config.restoreOverwritePhrase'))}</div>
           </div>
           <div class="prompt-editor__actions">
-            ${button(t('config.restoreBackup'), 'config-restore', 'button--danger', `${restoreButtonAttrs} data-config-restore-button`)}
+            ${button(t('config.restoreBackup'), 'config-restore', actionButtonClass(restoreButtonPresentation, 'button--danger'), `${restoreButtonAttrs} data-config-restore-button`)}
           </div>
         </div>
       </div>
@@ -11107,30 +11266,30 @@
     const restoreState = toObject(editor.restoreState);
     if (saveState.status === 'saving' || restoreState.status === 'restoring') {
       const activeState = saveState.status === 'saving' ? saveState : restoreState;
-      return `
-        <div class="section-banner section-banner--warn">
-          <div class="section-banner__title">${saveState.status === 'saving' ? t('prompts.savePrompt') : t('prompts.restoreBackup')}</div>
-          <div class="section-banner__copy">${escapeHTML(activeState.message || (saveState.status === 'saving' ? t('prompts.saveCreatesBackup') : t('common.working')))}</div>
-        </div>
-      `;
+      const copy = activeState.message || (saveState.status === 'saving' ? t('prompts.saveCreatesBackup') : t('common.working'));
+      return renderActionStateBanner(
+        actionPresentation(saveState.status === 'saving' ? 'prompt-save' : 'prompt-restore', 'busy', copy),
+        saveState.status === 'saving' ? t('prompts.savePrompt') : t('prompts.restoreBackup'),
+        copy
+      );
     }
     if (saveState.status === 'error' || restoreState.status === 'error') {
       const activeState = saveState.status === 'error' ? saveState : restoreState;
-      return `
-        <div class="section-banner section-banner--err">
-          <div class="section-banner__title">${saveState.status === 'error' ? t('prompts.promptSaveFailed') : t('prompts.promptRestoreFailed')}</div>
-          <div class="section-banner__copy">${escapeHTML(activeState.message || t('prompts.promptMutationFailed'))}</div>
-        </div>
-      `;
+      const copy = activeState.message || t('prompts.promptMutationFailed');
+      return renderActionStateBanner(
+        actionPresentation(saveState.status === 'error' ? 'prompt-save' : 'prompt-restore', 'failure', copy),
+        saveState.status === 'error' ? t('prompts.promptSaveFailed') : t('prompts.promptRestoreFailed'),
+        copy
+      );
     }
     if (saveState.status === 'success' || restoreState.status === 'success') {
       const activeState = saveState.status === 'success' ? saveState : restoreState;
-      return `
-        <div class="section-banner section-banner--info">
-          <div class="section-banner__title">${saveState.status === 'success' ? t('prompts.promptSaved') : t('prompts.promptRestored')}</div>
-          <div class="section-banner__copy">${escapeHTML(redactionAwareText(activeState.message, t('prompts.promptMutationCompleted')))}</div>
-        </div>
-      `;
+      const copy = redactionAwareText(activeState.message, t('prompts.promptMutationCompleted'));
+      return renderActionStateBanner(
+        actionPresentation(saveState.status === 'success' ? 'prompt-save' : 'prompt-restore', 'success', copy),
+        saveState.status === 'success' ? t('prompts.promptSaved') : t('prompts.promptRestored'),
+        copy
+      );
     }
     if (!promptMutationEnabled()) {
       return `
@@ -11389,6 +11548,20 @@
             : !mutationEnabled
               ? redactionAwareText(state.runnerControl?.message, t('prompts.promptMutationsDisabled'))
               : t('prompts.chooseBackupRestore');
+    const mutationActionState = saveState.status === 'saving' || restoreState.status === 'restoring'
+      ? 'busy'
+      : saveState.status === 'error' || restoreState.status === 'error'
+        ? 'failure'
+        : saveState.status === 'success' || restoreState.status === 'success'
+          ? 'success'
+          : !mutationEnabled
+            ? 'disabled'
+            : 'ready';
+    const mutationPresentation = actionPresentation(
+      saveState.status ? 'prompt-save' : restoreState.status ? 'prompt-restore' : 'prompt-mutation',
+      mutationActionState,
+      bannerCopy
+    );
     const errorCode = activeState && activeState.errorCode ? `<div class="prompt-mutation-state__code">${escapeHTML(activeState.errorCode)}</div>` : '';
     const backupOptions = backups.length
       ? backups.map((backup) => `
@@ -11403,14 +11576,24 @@
     const restoreConfirmationAttrs = !mutationEnabled || promptMutationInFlight(editor) || Boolean(editor.loading) || Boolean(editor.error)
       ? 'disabled'
       : '';
-    const saveButtonAttrs = saveDisabledReason ? `disabled title="${escapeHTML(saveDisabledReason)}"` : '';
-    const restoreButtonAttrs = restoreDisabledReason ? `disabled title="${escapeHTML(restoreDisabledReason)}"` : '';
+    const restoreNeedsConfirmation = mutationEnabled && backups.length && !promptMutationInFlight(editor) && toText(editor.restoreConfirmation, '').trim() !== 'RESTORE BACKUP';
+    const saveButtonPresentation = actionPresentation(
+      'prompt-save',
+      promptSaveInFlight(editor) ? 'busy' : saveDisabledReason ? 'disabled' : 'ready',
+      saveDisabledReason || t('prompts.saveCreatesBackup'),
+      { disabled: Boolean(saveDisabledReason) }
+    );
+    const restoreButtonPresentation = actionPresentation(
+      'prompt-restore',
+      promptRestoreInFlight(editor) ? 'busy' : restoreNeedsConfirmation ? 'confirmation' : restoreDisabledReason ? 'disabled' : 'ready',
+      restoreDisabledReason || t('prompts.restoreOverwritePhrase'),
+      { disabled: Boolean(restoreDisabledReason) }
+    );
+    const saveButtonAttrs = actionButtonAttrs(saveButtonPresentation, saveDisabledReason ? `title="${escapeHTML(saveDisabledReason)}"` : '');
+    const restoreButtonAttrs = actionButtonAttrs(restoreButtonPresentation, restoreDisabledReason ? `title="${escapeHTML(restoreDisabledReason)}"` : '');
     return `
-      <div class="prompt-mutation-state">
-        <div class="section-banner section-banner--${bannerTone}">
-          <div class="section-banner__title">${escapeHTML(bannerTitle)}</div>
-          <div class="section-banner__copy">${escapeHTML(bannerCopy)}</div>
-        </div>
+      <div class="prompt-mutation-state" data-action-state="${escapeHTML(mutationPresentation.status)}">
+        ${renderActionStateBanner(mutationPresentation, bannerTitle, bannerCopy)}
         ${errorCode}
         <div class="prompt-mutation-state__meta" data-prompt-mutation-meta>
           ${renderPromptEditorMutationMeta()}
@@ -11446,8 +11629,8 @@
             <div class="summary-note">${escapeHTML(t('prompts.restoreOverwritePhrase'))}</div>
           </div>
           <div class="prompt-editor__actions">
-            ${button(t('prompts.savePrompt'), 'prompt-save', 'button--primary', `${saveButtonAttrs} data-prompt-save-button`)}
-            ${button(t('prompts.restoreBackup'), 'prompt-restore', 'button--danger', `${restoreButtonAttrs} data-prompt-restore-button`)}
+            ${button(t('prompts.savePrompt'), 'prompt-save', actionButtonClass(saveButtonPresentation, 'button--primary'), `${saveButtonAttrs} data-prompt-save-button`)}
+            ${button(t('prompts.restoreBackup'), 'prompt-restore', actionButtonClass(restoreButtonPresentation, 'button--danger'), `${restoreButtonAttrs} data-prompt-restore-button`)}
           </div>
         </div>
       </div>
@@ -11756,6 +11939,21 @@
     }
     const mutationNode = editorRoot.querySelector('[data-prompt-editor-mutation]');
     if (mutationNode) {
+      const saveState = toObject(editor.saveState);
+      const restoreState = toObject(editor.restoreState);
+      const mutationStateRoot = mutationNode.querySelector('.prompt-mutation-state');
+      if (mutationStateRoot) {
+        const mutationActionState = saveState.status === 'saving' || restoreState.status === 'restoring'
+          ? 'busy'
+          : saveState.status === 'error' || restoreState.status === 'error'
+            ? 'failure'
+            : saveState.status === 'success' || restoreState.status === 'success'
+              ? 'success'
+              : !promptMutationEnabled()
+                ? 'disabled'
+                : 'ready';
+        mutationStateRoot.setAttribute('data-action-state', normalizeActionStatus(mutationActionState));
+      }
       const metaNode = mutationNode.querySelector('[data-prompt-mutation-meta]');
       if (metaNode) {
         metaNode.innerHTML = renderPromptEditorMutationMeta();
@@ -12388,15 +12586,25 @@
     return '';
   }
 
-  function runnerControlActionClass(action, baseClass = 'button--quiet', control = currentLiveRunRunnerControl()) {
-    const classes = [baseClass];
-    const busyAction = runnerControlBusyAction(control);
-    if (busyAction === action) {
-      classes.push('button--loading');
-    } else if (!runnerControlActionEnabled(action, control)) {
-      classes.push('button--paused');
+  function runnerControlActionPresentation(action, control = currentLiveRunRunnerControl()) {
+    const current = toObject(control);
+    const stopProgress = normalizeStopProgress(current.status?.stopProgress);
+    const busyAction = runnerControlBusyAction(current);
+    const isBusy = busyAction === action || (!busyAction && Boolean(current.busy));
+    if (isBusy) {
+      return actionPresentation(`runner-${action}`, 'busy', t('runner.requestInFlight'));
     }
-    return classes.join(' ');
+    if (String(action || '').toLowerCase() === 'stop' && stopProgress.phase === 'timeout' && stopProgress.canRetry !== false) {
+      return actionPresentation(`runner-${action}`, 'retry', redactionAwareText(stopProgress.timeoutGuidance?.summary || stopProgress.message || t('runner.stopTimedOut'), ''));
+    }
+    if (!runnerControlActionEnabled(action, current)) {
+      return actionPresentation(`runner-${action}`, 'disabled', runnerControlActionDisabledReason(action, current));
+    }
+    return actionPresentation(`runner-${action}`, 'confirmation', runnerControlActionSummary(action));
+  }
+
+  function runnerControlActionClass(action, baseClass = 'button--quiet', control = currentLiveRunRunnerControl()) {
+    return actionButtonClass(runnerControlActionPresentation(action, control), baseClass);
   }
 
   function runnerControlActionState(action, control = currentLiveRunRunnerControl()) {
@@ -12448,20 +12656,13 @@
   }
 
   function runnerControlButtonAttrs(action, control = currentLiveRunRunnerControl()) {
-    const enabled = runnerControlActionEnabled(action, control);
+    const presentation = runnerControlActionPresentation(action, control);
     const reason = runnerControlActionDisabledReason(action, control);
-    const busy = runnerControlBusyAction(control) === action || toObject(control).busy;
     const attrs = [];
-    if (!enabled) {
-      attrs.push('disabled');
-      if (reason) {
-        attrs.push(`title="${escapeHTML(reason)}"`);
-      }
+    if (reason && presentation.status === 'disabled') {
+      attrs.push(`title="${escapeHTML(reason)}"`);
     }
-    if (busy) {
-      attrs.push('aria-busy="true"');
-    }
-    return attrs.join(' ');
+    return actionButtonAttrs(presentation, attrs.join(' '));
   }
 
   function runnerControlRequestPath(action) {
@@ -12548,13 +12749,36 @@
     return '';
   }
 
-  function worktreeActionButtonAttrs(review = state.worktreeMerge, action = 'merge') {
-    const enabled = worktreeActionEnabled(review, action);
-    const reason = worktreeActionDisabledReason(review, action);
-    if (enabled) {
-      return '';
+  function worktreeActionPresentation(review = state.worktreeMerge, action = 'merge') {
+    const data = toObject(review);
+    const status = toText(data.status, 'none');
+    const cleanupState = toText(data.cleanupState, 'none');
+    const activeAction = toObject(state.worktreeAction);
+    const normalizedAction = String(action || 'merge').toLowerCase() === 'discard' ? 'discard' : 'merge';
+    if (activeAction.submitting && activeAction.action === normalizedAction) {
+      return actionPresentation(`worktree-${normalizedAction}`, 'busy', t('worktree.refreshingStatus'));
     }
-    return `disabled aria-disabled="true" title="${escapeHTML(reason || t('worktree.actionUnavailable'))}"`;
+    if (cleanupState === 'failed' || status === 'applied_cleanup_failed' || status === 'discard_cleanup_failed') {
+      return actionPresentation(`worktree-${normalizedAction}`, 'retry', t('worktree.manualCleanupRequired'), { disabled: true });
+    }
+    if (status === 'error' || status === 'apply_failed' || status === 'patch_not_applied' || status === 'not_applied') {
+      return actionPresentation(`worktree-${normalizedAction}`, 'failure', worktreeActionDisabledReason(data, normalizedAction));
+    }
+    if (!worktreeActionEnabled(data, normalizedAction)) {
+      return actionPresentation(`worktree-${normalizedAction}`, 'disabled', worktreeActionDisabledReason(data, normalizedAction));
+    }
+    return actionPresentation(`worktree-${normalizedAction}`, 'confirmation', worktreeActionSummary(normalizedAction, data));
+  }
+
+  function worktreeActionButtonClass(review = state.worktreeMerge, action = 'merge', baseClass = 'button--quiet') {
+    return actionButtonClass(worktreeActionPresentation(review, action), baseClass);
+  }
+
+  function worktreeActionButtonAttrs(review = state.worktreeMerge, action = 'merge') {
+    const presentation = worktreeActionPresentation(review, action);
+    const reason = worktreeActionDisabledReason(review, action);
+    const title = reason ? `title="${escapeHTML(reason || t('worktree.actionUnavailable'))}"` : '';
+    return actionButtonAttrs(presentation, title);
   }
 
   function worktreeActionSummary(action, review = state.worktreeMerge) {
@@ -12631,7 +12855,6 @@
     const confirmationValue = toText(actionState.confirmation, '').trim();
     const actionEnabled = worktreeActionEnabled(review, action);
     const confirmEnabled = actionEnabled && confirmationValue === confirmation && !actionState.submitting;
-    const bannerTone = actionState.submitting ? 'info' : actionState.error ? 'err' : 'warn';
     const title = worktreeActionModalTitle(action);
     const summary = worktreeActionSummary(action, review);
     const instruction = worktreeActionInstruction(action, review);
@@ -12660,11 +12883,23 @@
         : '';
     const actionLabel = worktreeActionLabel(action, actionState.submitting);
     // Confirm ${actionLabel.toLowerCase()}
+    const overlayPresentation = actionState.submitting
+      ? actionPresentation(`worktree-${action}`, 'busy', t('worktree.refreshingStatus'))
+      : actionState.error
+        ? actionPresentation(`worktree-${action}`, 'failure', actionState.error)
+        : !actionEnabled
+          ? actionPresentation(`worktree-${action}`, 'disabled', worktreeActionDisabledReason(review, action))
+          : actionPresentation(`worktree-${action}`, 'confirmation', summary);
     const bannerMessage = actionState.submitting
       ? t('worktree.applyingPendingDecision', { sourceRepo: toText(review.sourceRepo, 'the source repository') })
       : actionState.error
         ? actionState.error
         : summary;
+    const confirmPresentation = actionState.submitting
+      ? actionPresentation(`worktree-${action}`, 'busy', bannerMessage)
+      : actionState.error
+        ? actionPresentation(`worktree-${action}`, 'failure', bannerMessage, { disabled: !confirmEnabled })
+        : actionPresentation(`worktree-${action}`, 'confirmation', instruction, { disabled: !confirmEnabled });
     overlayRoot().innerHTML = `
       <div class="overlay overlay--tight" data-overlay="worktree-action">
         <div class="overlay__panel overlay__panel--modal">
@@ -12673,14 +12908,8 @@
             <span class="overlay__sub">${escapeHTML(actionState.submitting ? t('worktree.refreshingStatus') : t('worktree.confirmationRequired'))}</span>
           </div>
           <div class="overlay__body">
-            <div class="worktree-action">
-              <div class="modal-banner section-banner section-banner--${bannerTone}">
-                <span class="dot" style="background: currentColor;"></span>
-                <div>
-                  <div class="section-banner__title">${escapeHTML(title)}</div>
-                  <div class="section-banner__copy">${escapeHTML(bannerMessage)}</div>
-                </div>
-              </div>
+            <div class="worktree-action" data-action-state="${escapeHTML(overlayPresentation.status)}">
+              ${renderActionStateBanner(overlayPresentation, title, bannerMessage)}
               <div class="runner-control__details worktree-action__details">
                 ${detailHTML}
               </div>
@@ -12718,7 +12947,7 @@
               <div class="modal-copy">${escapeHTML(actionEnabled ? summary : worktreeActionDisabledReason(review, action))}</div>
               <div class="modal-actions">
                 <button type="button" class="button button--quiet" data-worktree-action-close ${actionState.submitting ? 'disabled' : ''}>${escapeHTML(t('common.cancel'))}</button>
-                <button type="button" class="button ${action === 'discard' ? 'button--danger' : 'button--primary'}" data-worktree-action-confirm ${confirmEnabled ? '' : 'disabled aria-disabled="true"'}>${escapeHTML(actionState.submitting ? actionLabel : action === 'discard' ? t('worktree.confirmDiscard') : t('worktree.confirmMerge'))}</button>
+                <button type="button" class="button ${actionButtonClass(confirmPresentation, action === 'discard' ? 'button--danger' : 'button--primary')}" data-worktree-action-confirm ${actionButtonAttrs(confirmPresentation)}>${escapeHTML(actionState.submitting ? actionLabel : action === 'discard' ? t('worktree.confirmDiscard') : t('worktree.confirmMerge'))}</button>
               </div>
             </div>
           </div>
@@ -13791,6 +14020,12 @@
       stateLabel = t('common.loading');
       statusClass = 'status-chip status-chip--loading';
     }
+    const presentation = actionPresentation(
+      'log-tail',
+      busy ? 'busy' : paused ? 'retry' : 'ready',
+      stateLabel,
+      { disabled: false }
+    );
     return {
       paused,
       loading,
@@ -13798,8 +14033,8 @@
       stateLabel,
       buttonLabel,
       statusClass,
-      buttonClass: paused ? 'button--paused' : busy ? 'button--loading' : 'button--quiet',
-      buttonAttrs: `${paused ? 'aria-pressed="true"' : 'aria-pressed="false"'}${busy ? ' aria-busy="true"' : ''}`,
+      buttonClass: actionButtonClass(presentation, paused ? 'button--paused' : 'button--quiet'),
+      buttonAttrs: `${paused ? 'aria-pressed="true"' : 'aria-pressed="false"'} ${actionButtonAttrs(presentation)}`,
       dotClass: paused ? 'dot' : 'dot dot--pulse',
     };
   }
@@ -14717,12 +14952,18 @@
         : state.logsPaused
           ? t('logs.resumeLiveTail')
           : t('logs.pauseLiveTail');
+    const logsActionPresentation = actionPresentation(
+      'log-tail',
+      state.snapshotStatus === 'loading' ? 'busy' : state.logsPaused ? 'retry' : 'ready',
+      logsStateLabel,
+      { disabled: false }
+    );
     const logsButtonAttrs =
       state.snapshotStatus === 'loading'
-        ? 'aria-busy="true"'
+        ? actionButtonAttrs(logsActionPresentation)
         : state.logsPaused
-          ? 'aria-pressed="true"'
-          : 'aria-pressed="false"';
+          ? actionButtonAttrs(logsActionPresentation, 'aria-pressed="true"')
+          : actionButtonAttrs(logsActionPresentation, 'aria-pressed="false"');
     const logsStatusClass =
       state.snapshotStatus === 'loading'
         ? 'status-chip status-chip--loading'
@@ -14913,7 +15154,6 @@
     const goalSave = toObject(state.goalSave || {});
     const goalSaveRisk = buildGoalSaveRiskSummary(goalSnapshot.items, state.goals);
     const goalSaveDisabled = goalSaveDisabledReason(goalDraft, goalSaveRisk, toText(goalSave.confirmation, '').trim());
-    const goalSaveButtonAttrs = goalSaveDisabled ? `disabled title="${escapeHTML(goalSaveDisabled)}"` : '';
     const goalSaveStatusLabel = goalSave.status === 'saving'
       ? t('goals.saving')
       : goalSave.status === 'success'
@@ -14938,6 +15178,24 @@
       : goalSaveRisk.requiresConfirmation
         ? t('goals.confirmSave')
         : t('goals.saveGoals');
+    const goalActionState = goalSave.status === 'saving'
+      ? 'busy'
+      : goalSave.status === 'success'
+        ? 'success'
+        : goalSave.status === 'error'
+          ? 'failure'
+          : goalSaveRisk.requiresConfirmation && goalSaveDisabled
+            ? 'confirmation'
+            : goalSaveDisabled
+              ? 'disabled'
+              : 'ready';
+    const goalSaveButtonPresentation = actionPresentation(
+      'goal-save',
+      goalActionState,
+      goalSaveDisabled || goalSaveRiskSummaryText(goalSaveRisk) || t('goals.saveCreatesBackup'),
+      { disabled: Boolean(goalSaveDisabled) }
+    );
+    const goalSaveButtonAttrs = actionButtonAttrs(goalSaveButtonPresentation, goalSaveDisabled ? `title="${escapeHTML(goalSaveDisabled)}"` : '');
 
     const body = `
       <div class="view-grid">
@@ -15004,7 +15262,7 @@
           t('goals.goalSavePanel'),
           goalSaveStatusLabel,
           `
-            <div class="goal-save-state" data-goal-save-root data-goal-save-status="${escapeHTML(goalSave.status || 'idle')}" data-goal-saving="${goalSaveInFlight() ? 'true' : 'false'}">
+            <div class="goal-save-state" data-goal-save-root data-goal-save-status="${escapeHTML(goalSave.status || 'idle')}" data-goal-saving="${goalSaveInFlight() ? 'true' : 'false'}" data-action-state="${escapeHTML(goalSaveButtonPresentation.status)}">
               <div data-goal-save-banner>
                 ${renderGoalSaveBanner(goalDraft, goalSaveRisk)}
               </div>
@@ -15023,7 +15281,7 @@
               </div>
               <div class="summary-note" style="margin-top:10px;">${escapeHTML(t('goals.saveCreatesBackup'))}</div>
               <div class="modal-actions" style="margin-top:14px;">
-                ${button(goalSaveButtonLabel, 'goal-save-draft', 'button--primary', `${goalSaveButtonAttrs} data-goal-save-button`)}
+                ${button(goalSaveButtonLabel, 'goal-save-draft', actionButtonClass(goalSaveButtonPresentation, 'button--primary'), `${goalSaveButtonAttrs} data-goal-save-button`)}
               </div>
             </div>
           `
@@ -15176,8 +15434,14 @@
     const restorePanelHTML = renderConfigRestorePanel();
     const configRedaction = toObject(state.redaction);
     // restart required
-    const saveButtonAttrs = saveDisabledReason ? `disabled title="${escapeHTML(saveDisabledReason)}"` : '';
     const saveButtonLabel = saveInFlight ? t('config.saving') : t('config.saveChanges');
+    const saveButtonPresentation = actionPresentation(
+      'config-save',
+      saveInFlight ? 'busy' : saveDisabledReason ? 'disabled' : 'ready',
+      saveDisabledReason || t('config.saveCreatesBackup'),
+      { disabled: Boolean(saveDisabledReason) }
+    );
+    const saveButtonAttrs = actionButtonAttrs(saveButtonPresentation, saveDisabledReason ? `title="${escapeHTML(saveDisabledReason)}"` : '');
 
     const groupsHTML = configGroups()
       .map((group) => `
@@ -15363,7 +15627,7 @@
       t('config.title'),
       `${escapeHTML(t('config.localDraftOnly'))} | ${escapeHTML(diffs.length)} ${escapeHTML(t('config.pendingChanges'))}`,
       `
-        ${button(saveButtonLabel, 'save-config', 'button--primary', saveButtonAttrs)}
+        ${button(saveButtonLabel, 'save-config', actionButtonClass(saveButtonPresentation, 'button--primary'), saveButtonAttrs)}
         ${button(t('config.resetDraft'), 'reset-config', 'button--quiet', saveLocked ? `disabled title="${escapeHTML(t('config.saveInProgress'))}"` : '')}
         ${button(t('common.openPrompts'), 'nav-prompts', 'button--quiet')}
       `,
@@ -16032,6 +16296,8 @@
     const bannerTitle = reviewSummary.title;
     const bannerCopy = reviewSummary.copy;
     const actionCopy = reviewSummary.actionCopy;
+    const mergeActionClass = worktreeActionButtonClass(review, 'merge', 'button--primary');
+    const discardActionClass = worktreeActionButtonClass(review, 'discard', 'button--danger');
     const mergeActionAttrs = worktreeActionButtonAttrs(review, 'merge');
     const discardActionAttrs = worktreeActionButtonAttrs(review, 'discard');
     const copyPatchAttrs = canCopyPatch
@@ -16187,8 +16453,8 @@
             `
               <div class="summary-note">${escapeHTML(actionCopy)}</div>
               <div class="modal-actions">
-                ${button(t('worktree.applyMerge'), 'worktree-apply', 'button--primary', mergeActionAttrs)}
-                ${button(t('worktree.discardMerge'), 'worktree-discard', 'button--danger', discardActionAttrs)}
+                ${button(t('worktree.applyMerge'), 'worktree-apply', mergeActionClass, mergeActionAttrs)}
+                ${button(t('worktree.discardMerge'), 'worktree-discard', discardActionClass, discardActionAttrs)}
               </div>
               <div class="modal-actions" style="margin-top:12px;">
                 ${button(t('worktree.copyPatchPath'), 'copy-worktree-patch', 'button--quiet', copyPatchAttrs)}
@@ -16624,19 +16890,6 @@
     const startAction = action === 'start' || action === 'reload' || action === 'restart';
     const startOptionsValidation = startAction ? runnerControlStartOptionsValidation(control, state.stopStartOptions) : null;
     const confirmEnabled = actionEnabled && confirmationValue === confirmation && !state.stopSubmitting && (!startAction || startOptionsValidation.valid);
-    const bannerTone = state.stopSubmitting
-      ? 'info'
-      : timeoutActive
-        ? 'warn'
-        : finalizedState
-          ? 'success'
-          : state.stopError
-            ? 'err'
-            : !actionEnabled
-              ? 'warn'
-              : startAction && startOptionsValidation && !startOptionsValidation.valid
-                ? 'warn'
-                : 'idle';
     const actionTitle = runnerControlModalTitle(action);
     const actionSummary = runnerControlActionSummary(action);
     const actionLabel = timeoutActive && action === 'stop' && !state.stopSubmitting
@@ -16692,8 +16945,30 @@
             : !actionEnabled
               ? runnerControlActionDisabledReason(action)
               : startAction && startOptionsValidation && !startOptionsValidation.valid
-                ? startOptionsValidation.message || 'Fix the highlighted start options before continuing.'
+              ? startOptionsValidation.message || 'Fix the highlighted start options before continuing.'
                 : redactionAwareText(control.message, actionSummary);
+    const overlayPresentation = state.stopSubmitting
+      ? actionPresentation(`runner-${action}`, 'busy', bannerMessage)
+      : timeoutActive
+        ? actionPresentation(`runner-${action}`, 'timeout', bannerMessage)
+        : finalizedState
+          ? actionPresentation(`runner-${action}`, 'success', bannerMessage)
+          : state.stopError
+            ? actionPresentation(`runner-${action}`, 'failure', bannerMessage)
+            : !actionEnabled
+              ? actionPresentation(`runner-${action}`, 'disabled', bannerMessage)
+              : startAction && startOptionsValidation && !startOptionsValidation.valid
+                ? actionPresentation(`runner-${action}`, 'disabled', bannerMessage)
+                : actionPresentation(`runner-${action}`, 'confirmation', bannerMessage);
+    const confirmPresentation = state.stopSubmitting
+      ? actionPresentation(`runner-${action}`, 'busy', bannerMessage)
+      : timeoutActive
+        ? actionPresentation(`runner-${action}`, 'retry', bannerMessage, { disabled: !confirmEnabled })
+      : state.stopError
+          ? actionPresentation(`runner-${action}`, 'failure', bannerMessage, { disabled: !confirmEnabled })
+          : !actionEnabled || (startAction && startOptionsValidation && !startOptionsValidation.valid)
+            ? actionPresentation(`runner-${action}`, 'disabled', bannerMessage)
+            : actionPresentation(`runner-${action}`, 'confirmation', actionSummary, { disabled: !confirmEnabled });
     overlayRoot().innerHTML = `
       <div class="overlay overlay--tight" data-overlay="stop">
         <div class="overlay__panel overlay__panel--modal">
@@ -16702,13 +16977,7 @@
             <span class="overlay__sub">${escapeHTML(subLabel)}${state.stopSubmitting ? ` / ${t('runner.working')}` : ''}</span>
           </div>
           <div class="overlay__body">
-            <div class="modal-banner section-banner section-banner--${bannerTone}">
-              <span class="dot" style="background: currentColor;"></span>
-              <div>
-                <div class="section-banner__title">${escapeHTML(bannerTitle)}</div>
-                <div class="section-banner__copy">${escapeHTML(bannerMessage)}</div>
-              </div>
-            </div>
+            ${renderActionStateBanner(overlayPresentation, bannerTitle, bannerMessage)}
             <div style="margin-top:12px;" class="detail-copy">
               ${escapeHTML(actionSummary)}
             </div>
@@ -16740,7 +17009,7 @@
             ${state.stopError ? `<div class="field-error" style="margin-top:10px;">${escapeHTML(state.stopError)}</div>` : ''}
             <div class="modal-actions" style="margin-top:16px;">
               <button type="button" class="button button--quiet" data-stop-close ${state.stopSubmitting ? 'disabled' : ''}>${escapeHTML(t('common.cancel'))}</button>
-              <button type="button" class="button ${action === 'stop' ? 'button--danger' : action === 'start' ? 'button--primary' : 'button--quiet'} ${state.stopSubmitting ? 'button--loading' : !confirmEnabled ? 'button--paused' : ''}" data-stop-confirm ${confirmEnabled ? '' : 'disabled'}>${escapeHTML(actionLabel)}</button>
+              <button type="button" class="button ${actionButtonClass(confirmPresentation, action === 'stop' ? 'button--danger' : action === 'start' ? 'button--primary' : 'button--quiet')}" data-stop-confirm ${actionButtonAttrs(confirmPresentation)}>${escapeHTML(actionLabel)}</button>
             </div>
           </div>
         </div>
@@ -18196,9 +18465,21 @@
             ? redactionAwareText(state.runnerControl?.message, t('config.savesDisabledUntilRunnerEnabled'))
             : !goalDraft.dirty
               ? t('goals.draftStaysLocal')
-              : requiresConfirmation && !confirmationMatches
+            : requiresConfirmation && !confirmationMatches
                 ? t('goals.typeExact', { confirmation: goalSaveRiskSummaryText(risk) })
                 : t('goals.saveCreatesBackup');
+    const goalActionState = saveState.status === 'saving'
+      ? 'busy'
+      : saveState.status === 'success'
+        ? 'success'
+        : saveState.status === 'error'
+          ? 'failure'
+          : !goalSaveEnabled() || !goalDraft.dirty
+            ? 'disabled'
+            : requiresConfirmation && !confirmationMatches
+              ? 'confirmation'
+              : 'ready';
+    const goalPresentation = actionPresentation('goal-save', goalActionState, bannerCopy);
     const metaRows = [];
     metaRows.push(`
       <div>
@@ -18261,13 +18542,7 @@
       }
     }
     return `
-      <div class="modal-banner section-banner section-banner--${bannerTone}">
-        <span class="dot" style="background: currentColor;"></span>
-        <div>
-          <div class="section-banner__title">${escapeHTML(bannerTitle)}</div>
-          <div class="section-banner__copy">${escapeHTML(bannerCopy)}</div>
-        </div>
-      </div>
+      ${renderActionStateBanner(goalPresentation, bannerTitle, bannerCopy)}
       ${metaRows.length ? `<div class="goal-save-state__meta">${metaRows.join('')}</div>` : ''}
     `;
   }
@@ -18308,8 +18583,22 @@
     const snapshotGoals = goalSnapshot.items || goalSnapshot;
     const goalDraft = buildGoalDraftSummary(snapshotGoals, state.goals);
     const risk = buildGoalSaveRiskSummary(snapshotGoals, state.goals);
+    const reason = goalSaveDisabledReason(goalDraft, risk);
+    const goalActionState = goalSaveInFlight()
+      ? 'busy'
+      : toText(state.goalSave?.status, '') === 'success'
+        ? 'success'
+        : toText(state.goalSave?.status, '') === 'error'
+          ? 'failure'
+          : risk.requiresConfirmation && reason
+            ? 'confirmation'
+            : reason
+              ? 'disabled'
+              : 'ready';
+    const presentation = actionPresentation('goal-save', goalActionState, reason || goalSaveRiskSummaryText(risk), { disabled: Boolean(reason) });
     root.setAttribute('data-goal-save-status', toText(state.goalSave?.status, 'idle'));
     root.setAttribute('data-goal-saving', goalSaveInFlight() ? 'true' : 'false');
+    root.setAttribute('data-action-state', presentation.status);
     const bannerNode = root.querySelector('[data-goal-save-banner]');
     if (bannerNode) {
       bannerNode.innerHTML = renderGoalSaveBanner(goalDraft, risk);
@@ -18323,12 +18612,20 @@
     }
     const button = root.querySelector('[data-goal-save-button]');
     if (button) {
-      const reason = goalSaveDisabledReason(goalDraft, risk);
+      button.setAttribute('data-action-state', presentation.status);
+      button.setAttribute('data-action-kind', presentation.kind);
+      if (presentation.busy) {
+        button.setAttribute('aria-busy', 'true');
+      } else {
+        button.removeAttribute('aria-busy');
+      }
       if (reason) {
         button.setAttribute('disabled', '');
+        button.setAttribute('aria-disabled', 'true');
         button.setAttribute('title', reason);
       } else {
         button.removeAttribute('disabled');
+        button.removeAttribute('aria-disabled');
         button.removeAttribute('title');
       }
     }

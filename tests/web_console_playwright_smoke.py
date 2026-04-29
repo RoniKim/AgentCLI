@@ -518,12 +518,14 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
                 ) from exc
 
             self.expect(page.locator("#main")).to_have_attribute("data-view", "dashboard")
+            self.expect(page.locator("#main .view").first).to_have_attribute("data-route-state", re.compile("ready|partial|empty|disabled|stale|loading|fallback|reconnecting|backend-unavailable|permission-denied|error"))
             self.expect(page.locator("#main")).to_contain_text("Pipeline snapshot")
             page.evaluate("window.__AGENTCLI_ADAPTERS__.handleAction('runner-stop')")
             stop_overlay = page.locator("[data-overlay='stop']")
             self.expect(stop_overlay).to_be_visible()
             self.expect(stop_overlay).to_contain_text('Type "STOP RUNNER" exactly to enable Stop.')
             self.expect(stop_overlay.locator("[data-stop-confirm]")).to_be_visible()
+            self.expect(stop_overlay.locator("[data-stop-confirm]")).to_have_attribute("data-action-state", re.compile("confirmation|disabled|busy|retry|failure"))
             page.keyboard.press("Escape")
             self.expect(stop_overlay).to_be_hidden()
 
@@ -562,6 +564,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(page.locator(".config-detail")).to_contain_text("로컬 검증 실패")
             page.evaluate("window.__AGENTCLI_ADAPTERS__.handleAction('save-config')")
             self.expect(page.locator(".config-save-state").first).to_contain_text("설정 저장 실패")
+            self.expect(page.locator(".config-save-state").first).to_have_attribute("data-action-state", "failure")
 
             page.locator('#topbar [data-action="set-locale-en"]').click()
             self.expect(page.locator("html")).to_have_attribute("lang", "en")
@@ -583,6 +586,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             page.evaluate("window.__AGENTCLI_ADAPTERS__.handleAction('prompt-save')")
             self.expect(page.locator('[data-prompt-editor-state]')).to_contain_text("저장 오류")
             self.expect(page.locator('[data-prompt-editor-banner]')).to_contain_text("프롬프트 저장 실패")
+            self.expect(page.locator(".prompt-mutation-state")).to_have_attribute("data-action-state", "failure")
             self.expect(page.locator('[data-prompt-editor-validation]')).to_contain_text("프롬프트 내용은 비워둘 수 없습니다.")
             page.locator('[data-prompt-editor-field="content"]').fill(original_prompt_content)
             page.evaluate("window.__AGENTCLI_ADAPTERS__.handleAction('prompt-restore')")
@@ -642,6 +646,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(worktree_overlay).to_be_visible()
             self.expect(worktree_overlay).to_contain_text("MERGE WORKTREE")
             self.expect(worktree_overlay.locator("[data-worktree-action-confirm]")).to_be_visible()
+            self.expect(worktree_overlay.locator("[data-worktree-action-confirm]")).to_have_attribute("data-action-state", "confirmation")
             page.keyboard.press("Escape")
             self.expect(worktree_overlay).to_be_hidden()
             page.evaluate("window.__AGENTCLI_ADAPTERS__.handleAction('worktree-discard')")
