@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import (
+    AGENT_WORK_DIR,
+    app_home,
     default_config_path,
     default_prompts_dir,
     legacy_default_config_path,
@@ -3215,6 +3217,31 @@ def _strip_run_dir_intent(cfg: dict[str, Any] | None) -> dict[str, Any]:
     overrides.pop("run_dir", None)
     overrides.pop("resume_latest", None)
     return overrides
+
+
+def _runner_control_approved_run_root(repo: Path) -> Path:
+    return (repo.expanduser().resolve() / AGENT_WORK_DIR / "agent_runs").resolve()
+
+
+def _runner_control_approved_config_roots(repo: Path, cfg_path: Path) -> list[Path]:
+    roots = [
+        (app_home() / "configs").resolve(),
+        default_config_path(repo).parent.resolve(),
+        cfg_path.expanduser().resolve().parent,
+    ]
+    legacy = legacy_default_config_path(repo)
+    if legacy is not None:
+        roots.append(legacy.parent.resolve())
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = root.as_posix().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(root)
+    return unique
 
 
 def _runner_control_start_options_contract(
@@ -7425,6 +7452,8 @@ def create_app(
                     request_options,
                     base_args=_build_runner_base_args(repo_root, cfg, cfg_path),
                     contract=start_options_contract,
+                    approved_run_root=_runner_control_approved_run_root(repo_root),
+                    approved_config_roots=_runner_control_approved_config_roots(repo_root, cfg_path),
                 )
                 if validation_error:
                     _record_runner_control_event(
@@ -7586,7 +7615,7 @@ def create_app(
                 )
 
             flow_name = "restart" if normalized_action == "restart" else "reload"
-            should_stop = bool(current_status.get("running")) or bool(str(current_status.get("run_dir") or "").strip())
+            should_stop = bool(_coerce_optional_bool(current_status.get("running")))
             stop_result: dict[str, Any] = {}
             if should_stop:
                 stop_result = _invoke_runner_stop(wait=False, control_action=normalized_action)
@@ -7638,6 +7667,15 @@ def create_app(
                         result={"stop": stop_result},
                         busy_override=False,
                     )
+            else:
+                stop_result = {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "runner_not_running",
+                    "message": f"Runner was already stopped; {flow_name} will start without writing stop artifacts.",
+                    "running": False,
+                    "run_dir": str(current_status.get("run_dir") or ""),
+                }
 
             result = _invoke_runner_start(start_overrides, control_action=normalized_action)
             if not bool(result.get("ok")):
@@ -7665,7 +7703,15 @@ def create_app(
                     busy_override=False,
                 )
 
-            success_message = "Runner restarted." if normalized_action == "restart" else "Runner reloaded."
+            start_only = bool(stop_result.get("skipped"))
+            if start_only:
+                success_message = (
+                    "Runner was stopped; started without writing stop artifacts."
+                    if normalized_action == "restart"
+                    else "Runner was stopped; reloaded by starting without writing stop artifacts."
+                )
+            else:
+                success_message = "Runner restarted." if normalized_action == "restart" else "Runner reloaded."
             message = success_message
             control_state["last_action"] = normalized_action
             control_state["last_message"] = message
@@ -7674,7 +7720,7 @@ def create_app(
                 action=normalized_action,
                 status_code=200,
                 ok=True,
-                status="restarted" if normalized_action == "restart" else "reloaded",
+                status=f"{flow_name}_started" if start_only else ("restarted" if normalized_action == "restart" else "reloaded"),
                 message=message,
                 result={"stop": stop_result, "start": result},
                 busy_override=False,

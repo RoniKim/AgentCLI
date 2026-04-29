@@ -956,7 +956,7 @@ class WebConsoleSafetyTests(unittest.TestCase):
 
     def test_runner_start_options_surface_all_field_errors_together(self) -> None:
         client, app = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
-        explicit_run_dir = (self.home / "runs" / "explicit").resolve()
+        explicit_run_dir = (self.repo / ".AgentCLI" / "agent_runs" / "explicit").resolve()
 
         response = client.post(
             "/api/runner/start",
@@ -1210,6 +1210,52 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual(self.config_path.as_posix(), stop_body["snapshot"]["runner_control"]["status"]["config_path"])
         self.assertEqual(3, len(controller.start_overrides))
 
+    def test_stopped_reload_restart_start_only_does_not_write_stop_artifacts(self) -> None:
+        class StopArtifactController(FakeRunnerController):
+            def stop(self, *, wait: bool = False) -> dict[str, object]:
+                result = super().stop(wait=wait)
+                if self.run_dir is not None:
+                    _write(self.run_dir / "STOP", "stop requested\n")
+                    _write(self.run_dir / "STOP_PROGRESS.json", "{}\n")
+                    _write(self.run_dir / "stop_progress.log", "stop requested\n")
+                return result
+
+        for action, phrase, expected_status in [
+            ("reload", "RELOAD RUNNER", "reload_started"),
+            ("restart", "RESTART RUNNER", "restart_started"),
+        ]:
+            with self.subTest(action=action):
+                historical_run_dir = self.repo / ".AgentCLI" / "agent_runs" / f"historical-{action}"
+                historical_run_dir.mkdir(parents=True, exist_ok=True)
+                _write(historical_run_dir / "run_summary.json", json.dumps({"final": {"rc": 0, "reason": "project_complete"}}, ensure_ascii=False) + "\n")
+
+                controller = StopArtifactController(
+                    repo=self.repo,
+                    base_args=_runner_base_args(self.config_path),
+                )
+                controller.run_dir = historical_run_dir
+                controller._running = False
+                client, app = _create_client(
+                    self.repo,
+                    enable_runner_controls=True,
+                    config_path=self.config_path,
+                    runner_controller=controller,
+                )
+
+                response = client.post(f"/api/runner/{action}", json={"confirmation": phrase})
+                self.assertEqual(200, response.status_code)
+                body = response.json()
+                self.assertTrue(body["ok"])
+                self.assertEqual(expected_status, body["status"])
+                self.assertTrue(body["result"]["stop"]["skipped"])
+                self.assertEqual("runner_not_running", body["result"]["stop"]["reason"])
+                self.assertEqual(1, app.state.runner_controller.start_calls)
+                self.assertEqual([], app.state.runner_controller.stop_calls)
+                self.assertNotEqual(historical_run_dir.resolve(), Path(body["result"]["start"]["run_dir"]).resolve())
+                self.assertFalse((historical_run_dir / "STOP").exists())
+                self.assertFalse((historical_run_dir / "STOP_PROGRESS.json").exists())
+                self.assertFalse((historical_run_dir / "stop_progress.log").exists())
+
     def test_invalid_runner_start_options_return_structured_400(self) -> None:
         client, app = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
 
@@ -1240,6 +1286,50 @@ class WebConsoleSafetyTests(unittest.TestCase):
                 self.assertTrue(any(item["field"] == field and item["code"] == code for item in errors))
                 self.assertEqual(0, app.state.runner_controller.start_calls)
                 self.assertEqual([], app.state.runner_controller.stop_calls)
+
+    def test_runner_start_rejects_launch_paths_outside_approved_roots(self) -> None:
+        client, app = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+        outside_run_dir = (self.home / "runs" / "outside").resolve()
+        response = client.post(
+            "/api/runner/start",
+            json={
+                "confirmation": "START RUNNER",
+                "start_options": {
+                    "config_path": self.config_path.as_posix(),
+                    "run_dir": outside_run_dir.as_posix(),
+                },
+            },
+        )
+
+        self.assertEqual(400, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("runner_start_options_invalid", payload["error"]["code"])
+        errors = payload["error"]["details"]["errors"]
+        self.assertTrue(any(item["field"] == "run_dir" and item["code"] == "outside_run_root" for item in errors))
+        self.assertEqual(0, app.state.runner_controller.start_calls)
+        self.assertEqual([], app.state.runner_controller.stop_calls)
+
+        outside_config_path = (self._tmp / "outside-config" / "agentcli.json").resolve()
+        _write_config(outside_config_path, self.repo)
+        response = client.post(
+            "/api/runner/start",
+            json={
+                "confirmation": "START RUNNER",
+                "start_options": {
+                    "config_path": outside_config_path.as_posix(),
+                },
+            },
+        )
+
+        self.assertEqual(400, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("runner_start_options_invalid", payload["error"]["code"])
+        errors = payload["error"]["details"]["errors"]
+        self.assertTrue(any(item["field"] == "config_path" and item["code"] == "outside_config_root" for item in errors))
+        self.assertEqual(0, app.state.runner_controller.start_calls)
+        self.assertEqual([], app.state.runner_controller.stop_calls)
 
     def test_runner_controls_require_trusted_network_on_non_loopback_bind(self) -> None:
         blocked_client, blocked_app = _create_client(

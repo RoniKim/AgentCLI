@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_runner.remote.controller import RunnerController
+from agent_runner.remote.controller import RunnerController, normalize_runner_start_options
 from agent_runner.stop_progress import (
     STOP_PROGRESS_FILE,
     STOP_PROGRESS_LOG_FILE,
@@ -207,6 +207,34 @@ class StopProgressTests(unittest.TestCase):
         self.assertEqual(resumed_run_dir.as_posix(), str(resumed.get("run_dir") or ""))
         self.assertEqual(explicit_1_run_dir.as_posix(), str(explicit_1.get("run_dir") or ""))
         self.assertEqual(explicit_2_run_dir.as_posix(), str(explicit_2.get("run_dir") or ""))
+
+    def test_runner_start_option_path_policy_reports_run_and_config_root_errors(self) -> None:
+        scratch = _scratch_dir("runner_start_path_policy")
+        repo = scratch / "repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        run_root = repo / ".AgentCLI" / "agent_runs"
+        config_root = scratch / "home" / "configs"
+        config_root.mkdir(parents=True, exist_ok=True)
+        approved_config = config_root / "agentcli.json"
+        outside_config = scratch / "outside" / "agentcli.json"
+        outside_run_dir = scratch / "runs" / "outside"
+
+        _, error = normalize_runner_start_options(
+            repo,
+            {
+                "config_path": outside_config.as_posix(),
+                "run_dir": outside_run_dir.as_posix(),
+            },
+            base_args=argparse.Namespace(config_path=approved_config.as_posix(), config=approved_config.as_posix()),
+            approved_run_root=run_root,
+            approved_config_roots=[config_root],
+        )
+
+        self.assertIsNotNone(error)
+        details = error["details"] if error is not None else {}
+        errors = details["errors"]
+        self.assertTrue(any(item["field"] == "run_dir" and item["code"] == "outside_run_root" for item in errors))
+        self.assertTrue(any(item["field"] == "config_path" and item["code"] == "outside_config_root" for item in errors))
 
 
 if __name__ == "__main__":

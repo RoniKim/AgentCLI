@@ -301,6 +301,41 @@ def _runner_start_path_text(value: Path | str | None) -> str:
         return raw.replace("\\", "/")
 
 
+def _runner_start_root_paths(roots: list[Path | str] | tuple[Path | str, ...] | None) -> list[Path]:
+    normalized: list[Path] = []
+    seen: set[str] = set()
+    for root in roots or []:
+        raw = str(root or "").strip()
+        if not raw or raw == REDACTED_VALUE:
+            continue
+        try:
+            resolved = Path(raw).expanduser().resolve()
+        except Exception:
+            continue
+        key = resolved.as_posix().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(resolved)
+    return normalized
+
+
+def _runner_start_path_within(path_text: str, roots: list[Path]) -> tuple[bool, Path | None]:
+    if not roots:
+        return True, None
+    try:
+        candidate = Path(path_text).expanduser().resolve()
+    except Exception:
+        return False, None
+    for root in roots:
+        try:
+            candidate.relative_to(root)
+            return True, candidate
+        except Exception:
+            continue
+    return False, candidate
+
+
 def _runner_start_bool(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -643,6 +678,8 @@ def normalize_runner_start_options(
     *,
     base_args: argparse.Namespace | None = None,
     contract: dict[str, Any] | None = None,
+    approved_run_root: Path | str | None = None,
+    approved_config_roots: list[Path | str] | tuple[Path | str, ...] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     repo_root = repo.expanduser().resolve()
     contract = contract or build_runner_start_options_contract(repo_root, base_args)
@@ -650,6 +687,8 @@ def normalize_runner_start_options(
     raw = dict(raw_options or {})
     overrides: dict[str, Any] = {}
     errors: list[dict[str, Any]] = []
+    approved_run_roots = _runner_start_root_paths([approved_run_root] if approved_run_root is not None else None)
+    approved_config_root_paths = _runner_start_root_paths(approved_config_roots)
 
     def _error(field: str, code: str, message: str, details: dict[str, Any] | None = None) -> None:
         error: dict[str, Any] = {"field": field, "code": code, "message": message}
@@ -704,6 +743,17 @@ def normalize_runner_start_options(
                 config_path_text = resolved_config_path.expanduser().resolve().as_posix()
             except Exception:
                 config_path_text = _runner_start_path_text(config_path_text)
+            allowed, resolved_candidate = _runner_start_path_within(config_path_text, approved_config_root_paths)
+            if not allowed:
+                _error(
+                    "config_path",
+                    "outside_config_root",
+                    "Config path must stay under approved config roots.",
+                    {
+                        "actual": resolved_candidate.as_posix() if resolved_candidate is not None else config_path_text,
+                        "approved_roots": [root.as_posix() for root in approved_config_root_paths],
+                    },
+                )
             overrides["config_path"] = config_path_text
             overrides["config"] = config_path_text
 
@@ -723,6 +773,17 @@ def normalize_runner_start_options(
             if run_dir_text == REDACTED_VALUE:
                 _error("run_dir", "invalid_value", "Run dir cannot be the redacted placeholder.")
             else:
+                allowed, resolved_candidate = _runner_start_path_within(run_dir_text, approved_run_roots)
+                if not allowed:
+                    _error(
+                        "run_dir",
+                        "outside_run_root",
+                        "Run dir must stay under the repo AgentCLI run root.",
+                        {
+                            "actual": resolved_candidate.as_posix() if resolved_candidate is not None else run_dir_text,
+                            "approved_root": approved_run_roots[0].as_posix() if approved_run_roots else "",
+                        },
+                    )
                 overrides["run_dir"] = run_dir_text
         if run_dir_text == REDACTED_VALUE:
             run_dir_text = ""
@@ -831,6 +892,18 @@ def normalize_runner_start_options(
         )
     if "config" not in overrides and "config_path" in overrides:
         overrides["config"] = overrides["config_path"]
+    if approved_config_root_paths and str(overrides.get("config_path") or "").strip() and str(overrides.get("config_path") or "").strip() != REDACTED_VALUE:
+        allowed, resolved_candidate = _runner_start_path_within(str(overrides.get("config_path") or ""), approved_config_root_paths)
+        if not allowed and not any(error.get("field") == "config_path" and error.get("code") == "outside_config_root" for error in errors):
+            _error(
+                "config_path",
+                "outside_config_root",
+                "Config path must stay under approved config roots.",
+                {
+                    "actual": resolved_candidate.as_posix() if resolved_candidate is not None else str(overrides.get("config_path") or ""),
+                    "approved_roots": [root.as_posix() for root in approved_config_root_paths],
+                },
+            )
     if "autopilot" not in overrides and autopilot_present is False:
         overrides["autopilot"] = bool(current_values.get("autopilot", False))
     if "loop_max_cycles" not in overrides and loop_max_cycles_present is False:
@@ -841,8 +914,26 @@ def normalize_runner_start_options(
         maybe_run_dir = _runner_start_path_text(current_values.get("run_dir"))
         if maybe_run_dir:
             overrides["run_dir"] = maybe_run_dir
+    if approved_run_roots and str(overrides.get("run_dir") or "").strip() and str(overrides.get("run_dir") or "").strip() != REDACTED_VALUE:
+        allowed, resolved_candidate = _runner_start_path_within(str(overrides.get("run_dir") or ""), approved_run_roots)
+        if not allowed and not any(error.get("field") == "run_dir" and error.get("code") == "outside_run_root" for error in errors):
+            _error(
+                "run_dir",
+                "outside_run_root",
+                "Run dir must stay under the repo AgentCLI run root.",
+                {
+                    "actual": resolved_candidate.as_posix() if resolved_candidate is not None else str(overrides.get("run_dir") or ""),
+                    "approved_root": approved_run_roots[0].as_posix(),
+                },
+            )
     if "resume_latest" not in overrides and resume_latest_present is False:
         overrides["resume_latest"] = bool(current_values.get("resume_latest", False))
+    if errors:
+        return {}, {
+            "code": "runner_start_options_invalid",
+            "message": "Runner start options are invalid.",
+            "details": _runner_start_validation_payload(errors),
+        }
     return overrides, None
 
 
