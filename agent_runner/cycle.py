@@ -23,11 +23,13 @@ from .gates import (
     should_retry_fast_web_worktree_regression_failure,
     summarize_fast_web_worktree_regression_failure,
 )
+from .pr_queue import queue_review_packet
 from .gitops import (
     git_head,
     git_changed_files,
     git_worktree_changed_files,
     git_porcelain,
+    git_rev_parse_ref,
     has_working_tree_changes,
     has_new_commits,
     git_untracked_files,
@@ -46,6 +48,7 @@ from .gitops import (
     create_worktree,
     remove_worktree,
     handle_worktree_patch,
+    read_pending_worktree_merge,
     check_and_remove_stale_git_lock,
     ensure_clean_working_tree,
 )
@@ -3137,33 +3140,142 @@ async def main_async(args: argparse.Namespace) -> int:
                     _record_task_stop("dev_after_attempt", locals().get("attempt") if "attempt" in locals() else None)
                     return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
 
-                # Merge or abandon task branch
+                # Merge or preserve task branch
                 if task_completed and tb:
-                    merge_ok = merge_task_branch(repo, tb)
-                    if merge_ok:
-                        metrics.event(
-                            "task_branch_merged",
-                            cycle=cycle_idx,
-                            step=step,
-                            task_id=next_task.id,
-                            branch=tb.branch_name,
-                            goal_trace=task_goal_trace,
-                            goal_ref=task_goal_ref,
-                            goal_text=task_goal_text,
-                        )
+                    if worktree_dir is not None:
+                        try:
+                            abandon_task_branch(repo, tb)
+                        except Exception as _ab_ex:
+                            eprint(f"[WARN] abandon_task_branch failed for preserved worktree task {tb.branch_name}: {_ab_ex}")
+                            metrics.event(
+                                "task_branch_preserve_failed",
+                                cycle=cycle_idx,
+                                step=step,
+                                task_id=next_task.id,
+                                branch=tb.branch_name,
+                                goal_trace=task_goal_trace,
+                                goal_ref=task_goal_ref,
+                                goal_text=task_goal_text,
+                                error=str(_ab_ex),
+                            )
+                        else:
+                            branch_head = git_rev_parse_ref(repo, tb.branch_name) or ""
+                            source_head_after = git_head(repo)
+                            try:
+                                packet_result = queue_review_packet(
+                                    source_repo,
+                                    run_id=run_dir.name,
+                                    task_ids=[next_task.id],
+                                    base_ref=tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit,
+                                    head_ref=branch_head,
+                                    branch=tb.branch_name,
+                                    created_at=tb.created_at,
+                                    source_head_before=source_base_ref,
+                                    source_head_after=source_head_after,
+                                    worktree_dir=worktree_dir.as_posix(),
+                                    validation_status="validation_passed",
+                                    validation_artifacts=[
+                                        str(
+                                            record.get("artifact_path")
+                                            or record.get("log_path")
+                                            or record.get("path")
+                                            or ""
+                                        )
+                                        for record in validation_records
+                                        if isinstance(record, dict)
+                                        and (
+                                            record.get("artifact_path")
+                                            or record.get("log_path")
+                                            or record.get("path")
+                                        )
+                                    ],
+                                    qa_notes=[
+                                        str(record.get("summary") or record.get("detail") or "").strip()
+                                        for record in validation_records
+                                        if isinstance(record, dict)
+                                        and str(record.get("summary") or record.get("detail") or "").strip()
+                                    ],
+                                    goal_trace=tb.goal_trace,
+                                    changed_files=git_changed_files(source_repo, tb.base_commit, branch_head),
+                                    merge_preflight={
+                                        "base_ref": tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit,
+                                        "head_ref": branch_head,
+                                        "branch": tb.branch_name,
+                                        "source_head_before": source_base_ref,
+                                        "source_head_after": source_head_after,
+                                        "source_main_mutated": source_base_ref != source_head_after,
+                                    },
+                                    status="pr_queued",
+                                )
+                            except Exception as _pq_ex:
+                                packet_result = {
+                                    "ok": False,
+                                    "status": "pr_queue_failed",
+                                    "recoverable": False,
+                                    "recoverable_reason": str(_pq_ex),
+                                    "packet_path": "",
+                                    "branch_index_path": "",
+                                    "packet_id": "",
+                                }
+                                eprint(f"[WARN] queue_review_packet failed for {tb.branch_name}: {_pq_ex}")
+                                metrics.event(
+                                    "task_review_packet_failed",
+                                    cycle=cycle_idx,
+                                    step=step,
+                                    task_id=next_task.id,
+                                    branch=tb.branch_name,
+                                    error=str(_pq_ex),
+                                    goal_trace=task_goal_trace,
+                                    goal_ref=task_goal_ref,
+                                    goal_text=task_goal_text,
+                                )
+                            else:
+                                metrics.event(
+                                    "task_review_packet_queued",
+                                    cycle=cycle_idx,
+                                    step=step,
+                                    task_id=next_task.id,
+                                    branch=tb.branch_name,
+                                    packet_id=packet_result.get("packet_id", ""),
+                                    packet_path=packet_result.get("packet_path", ""),
+                                    branch_index_path=packet_result.get("branch_index_path", ""),
+                                    recoverable=bool(packet_result.get("recoverable")),
+                                    goal_trace=task_goal_trace,
+                                    goal_ref=task_goal_ref,
+                                    goal_text=task_goal_text,
+                                )
+                                if packet_result.get("recoverable"):
+                                    eprint(
+                                        f"[WARN] Task review packet for {next_task.id} is recoverable: "
+                                        f"{packet_result.get('recoverable_reason') or packet_result.get('status')}"
+                                    )
+                        tb = None
                     else:
-                        eprint(f"[WARN] Merge failed for {tb.branch_name}; work preserved on branch")
-                        metrics.event(
-                            "task_branch_merge_failed",
-                            cycle=cycle_idx,
-                            step=step,
-                            task_id=next_task.id,
-                            branch=tb.branch_name,
-                            goal_trace=task_goal_trace,
-                            goal_ref=task_goal_ref,
-                            goal_text=task_goal_text,
-                        )
-                    tb = None
+                        merge_ok = merge_task_branch(repo, tb)
+                        if merge_ok:
+                            metrics.event(
+                                "task_branch_merged",
+                                cycle=cycle_idx,
+                                step=step,
+                                task_id=next_task.id,
+                                branch=tb.branch_name,
+                                goal_trace=task_goal_trace,
+                                goal_ref=task_goal_ref,
+                                goal_text=task_goal_text,
+                            )
+                        else:
+                            eprint(f"[WARN] Merge failed for {tb.branch_name}; work preserved on branch")
+                            metrics.event(
+                                "task_branch_merge_failed",
+                                cycle=cycle_idx,
+                                step=step,
+                                task_id=next_task.id,
+                                branch=tb.branch_name,
+                                goal_trace=task_goal_trace,
+                                goal_ref=task_goal_ref,
+                                goal_text=task_goal_text,
+                            )
+                        tb = None
 
                 if task_blocked:
                     # Blocked tasks: skip to next task instead of stopping
@@ -3984,40 +4096,103 @@ async def main_async(args: argparse.Namespace) -> int:
             if worktree_dir is not None:
                 gitops_cfg = getattr(args, "gitops", {}) if isinstance(getattr(args, "gitops", {}), dict) else {}
                 exclude_globs = gitops_cfg.get("untracked_exclude_globs", []) or []
-                merge_mode = str(gitops_cfg.get("worktree_merge_mode") or "manual").strip().lower()
-                auto_apply_worktree = merge_mode in {"auto", "apply", "true", "yes", "y"}
                 last_rc = handle_worktree_patch(
                     repo,
                     source_repo,
                     run_dir,
                     last_rc,
                     base_ref=source_base_ref or "HEAD",
-                    auto_apply=auto_apply_worktree,
+                    auto_apply=False,
                     exclude_globs=exclude_globs,
                 )
                 pending_merge = run_dir / "WORKTREE_MERGE_PENDING.json"
                 apply_failure = run_dir / "WORKTREE_APPLY_FAILURE.md"
+                queue_result: dict[str, object] | None = None
                 if pending_merge.exists():
-                    eprint("")
-                    eprint("[ACTION REQUIRED] Worktree merge pending.")
-                    eprint(f" - worktree: {worktree_dir}")
-                    eprint(f" - patch:    {run_dir / 'worktree.patch'}")
-                    eprint(" - shell:    /merge-worktree  (or /discard-worktree)")
-                    eprint("")
-                if auto_apply_worktree or (not pending_merge.exists() and not apply_failure.exists()):
                     try:
-                        remove_worktree(source_repo, worktree_dir)
-                    except Exception as ex:
-                        eprint(f"[WARN] Failed to remove worktree: {ex}")
-                        safe_write_text(
-                            run_dir / "WORKTREE_CLEANUP_FAILURE.md",
-                            "# Worktree cleanup failure\n\n"
-                            f"AgentCLI could not remove the isolated worktree:\n\n- `{worktree_dir}`\n\n"
-                            f"Error:\n\n```text\n{ex}\n```\n",
+                        pending_payload = read_pending_worktree_merge(pending_merge)
+                    except Exception:
+                        pending_payload = {}
+                    state_payload = {}
+                    try:
+                        state_payload = load_state(run_dir / "STATE.json")
+                    except Exception:
+                        state_payload = {}
+                    done_task_ids = [
+                        str(task_id).strip()
+                        for task_id in list(state_payload.get("done", []) or [])
+                        if str(task_id).strip()
+                    ]
+                    try:
+                        queue_result = queue_review_packet(
+                            source_repo,
+                            run_id=run_dir.name,
+                            task_ids=done_task_ids,
+                            base_ref=str(pending_payload.get("base_ref") or source_base_ref or "HEAD"),
+                            head_ref=str(pending_payload.get("head_ref") or git_head(source_repo)),
+                            branch=str(pending_payload.get("branch") or pending_payload.get("source_branch") or ""),
+                            source_head_before=source_base_ref,
+                            source_head_after=git_head(source_repo),
+                            worktree_dir=worktree_dir.as_posix(),
+                            validation_status="validation_passed" if last_rc == 0 else "validation_pending",
+                            validation_artifacts=[
+                                str(value).strip()
+                                for value in (
+                                    pending_payload.get("patch_path"),
+                                    run_dir / "worktree.patch",
+                                    pending_payload.get("pending_file"),
+                                )
+                                if value is not None and str(value).strip()
+                            ],
+                            qa_notes=[],
+                            goal_trace=list(pending_payload.get("goal_trace") or pending_payload.get("goalTrace") or []),
+                            changed_files=pending_payload.get("changed_files") or pending_payload.get("changedFiles") or [],
+                            merge_preflight=pending_payload.get("preflight") or pending_payload.get("apply_check") or {},
+                            status="pr_queued",
                         )
-                        if last_rc == 0:
-                            last_rc = 1
-                        final_reason = "worktree_cleanup_failed"
+                    except Exception as _pq_ex:
+                        queue_result = {
+                            "ok": False,
+                            "status": "pr_queue_failed",
+                            "recoverable": False,
+                            "recoverable_reason": str(_pq_ex),
+                            "packet_path": "",
+                            "branch_index_path": "",
+                            "packet_id": "",
+                        }
+                        eprint(f"[WARN] Failed to queue review packet for isolated worktree: {_pq_ex}")
+                        metrics.event(
+                            "worktree_review_packet_failed",
+                            run_id=run_dir.name,
+                            error=str(_pq_ex),
+                            worktree=worktree_dir.as_posix(),
+                        )
+                        if final_reason in {"", "ok"}:
+                            final_reason = "pr_queue_failed"
+                    else:
+                        if queue_result.get("recoverable"):
+                            final_reason = str(queue_result.get("status") or final_reason or "review_required")
+                        eprint("")
+                        eprint("[INFO] Review packet queued for isolated worktree.")
+                        eprint(f" - packet:  {queue_result.get('packet_path')}")
+                        eprint(f" - branch index: {queue_result.get('branch_index_path')}")
+                        eprint(f" - worktree: {worktree_dir}")
+                        if queue_result.get("recoverable"):
+                            eprint(f" - status:   {queue_result.get('status')} ({queue_result.get('recoverable_reason') or 'recoverable'})")
+                        eprint("")
+                try:
+                    remove_worktree(source_repo, worktree_dir)
+                except Exception as ex:
+                    eprint(f"[WARN] Failed to remove worktree: {ex}")
+                    safe_write_text(
+                        run_dir / "WORKTREE_CLEANUP_FAILURE.md",
+                        "# Worktree cleanup failure\n\n"
+                        f"AgentCLI could not remove the isolated worktree:\n\n- `{worktree_dir}`\n\n"
+                        f"Error:\n\n```text\n{ex}\n```\n",
+                    )
+                    if last_rc == 0:
+                        last_rc = 1
+                    final_reason = "worktree_cleanup_failed"
             run_summary["final"] = {"rc": last_rc, "reason": final_reason or ""}
             _write_run_summary()
             try:

@@ -22,11 +22,16 @@ if str(ROOT) not in sys.path:
 from agent_runner.gitops import (
     WORKTREE_MERGE_PENDING,
     WorktreeSafetyError,
+    abandon_task_branch,
+    create_task_branch,
+    git_head,
     _git_data_lines,
     create_worktree,
     default_worktree_dir,
+    remove_worktree,
     scan_worktree_diagnostics,
 )
+from agent_runner.pr_queue import load_branch_index, pr_branch_index_path, pr_packet_path, queue_review_packet
 from agent_runner.preflight import check_runner_start_readiness
 from agent_runner.remote.controller import read_runner_control_event
 from agent_runner.shell import RunnerShell
@@ -1012,6 +1017,55 @@ class WorktreeIsolationTests(unittest.TestCase):
                 dev_escalate_on={"test_failed"},
             )
         )
+
+    def test_generated_worktree_cleanup_preserves_pr_queue_and_source_head(self) -> None:
+        source_head_before = self._init_repo()
+        create_worktree(self.repo, self.worktree, run_dir=self.run_dir)
+
+        tb = create_task_branch(self.worktree, "T-review", task_title="Queue preserved review")
+        (self.worktree / "feature.txt").write_text("reviewable\n", encoding="utf-8")
+        self._git("add", "feature.txt", cwd=self.worktree)
+        self._git("commit", "-m", "reviewable", cwd=self.worktree)
+        branch_head = self._git("rev-parse", "HEAD", cwd=self.worktree).strip()
+        abandon_task_branch(self.worktree, tb)
+
+        result = queue_review_packet(
+            self.repo,
+            run_id=self.run_dir.name,
+            task_ids=["T-review"],
+            base_ref=tb.base_commit,
+            head_ref=branch_head,
+            branch=tb.branch_name,
+            created_at=tb.created_at,
+            source_head_before=source_head_before,
+            source_head_after=git_head(self.repo),
+            worktree_dir=self.worktree.as_posix(),
+            validation_status="validation_passed",
+            validation_artifacts=[(self.run_dir / "validation.log").as_posix()],
+            qa_notes=["ready for review"],
+            goal_trace=tb.goal_trace,
+            changed_files=["feature.txt"],
+            status="pr_queued",
+        )
+
+        remove_worktree(self.repo, self.worktree)
+
+        packet_path = pr_packet_path(self.repo, result["packet_id"])
+        index_path = pr_branch_index_path(self.repo)
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        index = load_branch_index(self.repo)
+
+        self.assertEqual(source_head_before, git_head(self.repo))
+        self.assertFalse(self.worktree.exists())
+        self.assertTrue(packet_path.exists())
+        self.assertTrue(index_path.exists())
+        self.assertEqual("pr_queued", packet["status"])
+        self.assertFalse(packet["source_main_mutated"])
+        self.assertEqual(branch_head, packet["head_ref"])
+        self.assertEqual(tb.branch_name, packet["branch"])
+        self.assertEqual(1, len(index["entries"]))
+        self.assertEqual(result["packet_id"], index["entries"][0]["id"])
+        self.assertEqual(tb.branch_name, index["entries"][0]["branch"])
 
 
 if __name__ == "__main__":

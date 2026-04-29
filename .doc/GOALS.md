@@ -202,9 +202,9 @@
 - [ ] Design-token audit aligns production `web_console/styles.css` with Direction A's deep near-black/green terminal palette while preserving readable contrast and reserving green for success/accent/status semantics.
 - [ ] Destructive, mutating, and long-running actions use consistent confirmation, busy, disabled, success, failure, timeout, and retry states.
 - [ ] Empty, partial, loading, stale, permission-denied, and backend-unavailable states are visually distinct across every screen.
-- [ ] Keyboard navigation covers route switching, command palette, modals, editors, diff views, logs, and confirmation dialogs.
-- [ ] Accessibility checks cover focus visibility, labels, contrast, reduced motion, and screen-reader names for icon-only controls.
-- [ ] Playwright screenshots validate Dashboard, Pipeline, Logs, Goals, Config, Prompts, History, Notifications, Worktree Review, Runner Controls, and mobile in both locales.
+- [x] Keyboard navigation covers route switching, command palette, modals, editors, diff views, logs, and confirmation dialogs.
+- [x] Accessibility checks cover focus visibility, labels, contrast, reduced motion, and screen-reader names for icon-only controls.
+- [x] Playwright screenshots validate Dashboard, Pipeline, Logs, Goals, Config, Prompts, History, Notifications, Worktree Review, Runner Controls, and mobile in both locales.
 
 ### P0-S. Documentation And Personal Automation Readiness
 
