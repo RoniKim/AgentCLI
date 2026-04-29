@@ -231,6 +231,57 @@ class WebConsoleStaticTests(unittest.TestCase):
         for token in required_tokens:
             self.assertIn(token, self.styles_css)
 
+    def test_styles_keep_desktop_routes_neutral_and_overflow_safe(self) -> None:
+        neutral_base_tokens = [
+            "--bg: #090b10",
+            "--surface: #10131a",
+            "--surface-2: #171b24",
+            "--surface-3: #0d1016",
+            "--border: #232937",
+            "--border-hi: #303849",
+            "--text: #d0d5df",
+            "--text-dim: #858d9b",
+            "--text-sub: #5b6472",
+        ]
+        old_green_tint_tokens = [
+            "--bg: #0a0c0a",
+            "--surface: #10130f",
+            "--surface-2: #161a14",
+            "--border: #1f2620",
+            "--border-hi: #2a3328",
+            "--text: #c8d2be",
+            "--text-dim: #7a8275",
+            "--text-sub: #505a4c",
+        ]
+        desktop_layout_tokens = [
+            ".view,\n.view__body,\n.view-grid,\n.panel",
+            ".compact-list__item > :not(.compact-list__bullet)",
+            "overflow-wrap: anywhere",
+            "word-break: break-word",
+            "max-width: 100%",
+            "min-height: 28px",
+            "text-overflow: ellipsis",
+            ".review-layout",
+            ".prompt-layout",
+            ".history-layout",
+            ".notification-layout",
+            ".worktree-diagnostics__entry",
+            ".runner-control__detail",
+        ]
+
+        for token in neutral_base_tokens + desktop_layout_tokens:
+            self.assertIn(token, self.styles_css)
+        for token in old_green_tint_tokens:
+            self.assertNotIn(token, self.styles_css)
+
+        token_block = self.styles_css.split("}", 1)[0]
+        for surface_token in ("--bg", "--surface", "--surface-2", "--surface-3", "--border", "--border-hi"):
+            match = re.search(rf"{re.escape(surface_token)}:\s*([^;]+);", token_block)
+            self.assertIsNotNone(match, surface_token)
+            value = match.group(1)
+            self.assertNotIn("126, 227, 138", value)
+            self.assertNotIn("#7ee38a", value.lower())
+
     def test_app_js_defines_required_shell_views_and_keyboard_flows(self) -> None:
         required_views = [
             "Dashboard",

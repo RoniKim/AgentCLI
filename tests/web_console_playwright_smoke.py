@@ -37,6 +37,21 @@ def _free_port() -> int:
 
 
 class WebConsolePlaywrightSmokeTests(unittest.TestCase):
+    DESKTOP_PRIMARY_ROUTES = (
+        "dashboard",
+        "pipeline",
+        "logs",
+        "backlog",
+        "goals",
+        "config",
+        "prompts",
+        "history",
+        "notifications",
+        "worktree",
+        "landing",
+        "mobile",
+    )
+
     @classmethod
     def _asyncio_subprocess_runtime_available(cls) -> bool:
         async def _probe() -> None:
@@ -344,9 +359,123 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
         self.expect(page.locator("#main")).to_have_attribute("data-view", view)
         self.expect(page.locator("#main")).to_contain_text(re.compile(re.escape(marker), re.IGNORECASE))
 
+    def _assert_desktop_route_layout(self, page, route: str) -> None:
+        metrics = page.evaluate(
+            """(route) => {
+                const visible = (el) => {
+                    const style = getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                };
+                const heights = (selector) => Array.from(document.querySelectorAll(selector))
+                    .filter(visible)
+                    .map((el) => Math.round(el.getBoundingClientRect().height * 10) / 10);
+                const root = document.documentElement;
+                const body = document.body;
+                const main = document.querySelector('#main');
+                const overflowOffenders = Array.from(document.querySelectorAll('#main *'))
+                    .filter((el) => {
+                        if (!visible(el)) return false;
+                        const style = getComputedStyle(el);
+                        const allowedOverflow = ['auto', 'scroll', 'hidden', 'clip'].includes(style.overflowX);
+                        const formControl = ['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName);
+                        const scrollRegion = Boolean(el.closest('.log-feed__scroll, .scroll-box, .prompt-preview__text'));
+                        return el.scrollWidth - el.clientWidth > 2 && !allowedOverflow && !formControl && !scrollRegion;
+                    })
+                    .slice(0, 8)
+                    .map((el) => ({
+                        tag: el.tagName.toLowerCase(),
+                        className: String(el.className || ''),
+                        text: (el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 160),
+                        scrollWidth: el.scrollWidth,
+                        clientWidth: el.clientWidth,
+                    }));
+                return {
+                    route,
+                    innerWidth: window.innerWidth,
+                    rootClientWidth: root.clientWidth,
+                    documentScrollWidth: root.scrollWidth,
+                    bodyScrollWidth: body.scrollWidth,
+                    mainClientWidth: main ? main.clientWidth : 0,
+                    mainScrollWidth: main ? main.scrollWidth : 0,
+                    overflowOffenders,
+                    buttonHeights: heights('#topbar .button:not(.button--tiny), #main .button:not(.button--tiny)'),
+                    filterHeights: heights('#main .filter-chip, #main .control-chip, #main .modal-tab'),
+                    fieldHeights: heights('#main input.field-control, #main select.field-control, #main .log-tail-input'),
+                    navHeights: heights('#sidebar .nav-item'),
+                };
+            }""",
+            route,
+        )
+        width_tolerance = 2
+        self.assertLessEqual(
+            metrics["documentScrollWidth"],
+            metrics["rootClientWidth"] + width_tolerance,
+            f"{route} document overflows horizontally: {metrics}",
+        )
+        self.assertLessEqual(
+            metrics["bodyScrollWidth"],
+            metrics["rootClientWidth"] + width_tolerance,
+            f"{route} body overflows horizontally: {metrics}",
+        )
+        self.assertLessEqual(
+            metrics["mainScrollWidth"],
+            metrics["mainClientWidth"] + width_tolerance,
+            f"{route} main overflows horizontally: {metrics}",
+        )
+        self.assertEqual([], metrics["overflowOffenders"], f"{route} has unconstrained text/control overflow: {metrics}")
+        for key in ("buttonHeights", "filterHeights"):
+            values = metrics[key]
+            if values:
+                self.assertGreaterEqual(min(values), 26, f"{route} {key} below desktop control height: {metrics}")
+                self.assertLessEqual(max(values), 44, f"{route} {key} above stable desktop control height: {metrics}")
+        field_heights = metrics["fieldHeights"]
+        if field_heights:
+            self.assertGreaterEqual(min(field_heights), 30, f"{route} field controls below desktop height: {metrics}")
+            self.assertLessEqual(max(field_heights), 40, f"{route} field controls above stable desktop height: {metrics}")
+        nav_heights = metrics["navHeights"]
+        self.assertTrue(nav_heights, f"{route} sidebar controls were not measured")
+        self.assertGreaterEqual(min(nav_heights), 26, f"{route} sidebar controls below desktop height: {metrics}")
+        self.assertLessEqual(max(nav_heights), 44, f"{route} sidebar controls above stable desktop height: {metrics}")
+
     def _read_snapshot(self) -> dict[str, object]:
         with urlopen(f"{self.server_url}/api/status", timeout=5) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def test_primary_desktop_routes_have_no_horizontal_overflow_and_stable_controls(self) -> None:
+        self._start_server()
+
+        manager = self.sync_playwright()
+        try:
+            playwright = manager.__enter__()
+        except Exception as exc:
+            raise unittest.SkipTest(
+                "Playwright runtime is unavailable. Optional setup: "
+                f'"{sys.executable}" -m pip install playwright && '
+                f'"{sys.executable}" -m playwright install chromium'
+            ) from exc
+        try:
+            try:
+                page = self._open_page(playwright)
+            except Exception as exc:
+                raise unittest.SkipTest(
+                    "Playwright Chromium is unavailable. Optional setup: "
+                    f'"{sys.executable}" -m pip install playwright && '
+                    f'"{sys.executable}" -m playwright install chromium'
+                ) from exc
+
+            page.set_viewport_size({"width": 1440, "height": 1024})
+            page.locator('#topbar [data-action="set-locale-ko"]').click()
+            self.expect(page.locator("html")).to_have_attribute("lang", "ko")
+
+            for route in self.DESKTOP_PRIMARY_ROUTES:
+                page.locator(f'#sidebar [data-nav="{route}"]').click()
+                self.expect(page.locator("#main")).to_have_attribute("data-view", route)
+                if route == "prompts":
+                    self.expect(page.locator("[data-prompt-editor-root]")).to_have_attribute("data-prompt-loading", "false")
+                self._assert_desktop_route_layout(page, route)
+        finally:
+            self._close_playwright(manager)
 
     def test_primary_views_locale_and_mobile_width(self) -> None:
         self._start_server()
