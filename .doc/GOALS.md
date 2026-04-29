@@ -5,7 +5,7 @@
 > This file is the target backlog, not a status report. Current implementation notes belong in `docs/WEB_CONSOLE.md`, `docs/MASTER_INDEX.md`, or archived incident/design notes.
 > Do not downgrade, remove, or merge unmet P0 goals to make progress look complete; implement them until they are true.
 > Task sizing rule: each unchecked P0 item should be small enough for one focused AgentCLI task branch.
-> Last reviewed: 2026-04-28.
+> Last reviewed: 2026-04-29.
 
 ## P0 (Must-Have)
 
@@ -186,6 +186,8 @@
 - [x] Generated task branches include the GOALS item id or exact text they satisfy, and completion can be traced from commit to GOALS checkbox.
 - [x] AgentCLI self-runs cannot stop early with `reason=ok` while any required GOALS completion level remains unmet.
 - [x] Task completion requires compile checks plus the fast regression suite relevant to touched files, with failures persisted in run artifacts.
+- [x] Worktree-isolated build/test gates resolve repo-local virtualenv commands such as `.venv/Scripts/python.exe` from the source repo while executing against the generated worktree.
+- [x] Validation subprocesses return deterministic stop/timeout results and clean reader tasks/child processes so a stuck gate cannot strand a run indefinitely at `test_start`, `fast_regression_start`, or `runner_wait`.
 - [x] QA stage records the validation commands, return codes, artifacts, and skipped-test rationale in a browser-readable report.
 - [x] Reporter stage writes a concise final run report that the Web UI can render without reading raw terminal scrollback.
 - [x] Failed tasks are carried into the next PM prompt through a structured failed-tasks block and are visible in Web History.
@@ -214,6 +216,8 @@
 - [ ] A visible identity header shows active repo, branch, run id, run dir, port, mode, runner-control status, and redaction status on every primary route.
 - [ ] A repo-level web instance lock prevents accidental duplicate local-operator control of the same repo.
 - [ ] Reload/restart while stopped behaves as start-only or no-op and does not write STOP or stop-progress artifacts into historical runs.
+- [ ] Pre-run readiness checks verify source `.venv`, Git worktree ownership/safe-directory state, stale STOP/runner_wait artifacts, and already-merged generated worktrees before a long unattended run starts.
+- [ ] Worktree cleanup diagnostics can report ACL-denied residual directories after Git unregisters a worktree and provide reboot/admin cleanup guidance without blocking new runs.
 - [ ] Web runner start rejects `run_dir` values outside the active repo's approved AgentCLI run root and rejects `config_path` values outside approved config roots.
 - [ ] LAN mode blocks raw prompt reads and keeps mutating actions disabled until authentication exists or a stronger trusted-operator gate is implemented.
 
