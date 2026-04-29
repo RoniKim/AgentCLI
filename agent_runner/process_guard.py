@@ -54,8 +54,6 @@ _watchdog_process: Optional[subprocess.Popen[object]] = None
 # regardless of PID liveness — guards against PID-recycling false positives.
 _SESSION_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 _KILL_RETRY_BACKOFF_SECONDS = 15 * 60  # Avoid noisy retries for kernel-stuck processes.
-_WATCHDOG_PARENT_POLL_SECONDS = 1.0
-
 # ---------------------------------------------------------------------------
 # L1 - Windows Job Object
 # ---------------------------------------------------------------------------
@@ -81,6 +79,10 @@ _DETACHED_PROCESS = 0x00000008
 # WaitForSingleObject return values
 _WAIT_OBJECT_0 = 0x00000000
 _WAIT_TIMEOUT = 0x00000102
+
+# Parent watchdog polling is intentionally bounded so the helper never holds a
+# single process handle open indefinitely.
+_PARENT_WATCHDOG_POLL_SECONDS = 1.0
 
 # ctypes type alias
 _HANDLE = ctypes.c_void_p
@@ -508,6 +510,52 @@ def process_descendant_pids(pid: int) -> list[int]:
     if sys.platform == "win32":
         return _descendant_pids(pid, _windows_child_pid_map())
     return []
+
+
+def _watchdog_process_state(pid: int) -> tuple[bool, Optional[int]]:
+    """Return a short-lived snapshot of a process' liveness and create-time."""
+    if pid <= 0:
+        return False, None
+    if sys.platform == "win32":
+        try:
+            _init_kernel32_types()
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = kernel32.OpenProcess(_SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not handle:
+                try:
+                    return int(kernel32.GetLastError()) == 5, None
+                except Exception:
+                    return False, None
+
+            creation = _FILETIME()
+            exit_time = _FILETIME()
+            kernel = _FILETIME()
+            user = _FILETIME()
+            try:
+                alive = kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT
+                actual_create_time: Optional[int] = None
+                try:
+                    ok = kernel32.GetProcessTimes(
+                        handle,
+                        ctypes.byref(creation),
+                        ctypes.byref(exit_time),
+                        ctypes.byref(kernel),
+                        ctypes.byref(user),
+                    )
+                    if ok:
+                        actual_create_time = _filetime_to_int(creation)
+                except Exception:
+                    pass
+                return alive, actual_create_time
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return False, None
+
+    alive = _pid_alive(pid)
+    if not alive:
+        return False, None
+    return True, _pid_create_time_ticks(pid)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -977,13 +1025,12 @@ def _wait_for_parent_exit(parent_pid: int, parent_create_time: Optional[int] = N
         return
 
     while True:
-        if parent_create_time is not None:
-            actual = _pid_create_time_ticks(parent_pid)
-            if actual is not None and actual != parent_create_time:
-                return
-        if not _pid_alive(parent_pid):
+        alive, actual_create_time = _watchdog_process_state(parent_pid)
+        if not alive:
             return
-        time.sleep(_WATCHDOG_PARENT_POLL_SECONDS)
+        if parent_create_time is not None and actual_create_time is not None and actual_create_time != parent_create_time:
+            return
+        time.sleep(_PARENT_WATCHDOG_POLL_SECONDS)
 
 
 def _run_parent_watchdog(parent_pid: int, session_dir: Path, parent_create_time: Optional[int] = None) -> int:

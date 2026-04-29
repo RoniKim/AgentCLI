@@ -711,49 +711,47 @@ class _CodexAppServerClient:
         self._closed = True
 
         pid = self._registered_pid or (int(self._proc.pid) if self._proc.pid else None)
-        if self._proc.stdin is not None:
-            try:
-                self._proc.stdin.close()
-            except Exception:
-                pass
-
-        if self._proc.poll() is None:
-            try:
-                self._proc.terminate()
-                self._proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
+        try:
+            if self._proc.poll() is None:
                 try:
-                    self._proc.kill()
-                    self._proc.wait(timeout=2)
+                    self._proc.terminate()
                 except Exception:
                     pass
-            except Exception:
                 try:
-                    self._proc.kill()
                     self._proc.wait(timeout=2)
                 except Exception:
-                    pass
-        for stream_name in ("stdout", "stderr"):
-            stream = getattr(self._proc, stream_name, None)
-            if stream is not None:
+                    try:
+                        self._proc.kill()
+                    except Exception:
+                        pass
+                    try:
+                        self._proc.wait(timeout=2)
+                    except Exception:
+                        pass
+        finally:
+            for stream in (self._proc.stdin, self._proc.stdout, self._proc.stderr):
+                if stream is None:
+                    continue
                 try:
                     stream.close()
                 except Exception:
                     pass
-        if self._reader.is_alive() and threading.current_thread() is not self._reader:
-            try:
-                self._reader.join(timeout=2)
-            except Exception:
-                pass
-        if pid is not None:
-            try:
-                from .process_guard import terminate_process_tree, unregister_pid_if_exited
 
-                terminate_process_tree(pid, include_root=self._proc.poll() is None)
-                unregister_pid_if_exited(pid)
-            except Exception:
-                pass
-            self._registered_pid = None
+            if self._reader.is_alive() and threading.current_thread() is not self._reader:
+                try:
+                    self._reader.join(timeout=2)
+                except Exception:
+                    pass
+
+            if pid is not None:
+                try:
+                    from .process_guard import terminate_process_tree, unregister_pid_if_exited
+
+                    terminate_process_tree(pid, include_root=self._proc.poll() is None, wait=True)
+                    unregister_pid_if_exited(pid)
+                except Exception:
+                    pass
+                self._registered_pid = None
 
     def _reader_loop(self) -> None:
         assert self._proc.stdout is not None

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import asyncio
 import json
 import os
@@ -10,7 +11,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -317,6 +318,56 @@ class ProcessGuardTests(unittest.TestCase):
         flags = int(calls[0]["creationflags"])
         self.assertTrue(flags & process_guard._CREATE_BREAKAWAY_FROM_JOB)
 
+    def test_watchdog_process_state_closes_windows_handle_on_each_check(self) -> None:
+        creation_values = {1: 111, 2: 222}
+
+        def _fill_creation(handle: int, creation: object, exit_time: object, kernel: object, user: object) -> int:
+            ft = ctypes.cast(creation, ctypes.POINTER(process_guard._FILETIME)).contents
+            ft.dwLowDateTime = creation_values[int(handle)]
+            ft.dwHighDateTime = 0
+            return 1
+
+        fake_kernel32 = SimpleNamespace(
+            OpenProcess=MagicMock(side_effect=[1, 2]),
+            WaitForSingleObject=MagicMock(side_effect=[process_guard._WAIT_TIMEOUT, process_guard._WAIT_OBJECT_0]),
+            GetProcessTimes=MagicMock(side_effect=_fill_creation),
+            CloseHandle=MagicMock(return_value=1),
+            GetLastError=MagicMock(return_value=5),
+            CreateJobObjectW=MagicMock(),
+            SetInformationJobObject=MagicMock(),
+            AssignProcessToJobObject=MagicMock(),
+            GetCurrentProcess=MagicMock(),
+            TerminateProcess=MagicMock(),
+            CreateToolhelp32Snapshot=MagicMock(),
+            Process32FirstW=MagicMock(),
+            Process32NextW=MagicMock(),
+        )
+
+        with (
+            patch.object(process_guard.sys, "platform", "win32"),
+            patch.object(process_guard.ctypes, "windll", SimpleNamespace(kernel32=fake_kernel32), create=True),
+        ):
+            state_1 = process_guard._watchdog_process_state(123)
+            state_2 = process_guard._watchdog_process_state(123)
+
+        self.assertEqual((True, 111), state_1)
+        self.assertEqual((False, 222), state_2)
+        self.assertEqual(2, fake_kernel32.OpenProcess.call_count)
+        self.assertEqual(2, fake_kernel32.CloseHandle.call_count)
+
+    def test_wait_for_parent_exit_polls_create_time_with_bounded_sleep(self) -> None:
+        states = iter([(True, 111), (True, 222)])
+        sleeps: list[float] = []
+
+        with (
+            patch("agent_runner.process_guard._watchdog_process_state", side_effect=lambda pid: next(states)) as state,
+            patch("agent_runner.process_guard.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)),
+        ):
+            process_guard._wait_for_parent_exit(10, 111)
+
+        self.assertEqual(2, state.call_count)
+        self.assertEqual([process_guard._PARENT_WATCHDOG_POLL_SECONDS], sleeps)
+
     def test_watchdog_executable_prefers_pythonw_on_windows(self) -> None:
         fake_python = self.fixture_root / "python.exe"
         fake_pythonw = self.fixture_root / "pythonw.exe"
@@ -328,31 +379,6 @@ class ProcessGuardTests(unittest.TestCase):
             patch.object(process_guard.sys, "executable", str(fake_python)),
         ):
             self.assertEqual(str(fake_pythonw), process_guard._watchdog_executable())
-
-    def test_parent_watchdog_polling_does_not_hold_infinite_windows_handle(self) -> None:
-        with (
-            patch.object(process_guard.sys, "platform", "win32"),
-            patch("agent_runner.process_guard._pid_create_time_ticks", return_value=111) as create_time,
-            patch("agent_runner.process_guard._pid_alive", side_effect=[True, False]) as alive,
-            patch("agent_runner.process_guard.time.sleep") as sleep,
-        ):
-            process_guard._wait_for_parent_exit(123, parent_create_time=111)
-
-        self.assertEqual([call(123), call(123)], create_time.call_args_list)
-        self.assertEqual([call(123), call(123)], alive.call_args_list)
-        sleep.assert_called_once_with(process_guard._WATCHDOG_PARENT_POLL_SECONDS)
-
-    def test_parent_watchdog_polling_stops_on_pid_reuse_signature(self) -> None:
-        with (
-            patch.object(process_guard.sys, "platform", "win32"),
-            patch("agent_runner.process_guard._pid_create_time_ticks", return_value=222),
-            patch("agent_runner.process_guard._pid_alive") as alive,
-            patch("agent_runner.process_guard.time.sleep") as sleep,
-        ):
-            process_guard._wait_for_parent_exit(123, parent_create_time=111)
-
-        alive.assert_not_called()
-        sleep.assert_not_called()
 
     @unittest.skipUnless(sys.platform == "win32", "Windows process-tree smoke test")
     def test_run_cmd_async_cleans_inherited_stdout_child_process(self) -> None:

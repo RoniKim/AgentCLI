@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -11,78 +12,129 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-from agent_runner import utils
+from agent_runner.utils import _CodexAppServerClient
 
 
 class _FakePipe:
     def __init__(self) -> None:
+        self.close_calls = 0
         self.closed = False
 
     def close(self) -> None:
+        self.close_calls += 1
         self.closed = True
 
 
-class _FakeStdout(_FakePipe):
-    def __iter__(self):
-        return iter(())
-
-
-class _FakePopen:
+class _FakeReaderThread:
     def __init__(self) -> None:
-        self.pid = 12345
+        self.started = False
+        self.join_calls: list[float | None] = []
+        self._alive = True
+
+    def start(self) -> None:
+        self.started = True
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+        self._alive = False
+
+
+class _FakeProc:
+    def __init__(self, *, pid: int = 4321, terminate_stops: bool = True) -> None:
+        self.pid = pid
         self.stdin = _FakePipe()
-        self.stdout = _FakeStdout()
-        self.stderr = None
-        self.terminated = False
-        self.killed = False
-        self.wait_calls = 0
-        self.returncode: int | None = None
+        self.stdout = _FakePipe()
+        self.stderr = _FakePipe()
+        self._alive = True
+        self._returncode: int | None = None
+        self._terminate_stops = terminate_stops
+        self.terminate_calls = 0
+        self.kill_calls = 0
+        self.wait_calls: list[float | None] = []
 
     def poll(self) -> int | None:
-        return self.returncode
+        return None if self._alive else self._returncode
 
     def terminate(self) -> None:
-        self.terminated = True
+        self.terminate_calls += 1
+        if self._terminate_stops:
+            self._alive = False
+            self._returncode = 0
 
     def kill(self) -> None:
-        self.killed = True
-        self.returncode = -9
+        self.kill_calls += 1
+        self._alive = False
+        self._returncode = -9
 
     def wait(self, timeout: float | None = None) -> int:
-        self.wait_calls += 1
-        self.returncode = 0
-        return 0
+        self.wait_calls.append(timeout)
+        if self._alive and not self._terminate_stops:
+            raise subprocess.TimeoutExpired(cmd=["codex", "app-server"], timeout=timeout)
+        if self._returncode is None:
+            self._returncode = 0
+        self._alive = False
+        return self._returncode
 
 
 class CodexAppServerCleanupTests(unittest.TestCase):
-    def test_close_releases_stdio_and_unregisters_process(self) -> None:
-        fake_proc = _FakePopen()
-        unregistered: list[int] = []
-        terminated: list[tuple[int, bool]] = []
+    def _build_client(self, proc: _FakeProc, reader: _FakeReaderThread) -> _CodexAppServerClient:
+        with (
+            patch("agent_runner.utils.subprocess.Popen", return_value=proc),
+            patch("agent_runner.utils.threading.Thread", return_value=reader),
+            patch("agent_runner.utils._CodexAppServerClient._initialize", return_value=None),
+            patch("agent_runner.process_guard.register_pid") as register_pid,
+        ):
+            client = _CodexAppServerClient(codex_path="codex", timeout_s=0.1)
+        register_pid.assert_called_once_with(proc.pid)
+        return client
+
+    def test_close_closes_pipes_joins_reader_and_unregisters_pid(self) -> None:
+        proc = _FakeProc(terminate_stops=True)
+        reader = _FakeReaderThread()
 
         with (
-            patch("agent_runner.utils.subprocess.Popen", return_value=fake_proc),
-            patch.object(utils._CodexAppServerClient, "_initialize", return_value=None),
-            patch("agent_runner.process_guard.register_pid"),
-            patch(
-                "agent_runner.process_guard.terminate_process_tree",
-                side_effect=lambda pid, include_root=True: terminated.append((pid, include_root)) or True,
-            ),
-            patch(
-                "agent_runner.process_guard.unregister_pid_if_exited",
-                side_effect=lambda pid: unregistered.append(pid),
-            ),
+            patch("agent_runner.process_guard.terminate_process_tree") as terminate_tree,
+            patch("agent_runner.process_guard.unregister_pid_if_exited") as unregister_pid,
         ):
-            client = utils._CodexAppServerClient(codex_path="codex")
+            client = self._build_client(proc, reader)
             client.close()
             client.close()
 
-        self.assertTrue(fake_proc.stdin.closed)
-        self.assertTrue(fake_proc.stdout.closed)
-        self.assertTrue(fake_proc.terminated)
-        self.assertEqual(1, fake_proc.wait_calls)
-        self.assertEqual([(12345, False)], terminated)
-        self.assertEqual([12345], unregistered)
+        self.assertEqual(1, proc.stdin.close_calls)
+        self.assertEqual(1, proc.stdout.close_calls)
+        self.assertEqual(1, proc.stderr.close_calls)
+        self.assertEqual([2], reader.join_calls)
+        self.assertEqual(1, proc.terminate_calls)
+        self.assertEqual(0, proc.kill_calls)
+        self.assertEqual([2], proc.wait_calls)
+        terminate_tree.assert_called_once_with(proc.pid, include_root=False, wait=True)
+        unregister_pid.assert_called_once_with(proc.pid)
+        self.assertIsNone(client._registered_pid)
+
+    def test_close_forced_termination_still_cleans_up_everything(self) -> None:
+        proc = _FakeProc(terminate_stops=False)
+        reader = _FakeReaderThread()
+
+        with (
+            patch("agent_runner.process_guard.terminate_process_tree") as terminate_tree,
+            patch("agent_runner.process_guard.unregister_pid_if_exited") as unregister_pid,
+        ):
+            client = self._build_client(proc, reader)
+            client.close()
+
+        self.assertEqual(1, proc.stdin.close_calls)
+        self.assertEqual(1, proc.stdout.close_calls)
+        self.assertEqual(1, proc.stderr.close_calls)
+        self.assertEqual([2], reader.join_calls)
+        self.assertEqual(1, proc.terminate_calls)
+        self.assertEqual(1, proc.kill_calls)
+        self.assertEqual([2, 2], proc.wait_calls)
+        terminate_tree.assert_called_once_with(proc.pid, include_root=False, wait=True)
+        unregister_pid.assert_called_once_with(proc.pid)
+        self.assertIsNone(client._registered_pid)
 
 
 if __name__ == "__main__":
