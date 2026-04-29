@@ -389,6 +389,7 @@ def record_history(
     task_id: str,
     title: str,
     status: str,
+    task_status: str = "",
     reason: str = "",
     detail: str = "",
     files: list[str] | None = None,
@@ -402,7 +403,7 @@ def record_history(
         return
     _record_task_history(
         repo, task_id=task_id, title=title, status=status,
-        reason=reason, detail=detail, files=files,
+        task_status=task_status, reason=reason, detail=detail, files=files,
         cycle_idx=cycle, attempt=attempt, max_attempts=max_attempts,
         run_id=run_dir.name, backend=backend,
     )

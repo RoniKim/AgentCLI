@@ -71,6 +71,12 @@ from .remote.controller import (
 from .runtime_contract import CODEX_MODEL_FIELD_SPECS, PIPELINE_ROLE_FIELD_SPEC, PIPELINE_STAGE_ORDER
 from .stop_progress import normalize_stop_progress_payload, summarize_stop_progress_liveness
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, load_state, parse_backlog_md
+from .failure_policy import (
+    STATUS_GROUP_BLOCKED_ENV,
+    STATUS_GROUP_REGRESSION,
+    STATUS_GROUP_REVIEW,
+    count_task_status_groups,
+)
 from .utils import atomic_write_json, atomic_write_text, now_iso, run_cmd, STOP_REASON_PROJECT_COMPLETE
 
 try:  # Optional dependency: the app must still import when FastAPI is absent.
@@ -4221,9 +4227,34 @@ def _load_backlog_payload(
             if item["status"] in {"failed", "review_required", "blocked_env", "test_contract_changed", "regression_failed"}
         ]),
     }
+    status_counts: dict[str, int] = {}
+    for item in backlog:
+        key = _pick_text(item.get("task_status"), item.get("status"), "unknown")
+        status_counts[key] = status_counts.get(key, 0) + 1
+    failure_group_counts = count_task_status_groups(
+        [
+            _pick_text(item.get("task_status"), item.get("status"), "unknown")
+            for item in backlog
+            if item["status"] in {"failed", "review_required", "blocked_env", "test_contract_changed", "regression_failed"}
+        ]
+    )
+    counts.update(
+        {
+            "regressed": failure_group_counts.get(STATUS_GROUP_REGRESSION, 0),
+            "review": failure_group_counts.get(STATUS_GROUP_REVIEW, 0),
+            "blocked_env": failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0),
+            "tasks_regressed": failure_group_counts.get(STATUS_GROUP_REGRESSION, 0),
+            "tasks_review": failure_group_counts.get(STATUS_GROUP_REVIEW, 0),
+            "tasks_blocked_env": failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0),
+        }
+    )
     return {
         "items": backlog,
         "counts": counts,
+        "status_counts": status_counts,
+        "statusCounts": status_counts,
+        "failure_group_counts": failure_group_counts,
+        "failureGroupCounts": failure_group_counts,
         "selected_id": selected_id,
     }
 

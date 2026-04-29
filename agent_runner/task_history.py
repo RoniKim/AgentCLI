@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS task_history (
     task_id      TEXT NOT NULL,
     title        TEXT NOT NULL,
     status       TEXT NOT NULL,
+    task_status  TEXT DEFAULT '',
     reason       TEXT DEFAULT '',
     detail       TEXT DEFAULT '',
     files        TEXT DEFAULT '[]',
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS task_history (
 _MIGRATIONS = [
     "ALTER TABLE task_history ADD COLUMN attempt INTEGER DEFAULT 0;",
     "ALTER TABLE task_history ADD COLUMN max_attempts INTEGER DEFAULT 1;",
+    "ALTER TABLE task_history ADD COLUMN task_status TEXT DEFAULT '';",
 ]
 
 _MAX_DETAIL_LEN = 500
@@ -91,6 +93,7 @@ def record_task(
     task_id: str,
     title: str,
     status: str,
+    task_status: str = "",
     reason: str = "",
     detail: str = "",
     files: Optional[Sequence[str]] = None,
@@ -109,12 +112,13 @@ def record_task(
             recorded_at = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "INSERT INTO task_history "
-                "(task_id, title, status, reason, detail, files, cycle_idx, attempt, max_attempts, run_id, backend, recorded_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(task_id, title, status, task_status, reason, detail, files, cycle_idx, attempt, max_attempts, run_id, backend, recorded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(task_id),
                     str(title),
                     str(status),
+                    str(task_status or ""),
                     str(reason or ""),
                     truncated_detail,
                     files_json,
@@ -145,20 +149,20 @@ def query_history(
         try:
             if status_filter:
                 rows = conn.execute(
-                    "SELECT task_id, title, status, reason, detail, files, cycle_idx, "
+                    "SELECT task_id, title, status, task_status, reason, detail, files, cycle_idx, "
                     "attempt, max_attempts, run_id, backend, recorded_at "
                     "FROM task_history WHERE status = ? ORDER BY id DESC LIMIT ?",
                     (str(status_filter), int(max_items)),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT task_id, title, status, reason, detail, files, cycle_idx, "
+                    "SELECT task_id, title, status, task_status, reason, detail, files, cycle_idx, "
                     "attempt, max_attempts, run_id, backend, recorded_at "
                     "FROM task_history ORDER BY id DESC LIMIT ?",
                     (int(max_items),),
                 ).fetchall()
             cols = [
-                "task_id", "title", "status", "reason", "detail", "files",
+                "task_id", "title", "status", "task_status", "reason", "detail", "files",
                 "cycle_idx", "attempt", "max_attempts", "run_id", "backend", "recorded_at",
             ]
             result = []
@@ -361,7 +365,7 @@ def _build_failed_task_item(
         title = task_id or _text(row.get("task_title") or row.get("taskTitle"), "unknown")
 
     reason = _text(row.get("reason"), "unknown")
-    task_status = _text(row.get("status") or row.get("task_status") or row.get("taskStatus") or row.get("outcome_status") or row.get("outcomeStatus"), "")
+    task_status = _text(row.get("task_status") or row.get("taskStatus") or row.get("outcome_status") or row.get("outcomeStatus") or row.get("status"), "")
     detail = _text(row.get("detail"), "", max_chars=_MAX_PROMPT_TEXT_LEN)
     current_attempt = _int(row.get("attempt"), 0)
     max_attempts = _int(row.get("max_attempts"), 0)
@@ -657,6 +661,7 @@ def count_consecutive_title_failures(
     title: str,
     *,
     max_lookback: int = 20,
+    excluded_task_statuses: Sequence[str] | None = None,
 ) -> int:
     """Count how many times a task with the given title failed consecutively (most-recent first).
 
@@ -669,14 +674,22 @@ def count_consecutive_title_failures(
     try:
         conn = _connect(repo)
         try:
+            excluded = {
+                str(value or "").strip().lower()
+                for value in (excluded_task_statuses if excluded_task_statuses is not None else ("blocked_env", "test_contract_changed"))
+                if str(value or "").strip()
+            }
             rows = conn.execute(
-                "SELECT status FROM task_history "
+                "SELECT status, task_status FROM task_history "
                 "WHERE title = ? ORDER BY id DESC LIMIT ?",
                 (str(title), int(max_lookback)),
             ).fetchall()
             count = 0
-            for (status,) in rows:
-                if status.upper() in ("FAILED", "FAIL"):
+            for status, task_status in rows:
+                normalized_task_status = str(task_status or "").strip().lower()
+                if normalized_task_status in excluded:
+                    continue
+                if str(status or "").upper() in ("FAILED", "FAIL"):
                     count += 1
                 else:
                     break

@@ -11,6 +11,12 @@ from .goals import parse_goals_completion, read_goals
 from .gitops import find_pending_worktree_merge, git_head, git_porcelain, list_untracked, read_pending_worktree_merge
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, parse_backlog_md, load_state
 from .task_history import build_failed_tasks_artifact
+from .failure_policy import (
+    STATUS_GROUP_BLOCKED_ENV,
+    STATUS_GROUP_REGRESSION,
+    STATUS_GROUP_REVIEW,
+    count_task_status_groups,
+)
 from .todo import read_current_todo
 from .utils import atomic_write_json, now_iso, run_cmd, safe_write_text
 
@@ -488,10 +494,11 @@ def build_cycle_change_summary(
     backlog = _load_backlog_tasks(run_dir)
     title_lookup = {task.id: task.title for task in backlog}
     done_ids = set(state.get("done", []) or [])
+    state_failed_items = [item for item in (state.get("failed", []) or []) if isinstance(item, dict)]
     failed_artifact = build_failed_tasks_artifact(
         repo,
         run_dir,
-        failed_items=[item for item in (state.get("failed", []) or []) if isinstance(item, dict)],
+        failed_items=state_failed_items,
         task_lookup=title_lookup,
         done_ids=done_ids,
         source="state",
@@ -518,6 +525,15 @@ def build_cycle_change_summary(
         item for item in task_results_list
         if _text(item.get("status")) in {"failed", "review_required", "blocked_env", "test_contract_changed", "regression_failed"}
     ])
+    failure_status_counts: dict[str, int] = {}
+    failure_statuses: list[str] = []
+    for item in state_failed_items:
+        status_key = _text(item.get("task_status") or item.get("taskStatus") or item.get("outcome_status") or item.get("status") or "failed").lower()
+        failure_status_counts[status_key] = failure_status_counts.get(status_key, 0) + 1
+        failure_statuses.append(status_key)
+    failure_group_counts = count_task_status_groups(failure_statuses)
+    if state_failed_items:
+        task_failed = max(task_failed, len(state_failed_items))
     task_skipped = len([item for item in task_results_list if _text(item.get("status")) == "skipped"])
     validation_passed = len([item for item in validation_results if _text(item.get("status")).lower() in {"passed", "pass", "success", "completed", "ok"}])
     validation_failed = len([item for item in validation_results if _text(item.get("status")).lower() in {"failed", "fail", "error"}])
@@ -559,6 +575,17 @@ def build_cycle_change_summary(
             "tasks_done": task_done,
             "tasks_failed": task_failed,
             "tasks_skipped": task_skipped,
+            "tasks_regressed": failure_group_counts.get(STATUS_GROUP_REGRESSION, 0),
+            "tasks_review": failure_group_counts.get(STATUS_GROUP_REVIEW, 0),
+            "tasks_blocked_env": failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0),
+            "tasksRegressed": failure_group_counts.get(STATUS_GROUP_REGRESSION, 0),
+            "tasksReview": failure_group_counts.get(STATUS_GROUP_REVIEW, 0),
+            "tasksBlockedEnv": failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0),
+            "failed_state_total": len(state_failed_items),
+            "failure_status_counts": failure_status_counts,
+            "failureStatusCounts": failure_status_counts,
+            "failure_group_counts": failure_group_counts,
+            "failureGroupCounts": failure_group_counts,
         },
         "goals": goals_changes,
         "pending_worktree": pending_worktree,
