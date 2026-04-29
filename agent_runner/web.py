@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import threading
 import time
 from collections import deque
@@ -59,7 +60,7 @@ from .prompts import (
     REPORTER_INSTRUCTIONS_DEFAULT,
     _read_text_robust,
 )
-from .process_guard import init_process_guard, terminate_all_children
+from .process_guard import _pid_alive, _pid_create_time_ticks, _pid_signature_matches, init_process_guard, terminate_all_children
 from .run_dir import find_latest_run_dir
 from .shared import coerce_roles_arg
 from .remote.controller import (
@@ -211,6 +212,9 @@ SENSITIVE_CONFIG_TOKENS = {
     "webhook",
 }
 REDACTED_VALUE = "[redacted]"
+WEB_INSTANCE_LOCK_FILENAME = "web_console.lock.json"
+_WEB_INSTANCE_LOCAL_HOLDS: dict[str, dict[str, Any]] = {}
+_WEB_INSTANCE_LOCAL_HOLDS_LOCK = threading.Lock()
 
 
 def _repo_root(repo: Path | str | None) -> Path:
@@ -2786,6 +2790,7 @@ def _runner_control_payload(
     cfg: dict[str, Any] | None = None,
     cfg_path: Path | str | None = None,
     redact_sensitive: bool = False,
+    web_instance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     status_payload = _runner_control_status_payload(
         controller,
@@ -2841,6 +2846,13 @@ def _runner_control_payload(
             cfg_path=cfg_path,
             redact_paths=redact_sensitive,
         )
+    instance_state = ""
+    read_only = False
+    duplicate_instance = False
+    if isinstance(web_instance, dict):
+        instance_state = str(web_instance.get("state") or "").strip().lower()
+        read_only = str(web_instance.get("mode") or "").strip().lower() == "read_only"
+        duplicate_instance = instance_state == "duplicate"
     return {
         "enabled": bool(enabled),
         "source": source,
@@ -2866,6 +2878,14 @@ def _runner_control_payload(
         "last_error": status_last_error,
         "lastError": status_last_error,
         "busy": bool(busy),
+        "instance_state": instance_state,
+        "instanceState": instance_state,
+        "read_only": bool(read_only),
+        "readOnly": bool(read_only),
+        "duplicate_instance": bool(duplicate_instance),
+        "duplicateInstance": bool(duplicate_instance),
+        "web_instance": dict(web_instance) if isinstance(web_instance, dict) else {},
+        "webInstance": dict(web_instance) if isinstance(web_instance, dict) else {},
     }
 
 
@@ -6548,6 +6568,7 @@ def build_snapshot(
     *,
     config_path: str | None = None,
     bind_host: str = "127.0.0.1",
+    bind_port: int = 8000,
     trusted_network: bool | None = None,
     runner_controller: RunnerController | None = None,
     runner_controls_enabled: bool | None = None,
@@ -6558,6 +6579,7 @@ def build_snapshot(
     runner_control_last_message: str = "",
     runner_control_last_error: str = "",
     runner_controller_auto_build: bool = True,
+    web_instance_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     repo_root = _repo_root(repo)
     cfg_path, cfg, cfg_source = _load_config_payload(repo_root, config_path)
@@ -6576,6 +6598,25 @@ def build_snapshot(
         resolved_disabled_reason = runner_controls_disabled_reason or (
             "" if control_enabled else "Runner controls are disabled until the server is started with AGENTCLI_WEB_RUNNER_CONTROLS=1 or --enable-runner-controls."
         )
+    web_instance = dict(web_instance_state) if isinstance(web_instance_state, dict) else _web_instance_payload(
+        repo_root,
+        bind_host=bind_host,
+        bind_port=bind_port,
+        state="primary",
+        mode="read_write",
+        reason="",
+        created_at=now_iso(),
+        runner_control_requested=bool(control_enabled),
+        runner_control_enabled=bool(control_enabled),
+        runner_control_state="enabled" if control_enabled else "disabled",
+    )
+    web_instance_state_value = str(web_instance.get("state") or "primary").strip().lower() or "primary"
+    web_instance_mode = str(web_instance.get("mode") or "read_write").strip().lower() or "read_write"
+    if web_instance_mode == "read_only":
+        control_enabled = False
+        resolved_disabled_reason = str(web_instance.get("reason") or resolved_disabled_reason or "Mutating web controls are disabled for this web console instance.").strip()
+        if not resolved_source:
+            resolved_source = "web-lock"
     redaction_active = _web_redaction_active(bind_host)
     config_contract = _build_config_contract(
         repo_root,
@@ -6699,6 +6740,7 @@ def build_snapshot(
         cfg=cfg,
         cfg_path=cfg_path,
         redact_sensitive=redaction_active,
+        web_instance=web_instance,
     )
     goals = _web_apply_redaction(goals, active=redaction_active, redactor=_redact_web_goals_payload)
     backlog = _web_apply_redaction(backlog, active=redaction_active, redactor=_redact_web_backlog_payload)
@@ -6814,6 +6856,8 @@ def build_snapshot(
     runner_control_status_reason = str(runner_control_status.get("reason") or "").strip()
     if runner_control.get("busy"):
         runner_control_state = "busy"
+    elif web_instance_state_value == "duplicate":
+        runner_control_state = "duplicate"
     elif runner_control.get("last_error") or runner_control_status_reason.startswith("status_error:") or not runner_control.get("controller_available"):
         runner_control_state = "error"
     elif not runner_control.get("enabled"):
@@ -6899,6 +6943,18 @@ def build_snapshot(
         live_state=live_state,
         controller_status=controller_status,
     )
+    live_identity = live_run.get("identity") if isinstance(live_run.get("identity"), dict) else {}
+    if isinstance(live_identity, dict):
+        live_identity["webInstanceState"] = web_instance_state_value
+        live_identity["web_instance_state"] = web_instance_state_value
+        live_identity["webInstanceMode"] = web_instance_mode
+        live_identity["web_instance_mode"] = web_instance_mode
+        live_identity["webInstanceReadOnly"] = bool(web_instance_mode == "read_only")
+        live_identity["web_instance_read_only"] = bool(web_instance_mode == "read_only")
+        live_identity["webInstanceDuplicate"] = bool(web_instance_state_value == "duplicate")
+        live_identity["web_instance_duplicate"] = bool(web_instance_state_value == "duplicate")
+        live_identity["webInstance"] = dict(web_instance)
+        live_identity["web_instance"] = dict(web_instance)
 
     return {
         "ok": True,
@@ -6937,6 +6993,8 @@ def build_snapshot(
         "worktree": worktree,
         "worktree_diagnostics": worktree_diagnostics,
         "runner_control": runner_control,
+        "web_instance": web_instance,
+        "webInstance": web_instance,
         "liveRun": live_run,
         "redaction": {
             "active": redaction_active,
@@ -7010,12 +7068,15 @@ def build_health(repo: Path | str | None = None) -> dict[str, Any]:
     snapshot = build_snapshot(repo)
     progress = snapshot.get("progress", {}) if isinstance(snapshot.get("progress"), dict) else {}
     runner_control = snapshot.get("runner_control", {}) if isinstance(snapshot.get("runner_control"), dict) else {}
+    web_instance = snapshot.get("web_instance", {}) if isinstance(snapshot.get("web_instance"), dict) else {}
     return {
         "ok": bool(snapshot.get("ok", False)),
         "repo": snapshot.get("repo", {}),
         "latest_run_dir": snapshot.get("latest_run_dir"),
         "status": progress.get("run_status", "idle"),
         "runner_control": runner_control,
+        "web_instance": web_instance,
+        "webInstance": web_instance,
         "timestamp": now_iso(),
     }
 
@@ -7031,12 +7092,401 @@ def _resolve_web_dir(web_dir: Path | str | None) -> Path:
     return Path(__file__).resolve().parents[1] / "web_console"
 
 
+def _web_instance_lock_path(repo_root: Path) -> Path:
+    return repo_root / ".AgentCLI" / WEB_INSTANCE_LOCK_FILENAME
+
+
+def _web_instance_registry_key(path: Path) -> str:
+    resolved = path.expanduser()
+    try:
+        resolved = resolved.resolve()
+    except Exception:
+        pass
+    key = resolved.as_posix()
+    return key.lower() if os.name == "nt" else key
+
+
+def _web_instance_hostname() -> str:
+    try:
+        value = socket.gethostname()
+    except Exception:
+        value = ""
+    return str(value or os.getenv("COMPUTERNAME") or "").strip()
+
+
+def _current_process_create_time() -> int | None:
+    try:
+        return _pid_create_time_ticks(os.getpid())
+    except Exception:
+        return None
+
+
+def _web_instance_payload(
+    repo_root: Path,
+    *,
+    bind_host: str,
+    bind_port: int,
+    state: str,
+    mode: str,
+    reason: str,
+    created_at: str,
+    runner_control_requested: bool,
+    runner_control_enabled: bool,
+    runner_control_state: str,
+    owner: dict[str, Any] | None = None,
+    liveness: dict[str, Any] | None = None,
+    stale_reclaimed: bool = False,
+    same_owner: bool = False,
+    lock_held: bool = False,
+) -> dict[str, Any]:
+    pid = int(os.getpid())
+    pid_create_time = _current_process_create_time()
+    payload = {
+        "schema_version": 1,
+        "schemaVersion": 1,
+        "state": str(state or "primary").strip() or "primary",
+        "mode": str(mode or "read_write").strip() or "read_write",
+        "duplicate": str(state or "").strip().lower() == "duplicate",
+        "read_only": str(mode or "").strip().lower() == "read_only",
+        "readOnly": str(mode or "").strip().lower() == "read_only",
+        "reason": str(reason or "").strip(),
+        "repo_root": repo_root.as_posix(),
+        "repoRoot": repo_root.as_posix(),
+        "lock_path": _web_instance_lock_path(repo_root).as_posix(),
+        "lockPath": _web_instance_lock_path(repo_root).as_posix(),
+        "pid": pid,
+        "pid_create_time": pid_create_time,
+        "pidCreateTime": pid_create_time,
+        "created_at": str(created_at or now_iso()),
+        "createdAt": str(created_at or now_iso()),
+        "host": str(bind_host or "").strip() or "127.0.0.1",
+        "port": int(bind_port or 0),
+        "hostname": _web_instance_hostname(),
+        "runner_control_requested": bool(runner_control_requested),
+        "runnerControlRequested": bool(runner_control_requested),
+        "runner_control_enabled": bool(runner_control_enabled),
+        "runnerControlEnabled": bool(runner_control_enabled),
+        "runner_control_state": str(runner_control_state or "disabled").strip() or "disabled",
+        "runnerControlState": str(runner_control_state or "disabled").strip() or "disabled",
+        "stale_reclaimed": bool(stale_reclaimed),
+        "staleReclaimed": bool(stale_reclaimed),
+        "same_owner": bool(same_owner),
+        "sameOwner": bool(same_owner),
+        "lock_held": bool(lock_held),
+        "lockHeld": bool(lock_held),
+        "owner": dict(owner) if isinstance(owner, dict) else {},
+        "active_lock": dict(owner) if isinstance(owner, dict) else {},
+        "activeLock": dict(owner) if isinstance(owner, dict) else {},
+        "liveness": dict(liveness) if isinstance(liveness, dict) else {},
+    }
+    return payload
+
+
+def _read_web_instance_lock(path: Path) -> dict[str, Any]:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace").strip()
+        payload = json.loads(raw) if raw else {}
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+    return {}
+
+
+def _web_instance_same_owner(existing: dict[str, Any], *, pid: int, pid_create_time: int | None) -> bool:
+    existing_pid = _coerce_optional_int(existing.get("pid"))
+    if existing_pid is None or existing_pid != int(pid):
+        return False
+    existing_create_time = _coerce_optional_int(
+        existing.get("pid_create_time")
+        if existing.get("pid_create_time") is not None
+        else existing.get("pidCreateTime")
+    )
+    if existing_create_time is None or pid_create_time is None:
+        return True
+    return existing_create_time == int(pid_create_time)
+
+
+def _web_instance_lock_liveness(existing: dict[str, Any]) -> dict[str, Any]:
+    pid = _coerce_optional_int(existing.get("pid")) or 0
+    recorded_create_time = _coerce_optional_int(
+        existing.get("pid_create_time")
+        if existing.get("pid_create_time") is not None
+        else existing.get("pidCreateTime")
+    )
+    if pid <= 0:
+        return {
+            "live": False,
+            "deterministic": True,
+            "reason": "missing_pid",
+            "pid": pid,
+            "pid_create_time": recorded_create_time,
+            "pidCreateTime": recorded_create_time,
+        }
+    if not _pid_alive(pid):
+        return {
+            "live": False,
+            "deterministic": True,
+            "reason": "pid_not_alive",
+            "pid": pid,
+            "pid_create_time": recorded_create_time,
+            "pidCreateTime": recorded_create_time,
+        }
+    if recorded_create_time is not None and not _pid_signature_matches(pid, recorded_create_time):
+        return {
+            "live": False,
+            "deterministic": True,
+            "reason": "pid_reused",
+            "pid": pid,
+            "pid_create_time": recorded_create_time,
+            "pidCreateTime": recorded_create_time,
+        }
+    return {
+        "live": True,
+        "deterministic": recorded_create_time is not None,
+        "reason": "pid_alive_signature_match" if recorded_create_time is not None else "pid_alive_signature_unavailable",
+        "pid": pid,
+        "pid_create_time": recorded_create_time,
+        "pidCreateTime": recorded_create_time,
+    }
+
+
+def _web_instance_duplicate_reason(existing: dict[str, Any]) -> str:
+    pid = _coerce_optional_int(existing.get("pid"))
+    host = str(existing.get("host") or "").strip()
+    port = _coerce_optional_int(existing.get("port"))
+    address = ""
+    if host and port:
+        address = f"{host}:{port}"
+    elif host:
+        address = host
+    elif port:
+        address = f"port {port}"
+    started = str(existing.get("created_at") or existing.get("createdAt") or "").strip()
+    details = [f"pid {pid}" if pid else "", address, started]
+    joined = ", ".join(part for part in details if part)
+    suffix = f" ({joined})" if joined else ""
+    return f"Mutating web controls are locked by another web console for this repo{suffix}. This instance is read-only."
+
+
+class _RepoWebInstanceLock:
+    def __init__(self, repo_root: Path, *, bind_host: str, bind_port: int) -> None:
+        self.repo_root = repo_root
+        self.bind_host = str(bind_host or "").strip() or "127.0.0.1"
+        self.bind_port = int(bind_port or 0)
+        self.path = _web_instance_lock_path(repo_root)
+        self.created_at = now_iso()
+        self.pid = int(os.getpid())
+        self.pid_create_time = _current_process_create_time()
+        self.state = "primary"
+        self.mode = "read_write"
+        self.reason = ""
+        self.owner: dict[str, Any] = {}
+        self.liveness: dict[str, Any] = {}
+        self.stale_reclaimed = False
+        self.same_owner = False
+        self._registered_hold = False
+        self._registry_key = _web_instance_registry_key(self.path)
+        self._owner_key = f"{self.pid}:{self.pid_create_time if self.pid_create_time is not None else 'unknown'}"
+
+    def _register_local_hold(self) -> None:
+        if self._registered_hold:
+            return
+        with _WEB_INSTANCE_LOCAL_HOLDS_LOCK:
+            record = _WEB_INSTANCE_LOCAL_HOLDS.get(self._registry_key)
+            if record and record.get("owner_key") == self._owner_key:
+                record["count"] = int(record.get("count") or 0) + 1
+            else:
+                _WEB_INSTANCE_LOCAL_HOLDS[self._registry_key] = {
+                    "owner_key": self._owner_key,
+                    "count": 1,
+                }
+        self._registered_hold = True
+
+    def _write_primary_lock(self, *, runner_control_requested: bool = False, runner_control_enabled: bool = False, runner_control_state: str = "disabled") -> None:
+        payload = _web_instance_payload(
+            self.repo_root,
+            bind_host=self.bind_host,
+            bind_port=self.bind_port,
+            state="primary",
+            mode="read_write",
+            reason="",
+            created_at=self.created_at,
+            runner_control_requested=runner_control_requested,
+            runner_control_enabled=runner_control_enabled,
+            runner_control_state=runner_control_state,
+            owner={},
+            liveness={},
+            stale_reclaimed=self.stale_reclaimed,
+            same_owner=self.same_owner,
+            lock_held=self._registered_hold,
+        )
+        payload["owner"] = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"owner", "active_lock", "activeLock", "liveness"}
+        }
+        payload["active_lock"] = dict(payload["owner"])
+        payload["activeLock"] = dict(payload["owner"])
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(self.path, payload)
+        self.owner = dict(payload["owner"])
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        attempts = 0
+        while attempts < 2:
+            try:
+                payload = _web_instance_payload(
+                    self.repo_root,
+                    bind_host=self.bind_host,
+                    bind_port=self.bind_port,
+                    state="primary",
+                    mode="read_write",
+                    reason="",
+                    created_at=self.created_at,
+                    runner_control_requested=False,
+                    runner_control_enabled=False,
+                    runner_control_state="disabled",
+                )
+                payload["owner"] = {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"owner", "active_lock", "activeLock", "liveness"}
+                }
+                payload["active_lock"] = dict(payload["owner"])
+                payload["activeLock"] = dict(payload["owner"])
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as handle:
+                    handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+                self.owner = dict(payload["owner"])
+                self.state = "primary"
+                self.mode = "read_write"
+                self.reason = ""
+                self._register_local_hold()
+                return
+            except FileExistsError:
+                existing = _read_web_instance_lock(self.path)
+                if _web_instance_same_owner(existing, pid=self.pid, pid_create_time=self.pid_create_time):
+                    self.same_owner = True
+                    self.state = "primary"
+                    self.mode = "read_write"
+                    self.reason = ""
+                    self.owner = dict(existing) if existing else {}
+                    self._register_local_hold()
+                    return
+                liveness = _web_instance_lock_liveness(existing)
+                self.liveness = dict(liveness)
+                if not liveness.get("live"):
+                    try:
+                        self.path.unlink(missing_ok=True)
+                        self.stale_reclaimed = True
+                        attempts += 1
+                        continue
+                    except Exception as ex:
+                        self.state = "degraded"
+                        self.mode = "read_only"
+                        self.reason = f"Mutating web controls are disabled because the repo web lock could not be reclaimed: {ex}"
+                        self.owner = dict(existing) if existing else {}
+                        return
+                self.state = "duplicate"
+                self.mode = "read_only"
+                self.reason = _web_instance_duplicate_reason(existing)
+                self.owner = dict(existing) if existing else {}
+                return
+            except Exception as ex:
+                self.state = "degraded"
+                self.mode = "read_only"
+                self.reason = f"Mutating web controls are disabled because the repo web lock could not be acquired: {ex}"
+                return
+        if self.state == "primary" and not self._registered_hold:
+            self.state = "degraded"
+            self.mode = "read_only"
+            self.reason = "Mutating web controls are disabled because the repo web lock could not be acquired."
+
+    def snapshot(self, *, runner_control_requested: bool, runner_control_enabled: bool, runner_control_state: str) -> dict[str, Any]:
+        if self.state == "primary" and self._registered_hold:
+            try:
+                self._write_primary_lock(
+                    runner_control_requested=runner_control_requested,
+                    runner_control_enabled=runner_control_enabled,
+                    runner_control_state=runner_control_state,
+                )
+            except Exception:
+                pass
+        owner = self.owner
+        if self.state == "primary" and not owner:
+            owner = {
+                "repo_root": self.repo_root.as_posix(),
+                "repoRoot": self.repo_root.as_posix(),
+                "pid": self.pid,
+                "pid_create_time": self.pid_create_time,
+                "pidCreateTime": self.pid_create_time,
+                "created_at": self.created_at,
+                "createdAt": self.created_at,
+                "host": self.bind_host,
+                "port": self.bind_port,
+                "hostname": _web_instance_hostname(),
+                "state": "primary",
+                "mode": "read_write",
+                "runner_control_state": runner_control_state,
+                "runnerControlState": runner_control_state,
+                "runner_control_enabled": bool(runner_control_enabled),
+                "runnerControlEnabled": bool(runner_control_enabled),
+                "runner_control_requested": bool(runner_control_requested),
+                "runnerControlRequested": bool(runner_control_requested),
+            }
+        return _web_instance_payload(
+            self.repo_root,
+            bind_host=self.bind_host,
+            bind_port=self.bind_port,
+            state=self.state,
+            mode=self.mode,
+            reason=self.reason,
+            created_at=self.created_at,
+            runner_control_requested=runner_control_requested,
+            runner_control_enabled=runner_control_enabled,
+            runner_control_state=runner_control_state,
+            owner=owner,
+            liveness=self.liveness,
+            stale_reclaimed=self.stale_reclaimed,
+            same_owner=self.same_owner,
+            lock_held=self._registered_hold,
+        )
+
+    def release(self) -> None:
+        if not self._registered_hold:
+            return
+        remove_file = False
+        with _WEB_INSTANCE_LOCAL_HOLDS_LOCK:
+            record = _WEB_INSTANCE_LOCAL_HOLDS.get(self._registry_key)
+            if record and record.get("owner_key") == self._owner_key:
+                remaining = int(record.get("count") or 0) - 1
+                if remaining > 0:
+                    record["count"] = remaining
+                else:
+                    _WEB_INSTANCE_LOCAL_HOLDS.pop(self._registry_key, None)
+                    remove_file = True
+            else:
+                remove_file = True
+        self._registered_hold = False
+        if not remove_file:
+            return
+        try:
+            existing = _read_web_instance_lock(self.path)
+            if not existing or _web_instance_same_owner(existing, pid=self.pid, pid_create_time=self.pid_create_time):
+                self.path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def create_app(
     repo: Path | str | None = None,
     *,
     web_dir: Path | str | None = None,
     config_path: str | None = None,
     bind_host: str = "127.0.0.1",
+    bind_port: int = 8000,
     trusted_network: bool | None = None,
     enable_runner_controls: bool | None = None,
 ) -> Any:
@@ -7055,6 +7505,11 @@ def create_app(
         bind_host=bind_host,
         trusted_network=trusted_network,
     )
+    web_instance_lock = _RepoWebInstanceLock(repo_root, bind_host=bind_host, bind_port=bind_port)
+    web_instance_lock.acquire()
+    if web_instance_lock.mode == "read_only":
+        controls_enabled = False
+        controls_disabled_reason = web_instance_lock.reason or controls_disabled_reason
     control_state: dict[str, str] = {
         "last_action": "",
         "last_message": "",
@@ -7062,9 +7517,17 @@ def create_app(
     }
     control_lock = threading.Lock()
 
+    def _web_instance_snapshot() -> dict[str, Any]:
+        runner_control_state = "duplicate" if web_instance_lock.state == "duplicate" else "degraded" if web_instance_lock.state == "degraded" else "enabled" if controls_enabled else "disabled"
+        return web_instance_lock.snapshot(
+            runner_control_requested=bool(enable_runner_controls),
+            runner_control_enabled=bool(controls_enabled),
+            runner_control_state=runner_control_state,
+        )
+
     def _shutdown_process_guard() -> None:
         try:
-            if controller is not None:
+            if controller is not None and web_instance_lock.mode != "read_only":
                 status = controller.status()
                 if isinstance(status, dict) and bool(status.get("running")):
                     controller.stop(wait=True)
@@ -7072,6 +7535,10 @@ def create_app(
             pass
         try:
             terminate_all_children()
+        except Exception:
+            pass
+        try:
+            web_instance_lock.release()
         except Exception:
             pass
 
@@ -7093,19 +7560,23 @@ def create_app(
     app.state.web_dir = static_root
     app.state.config_path = config_path
     app.state.bind_host = bind_host
+    app.state.bind_port = int(bind_port)
     app.state.trusted_network = trusted_network
     app.state.runner_controller = controller
     app.state.runner_controls_enabled = controls_enabled
     app.state.runner_controls_source = controls_source
     app.state.runner_controls_disabled_reason = controls_disabled_reason
     app.state.runner_control_lock = control_lock
+    app.state.web_instance = _web_instance_snapshot()
+    app.state.web_instance_lock = web_instance_lock
     web_redaction_active = _web_redaction_active(bind_host)
 
     def _snapshot(*, busy_override: bool | None = None) -> dict[str, Any]:
-        return build_snapshot(
+        snapshot = build_snapshot(
             repo_root,
             config_path=config_path,
             bind_host=bind_host,
+            bind_port=bind_port,
             trusted_network=trusted_network,
             runner_controller=controller,
             runner_controller_auto_build=controller is not None,
@@ -7116,7 +7587,10 @@ def create_app(
             runner_control_last_action=control_state["last_action"],
             runner_control_last_message=control_state["last_message"],
             runner_control_last_error=control_state["last_error"],
+            web_instance_state=_web_instance_snapshot(),
         )
+        app.state.web_instance = snapshot.get("web_instance", {})
+        return snapshot
 
     def _section(name: str) -> Any:
         return _snapshot()[name]
@@ -7130,12 +7604,15 @@ def create_app(
         snap = _snapshot()
         control = snap.get("runner_control", {})
         progress = snap.get("progress", {}) if isinstance(snap.get("progress"), dict) else {}
+        web_instance = snap.get("web_instance", {}) if isinstance(snap.get("web_instance"), dict) else {}
         return {
             "ok": bool(snap.get("ok", False)),
             "repo": snap.get("repo", {}),
             "latest_run_dir": snap.get("latest_run_dir"),
             "progress": progress,
             "runner_control": control,
+            "web_instance": web_instance,
+            "webInstance": web_instance,
             "source": control.get("source", ""),
             "enabled": bool(control.get("enabled")),
             "controller_available": bool(control.get("controller_available")),
@@ -7223,35 +7700,46 @@ def create_app(
         return JSONResponse(status_code=status_code, content=payload)
 
     def _runner_control_disabled(action: str) -> Any:
-        control = _runner_control_snapshot().get("runner_control", {})
+        disabled_snapshot = _runner_control_snapshot()
+        control = disabled_snapshot.get("runner_control", {})
+        web_instance = disabled_snapshot.get("web_instance", {}) if isinstance(disabled_snapshot.get("web_instance"), dict) else {}
+        duplicate_instance = bool(
+            control.get("duplicate_instance")
+            or control.get("duplicateInstance")
+            or str(web_instance.get("state") or "").strip().lower() == "duplicate"
+        )
         message = str(control.get("message") or "Runner controls are disabled.")
         _record_runner_control_event(
             action,
-            status="disabled",
+            status="duplicate" if duplicate_instance else "disabled",
             message="",
             error=message,
             details={
                 "enabled": bool(control.get("enabled")),
                 "source": control.get("source", ""),
                 "bind_host": bind_host,
+                "bind_port": int(bind_port),
                 "trusted_network": bool(trusted_network),
                 "reason": str(control.get("message") or controls_disabled_reason or ""),
+                "web_instance": web_instance,
             },
             controller_status=control.get("status") if isinstance(control.get("status"), dict) else None,
         )
         return _runner_control_response(
             action=action,
-            status_code=403,
+            status_code=409 if duplicate_instance else 403,
             ok=False,
-            status="disabled",
+            status="duplicate" if duplicate_instance else "disabled",
             message=message,
-            error_code="runner_controls_disabled",
+            error_code="runner_controls_duplicate_instance" if duplicate_instance else "runner_controls_disabled",
             details={
                 "enabled": bool(control.get("enabled")),
                 "source": control.get("source", ""),
                 "bind_host": bind_host,
+                "bind_port": int(bind_port),
                 "trusted_network": bool(trusted_network),
                 "reason": str(control.get("message") or controls_disabled_reason or ""),
+                "web_instance": web_instance,
             },
         )
 
@@ -9392,6 +9880,7 @@ def serve(
         web_dir=web_dir,
         config_path=config_path,
         bind_host=host,
+        bind_port=int(port),
         trusted_network=trusted_network,
         enable_runner_controls=enable_runner_controls,
     )

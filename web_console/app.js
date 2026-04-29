@@ -3672,6 +3672,7 @@
   function runnerControlStateInfo(control = currentLiveRunRunnerControl()) {
     const current = toObject(control);
     const status = toObject(current.status);
+    const webInstance = normalizeWebInstance(current.webInstance || current.web_instance);
     const statusReason = toText(status.reason, '');
     const statusReasonText = redactionAwareText(statusReason, '');
     const currentMessageText = redactionAwareText(current.message, t('runner.working'));
@@ -3700,6 +3701,15 @@
         label: t('common.failed'),
         title: t('runner.backendError'),
         copy: lastErrorText || statusReasonText || currentMessageText || t('runner.backendError'),
+      };
+    }
+    if (toText(current.instanceState || webInstance.state, '').toLowerCase() === 'duplicate') {
+      return {
+        chipTone: 'paused',
+        bannerTone: 'warn',
+        label: t('common.readOnly'),
+        title: t('common.readOnly'),
+        copy: currentMessageText || t('runner.controlsDisabled'),
       };
     }
     if (!current.controllerAvailable) {
@@ -4128,6 +4138,10 @@
     const currentEvent = toObject(overrides.currentEvent || overrides.current_event);
     const history = toArray(overrides.history || overrides.eventHistory || overrides.event_history);
     const eventCount = toNumber(overrides.eventCount || overrides.event_count, history.length);
+    const webInstance = normalizeWebInstance(overrides.webInstance || overrides.web_instance);
+    const instanceState = toText(overrides.instanceState || overrides.instance_state || webInstance.state, webInstance.state || '');
+    const readOnly = Boolean(overrides.readOnly ?? overrides.read_only ?? webInstance.readOnly);
+    const duplicateInstance = Boolean(overrides.duplicateInstance ?? overrides.duplicate_instance ?? webInstance.duplicate);
     const message = toText(
       overrides.message,
       controllerAvailable
@@ -4209,6 +4223,14 @@
       event_history: history,
       eventCount,
       event_count: eventCount,
+      instanceState,
+      instance_state: instanceState,
+      readOnly,
+      read_only: readOnly,
+      duplicateInstance,
+      duplicate_instance: duplicateInstance,
+      webInstance,
+      web_instance: webInstance,
     };
   }
 
@@ -4558,6 +4580,29 @@
     };
   }
 
+  function normalizeWebInstance(raw) {
+    const item = toObject(raw);
+    const stateValue = toText(item.state, 'primary').trim().toLowerCase() || 'primary';
+    const modeValue = toText(
+      item.mode,
+      Boolean(item.read_only ?? item.readOnly) || stateValue === 'duplicate' ? 'read_only' : 'read_write'
+    ).trim().toLowerCase() || (stateValue === 'duplicate' ? 'read_only' : 'read_write');
+    return {
+      state: stateValue,
+      mode: modeValue,
+      duplicate: Boolean(item.duplicate ?? stateValue === 'duplicate'),
+      readOnly: Boolean(item.read_only ?? item.readOnly ?? modeValue === 'read_only'),
+      reason: toText(item.reason, ''),
+      lockPath: toText(item.lock_path || item.lockPath, ''),
+      repoRoot: toText(item.repo_root || item.repoRoot, ''),
+      pid: toMaybeNumber(item.pid),
+      host: toText(item.host, ''),
+      port: toMaybeNumber(item.port) ?? 0,
+      owner: toObject(item.owner || item.active_lock || item.activeLock),
+      liveness: toObject(item.liveness),
+    };
+  }
+
   function normalizeRunnerControl(control) {
     const raw = toObject(control);
     if (!Object.keys(raw).length) {
@@ -4582,6 +4627,10 @@
     const controllerAvailable = Boolean(raw.controller_available || raw.controllerAvailable);
     const running = Boolean(status.running || raw.running);
     const busy = Boolean(raw.busy);
+    const webInstance = normalizeWebInstance(raw.web_instance || raw.webInstance);
+    const instanceState = toText(raw.instance_state || raw.instanceState || webInstance.state, webInstance.state || '');
+    const readOnly = Boolean(raw.read_only ?? raw.readOnly ?? webInstance.readOnly);
+    const duplicateInstance = Boolean(raw.duplicate_instance ?? raw.duplicateInstance ?? webInstance.duplicate);
     return {
       enabled,
       source: toText(raw.source, 'api'),
@@ -4637,6 +4686,14 @@
       eventCount,
       event_count: eventCount,
       liveState: normalizeLiveState(raw.live_state || raw.liveState || status.live_state || status.liveState),
+      instanceState,
+      instance_state: instanceState,
+      readOnly,
+      read_only: readOnly,
+      duplicateInstance,
+      duplicate_instance: duplicateInstance,
+      webInstance,
+      web_instance: webInstance,
     };
   }
 
@@ -6825,6 +6882,14 @@
         rawRunnerControl.liveState ||
         rawRunnerControl.live_state
     );
+    const liveWebInstance = normalizeWebInstance(
+      rawIdentity.webInstance ||
+      rawIdentity.web_instance ||
+      raw.webInstance ||
+      raw.web_instance ||
+      rawRunnerControl.webInstance ||
+      rawRunnerControl.web_instance
+    );
     const identity = {
       id: toText(rawIdentity.id || rawIdentity.runId || activeRun.id, activeRun.id || 'no-run'),
       runId: toText(rawIdentity.runId || rawIdentity.id || activeRun.id, activeRun.id || 'no-run'),
@@ -6833,6 +6898,16 @@
       branch: toText(rawIdentity.branch || activeRun.branch, activeRun.branch || 'HEAD'),
       backend: toText(rawIdentity.backend || activeRun.backend, activeRun.backend || 'codex'),
       runDir: toText(rawIdentity.runDir || activeRun.runDir, activeRun.runDir || ''),
+      webInstanceState: toText(rawIdentity.webInstanceState || rawIdentity.web_instance_state || liveWebInstance.state, liveWebInstance.state || ''),
+      web_instance_state: toText(rawIdentity.web_instance_state || rawIdentity.webInstanceState || liveWebInstance.state, liveWebInstance.state || ''),
+      webInstanceMode: toText(rawIdentity.webInstanceMode || rawIdentity.web_instance_mode || liveWebInstance.mode, liveWebInstance.mode || ''),
+      web_instance_mode: toText(rawIdentity.web_instance_mode || rawIdentity.webInstanceMode || liveWebInstance.mode, liveWebInstance.mode || ''),
+      webInstanceReadOnly: Boolean(rawIdentity.webInstanceReadOnly ?? rawIdentity.web_instance_read_only ?? liveWebInstance.readOnly),
+      web_instance_read_only: Boolean(rawIdentity.web_instance_read_only ?? rawIdentity.webInstanceReadOnly ?? liveWebInstance.readOnly),
+      webInstanceDuplicate: Boolean(rawIdentity.webInstanceDuplicate ?? rawIdentity.web_instance_duplicate ?? liveWebInstance.duplicate),
+      web_instance_duplicate: Boolean(rawIdentity.web_instance_duplicate ?? rawIdentity.webInstanceDuplicate ?? liveWebInstance.duplicate),
+      webInstance: liveWebInstance,
+      web_instance: liveWebInstance,
     };
     const status = {
       run: toText(rawStatus.run || rawStatus.runStatus || activeRun.status, activeRun.status || 'idle'),
@@ -6987,6 +7062,7 @@
     const repo = toObject(raw.repo);
     const progress = toObject(raw.progress);
     const redaction = toObject(raw.redaction);
+    const webInstance = normalizeWebInstance(raw.web_instance || raw.webInstance);
     const config = adaptConfig(raw.config, { progress, repo });
     const configContract = adaptConfigContract(raw.config_contract || raw.configContract || raw.config, {
       progress,
@@ -7036,7 +7112,12 @@
     const history = adaptHistory(raw.history);
     const worktree = adaptWorktree(raw.worktree);
     const worktreeDiagnostics = normalizeWorktreeDiagnostics(raw.worktree_diagnostics || raw.worktreeDiagnostics || {});
-    const liveRun = adaptLiveRun(raw.liveRun || raw.live_run || {}, {
+    const liveRunSource = {
+      ...toObject(raw.liveRun || raw.live_run || {}),
+      webInstance,
+      web_instance: webInstance,
+    };
+    const liveRun = adaptLiveRun(liveRunSource, {
       activeRun,
       progress,
       stages: stages.items,
@@ -7104,6 +7185,7 @@
       worktreeMerge: worktree,
       worktreeDiagnostics,
       runnerControl,
+      webInstance,
       liveRun,
       logSources: logs.sources,
       logTailSourceId: logs.sourceId,
@@ -7125,7 +7207,15 @@
         metrics: metrics.state,
         history: history.state,
         worktree: worktree.state,
-        runnerControl: buildSectionState('runnerControl', runnerControl.controllerAvailable ? (runnerControl.enabled ? 'ready' : 'disabled') : 'error', redactionAwareText(runnerControl.message, fallbackSectionMessage('runnerControl'))),
+        runnerControl: buildSectionState(
+          'runnerControl',
+          toText(runnerControl.instanceState || webInstance.state, '').toLowerCase() === 'duplicate'
+            ? 'duplicate'
+            : runnerControl.controllerAvailable
+              ? (runnerControl.enabled ? 'ready' : 'disabled')
+              : 'error',
+          redactionAwareText(runnerControl.message, fallbackSectionMessage('runnerControl'))
+        ),
       },
     };
   }
@@ -7676,6 +7766,7 @@
         runStatus: 'loading',
         runnerMode: 'unknown',
       }),
+      webInstance: normalizeWebInstance({}),
       redaction: {
         active: false,
         placeholder: REDACTED_VALUE,
@@ -8574,6 +8665,7 @@
     state.worktreeDiagnostics = normalizeWorktreeDiagnostics(next.worktreeDiagnostics || next.worktree_diagnostics || {});
     state.runnerControl = normalizeRunnerControl(next.runnerControl);
     state.liveRun = toObject(next.liveRun);
+    state.webInstance = normalizeWebInstance(next.webInstance);
     state.history = toArray(next.history);
     state.runs = state.history;
     state.historySummary = toObject(next.historySummary);
@@ -17685,6 +17777,7 @@
     logFiles: clone(defaults.logFiles),
     notifications: clone(defaults.notifications),
     liveRun: clone(defaults.liveRun),
+    webInstance: clone(defaults.webInstance),
     snapshotRefresh: clone(defaults.snapshotRefresh),
     configDefault: clone(defaults.configDefault),
     config: clone(defaults.config),

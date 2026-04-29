@@ -4834,6 +4834,83 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(1, adapted["runnerControl"]["status"]["eventCount"])
         self.assertEqual("controller_error", adapted["runnerControl"]["history"][0]["status"])
 
+    def test_snapshot_adapter_preserves_duplicate_web_instance_read_only_contract(self) -> None:
+        snapshot = self.client.get("/api/status").json()
+        duplicate_reason = "Mutating web controls are locked by another web console for this repo (pid 4321, 127.0.0.1:8123). This instance is read-only."
+        duplicate_web_instance = {
+            "state": "duplicate",
+            "mode": "read_only",
+            "duplicate": True,
+            "read_only": True,
+            "readOnly": True,
+            "reason": duplicate_reason,
+            "lock_path": (self.repo / ".AgentCLI" / "web_console.lock.json").as_posix(),
+            "repo_root": self.repo.as_posix(),
+            "host": "127.0.0.1",
+            "port": 8123,
+            "owner": {
+                "pid": 4321,
+                "host": "127.0.0.1",
+                "port": 8123,
+                "created_at": "2026-04-29T00:00:00Z",
+            },
+        }
+        snapshot["web_instance"] = duplicate_web_instance
+        snapshot["webInstance"] = duplicate_web_instance
+        snapshot["runner_control"]["enabled"] = False
+        snapshot["runner_control"]["message"] = duplicate_reason
+        snapshot["runner_control"]["instance_state"] = "duplicate"
+        snapshot["runner_control"]["instanceState"] = "duplicate"
+        snapshot["runner_control"]["read_only"] = True
+        snapshot["runner_control"]["readOnly"] = True
+        snapshot["runner_control"]["duplicate_instance"] = True
+        snapshot["runner_control"]["duplicateInstance"] = True
+        snapshot["runner_control"]["web_instance"] = duplicate_web_instance
+        snapshot["runner_control"]["webInstance"] = duplicate_web_instance
+        snapshot["sectionState"]["runnerControl"]["state"] = "duplicate"
+        snapshot["liveRun"]["webInstance"] = duplicate_web_instance
+        snapshot["liveRun"]["web_instance"] = duplicate_web_instance
+        snapshot["liveRun"]["identity"]["webInstanceState"] = "duplicate"
+        snapshot["liveRun"]["identity"]["web_instance_state"] = "duplicate"
+        snapshot["liveRun"]["identity"]["webInstanceMode"] = "read_only"
+        snapshot["liveRun"]["identity"]["web_instance_mode"] = "read_only"
+        snapshot["liveRun"]["identity"]["webInstanceReadOnly"] = True
+        snapshot["liveRun"]["identity"]["web_instance_read_only"] = True
+        snapshot["liveRun"]["identity"]["webInstanceDuplicate"] = True
+        snapshot["liveRun"]["identity"]["web_instance_duplicate"] = True
+        snapshot["liveRun"]["identity"]["webInstance"] = duplicate_web_instance
+        snapshot["liveRun"]["identity"]["web_instance"] = duplicate_web_instance
+
+        adapted, display = _run_adapter_harness(
+            [
+                {"kind": "snapshot", "data": snapshot},
+                {
+                    "kind": "call",
+                    "name": "runnerControlStateInfo",
+                    "args": [
+                        {
+                            "enabled": False,
+                            "controllerAvailable": True,
+                            "message": duplicate_reason,
+                            "instanceState": "duplicate",
+                            "webInstance": duplicate_web_instance,
+                            "status": {"running": False, "reason": ""},
+                        }
+                    ],
+                },
+            ]
+        )
+
+        self.assertEqual("duplicate", adapted["sectionState"]["runnerControl"]["status"])
+        self.assertEqual("duplicate", adapted["runnerControl"]["instanceState"])
+        self.assertTrue(adapted["runnerControl"]["readOnly"])
+        self.assertTrue(adapted["runnerControl"]["duplicateInstance"])
+        self.assertEqual("duplicate", adapted["liveRun"]["identity"]["webInstanceState"])
+        self.assertTrue(adapted["liveRun"]["identity"]["webInstanceReadOnly"])
+        self.assertTrue(adapted["liveRun"]["identity"]["webInstanceDuplicate"])
+        self.assertIn("read", str(display["copy"]).lower())
+        self.assertIn("read-only", display["copy"])
+
     def test_section_endpoints_return_stable_shapes(self) -> None:
         progress = self.client.get("/api/progress").json()
         for key in ("active_run", "stages", "backlog", "goals", "logs", "config", "prompts", "history", "metrics", "notifications", "worktree", "state"):

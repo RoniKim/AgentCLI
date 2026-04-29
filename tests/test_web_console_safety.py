@@ -4,7 +4,9 @@ import json
 import os
 import subprocess
 import shutil
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -321,6 +323,44 @@ class WebConsoleSafetyTests(unittest.TestCase):
             os.environ.pop("AGENTCLI_HOME", None)
         else:
             os.environ["AGENTCLI_HOME"] = self._old_home
+
+    def _web_instance_lock_path(self) -> Path:
+        return self.repo / ".AgentCLI" / "web_console.lock.json"
+
+    def _terminate_sleep_process(self, proc: subprocess.Popen[object]) -> None:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+        else:
+            try:
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+
+    def _spawn_sleep_process(self) -> subprocess.Popen[object]:
+        from agent_runner.process_guard import _pid_alive, _pid_create_time_ticks
+
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            creationflags=creationflags,
+        )
+        self.addCleanup(self._terminate_sleep_process, proc)
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            if _pid_create_time_ticks(proc.pid) is not None or _pid_alive(proc.pid):
+                break
+            time.sleep(0.05)
+        return proc
 
     def _goal_item(self, text: str, *, done: bool = False, note: str = "") -> dict[str, object]:
         return {
@@ -1376,6 +1416,140 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("started", trusted_body["status"])
         self.assertEqual(self.repo.as_posix(), trusted_app.state.runner_controller.start_overrides[0]["repo"])
         self.assertEqual(self.config_path.as_posix(), trusted_app.state.runner_controller.start_overrides[0]["config_path"])
+
+    def test_repo_web_instance_lock_allows_primary_owner_and_same_process_reuse(self) -> None:
+        client, _ = _create_client(
+            self.repo,
+            enable_runner_controls=True,
+            config_path=self.config_path,
+        )
+        payload = client.get("/api/status").json()
+        self.assertEqual("primary", payload["web_instance"]["state"])
+        self.assertEqual("read_write", payload["web_instance"]["mode"])
+        self.assertTrue(payload["runner_control"]["enabled"])
+        self.assertTrue(payload["runner_control"]["actions"]["start"]["enabled"])
+        self.assertFalse(payload["web_instance"]["same_owner"])
+
+        lock_path = Path(payload["web_instance"]["lock_path"])
+        self.assertTrue(lock_path.exists())
+        lock_payload = json.loads(lock_path.read_text(encoding="utf-8", errors="replace"))
+        self.assertEqual(self.repo.as_posix(), lock_payload["repo_root"])
+        self.assertEqual(8000, lock_payload["port"])
+        self.assertEqual("enabled", lock_payload["runner_control_state"])
+
+        second_client, _ = _create_client(
+            self.repo,
+            enable_runner_controls=True,
+            config_path=self.config_path,
+        )
+        second_payload = second_client.get("/api/status").json()
+        self.assertEqual("primary", second_payload["web_instance"]["state"])
+        self.assertEqual("read_write", second_payload["web_instance"]["mode"])
+        self.assertTrue(second_payload["runner_control"]["enabled"])
+        self.assertTrue(second_payload["runner_control"]["actions"]["start"]["enabled"])
+
+    def test_live_duplicate_web_instance_is_read_only_and_refuses_mutations(self) -> None:
+        proc = self._spawn_sleep_process()
+        try:
+            _write(
+                self._web_instance_lock_path(),
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "repo_root": self.repo.as_posix(),
+                        "pid": proc.pid,
+                        "created_at": "2026-04-29T00:00:00Z",
+                        "host": "127.0.0.1",
+                        "port": 8123,
+                        "hostname": "duplicate-owner",
+                        "state": "primary",
+                        "mode": "read_write",
+                        "runner_control_state": "enabled",
+                        "runner_control_enabled": True,
+                        "runner_control_requested": True,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+            )
+
+            client, app = _create_client(
+                self.repo,
+                enable_runner_controls=True,
+                config_path=self.config_path,
+            )
+            payload = client.get("/api/status").json()
+            self.assertEqual("duplicate", payload["web_instance"]["state"])
+            self.assertEqual("read_only", payload["web_instance"]["mode"])
+            self.assertEqual("duplicate", payload["sectionState"]["runnerControl"]["state"])
+            self.assertFalse(payload["runner_control"]["enabled"])
+            self.assertTrue(payload["runner_control"]["read_only"])
+            self.assertTrue(payload["runner_control"]["duplicate_instance"])
+            self.assertFalse(payload["runner_control"]["actions"]["start"]["enabled"])
+            self.assertFalse(payload["runner_control"]["actions"]["restart"]["enabled"])
+            self.assertIn("read-only", payload["runner_control"]["message"])
+            self.assertEqual(proc.pid, payload["web_instance"]["owner"]["pid"])
+
+            response = client.post("/api/runner/start", json={"confirmation": "START RUNNER"})
+            self.assertEqual(409, response.status_code)
+            body = response.json()
+            self.assertFalse(body["ok"])
+            self.assertEqual("runner_controls_duplicate_instance", body["error"]["code"])
+            self.assertEqual("duplicate", body["status"])
+            self.assertFalse(app.state.runner_controller.start_calls)
+        finally:
+            self._terminate_sleep_process(proc)
+
+    def test_stale_web_instance_lock_with_reused_pid_signature_is_reclaimed(self) -> None:
+        from agent_runner.process_guard import _pid_create_time_ticks
+
+        proc = self._spawn_sleep_process()
+        try:
+            actual_create_time = _pid_create_time_ticks(proc.pid)
+            self.assertIsNotNone(actual_create_time)
+            _write(
+                self._web_instance_lock_path(),
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "repo_root": self.repo.as_posix(),
+                        "pid": proc.pid,
+                        "pid_create_time": int(actual_create_time) + 1,
+                        "created_at": "2026-04-29T00:00:00Z",
+                        "host": "127.0.0.1",
+                        "port": 8124,
+                        "hostname": "stale-owner",
+                        "state": "primary",
+                        "mode": "read_write",
+                        "runner_control_state": "enabled",
+                        "runner_control_enabled": True,
+                        "runner_control_requested": True,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+            )
+
+            client, _ = _create_client(
+                self.repo,
+                enable_runner_controls=True,
+                config_path=self.config_path,
+            )
+            payload = client.get("/api/status").json()
+            self.assertEqual("primary", payload["web_instance"]["state"])
+            self.assertEqual("read_write", payload["web_instance"]["mode"])
+            self.assertTrue(payload["web_instance"]["stale_reclaimed"])
+            self.assertTrue(payload["runner_control"]["enabled"])
+            self.assertTrue(payload["runner_control"]["actions"]["start"]["enabled"])
+
+            lock_payload = json.loads(self._web_instance_lock_path().read_text(encoding="utf-8", errors="replace"))
+            self.assertEqual(os.getpid(), lock_payload["pid"])
+            self.assertEqual("enabled", lock_payload["runner_control_state"])
+            self.assertNotEqual(proc.pid, lock_payload["pid"])
+        finally:
+            self._terminate_sleep_process(proc)
 
     def test_runner_controller_errors_surface_distinct_api_failures(self) -> None:
         from types import SimpleNamespace
