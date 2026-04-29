@@ -212,7 +212,7 @@
 - [x] User-facing docs for config, CLI flags, model defaults, Telegram options, stop reasons, and worktree merge behavior are checked against the live parser/defaults and fail validation on stale claims.
 - [ ] Web console docs are checked against the live FastAPI route inventory and do not claim nonexistent backup, config, prompt, goals, or runner endpoints.
 - [x] Documentation for shutdown reports, duplicate-report handling, and artifact writers matches the current implementation instead of preserving obsolete incident assumptions.
-- [ ] Web documentation defines the current one-repo-one-web operating model and explicitly defers multi-repo dashboard scope to a later phase.
+- [x] Web documentation defines the current one-repo-one-web operating model and explicitly defers multi-repo dashboard scope to a later phase.
 - [ ] A visible identity header shows active repo, branch, run id, run dir, port, mode, runner-control status, and redaction status on every primary route.
 - [x] A repo-level web instance lock prevents accidental duplicate local-operator control of the same repo.
 - [ ] Reload/restart while stopped behaves as start-only or no-op and does not write STOP or stop-progress artifacts into historical runs.

@@ -629,6 +629,33 @@ def _validate_flag_table(
     return errors
 
 
+def _validate_web_operating_model_section(
+    section_text: str,
+    *,
+    doc_label: str,
+    section_label: str,
+) -> list[str]:
+    errors: list[str] = []
+    lowered = section_text.lower()
+
+    if "one repo, one web instance" not in lowered:
+        errors.append(f"{doc_label}: {section_label} must describe the one repo, one web instance model")
+    if "active repo" not in lowered or "startup" not in lowered:
+        errors.append(
+            f"{doc_label}: {section_label} must explain that active repo identity is the startup-bound repository"
+        )
+    if "repo-level instance lock" not in lowered:
+        errors.append(f"{doc_label}: {section_label} must mention the repo-level instance lock")
+    if "multi-repo" not in lowered:
+        errors.append(f"{doc_label}: {section_label} must mention deferred multi-repo dashboard scope")
+    elif not any(marker in lowered for marker in ("deferred", "later phase", "future scope")):
+        errors.append(
+            f"{doc_label}: {section_label} must explicitly defer multi-repo dashboard scope to a later phase"
+        )
+
+    return errors
+
+
 def _validate_exact_first_cell_set(
     section_text: str,
     expected_values: set[str],
@@ -781,6 +808,7 @@ def validate_operations_doc(text: str) -> list[str]:
         [
             "# 안전/운영 옵션 (Git, Stop, No-diff)",
             "## Stop file로 안전 종료",
+            "## Web Operating Model",
             "## CLI flags",
             "## Stop reason reference",
             "## Worktree 격리 모드 (권장: 안전하게 오래 돌릴 때)",
@@ -804,6 +832,16 @@ def validate_operations_doc(text: str) -> list[str]:
                 errors.append(
                     f"{doc_label}: stale stop_wait_timeout_seconds value: expected {expected!r}, found {value!r}"
                 )
+
+    web_model_section = _section_text(text, "## Web Operating Model")
+    if web_model_section is not None:
+        errors.extend(
+            _validate_web_operating_model_section(
+                web_model_section,
+                doc_label=doc_label,
+                section_label="web operating model",
+            )
+        )
 
     cli_section = _section_text(text, "## CLI flags")
     if cli_section is not None:
@@ -1155,6 +1193,7 @@ def validate_web_console_doc(repo: Path, text: str) -> list[str]:
         doc_label,
         [
             "# AgentCLI Web Console",
+            "## Operating Model",
             "## Current Status",
             "## Web Server Flags",
             "## Runner Controls",
@@ -1165,6 +1204,16 @@ def validate_web_console_doc(repo: Path, text: str) -> list[str]:
 
     route_inventory = collect_fastapi_route_inventory(repo)
     errors.extend(validate_web_console_route_claims(text, route_inventory))
+
+    operating_model_section = _section_text(text, "## Operating Model")
+    if operating_model_section is not None:
+        errors.extend(
+            _validate_web_operating_model_section(
+                operating_model_section,
+                doc_label=doc_label,
+                section_label="operating model",
+            )
+        )
 
     flags_section = _section_text(text, "## Web Server Flags")
     if flags_section is not None:

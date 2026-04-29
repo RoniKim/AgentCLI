@@ -6,6 +6,15 @@ AgentCLI has an alpha FastAPI web console for browser-based monitoring. It is re
 
 This is not yet a complete operational web runner. Treat the current implementation as an alpha shell with read-only snapshots plus early runner-control plumbing.
 
+## Operating Model
+
+AgentCLI Web currently runs as `one repo, one web instance`.
+
+- Each web process owns exactly one active repository, selected at startup with `--repo`.
+- The active repo identity shown in the UI and API snapshots is that single startup-bound repository; it is not a browser-switchable scope and it does not aggregate multiple repositories.
+- The repo-level instance lock is a local duplicate-instance guard for the same repository. It prevents accidental duplicate local-operator control, but it is not a multi-repo coordinator.
+- Multi-repo dashboards are deferred future scope and belong to a later phase.
+
 ## Current Status
 
 Verified on 2026-04-26 with a local server and Playwright:

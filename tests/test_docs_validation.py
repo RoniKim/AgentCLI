@@ -87,6 +87,42 @@ class DocsValidationTests(unittest.TestCase):
         self.assertTrue(any("stale stop reason" in error for error in reason_errors), reason_errors)
         self.assertTrue(any("worktree merge mode" in error for error in worktree_errors), worktree_errors)
 
+    def test_web_docs_reject_stale_multi_repo_operating_model_claims(self) -> None:
+        web_text = (ROOT / "docs" / "WEB_CONSOLE.md").read_text(encoding="utf-8")
+        stale_web = web_text.replace(
+            "AgentCLI Web currently runs as `one repo, one web instance`.",
+            "AgentCLI Web currently runs as a `multi-repo dashboard`.",
+            1,
+        )
+        stale_web = stale_web.replace(
+            "Multi-repo dashboards are deferred future scope and belong to a later phase.",
+            "Multi-repo dashboards are current scope and belong to this phase.",
+            1,
+        )
+        web_errors = validate_web_console_doc(ROOT, stale_web)
+
+        operations_text = (ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
+        stale_operations = operations_text.replace(
+            "AgentCLI Web은 현재 `one repo, one web instance` 모델입니다.",
+            "AgentCLI Web은 현재 `multi-repo dashboard` 모델입니다.",
+            1,
+        )
+        stale_operations = stale_operations.replace(
+            "- `multi-repo dashboard` scope는 later phase로 deferred 됩니다.",
+            "- `multi-repo dashboard` scope는 현재 지원됩니다.",
+            1,
+        )
+        operations_errors = validate_operations_doc(stale_operations)
+
+        self.assertTrue(
+            any("one repo, one web instance" in error or "multi-repo dashboard scope" in error for error in web_errors),
+            web_errors,
+        )
+        self.assertTrue(
+            any("one repo, one web instance" in error or "multi-repo dashboard scope" in error for error in operations_errors),
+            operations_errors,
+        )
+
     def test_shutdown_report_docs_reject_stale_writer_and_recovery_claims(self) -> None:
         advanced_text = (ROOT / "docs" / "ADVANCED_FEATURES.md").read_text(encoding="utf-8")
         stale_advanced = advanced_text.replace("write_run_report_artifacts()", "build_local_shutdown_report()")

@@ -23,6 +23,14 @@ Shell:
 
 > 러너가 Reporter/디스크 플러시 등으로 길게 마무리하는 워크플로면 적당히 늘리는 것을 권장합니다 (예: 300-600). 강제 종료가 필요하면 `process_guard`가 별도로 처리합니다.
 
+## Web Operating Model
+
+AgentCLI Web은 현재 `one repo, one web instance` 모델입니다.
+
+- `--repo`가 Web 프로세스 전체의 active repo를 정합니다. UI와 API snapshot에 보이는 active repo identity는 이 startup-bound repository를 뜻하며, 브라우저가 바꿀 수 있는 scope가 아닙니다.
+- `repo-level instance lock`은 같은 repository에 대한 중복 Web 인스턴스를 막는 로컬 duplicate-instance guard입니다. 다중 repository를 묶는 중앙 대시보드가 아닙니다.
+- `multi-repo dashboard` scope는 later phase로 deferred 됩니다.
+
 ## CLI flags
 
 | 옵션 | 설명 |
