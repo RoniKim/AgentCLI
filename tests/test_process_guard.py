@@ -362,6 +362,27 @@ class ProcessGuardTests(unittest.TestCase):
         self.assertLess(elapsed, 10)
         self.assertFalse(process_guard._pid_alive(child_pid))
 
+    def test_run_cmd_async_timeout_returns_without_hanging(self) -> None:
+        from agent_runner.utils import run_cmd_async
+
+        log_path = self.fixture_root / "timeout.log"
+        started = time.monotonic()
+        rc, summary = asyncio.run(
+            run_cmd_async(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                self.fixture_root,
+                log_path,
+                timeout_sec=1,
+            )
+        )
+        elapsed = time.monotonic() - started
+
+        if rc == 127:
+            self.skipTest(f"subprocess spawn is unavailable in this environment: {summary}")
+        self.assertEqual(124, rc)
+        self.assertIn("timeout", summary)
+        self.assertLess(elapsed, 10)
+
 
 if __name__ == "__main__":
     unittest.main()

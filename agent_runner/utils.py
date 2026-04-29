@@ -162,6 +162,34 @@ async def run_cmd_async(
     written = 0
     log_fh = log_path.open("ab")
     reader_tasks: list[asyncio.Task] = []
+    summary = ""
+    forced_rc: int | None = None
+
+    async def _terminate_running_process(reason: str, *, rc: int) -> int:
+        nonlocal summary
+        summary = reason
+        if proc.returncode is not None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1)
+            except Exception:
+                pass
+            return rc
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                return rc
+        return rc
 
     try:
         async def _reader(stream: asyncio.StreamReader, label: str) -> None:
@@ -191,28 +219,19 @@ async def run_cmd_async(
             asyncio.create_task(_reader(proc.stderr, "stderr")),
         ]
 
-        summary = ""
         while True:
             if stop_path is not None and stop_path.exists():
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=2)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                summary = "stopped"
+                forced_rc = await _terminate_running_process("stopped", rc=130)
                 break
             if timeout_sec and (time.monotonic() - start) > timeout_sec:
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=2)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                summary = "timeout"
+                forced_rc = await _terminate_running_process("timeout", rc=124)
                 break
             if proc.returncode is not None:
                 break
             await asyncio.sleep(0.2)
-        rc = await proc.wait()
+        rc = forced_rc if forced_rc is not None else await asyncio.wait_for(proc.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        rc = await _terminate_running_process("timeout", rc=124)
     finally:
         # Ensure subprocess is terminated on any exit path (CancelledError, etc.)
         if proc.returncode is None:
@@ -247,7 +266,18 @@ async def run_cmd_async(
                         pass
             except Exception:
                 pass
-        await asyncio.gather(*reader_tasks, return_exceptions=True)
+        if reader_tasks:
+            done, pending = await asyncio.wait(reader_tasks, timeout=5)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if done:
+                await asyncio.gather(*done, return_exceptions=True)
+        try:
+            log_fh.flush()
+        except Exception:
+            pass
         log_fh.close()
         if registered_pid is not None:
             try:

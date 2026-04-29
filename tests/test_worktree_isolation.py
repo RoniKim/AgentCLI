@@ -705,6 +705,37 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertEqual("boom", summary["commands"][1]["failure_summary"])
         self.assertTrue((self.run_dir / "fast_web_worktree_regression" / "02_test_web_console_safety.txt").exists())
 
+    def test_gate_commands_resolve_source_repo_venv_when_running_in_worktree(self) -> None:
+        from agent_runner.gates import normalize_gate_command
+
+        self._init_repo()
+        create_worktree(self.repo, self.worktree, run_dir=self.run_dir)
+        expected_python = (
+            self.repo / ".venv" / "Scripts" / "python.exe"
+            if os.name == "nt"
+            else self.repo / ".venv" / "bin" / "python"
+        ).resolve()
+
+        direct = normalize_gate_command(
+            [".venv/Scripts/python.exe", "-B", "-m", "py_compile", "agent_runner/web.py"],
+            repo=self.worktree,
+            command_repo=self.repo,
+        )
+        self.assertEqual(str(expected_python), direct[0])
+
+        powershell = normalize_gate_command(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "& .\\.venv\\Scripts\\python.exe -B -m unittest discover -s tests -p 'test_web_console*.py'",
+            ],
+            repo=self.worktree,
+            command_repo=self.repo,
+        )
+        self.assertIn(str(expected_python), powershell[-1])
+        self.assertNotIn(".\\.venv\\Scripts\\python.exe", powershell[-1])
+
     def test_fast_web_worktree_regression_failure_summary_and_retry_policy(self) -> None:
         from agent_runner.gates import (
             should_retry_fast_web_worktree_regression_failure,

@@ -110,6 +110,66 @@ def _norm_cmd(v: object) -> list[str]:
     return []
 
 
+_REPO_VENV_PYTHON_RE = re.compile(
+    r"(?i)(?<![\w:])(?:\.?[\\/])?\.venv[\\/]+(?:scripts[\\/]+python(?:\.exe)?|bin[\\/]+python3?)"
+)
+
+
+def _repo_venv_python_path(command_repo: Path) -> Path:
+    repo = command_repo.expanduser().resolve()
+    windows_python = repo / ".venv" / "Scripts" / "python.exe"
+    posix_python = repo / ".venv" / "bin" / "python"
+    if os.name == "nt":
+        return windows_python
+    return posix_python if posix_python.exists() else windows_python
+
+
+def _is_repo_venv_python_token(value: object) -> bool:
+    text = str(value or "").strip().strip("\"'")
+    if not text:
+        return False
+    normalized = text.replace("\\", "/").lower()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized in {
+        ".venv/scripts/python.exe",
+        ".venv/scripts/python",
+        ".venv/bin/python",
+        ".venv/bin/python3",
+    }
+
+
+def _quote_for_embedded_command(path: Path) -> str:
+    text = str(path)
+    escaped = text.replace('"', '`"') if os.name == "nt" else text.replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def normalize_gate_command(
+    cmd: Sequence[object],
+    *,
+    repo: Path,
+    command_repo: Path | None = None,
+) -> list[str]:
+    """Normalize gate commands for an execution repo and a source command repo.
+
+    Worktree isolation runs tests from the generated worktree, but repo-local
+    toolchain paths such as .venv/Scripts/python.exe live in the source repo.
+    """
+    command_root = (command_repo or repo).expanduser().resolve()
+    repo_python = _repo_venv_python_path(command_root)
+    normalized: list[str] = []
+    for part in cmd:
+        text = str(part)
+        if _is_repo_venv_python_token(text):
+            normalized.append(str(repo_python))
+            continue
+        if ".venv" in text.lower():
+            text = _REPO_VENV_PYTHON_RE.sub(lambda _match: _quote_for_embedded_command(repo_python), text)
+        normalized.append(text)
+    return normalized
+
+
 def _validation_record(
     *,
     name: str,
@@ -261,7 +321,7 @@ async def run_fast_web_worktree_regression_async(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     started_at = now_iso()
-    started_monotonic = time.monotonic()
+    suite_started_monotonic = time.monotonic()
     command_specs = _fast_web_worktree_regression_commands()
     records: list[dict[str, object]] = []
     result: dict[str, object] = {
@@ -295,14 +355,22 @@ async def run_fast_web_worktree_regression_async(
             cmd_log_path = log_dir / f"{index:02d}_{name}.txt"
             started_at = now_iso()
             started_monotonic = time.monotonic()
-            rc, summary = await run_cmd_async(
-                cmd,
-                cwd=repo,
-                log_path=cmd_log_path,
-                timeout_sec=1800,
-                stop_path=stop_path,
-                max_output_bytes=max_output_bytes,
-            )
+            try:
+                rc, summary = await run_cmd_async(
+                    cmd,
+                    cwd=repo,
+                    log_path=cmd_log_path,
+                    timeout_sec=1800,
+                    stop_path=stop_path,
+                    max_output_bytes=max_output_bytes,
+                )
+            except Exception as ex:
+                rc = 1
+                summary = f"{type(ex).__name__}: {str(ex).strip() or type(ex).__name__}"
+                try:
+                    cmd_log_path.write_text(summary + "\n", encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
             ended_at = now_iso()
             elapsed_sec = round(max(0.0, time.monotonic() - started_monotonic), 3)
             status = "stopped" if str(summary or "").strip().lower() == "stopped" else ("passed" if rc == 0 else "failed")
@@ -339,7 +407,7 @@ async def run_fast_web_worktree_regression_async(
             result["failure_summary"] = failure_summary
             result["failureSummary"] = failure_summary
         result["ended_at"] = now_iso()
-        elapsed_sec = round(max(0.0, time.monotonic() - started_monotonic), 3)
+        elapsed_sec = round(max(0.0, time.monotonic() - suite_started_monotonic), 3)
         result["elapsed_sec"] = elapsed_sec
         result["elapsedSec"] = elapsed_sec
     finally:
@@ -361,6 +429,7 @@ def run_build_gate(repo: Path, build_cmd: object, build_timeout_sec: int, legacy
     cmd = _norm_cmd(build_cmd)
     if not cmd:
         cmd = find_build_cmd(repo, legacy_build_target)
+    cmd = normalize_gate_command(cmd, repo=repo)
     timeout = int(build_timeout_sec or 1800)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     code, out = run_cmd(cmd, cwd=repo, timeout_sec=timeout)
@@ -377,6 +446,7 @@ async def run_build_gate_async(
     *,
     stop_path: Path | None = None,
     max_output_bytes: int = 10_000_000,
+    command_repo: Path | None = None,
 ) -> bool:
     result = await run_build_validation_async(
         repo,
@@ -386,6 +456,7 @@ async def run_build_gate_async(
         log_path,
         stop_path=stop_path,
         max_output_bytes=max_output_bytes,
+        command_repo=command_repo,
     )
     return bool(result.get("ok", False))
 
@@ -397,6 +468,8 @@ def run_test_gate(
     legacy_test_target: str,
     legacy_test_filter: str,
     log_path: Path,
+    *,
+    command_repo: Path | None = None,
 ) -> bool:
     """Run test gate.
 
@@ -407,6 +480,7 @@ def run_test_gate(
     cmd = _norm_cmd(test_cmd)
     if not cmd:
         cmd = find_test_cmd(repo, legacy_test_target, legacy_test_filter)
+    cmd = normalize_gate_command(cmd, repo=repo, command_repo=command_repo)
     timeout = int(test_timeout_sec or 3600)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     code, out = run_cmd(cmd, cwd=repo, timeout_sec=timeout)
@@ -424,6 +498,7 @@ async def run_test_gate_async(
     *,
     stop_path: Path | None = None,
     max_output_bytes: int = 10_000_000,
+    command_repo: Path | None = None,
 ) -> bool:
     result = await run_test_validation_async(
         repo,
@@ -434,6 +509,7 @@ async def run_test_gate_async(
         log_path,
         stop_path=stop_path,
         max_output_bytes=max_output_bytes,
+        command_repo=command_repo,
     )
     return bool(result.get("ok", False))
 
@@ -447,10 +523,12 @@ async def run_build_validation_async(
     *,
     stop_path: Path | None = None,
     max_output_bytes: int = 10_000_000,
+    command_repo: Path | None = None,
 ) -> dict[str, object]:
     cmd = _norm_cmd(build_cmd)
     if not cmd:
         cmd = find_build_cmd(repo, legacy_build_target)
+    cmd = normalize_gate_command(cmd, repo=repo, command_repo=command_repo)
     timeout = int(build_timeout_sec or 1800)
     started_at = now_iso()
     started_monotonic = time.monotonic()
@@ -488,10 +566,12 @@ async def run_test_validation_async(
     *,
     stop_path: Path | None = None,
     max_output_bytes: int = 10_000_000,
+    command_repo: Path | None = None,
 ) -> dict[str, object]:
     cmd = _norm_cmd(test_cmd)
     if not cmd:
         cmd = find_test_cmd(repo, legacy_test_target, legacy_test_filter)
+    cmd = normalize_gate_command(cmd, repo=repo, command_repo=command_repo)
     timeout = int(test_timeout_sec or 3600)
     started_at = now_iso()
     started_monotonic = time.monotonic()

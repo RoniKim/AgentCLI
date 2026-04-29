@@ -1686,6 +1686,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     legacy_build_target=str(getattr(args, "dotnet_build_target", "") or ""),
                     log_path=pre_build_log,
                     stop_path=stop_path,
+                    command_repo=source_repo,
                 )
                 if not pre_build_ok:
                     eprint("[BUILD-FIX] Build is broken before tasks start. Running auto-fix...")
@@ -1726,6 +1727,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         legacy_build_target=str(getattr(args, "dotnet_build_target", "") or ""),
                         log_path=run_dir / "pre_cycle_build_post_fix.txt",
                         stop_path=stop_path,
+                        command_repo=source_repo,
                     )
                     if post_fix_ok:
                         eprint("[BUILD-FIX] Build fixed successfully!")
@@ -2409,6 +2411,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             legacy_build_target=str(getattr(args, "dotnet_build_target", "") or ""),
                             log_path=attempt_dir / "build.txt",
                             stop_path=stop_path,
+                            command_repo=source_repo,
                         )
                         build_validation.update(
                             {
@@ -2509,6 +2512,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             legacy_test_filter=str(getattr(args, "dotnet_test_filter", "") or ""),
                             log_path=attempt_dir / "test.txt",
                             stop_path=stop_path,
+                            command_repo=source_repo,
                         )
                         test_validation.update(
                             {
