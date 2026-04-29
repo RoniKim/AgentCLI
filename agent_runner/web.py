@@ -212,6 +212,12 @@ SENSITIVE_CONFIG_TOKENS = {
     "webhook",
 }
 REDACTED_VALUE = "[redacted]"
+LAN_SAFETY_MUTATION_DISABLED_MESSAGE = (
+    "LAN safety blocks mutating web actions until authentication or a stronger trusted-operator gate is implemented."
+)
+LAN_SAFETY_PROMPT_READ_DISABLED_MESSAGE = (
+    "LAN safety blocks raw prompt content reads. Redacted prompt inventory remains available."
+)
 WEB_INSTANCE_LOCK_FILENAME = "web_console.lock.json"
 _WEB_INSTANCE_LOCAL_HOLDS: dict[str, dict[str, Any]] = {}
 _WEB_INSTANCE_LOCAL_HOLDS_LOCK = threading.Lock()
@@ -2273,6 +2279,28 @@ def _resolve_trusted_network_enabled(explicit: bool | None = None) -> tuple[bool
     return False, "default"
 
 
+def _resolve_trusted_operator_gate_enabled() -> tuple[bool, str]:
+    # Placeholder for a future authenticated or otherwise stronger operator gate.
+    return False, "not-implemented"
+
+
+def _lan_safety_blocks_mutations(bind_host: str) -> bool:
+    gate_enabled, _ = _resolve_trusted_operator_gate_enabled()
+    return bool(_web_redaction_active(bind_host) and not gate_enabled)
+
+
+def _lan_safety_details(bind_host: str, *, trusted_network: bool | None = None) -> dict[str, Any]:
+    gate_enabled, gate_source = _resolve_trusted_operator_gate_enabled()
+    return {
+        "safety": "lan",
+        "scope": "lan",
+        "bind_host": str(bind_host or "").strip() or "0.0.0.0",
+        "trusted_network": bool(trusted_network),
+        "trusted_operator_gate": bool(gate_enabled),
+        "trusted_operator_gate_source": gate_source,
+    }
+
+
 def _resolve_runner_controls_enabled(
     explicit: bool | None = None,
     *,
@@ -2304,12 +2332,15 @@ def _resolve_runner_controls_enabled(
         return True, source, ""
 
     trusted_enabled, trusted_source = _resolve_trusted_network_enabled(trusted_network)
-    if trusted_enabled:
-        combined_source = f"{source};{trusted_source}" if source else trusted_source
-        return True, combined_source, ""
-
     host_label = str(bind_host or "").strip() or "0.0.0.0"
-    return False, source, f"Runner controls stay disabled on {host_label} until --trusted-network is set."
+    combined_source = f"{source};{trusted_source}" if trusted_enabled and source else (trusted_source if trusted_enabled else source)
+    gate_enabled, gate_source = _resolve_trusted_operator_gate_enabled()
+    if trusted_enabled and gate_enabled:
+        return True, f"{combined_source};{gate_source}", ""
+
+    if trusted_enabled:
+        return False, combined_source, LAN_SAFETY_MUTATION_DISABLED_MESSAGE
+    return False, combined_source, f"{LAN_SAFETY_MUTATION_DISABLED_MESSAGE} Bind host: {host_label}."
 
 
 def _runner_control_confirmation(action: str) -> str:
@@ -2815,7 +2846,9 @@ def _runner_control_payload(
     )
     status_reason = str(status_payload.get("reason") or "").strip()
     message_sensitive = False
-    if status_last_error:
+    if not enabled and disabled_reason == LAN_SAFETY_MUTATION_DISABLED_MESSAGE:
+        message = disabled_reason
+    elif status_last_error:
         message = status_last_error
         message_sensitive = True
     elif status_reason.startswith("status_error:"):
@@ -6598,6 +6631,10 @@ def build_snapshot(
         resolved_disabled_reason = runner_controls_disabled_reason or (
             "" if control_enabled else "Runner controls are disabled until the server is started with AGENTCLI_WEB_RUNNER_CONTROLS=1 or --enable-runner-controls."
         )
+    redaction_active = _web_redaction_active(bind_host)
+    if redaction_active and _lan_safety_blocks_mutations(bind_host):
+        control_enabled = False
+        resolved_disabled_reason = LAN_SAFETY_MUTATION_DISABLED_MESSAGE
     web_instance = dict(web_instance_state) if isinstance(web_instance_state, dict) else _web_instance_payload(
         repo_root,
         bind_host=bind_host,
@@ -6617,7 +6654,6 @@ def build_snapshot(
         resolved_disabled_reason = str(web_instance.get("reason") or resolved_disabled_reason or "Mutating web controls are disabled for this web console instance.").strip()
         if not resolved_source:
             resolved_source = "web-lock"
-    redaction_active = _web_redaction_active(bind_host)
     config_contract = _build_config_contract(
         repo_root,
         cfg,
@@ -7570,6 +7606,14 @@ def create_app(
     app.state.web_instance = _web_instance_snapshot()
     app.state.web_instance_lock = web_instance_lock
     web_redaction_active = _web_redaction_active(bind_host)
+    lan_safety_active = _lan_safety_blocks_mutations(bind_host)
+    app.state.lan_safety_active = lan_safety_active
+
+    def _lan_safety_error_details(action: str, *, reason: str = LAN_SAFETY_MUTATION_DISABLED_MESSAGE) -> dict[str, Any]:
+        details = _lan_safety_details(bind_host, trusted_network=trusted_network)
+        details["blocked_action"] = action
+        details["reason"] = reason
+        return details
 
     def _snapshot(*, busy_override: bool | None = None) -> dict[str, Any]:
         snapshot = build_snapshot(
@@ -7708,39 +7752,45 @@ def create_app(
             or control.get("duplicateInstance")
             or str(web_instance.get("state") or "").strip().lower() == "duplicate"
         )
-        message = str(control.get("message") or "Runner controls are disabled.")
+        message = str(
+            LAN_SAFETY_MUTATION_DISABLED_MESSAGE
+            if lan_safety_active and not duplicate_instance
+            else control.get("message") or "Runner controls are disabled."
+        )
+        error_code = (
+            "runner_controls_duplicate_instance"
+            if duplicate_instance
+            else "lan_safety_mutation_blocked"
+            if lan_safety_active
+            else "runner_controls_disabled"
+        )
+        details = {
+            "enabled": bool(control.get("enabled")),
+            "source": control.get("source", ""),
+            "bind_host": bind_host,
+            "bind_port": int(bind_port),
+            "trusted_network": bool(trusted_network),
+            "reason": str(message or controls_disabled_reason or ""),
+            "web_instance": web_instance,
+        }
+        if lan_safety_active and not duplicate_instance:
+            details.update(_lan_safety_error_details(f"runner-{action}"))
         _record_runner_control_event(
             action,
             status="duplicate" if duplicate_instance else "disabled",
             message="",
             error=message,
-            details={
-                "enabled": bool(control.get("enabled")),
-                "source": control.get("source", ""),
-                "bind_host": bind_host,
-                "bind_port": int(bind_port),
-                "trusted_network": bool(trusted_network),
-                "reason": str(control.get("message") or controls_disabled_reason or ""),
-                "web_instance": web_instance,
-            },
+            details=details,
             controller_status=control.get("status") if isinstance(control.get("status"), dict) else None,
         )
         return _runner_control_response(
             action=action,
             status_code=409 if duplicate_instance else 403,
             ok=False,
-            status="duplicate" if duplicate_instance else "disabled",
+            status="duplicate" if duplicate_instance else "lan_safety_blocked" if lan_safety_active else "disabled",
             message=message,
-            error_code="runner_controls_duplicate_instance" if duplicate_instance else "runner_controls_disabled",
-            details={
-                "enabled": bool(control.get("enabled")),
-                "source": control.get("source", ""),
-                "bind_host": bind_host,
-                "bind_port": int(bind_port),
-                "trusted_network": bool(trusted_network),
-                "reason": str(control.get("message") or controls_disabled_reason or ""),
-                "web_instance": web_instance,
-            },
+            error_code=error_code,
+            details=details,
         )
 
     def _runner_control_unavailable(action: str) -> Any:
@@ -8291,21 +8341,24 @@ def create_app(
 
     def _worktree_action_disabled(action: str) -> Any:
         control = _runner_control_snapshot().get("runner_control", {})
-        message = str(control.get("message") or "Worktree review actions are disabled.")
+        message = str(LAN_SAFETY_MUTATION_DISABLED_MESSAGE if lan_safety_active else control.get("message") or "Worktree review actions are disabled.")
+        details = {
+            "enabled": bool(control.get("enabled")),
+            "source": control.get("source", ""),
+            "bind_host": bind_host,
+            "trusted_network": bool(trusted_network),
+            "reason": str(message or controls_disabled_reason or ""),
+        }
+        if lan_safety_active:
+            details.update(_lan_safety_error_details(f"worktree-{action}"))
         return _worktree_action_response(
             action=action,
             status_code=403,
             ok=False,
-            status="disabled",
+            status="lan_safety_blocked" if lan_safety_active else "disabled",
             message=message,
-            error_code="worktree_actions_disabled",
-            details={
-                "enabled": bool(control.get("enabled")),
-                "source": control.get("source", ""),
-                "bind_host": bind_host,
-                "trusted_network": bool(trusted_network),
-                "reason": str(control.get("message") or controls_disabled_reason or ""),
-            },
+            error_code="lan_safety_mutation_blocked" if lan_safety_active else "worktree_actions_disabled",
+            details=details,
         )
 
     async def _worktree_action_body(request: Request) -> dict[str, Any] | None:
@@ -8970,6 +9023,13 @@ def create_app(
     async def api_config_restore(request: Request) -> Any:
         nonlocal cfg
         if not controls_enabled:
+            if lan_safety_active:
+                return _config_restore_error(
+                    403,
+                    "lan_safety_mutation_blocked",
+                    LAN_SAFETY_MUTATION_DISABLED_MESSAGE,
+                    **_lan_safety_error_details("config-restore"),
+                )
             return _config_restore_error(
                 403,
                 "config_restore_disabled",
@@ -9114,6 +9174,13 @@ def create_app(
     async def api_config_save(request: Request) -> Any:
         nonlocal cfg
         if not controls_enabled:
+            if lan_safety_active:
+                return _config_save_error(
+                    403,
+                    "lan_safety_mutation_blocked",
+                    LAN_SAFETY_MUTATION_DISABLED_MESSAGE,
+                    **_lan_safety_error_details("config-save"),
+                )
             return _config_save_error(
                 403,
                 "config_save_disabled",
@@ -9440,6 +9507,13 @@ def create_app(
     @app.api_route("/api/prompts/read", methods=["GET", "POST"])
     @app.api_route("/api/prompts/content", methods=["GET", "POST"])
     async def api_prompt_read(request: Request) -> Any:
+        if lan_safety_active:
+            return _prompt_error(
+                403,
+                "lan_safety_prompt_read_blocked",
+                LAN_SAFETY_PROMPT_READ_DISABLED_MESSAGE,
+                **_lan_safety_error_details("prompt-read", reason=LAN_SAFETY_PROMPT_READ_DISABLED_MESSAGE),
+            )
         prompt_dir = resolve_prompts_dir(repo_root, str(cfg.get("prompts_dir") or ""))
         if not prompt_dir:
             prompt_dir = default_prompts_dir(repo_root)
@@ -9471,6 +9545,14 @@ def create_app(
     async def api_prompt_save(request: Request) -> Any:
         nonlocal cfg
         if not controls_enabled:
+            if lan_safety_active:
+                return _prompt_action_error(
+                    403,
+                    "prompt-save",
+                    "lan_safety_mutation_blocked",
+                    LAN_SAFETY_MUTATION_DISABLED_MESSAGE,
+                    **_lan_safety_error_details("prompt-save"),
+                )
             return _prompt_action_error(
                 403,
                 "prompt-save",
@@ -9560,6 +9642,14 @@ def create_app(
     async def api_prompt_restore(request: Request) -> Any:
         nonlocal cfg
         if not controls_enabled:
+            if lan_safety_active:
+                return _prompt_action_error(
+                    403,
+                    "prompt-restore",
+                    "lan_safety_mutation_blocked",
+                    LAN_SAFETY_MUTATION_DISABLED_MESSAGE,
+                    **_lan_safety_error_details("prompt-restore"),
+                )
             return _prompt_action_error(
                 403,
                 "prompt-restore",
@@ -9692,6 +9782,13 @@ def create_app(
         goal_path = goals_path(repo_root)
         backup_path: Path | None = None
         if not controls_enabled:
+            if lan_safety_active:
+                return _goal_save_error(
+                    403,
+                    "lan_safety_mutation_blocked",
+                    LAN_SAFETY_MUTATION_DISABLED_MESSAGE,
+                    **_lan_safety_error_details("goals-save"),
+                )
             return _goal_save_error(
                 403,
                 "goals_save_disabled",

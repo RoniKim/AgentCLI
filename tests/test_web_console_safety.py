@@ -501,6 +501,36 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertFalse(body["runner_control"]["enabled"])
         self.assertFalse(app.state.runner_controller.start_calls)
 
+    def test_localhost_read_only_keeps_raw_prompt_reads_but_blocks_mutations(self) -> None:
+        prompts_dir = self.home / "prompts" / "agentcli"
+        _write(prompts_dir / "pm_instructions.md", "# Local prompt\nSECRET: local-only\nRepo: {repo}\n")
+        client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=self.config_path)
+
+        status_payload = client.get("/api/status").json()
+        self.assertFalse(status_payload["redaction"]["active"])
+        self.assertEqual("local", status_payload["redaction"]["scope"])
+        self.assertFalse(status_payload["runner_control"]["enabled"])
+        self.assertFalse(status_payload["config_contract"]["meta"]["save_enabled"])
+
+        prompt_read = client.get("/api/prompts/read", params={"id": "pm_instructions", "file": "pm_instructions.md"})
+        self.assertEqual(200, prompt_read.status_code)
+        prompt_payload = prompt_read.json()
+        self.assertIn("SECRET: local-only", prompt_payload["content"])
+
+        save_response = client.post("/api/config/save", json={"changes": [{"path": "iterations", "value": 5}]})
+        self.assertEqual(403, save_response.status_code)
+        self.assertEqual("config_save_disabled", save_response.json()["error"]["code"])
+
+    def test_localhost_opt_in_enables_mutating_control_surfaces(self) -> None:
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        status_payload = client.get("/api/status").json()
+        self.assertFalse(status_payload["redaction"]["active"])
+        self.assertTrue(status_payload["runner_control"]["enabled"])
+        self.assertTrue(status_payload["runner_control"]["actions"]["start"]["enabled"])
+        self.assertTrue(status_payload["config_contract"]["meta"]["save_enabled"])
+        self.assertTrue(status_payload["config_contract"]["meta"]["restore_enabled"])
+
     def test_runner_control_timeout_stop_response_is_retryable_and_surfaces_stop_progress(self) -> None:
         timeout_progress = {
             "phase": "timeout",
@@ -912,10 +942,12 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("[redacted]", prompts_payload["dir"])
 
         prompt_read = client.get("/api/prompts/read", params={"id": "pm_instructions", "file": "pm_instructions.md"})
-        self.assertEqual(200, prompt_read.status_code)
+        self.assertEqual(403, prompt_read.status_code)
         prompt_read_payload = prompt_read.json()
-        self.assertIn("SECRET: super-secret", prompt_read_payload["content"])
-        self.assertIn("{repo}", prompt_read_payload["content"])
+        self.assertFalse(prompt_read_payload["ok"])
+        self.assertEqual("lan_safety_prompt_read_blocked", prompt_read_payload["error"]["code"])
+        self.assertIn("prompt inventory", prompt_read_payload["error"]["message"])
+        self.assertNotIn("content", prompt_read_payload)
 
         runner_status = client.get("/api/runner/status").json()
         self.assertEqual("[redacted]", runner_status["status"]["config_path"])
@@ -937,19 +969,18 @@ class WebConsoleSafetyTests(unittest.TestCase):
         )
 
         response = client.post("/api/runner/start", json={"phrase": "START RUNNER"})
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(403, response.status_code)
         payload = response.json()
-        self.assertTrue(payload["ok"])
-        self.assertEqual("started", payload["status"])
-        self.assertTrue(payload["runner_control"]["enabled"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual("lan_safety_mutation_blocked", payload["error"]["code"])
+        self.assertEqual("lan_safety_blocked", payload["status"])
+        self.assertFalse(payload["runner_control"]["enabled"])
         self.assertEqual("[redacted]", payload["runner_control"]["status"]["config_path"])
         self.assertEqual("[redacted]", payload["runner_control"]["startOptions"]["path"])
         self.assertEqual("[redacted]", payload["runner_control"]["startOptions"]["values"]["config_path"])
         self.assertEqual("[redacted]", payload["runner_control"]["startOptions"]["argv_preview"][1])
         self.assertEqual("[redacted]", payload["runner_control"]["startOptions"]["argv_preview"][3])
         self.assertTrue(payload["runner_control"]["startOptions"]["validation"]["valid"])
-        self.assertEqual("[redacted]", payload["result"]["config_path"])
-        self.assertEqual(self.repo.as_posix(), payload["result"]["repo"])
         self.assertEqual("[redacted]", payload["snapshot"]["logs"]["files"]["cycle_summary"])
         self.assertEqual("[redacted]", payload["snapshot"]["runner_control"]["status"]["config_path"])
         self.assertTrue(payload["snapshot"]["redaction"]["active"])
@@ -1399,8 +1430,8 @@ class WebConsoleSafetyTests(unittest.TestCase):
         blocked_status = blocked_client.get("/api/runner/status").json()
         self.assertFalse(blocked_status["enabled"])
         self.assertEqual("cli", blocked_status["source"])
-        self.assertIn("0.0.0.0", blocked_status["message"])
-        self.assertIn("trusted-network", blocked_status["message"])
+        self.assertIn("LAN safety", blocked_status["message"])
+        self.assertIn("trusted-operator", blocked_status["message"])
         self.assertFalse(blocked_status["runner_control"]["actions"]["start"]["enabled"])
         self.assertFalse(blocked_status["runner_control"]["actions"]["restart"]["enabled"])
 
@@ -1408,8 +1439,9 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual(403, blocked_response.status_code)
         blocked_body = blocked_response.json()
         self.assertFalse(blocked_body["ok"])
-        self.assertEqual("runner_controls_disabled", blocked_body["error"]["code"])
-        self.assertIn("trusted-network", blocked_body["error"]["details"]["reason"])
+        self.assertEqual("lan_safety_mutation_blocked", blocked_body["error"]["code"])
+        self.assertEqual("lan", blocked_body["error"]["details"]["scope"])
+        self.assertIn("LAN safety", blocked_body["error"]["details"]["reason"])
         self.assertFalse(blocked_app.state.runner_controller.start_calls)
 
         trusted_client, trusted_app = _create_client(
@@ -1421,18 +1453,57 @@ class WebConsoleSafetyTests(unittest.TestCase):
         )
 
         trusted_status = trusted_client.get("/api/runner/status").json()
-        self.assertTrue(trusted_status["enabled"])
+        self.assertFalse(trusted_status["enabled"])
         self.assertEqual("cli;cli:--trusted-network", trusted_status["source"])
-        self.assertTrue(trusted_status["runner_control"]["actions"]["start"]["enabled"])
+        self.assertIn("LAN safety", trusted_status["message"])
+        self.assertFalse(trusted_status["runner_control"]["actions"]["start"]["enabled"])
         self.assertEqual("[redacted]", trusted_status["runner_control"]["status"]["config_path"])
 
         trusted_response = trusted_client.post("/api/runner/start", json={"confirmation": "START RUNNER"})
-        self.assertEqual(200, trusted_response.status_code)
+        self.assertEqual(403, trusted_response.status_code)
         trusted_body = trusted_response.json()
-        self.assertTrue(trusted_body["ok"])
-        self.assertEqual("started", trusted_body["status"])
-        self.assertEqual(self.repo.as_posix(), trusted_app.state.runner_controller.start_overrides[0]["repo"])
-        self.assertEqual(self.config_path.as_posix(), trusted_app.state.runner_controller.start_overrides[0]["config_path"])
+        self.assertFalse(trusted_body["ok"])
+        self.assertEqual("lan_safety_mutation_blocked", trusted_body["error"]["code"])
+        self.assertEqual("lan_safety_blocked", trusted_body["status"])
+        self.assertEqual(0, trusted_app.state.runner_controller.start_calls)
+
+    def test_lan_mutating_actions_are_rejected_even_with_opt_in_and_trusted_network(self) -> None:
+        controller = FakeRunnerController(repo=self.repo, base_args=_runner_base_args(self.config_path))
+        client, app = _create_client(
+            self.repo,
+            enable_runner_controls=True,
+            config_path=self.config_path,
+            host="0.0.0.0",
+            trusted_network=True,
+            runner_controller=controller,
+        )
+
+        mutation_requests = [
+            ("/api/runner/start", {"confirmation": "START RUNNER"}),
+            ("/api/runner/stop", {"confirmation": "STOP RUNNER"}),
+            ("/api/runner/reload", {"confirmation": "RELOAD RUNNER"}),
+            ("/api/runner/restart", {"confirmation": "RESTART RUNNER"}),
+            ("/api/config/save", {"changes": [{"path": "iterations", "value": 6}]}),
+            ("/api/config/restore", {"backup_path": "agentcli.20260426.bak.json", "confirm": "RESTORE CONFIG BACKUP"}),
+            ("/api/prompts/save", {"id": "pm_bootstrap", "file": "pm_bootstrap_prompt.md", "content": "Repo: {repo} {analysis_md}\n"}),
+            ("/api/prompts/restore", {"id": "pm_bootstrap", "file": "pm_bootstrap_prompt.md", "backup_path": "pm_bootstrap_prompt.bak.md", "confirm": "RESTORE BACKUP"}),
+            ("/api/goals/save", {"draft": {"p0": [self._goal_item("Add FastAPI web console", done=False)], "p1": []}}),
+            ("/api/worktree/merge", {"confirmation": "MERGE WORKTREE"}),
+            ("/api/worktree/discard", {"confirmation": "DISCARD WORKTREE"}),
+        ]
+
+        for path, body in mutation_requests:
+            with self.subTest(path=path):
+                response = client.post(path, json=body)
+                self.assertEqual(403, response.status_code)
+                payload = response.json()
+                self.assertFalse(payload["ok"])
+                self.assertEqual("lan_safety_mutation_blocked", payload["error"]["code"])
+                self.assertEqual("lan", payload["error"]["details"]["scope"])
+                self.assertIn("LAN safety", payload["error"]["message"])
+
+        self.assertEqual(0, app.state.runner_controller.start_calls)
+        self.assertEqual([], app.state.runner_controller.stop_calls)
 
     def test_repo_web_instance_lock_allows_primary_owner_and_same_process_reuse(self) -> None:
         client, _ = _create_client(
@@ -1704,7 +1775,8 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("reload", payload["runner_control"]["status"]["history"][0]["action"])
         self.assertEqual("reload", payload["runner_control"]["last_action"])
         self.assertEqual("Runner reloaded.", payload["runner_control"]["last_message"])
-        self.assertEqual("Runner reloaded.", payload["runner_control"]["message"])
+        self.assertIn("LAN safety", payload["runner_control"]["message"])
+        self.assertFalse(payload["runner_control"]["enabled"])
 
         shell = RunnerShell([], controller=None)
         shell.set_repo(self.repo.as_posix())

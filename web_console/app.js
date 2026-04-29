@@ -1769,9 +1769,10 @@
       noBackupsAvailable: 'No backups available',
       errorCode: 'Error code',
       backupPath: 'Backup path',
-        promptInventorySummary: 'Inventory previews stay redacted. Select a prompt to open the explicit full-content read path.',
-        draftStaysLocal: 'Draft edits stay local until save or reset.',
-        promptEditorSummary: 'Loaded through the explicit read path',
+      promptInventorySummary: 'Inventory previews stay redacted. Select a prompt to open the explicit full-content read path.',
+      inventoryLanSafety: 'LAN safety keeps prompt previews redacted and blocks full prompt reads.',
+      draftStaysLocal: 'Draft edits stay local until save or reset.',
+      promptEditorSummary: 'Loaded through the explicit read path',
       saveCreatesBackup: 'Saving always creates a backup before updating the prompt file.',
       copyPromptSummary: 'Copy prompt summary',
       template: 'template',
@@ -1937,9 +1938,10 @@
       noBackupsAvailable: '사용 가능한 백업 없음',
       errorCode: '오류 코드',
       backupPath: '백업 경로',
-        promptInventorySummary: '인벤토리 미리보기는 가려진 상태로 유지됩니다. 명시적인 전체 읽기 경로를 열려면 프롬프트를 선택하세요.',
-        draftStaysLocal: '초안 편집은 저장하거나 초기화하기 전까지 로컬에만 유지됩니다.',
-        promptEditorSummary: '명시적인 읽기 경로를 통해 로드됨',
+      promptInventorySummary: '인벤토리 미리보기는 가려진 상태로 유지됩니다. 명시적인 전체 읽기 경로를 열려면 프롬프트를 선택하세요.',
+      inventoryLanSafety: 'LAN 안전 모드는 프롬프트 미리보기를 가린 상태로 유지하고 전체 읽기를 차단합니다.',
+      draftStaysLocal: '초안 편집은 저장하거나 초기화하기 전까지 로컬에만 유지됩니다.',
+      promptEditorSummary: '명시적인 읽기 경로를 통해 로드됨',
       saveCreatesBackup: '저장은 프롬프트 파일을 업데이트하기 전에 항상 백업을 만듭니다.',
       copyPromptSummary: '프롬프트 요약 복사',
     },
@@ -5163,6 +5165,10 @@
       return t('config.redactedHidden');
     }
     return text || fallback;
+  }
+
+  function lanSafetyActive() {
+    return toText(state.redaction?.scope, '').toLowerCase() === 'lan' && Boolean(state.redaction?.active);
   }
 
   function goalBucketLabel(bucket) {
@@ -15754,6 +15760,8 @@
     const editorUpdated = editor.promptUpdated || selected.updated || '';
     const editorPreview = redactionAwareText(editor.promptPreview || selected.preview, t('common.unavailable'));
     const editorDisabled = editor.loading || promptMutationInFlight(editor) || !editor.promptId || Boolean(editor.error);
+    const promptInventorySummary = lanSafetyActive() ? t('prompts.inventoryLanSafety') : t('prompts.promptInventorySummary');
+    const promptInventoryMeta = lanSafetyActive() ? t('prompts.inventoryLanSafety') : t('prompts.inventoryRedacted');
     // Inventory previews stay redacted by default. Saving creates a backup before atomically updating the prompt file, and restore uses the selected backup.
 
     const body = `
@@ -15761,10 +15769,10 @@
         <div class="prompt-list">
           ${panel(
             t('prompts.promptInventory'),
-            `${escapeHTML(overrides)}/${escapeHTML(state.prompts.length)} ${escapeHTML(t('common.overrides'))} | ${escapeHTML(t('prompts.inventoryRedacted'))}`,
+            `${escapeHTML(overrides)}/${escapeHTML(state.prompts.length)} ${escapeHTML(t('common.overrides'))} | ${escapeHTML(promptInventoryMeta)}`,
             `
               ${sectionNotice('prompts')}
-              <div class="summary-note">${escapeHTML(t('prompts.promptInventorySummary'))}</div>
+              <div class="summary-note">${escapeHTML(promptInventorySummary)}</div>
               <div class="compact-list">
                 <div class="compact-list__item">
                   <span class="compact-list__bullet"></span>
