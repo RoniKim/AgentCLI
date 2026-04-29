@@ -10,7 +10,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -328,6 +328,31 @@ class ProcessGuardTests(unittest.TestCase):
             patch.object(process_guard.sys, "executable", str(fake_python)),
         ):
             self.assertEqual(str(fake_pythonw), process_guard._watchdog_executable())
+
+    def test_parent_watchdog_polling_does_not_hold_infinite_windows_handle(self) -> None:
+        with (
+            patch.object(process_guard.sys, "platform", "win32"),
+            patch("agent_runner.process_guard._pid_create_time_ticks", return_value=111) as create_time,
+            patch("agent_runner.process_guard._pid_alive", side_effect=[True, False]) as alive,
+            patch("agent_runner.process_guard.time.sleep") as sleep,
+        ):
+            process_guard._wait_for_parent_exit(123, parent_create_time=111)
+
+        self.assertEqual([call(123), call(123)], create_time.call_args_list)
+        self.assertEqual([call(123), call(123)], alive.call_args_list)
+        sleep.assert_called_once_with(process_guard._WATCHDOG_PARENT_POLL_SECONDS)
+
+    def test_parent_watchdog_polling_stops_on_pid_reuse_signature(self) -> None:
+        with (
+            patch.object(process_guard.sys, "platform", "win32"),
+            patch("agent_runner.process_guard._pid_create_time_ticks", return_value=222),
+            patch("agent_runner.process_guard._pid_alive") as alive,
+            patch("agent_runner.process_guard.time.sleep") as sleep,
+        ):
+            process_guard._wait_for_parent_exit(123, parent_create_time=111)
+
+        alive.assert_not_called()
+        sleep.assert_not_called()
 
     @unittest.skipUnless(sys.platform == "win32", "Windows process-tree smoke test")
     def test_run_cmd_async_cleans_inherited_stdout_child_process(self) -> None:

@@ -218,9 +218,9 @@
 - [ ] Reload/restart while stopped behaves as start-only or no-op and does not write STOP or stop-progress artifacts into historical runs.
 - [ ] Pre-run readiness checks verify source `.venv`, Git worktree ownership/safe-directory state, stale STOP/runner_wait artifacts, and already-merged generated worktrees before a long unattended run starts.
 - [ ] Worktree cleanup diagnostics can report ACL-denied residual directories after Git unregisters a worktree and provide reboot/admin cleanup guidance without blocking new runs.
-- [ ] Parent watchdog cleanup does not hold parent process handles indefinitely; it polls PID/create-time state with bounded sleeps and closes handles on every check.
-- [ ] Codex app-server subprocess cleanup explicitly closes stdio pipes, joins the reader thread, unregisters process-guard PIDs, and cannot leave inherited handles behind after timeout or forced termination.
-- [ ] AgentCLI entrypoints register structured logger cleanup with `atexit` so `run.log`, `error.log`, `debug.log`, and `events.jsonl` handlers are closed on interpreter shutdown.
+- [x] Parent watchdog cleanup does not hold parent process handles indefinitely; it polls PID/create-time state with bounded sleeps and closes handles on every check.
+- [x] Codex app-server subprocess cleanup explicitly closes stdio pipes, joins the reader thread, unregisters process-guard PIDs, and cannot leave inherited handles behind after timeout or forced termination.
+- [x] AgentCLI entrypoints register structured logger cleanup with `atexit` so `run.log`, `error.log`, `debug.log`, and `events.jsonl` handlers are closed on interpreter shutdown.
 - [ ] Web runner start rejects `run_dir` values outside the active repo's approved AgentCLI run root and rejects `config_path` values outside approved config roots.
 - [ ] LAN mode blocks raw prompt reads and keeps mutating actions disabled until authentication exists or a stronger trusted-operator gate is implemented.
 

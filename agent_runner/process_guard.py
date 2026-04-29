@@ -54,6 +54,7 @@ _watchdog_process: Optional[subprocess.Popen[object]] = None
 # regardless of PID liveness — guards against PID-recycling false positives.
 _SESSION_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 _KILL_RETRY_BACKOFF_SECONDS = 15 * 60  # Avoid noisy retries for kernel-stuck processes.
+_WATCHDOG_PARENT_POLL_SECONDS = 1.0
 
 # ---------------------------------------------------------------------------
 # L1 - Windows Job Object
@@ -964,28 +965,25 @@ def cleanup_orphans(session_dir: Optional[Path] = None) -> int:
 # ---------------------------------------------------------------------------
 
 def _wait_for_parent_exit(parent_pid: int, parent_create_time: Optional[int] = None) -> None:
-    """Block until parent_pid exits, falling back to polling when needed."""
+    """Block until parent_pid exits without holding a long-lived process handle.
+
+    Windows keeps a process object alive while another process holds an open
+    handle to it.  The watchdog used to wait on a single ``OpenProcess`` handle
+    for the entire parent lifetime; if the watchdog wedged, that reference could
+    delay object/file-handle cleanup.  Polling keeps every probe short-lived and
+    preserves the PID-reuse signature check.
+    """
     if parent_pid <= 0 or parent_pid == os.getpid():
         return
-    if sys.platform == "win32":
-        try:
-            _init_kernel32_types()
-            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-            handle = kernel32.OpenProcess(_SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, int(parent_pid))
-            if handle:
-                try:
-                    kernel32.WaitForSingleObject(handle, _INFINITE)
-                    return
-                finally:
-                    kernel32.CloseHandle(handle)
-        except Exception:
-            pass
-    while _pid_alive(parent_pid):
+
+    while True:
         if parent_create_time is not None:
             actual = _pid_create_time_ticks(parent_pid)
             if actual is not None and actual != parent_create_time:
                 return
-        time.sleep(1.0)
+        if not _pid_alive(parent_pid):
+            return
+        time.sleep(_WATCHDOG_PARENT_POLL_SECONDS)
 
 
 def _run_parent_watchdog(parent_pid: int, session_dir: Path, parent_create_time: Optional[int] = None) -> int:

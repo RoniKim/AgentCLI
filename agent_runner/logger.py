@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import sys
@@ -17,6 +18,7 @@ from .utils import now_iso
 
 _ACTIVE_LOGGERS: "weakref.WeakSet[StructuredLogger]" = weakref.WeakSet()
 _ACTIVE_LOGGERS_LOCK = threading.RLock()
+_ATEXIT_REGISTERED = False
 
 
 class _ProcessGuardFilter(logging.Filter):
@@ -403,3 +405,17 @@ def close_all_loggers() -> None:
             logger.close()
         except Exception:
             pass
+
+
+def _register_atexit_cleanup() -> None:
+    global _ATEXIT_REGISTERED
+    if _ATEXIT_REGISTERED:
+        return
+    try:
+        atexit.register(close_all_loggers)
+        _ATEXIT_REGISTERED = True
+    except Exception:
+        pass
+
+
+_register_atexit_cleanup()

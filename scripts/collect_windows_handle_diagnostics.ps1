@@ -6,7 +6,13 @@ param(
     [int]$TopProcessCount = 25,
     [switch]$IncludeCommandLine,
     [switch]$IncludeLogHandles,
+    [switch]$IncludeWindowsEvents,
+    [switch]$StopOnResourcePressure,
     [int]$LogHandleEvery = 5,
+    [int]$WindowsEventEvery = 5,
+    [int]$WindowsEventLookbackMinutes = 10,
+    [int]$SystemHandleLimit = 550000,
+    [int]$TopProcessHandleLimit = 250000,
     [string]$OutputPath = ""
 )
 
@@ -261,6 +267,148 @@ function Get-TopHandleProcesses {
     }
 }
 
+function Get-WindowsDiagnosticEvents {
+    param(
+        [datetime]$Since,
+        [datetime]$Until
+    )
+    $events = @()
+    $systemIds = @(26, 100, 1074, 109, 577, 13, 7031, 7034, 7040, 7045)
+    $systemPattern = 'cmd\.exe|conhost\.exe|explorer\.exe|Application Error|0xc0000142|virtual memory|resource|handle|memory'
+    $appPattern = 'cmd\.exe|conhost\.exe|explorer\.exe|WerFault|LiveKernelEvent|0xc0000142|xTend|darkFlash'
+    try {
+        $systemEvents = Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=$Since; EndTime=$Until} -ErrorAction SilentlyContinue
+        $systemEvents = $systemEvents | Where-Object { $_.Id -in $systemIds -or $_.Message -match $systemPattern } | Select-Object -First 40
+        foreach ($event in @($systemEvents)) {
+            $events += [ordered]@{
+                log = 'System';
+                timeCreated = $event.TimeCreated.ToString("o");
+                id = [int]$event.Id;
+                level = [string]$event.LevelDisplayName;
+                provider = [string]$event.ProviderName;
+                message = ([string]$event.Message -replace '\s+', ' ');
+            }
+        }
+    } catch {
+        $events += [ordered]@{ log = 'System'; error = $_.Exception.Message }
+    }
+
+    try {
+        $appEvents = Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=$Since; EndTime=$Until} -ErrorAction SilentlyContinue
+        $appEvents = $appEvents | Where-Object { $_.ProviderName -match 'Application Error|Windows Error Reporting|Application Hang' -or $_.Message -match $appPattern } | Select-Object -First 40
+        foreach ($event in @($appEvents)) {
+            $events += [ordered]@{
+                log = 'Application';
+                timeCreated = $event.TimeCreated.ToString("o");
+                id = [int]$event.Id;
+                level = [string]$event.LevelDisplayName;
+                provider = [string]$event.ProviderName;
+                message = ([string]$event.Message -replace '\s+', ' ');
+            }
+        }
+    } catch {
+        $events += [ordered]@{ log = 'Application'; error = $_.Exception.Message }
+    }
+
+    try {
+        $resourceLog = 'Microsoft-Windows-Resource-Exhaustion-Detector/Operational'
+        $resourceEvents = Get-WinEvent -FilterHashtable @{LogName=$resourceLog; StartTime=$Since; EndTime=$Until} -ErrorAction SilentlyContinue |
+            Select-Object -First 20
+        foreach ($event in @($resourceEvents)) {
+            $events += [ordered]@{
+                log = $resourceLog;
+                timeCreated = $event.TimeCreated.ToString("o");
+                id = [int]$event.Id;
+                level = [string]$event.LevelDisplayName;
+                provider = [string]$event.ProviderName;
+                message = ([string]$event.Message -replace '\s+', ' ');
+            }
+        }
+    } catch {
+        $events += [ordered]@{ log = 'Microsoft-Windows-Resource-Exhaustion-Detector/Operational'; error = $_.Exception.Message }
+    }
+
+    return @($events)
+}
+
+function Get-ResourcePressure {
+    param(
+        [object]$SystemCounters,
+        [array]$TopHandleProcesses
+    )
+    $handleCount = $null
+    try {
+        if ($SystemCounters -and $null -ne $SystemCounters.handle_count) {
+            $handleCount = [int64]$SystemCounters.handle_count
+        }
+    } catch {
+        $handleCount = $null
+    }
+
+    $top = $null
+    foreach ($proc in @($TopHandleProcesses)) {
+        if ($proc -and $null -ne $proc.handleCount) {
+            $top = $proc
+            break
+        }
+    }
+
+    $topHandles = $null
+    try {
+        if ($top) {
+            $topHandles = [int64]$top.handleCount
+        }
+    } catch {
+        $topHandles = $null
+    }
+
+    $reasons = @()
+    if ($null -ne $handleCount -and $SystemHandleLimit -gt 0 -and $handleCount -ge $SystemHandleLimit) {
+        $reasons += "system_handles>=$SystemHandleLimit"
+    }
+    if ($null -ne $topHandles -and $TopProcessHandleLimit -gt 0 -and $topHandles -ge $TopProcessHandleLimit) {
+        $reasons += "top_process_handles>=$TopProcessHandleLimit"
+    }
+
+    return [ordered]@{
+        exceeded = ($reasons.Count -gt 0)
+        reasons = @($reasons)
+        systemHandleCount = $handleCount
+        systemHandleLimit = $SystemHandleLimit
+        topProcess = if ($top) {
+            [ordered]@{
+                pid = [int]$top.pid
+                name = [string]$top.name
+                handleCount = $topHandles
+                handleLimit = $TopProcessHandleLimit
+            }
+        } else {
+            $null
+        }
+    }
+}
+
+function Request-AgentCliStopForResourcePressure {
+    param(
+        [string]$RunDir,
+        [object]$Pressure
+    )
+    if (-not $RunDir) {
+        return $false
+    }
+    $stopPath = Join-Path $RunDir "STOP"
+    if (Test-Path -LiteralPath $stopPath) {
+        return $false
+    }
+    try {
+        $reasonText = "windows_resource_pressure`n" + ($Pressure | ConvertTo-Json -Depth 6 -Compress)
+        Set-Content -LiteralPath $stopPath -Value $reasonText -Encoding UTF8
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Get-LogHandles {
     param(
         [array]$Processes,
@@ -365,6 +513,14 @@ while ($true) {
     $errorLogPath = if ($logDir) { Join-Path $logDir "error.log" } else { "" }
     $eventsPath = if ($logDir) { Join-Path $logDir "events.jsonl" } else { "" }
 
+    $systemCounters = Get-SystemCounters
+    $topHandleProcesses = Get-TopHandleProcesses -Count $TopProcessCount
+    $resourcePressure = Get-ResourcePressure -SystemCounters $systemCounters -TopHandleProcesses $topHandleProcesses
+    $stopRequestedByResourcePressure = $false
+    if ($StopOnResourcePressure -and $resourcePressure.exceeded) {
+        $stopRequestedByResourcePressure = Request-AgentCliStopForResourcePressure -RunDir $runDirResolved -Pressure $resourcePressure
+    }
+
     $sample = [ordered]@{
         schema = 1
         sample = $sampleIndex
@@ -382,12 +538,18 @@ while ($true) {
         }
         sessions = $sessions
         processTree = $processes
-        systemCounters = Get-SystemCounters
-        topHandleProcesses = Get-TopHandleProcesses -Count $TopProcessCount
+        systemCounters = $systemCounters
+        topHandleProcesses = $topHandleProcesses
+        resourcePressure = $resourcePressure
+        stopRequestedByResourcePressure = $stopRequestedByResourcePressure
     }
 
     if ($IncludeLogHandles -and $LogHandleEvery -gt 0 -and ($sampleIndex % $LogHandleEvery -eq 0)) {
         $sample.logHandles = Get-LogHandles -Processes $processes -RepoRoot $repoRootResolved
+    }
+    if ($IncludeWindowsEvents -and $WindowsEventEvery -gt 0 -and ($sampleIndex % $WindowsEventEvery -eq 0)) {
+        $eventSince = $now.AddMinutes(-1 * [Math]::Max(1, $WindowsEventLookbackMinutes))
+        $sample.windowsEvents = Get-WindowsDiagnosticEvents -Since $eventSince -Until $now
     }
 
     $json = $sample | ConvertTo-Json -Depth 12 -Compress
@@ -396,7 +558,11 @@ while ($true) {
     if ($sample.latestMetric -and $sample.latestMetric.event) {
         $latestEvent = [string]$sample.latestMetric.event
     }
-    Write-Host ("[{0}] sample={1} processes={2} latestEvent={3} output={4}" -f $now.ToString("HH:mm:ss"), $sampleIndex, @($processes).Count, $latestEvent, $OutputPath)
+    $pressureText = ""
+    if ($resourcePressure.exceeded) {
+        $pressureText = " resourcePressure=" + (($resourcePressure.reasons -join ",") -replace "\s+", "_")
+    }
+    Write-Host ("[{0}] sample={1} processes={2} latestEvent={3}{4} output={5}" -f $now.ToString("HH:mm:ss"), $sampleIndex, @($processes).Count, $latestEvent, $pressureText, $OutputPath)
 
     $sampleIndex += 1
     Start-Sleep -Seconds ([Math]::Max(1, $IntervalSeconds))

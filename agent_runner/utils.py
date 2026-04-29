@@ -660,6 +660,7 @@ class _CodexAppServerClient:
         # via CreateProcess without the full path.
         resolved = shutil.which(codex_path) or codex_path
         self._registered_pid: int | None = None
+        self._closed = False
         self._proc = subprocess.Popen(
             [resolved, "app-server", "--listen", "stdio://"],
             stdin=subprocess.PIPE,
@@ -705,16 +706,45 @@ class _CodexAppServerClient:
         self.close()
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+
         pid = self._registered_pid or (int(self._proc.pid) if self._proc.pid else None)
+        if self._proc.stdin is not None:
+            try:
+                self._proc.stdin.close()
+            except Exception:
+                pass
+
         if self._proc.poll() is None:
             try:
                 self._proc.terminate()
                 self._proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=2)
+                except Exception:
+                    pass
             except Exception:
                 try:
                     self._proc.kill()
+                    self._proc.wait(timeout=2)
                 except Exception:
                     pass
+        for stream_name in ("stdout", "stderr"):
+            stream = getattr(self._proc, stream_name, None)
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+        if self._reader.is_alive() and threading.current_thread() is not self._reader:
+            try:
+                self._reader.join(timeout=2)
+            except Exception:
+                pass
         if pid is not None:
             try:
                 from .process_guard import terminate_process_tree, unregister_pid_if_exited
