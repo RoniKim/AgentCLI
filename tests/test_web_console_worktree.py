@@ -405,6 +405,88 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
         _write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         return path
 
+    def _write_residual_cleanup_artifact(self, *, generated_worktree: Path | None = None) -> tuple[Path, str]:
+        worktree_dir = generated_worktree or (self._tmp / ".agentcli_worktrees" / self.repo.name / "residual")
+        worktree_dir.mkdir(parents=True, exist_ok=True)
+        _write(self.patch_path, "diff --git a/a b/a\n")
+        locked_path = (worktree_dir / "nested" / "locked.txt").as_posix()
+        locked_message = str(PermissionError(13, "Permission denied", locked_path))
+        self._write_status_artifact(
+            "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json",
+            {
+                "schema_version": 1,
+                "status": "applied_cleanup_failed",
+                "created_at": "2026-04-26T12:11:00",
+                "source_repo": self.repo.as_posix(),
+                "run_dir": self.run_dir.as_posix(),
+                "worktree_dir": worktree_dir.resolve().as_posix(),
+                "patch_path": self.patch_path.as_posix(),
+                "cleanup_path": locked_path,
+                "cleanup_message": locked_message,
+                "cleanup_details": {
+                    "path": locked_path,
+                    "locking_path": locked_path,
+                    "affected_artifact": worktree_dir.resolve().as_posix(),
+                    "worktree_dir": worktree_dir.resolve().as_posix(),
+                    "operation": "shutil.rmtree",
+                    "permission_detail": locked_message,
+                    "reboot_required": True,
+                    "reboot_guidance": "Close the locking process or reboot Windows before retrying cleanup.",
+                    "admin_guidance": "Ask an administrator to remove the residual directory if the ACL lock persists.",
+                    "git_worktree_registration": {
+                        "repo": self.repo.as_posix(),
+                        "worktree_dir": worktree_dir.resolve().as_posix(),
+                        "registered": False,
+                        "registered_path": "",
+                        "rc": 0,
+                        "output": "",
+                    },
+                    "residual_directory": True,
+                },
+                "cleanup_attempts": [
+                    {
+                        "attempt": 1,
+                        "operation": "shutil.rmtree",
+                        "path": locked_path,
+                        "locking_path": locked_path,
+                        "affected_artifact": worktree_dir.resolve().as_posix(),
+                        "worktree_dir": worktree_dir.resolve().as_posix(),
+                        "error_type": "PermissionError",
+                        "message": locked_message,
+                        "errno": 13,
+                    }
+                ],
+                "cleanup_reconciliation": {
+                    "artifact_status": "applied_cleanup_failed",
+                    "final_status": "applied",
+                    "worktree_dir": worktree_dir.resolve().as_posix(),
+                    "worktree_exists": True,
+                    "cleanup_path": locked_path,
+                    "cleanup_path_exists": False,
+                    "pending_marker_paths": [],
+                    "existing_pending_markers": [],
+                    "marker_state": "reconciled",
+                    "worktree_state": "present",
+                    "blocking_paths": [worktree_dir.resolve().as_posix()],
+                    "reconciled": False,
+                    "reconciled_from": "",
+                    "git_worktree_registration": {
+                        "repo": self.repo.as_posix(),
+                        "worktree_dir": worktree_dir.resolve().as_posix(),
+                        "registered": False,
+                        "registered_path": "",
+                        "rc": 0,
+                        "output": "",
+                    },
+                    "residual_directory": True,
+                },
+                "base_ref": "main",
+                "head_ref": "abc12345",
+                "last_rc": 0,
+            },
+        )
+        return worktree_dir, locked_path
+
     def _write_patch(self) -> Path:
         text = "\n".join(
             [
@@ -765,6 +847,30 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
         self.assertIn("대기", empty_html)
         self.assertIn("정리 실패", empty_html)
         self.assertIn("패치 없음", empty_html)
+
+    def test_worktree_diagnostics_panel_surfaces_residual_cleanup_guidance(self) -> None:
+        residual_worktree, locked_path = self._write_residual_cleanup_artifact()
+        snapshot = self._build_snapshot()
+        diagnostics = snapshot["worktree_diagnostics"]
+
+        rendered_en = _run_worktree_render_harness(snapshot, locale="en")
+        rendered_ko = _run_worktree_render_harness(snapshot, locale="ko")
+
+        self.assertEqual("warning", diagnostics["status"])
+        self.assertTrue(diagnostics["cleanup_failed"][0]["residual_directory"])
+        self.assertFalse(diagnostics["cleanup_failed"][0]["reconciliation"]["git_worktree_registration"]["registered"])
+        self.assertIn("Residual worktree directory", rendered_en["main"])
+        self.assertIn(residual_worktree.resolve().as_posix(), rendered_en["main"])
+        self.assertIn("Cleanup operation", rendered_en["main"])
+        self.assertIn("Permission detail", rendered_en["main"])
+        self.assertIn("Reboot guidance", rendered_en["main"])
+        self.assertIn("Admin cleanup guidance", rendered_en["main"])
+        self.assertIn("잔존 작업트리 디렉터리", rendered_ko["main"])
+        self.assertIn("정리 작업", rendered_ko["main"])
+        self.assertIn("권한 세부 정보", rendered_ko["main"])
+        self.assertIn("재부팅 안내", rendered_ko["main"])
+        self.assertIn("관리자 정리 안내", rendered_ko["main"])
+        self.assertIn(locked_path, rendered_en["main"])
 
     def test_valid_pending_file_surfaces_review_required_fields(self) -> None:
         changed_files = [

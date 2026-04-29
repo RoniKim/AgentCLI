@@ -89,6 +89,89 @@ class WorktreeIsolationTests(unittest.TestCase):
         payload.update(updates)
         self.contract_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+    def _write_residual_cleanup_artifact(self, *, generated_worktree: Path | None = None) -> tuple[Path, str]:
+        worktree_dir = generated_worktree or (self.fixture_root / ".agentcli_worktrees" / self.repo.name / "residual")
+        worktree_dir.mkdir(parents=True, exist_ok=True)
+        self.patch_path.write_text("diff --git a/a b/a\n", encoding="utf-8")
+        locked_path = (worktree_dir / "nested" / "locked.txt").as_posix()
+        locked_message = str(PermissionError(13, "Permission denied", locked_path))
+        payload = {
+            "schema_version": 1,
+            "status": "applied_cleanup_failed",
+            "created_at": "2026-04-27T12:01:00",
+            "source_repo": self.repo.resolve().as_posix(),
+            "run_dir": self.run_dir.resolve().as_posix(),
+            "worktree_dir": worktree_dir.resolve().as_posix(),
+            "patch_path": self.patch_path.resolve().as_posix(),
+            "cleanup_path": locked_path,
+            "cleanup_message": locked_message,
+            "cleanup_details": {
+                "path": locked_path,
+                "locking_path": locked_path,
+                "affected_artifact": worktree_dir.resolve().as_posix(),
+                "worktree_dir": worktree_dir.resolve().as_posix(),
+                "operation": "shutil.rmtree",
+                "permission_detail": locked_message,
+                "reboot_required": True,
+                "reboot_guidance": "Close the locking process or reboot Windows before retrying cleanup.",
+                "admin_guidance": "Ask an administrator to remove the residual directory if the ACL lock persists.",
+                "git_worktree_registration": {
+                    "repo": self.repo.resolve().as_posix(),
+                    "worktree_dir": worktree_dir.resolve().as_posix(),
+                    "registered": False,
+                    "registered_path": "",
+                    "rc": 0,
+                    "output": "",
+                },
+                "residual_directory": True,
+            },
+            "cleanup_attempts": [
+                {
+                    "attempt": 1,
+                    "operation": "shutil.rmtree",
+                    "path": locked_path,
+                    "locking_path": locked_path,
+                    "affected_artifact": worktree_dir.resolve().as_posix(),
+                    "worktree_dir": worktree_dir.resolve().as_posix(),
+                    "error_type": "PermissionError",
+                    "message": locked_message,
+                    "errno": 13,
+                }
+            ],
+            "cleanup_reconciliation": {
+                "artifact_status": "applied_cleanup_failed",
+                "final_status": "applied",
+                "worktree_dir": worktree_dir.resolve().as_posix(),
+                "worktree_exists": True,
+                "cleanup_path": locked_path,
+                "cleanup_path_exists": False,
+                "pending_marker_paths": [],
+                "existing_pending_markers": [],
+                "marker_state": "reconciled",
+                "worktree_state": "present",
+                "blocking_paths": [worktree_dir.resolve().as_posix()],
+                "reconciled": False,
+                "reconciled_from": "",
+                "git_worktree_registration": {
+                    "repo": self.repo.resolve().as_posix(),
+                    "worktree_dir": worktree_dir.resolve().as_posix(),
+                    "registered": False,
+                    "registered_path": "",
+                    "rc": 0,
+                    "output": "",
+                },
+                "residual_directory": True,
+            },
+            "base_ref": "main",
+            "head_ref": "abc12345",
+            "last_rc": 0,
+        }
+        self.run_dir.joinpath("WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return worktree_dir, locked_path
+
     def test_default_worktree_dir_is_outside_source_repo(self) -> None:
         worktree_dir = default_worktree_dir(self.repo, self.run_dir)
 
@@ -317,6 +400,27 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertEqual("failed", diagnostics["cleanup_failed"][0]["resolution_actions"][0]["status"])
         self.assertEqual("cleanup_failed_reconcile", diagnostics["cleanup_failed"][0]["resolution_actions"][2]["kind"])
 
+    def test_scan_worktree_diagnostics_reports_residual_cleanup_directory_as_warning(self) -> None:
+        residual_worktree, locked_path = self._write_residual_cleanup_artifact()
+
+        diagnostics = scan_worktree_diagnostics(self.repo)
+        issue_kinds = {str(issue["kind"]) for issue in diagnostics["issues"]}
+        cleanup_failed = diagnostics["cleanup_failed"][0]
+
+        self.assertEqual("warning", diagnostics["status"])
+        self.assertIn("cleanup_failed", issue_kinds)
+        self.assertTrue(cleanup_failed["residual_directory"])
+        self.assertFalse(cleanup_failed["reconciliation"]["git_worktree_registration"]["registered"])
+        self.assertEqual("warn", next(issue["severity"] for issue in diagnostics["issues"] if issue["kind"] == "cleanup_failed"))
+        self.assertEqual(residual_worktree.resolve().as_posix(), next(issue["path"] for issue in diagnostics["issues"] if issue["kind"] == "cleanup_failed"))
+        self.assertEqual("shutil.rmtree", cleanup_failed["cleanup_operation"])
+        self.assertIn("Permission denied", cleanup_failed["permission_detail"])
+        self.assertIn("reboot", cleanup_failed["reboot_guidance"].lower())
+        self.assertIn("administrator", cleanup_failed["admin_guidance"].lower())
+        self.assertIn("residual directory", cleanup_failed["resolution_actions"][-1]["detail"].lower())
+        self.assertEqual(residual_worktree.resolve().as_posix(), cleanup_failed["reconciliation"]["blocking_paths"][0])
+        self.assertEqual(locked_path, cleanup_failed["cleanup_path"])
+
     def test_scan_worktree_diagnostics_reconciles_cleanup_failed_artifact_after_cleanup_finishes(self) -> None:
         self.patch_path.write_text("diff --git a/a b/a\n", encoding="utf-8")
         payload = {
@@ -349,6 +453,18 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertTrue(reconciled_payload["cleanup_reconciliation"]["reconciled"])
         self.assertEqual("cleanup_failed_reconcile", reconciled_payload["resolution_actions"][-1]["kind"])
         self.assertEqual("done", reconciled_payload["resolution_actions"][-1]["status"])
+
+    def test_runner_start_readiness_is_not_blocked_by_residual_cleanup_warning(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
+        self._write_residual_cleanup_artifact()
+
+        diagnostics = scan_worktree_diagnostics(self.repo)
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        self.assertEqual("warning", diagnostics["status"])
+        self.assertTrue(readiness["ok"])
+        self.assertEqual([], readiness["blockers"])
 
     def test_scan_worktree_diagnostics_reports_orphaned_generated_worktree(self) -> None:
         generated_worktree = self.fixture_root / ".agentcli_worktrees" / self.repo.name / "orphaned"
@@ -504,6 +620,25 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertIn("Worktree Diagnostics", output)
         self.assertIn("issues: none", output)
         self.assertEqual(before, after)
+
+    def test_shell_worktree_command_prints_residual_cleanup_guidance(self) -> None:
+        residual_worktree, _ = self._write_residual_cleanup_artifact()
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        stream = io.StringIO()
+
+        with redirect_stdout(stream):
+            shell.worktree([])
+
+        output = stream.getvalue()
+        self.assertIn("Worktree Diagnostics", output)
+        self.assertIn("cleanup-failed", output)
+        self.assertIn("residual", output.lower())
+        self.assertIn(residual_worktree.resolve().as_posix(), output)
+        self.assertIn("shutil.rmtree", output)
+        self.assertIn("Permission denied", output)
+        self.assertIn("reboot", output.lower())
+        self.assertIn("administrator", output.lower())
 
     def test_runner_start_readiness_reports_missing_source_venv_and_records_shell_event(self) -> None:
         self._init_repo()

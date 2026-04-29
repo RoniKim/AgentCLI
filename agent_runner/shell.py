@@ -1253,11 +1253,26 @@ class RunnerShell:
                 worktree_dir = str(item.get("worktree_dir") or "").strip()
                 cleanup_path = str(item.get("cleanup_path") or "").strip()
                 message = str(item.get("cleanup_message") or "").strip()
+                cleanup_operation = str(item.get("cleanup_operation") or item.get("cleanupOperation") or "").strip()
+                permission_detail = str(item.get("permission_detail") or item.get("permissionDetail") or "").strip()
+                reboot_guidance = str(item.get("reboot_guidance") or item.get("rebootGuidance") or "").strip()
+                admin_guidance = str(item.get("admin_guidance") or item.get("adminGuidance") or "").strip()
+                residual_directory = bool(item.get("residual_directory") or item.get("residualDirectory"))
                 bits = [item.get("status") or "cleanup_failed"]
+                if residual_directory:
+                    bits.append("residual")
                 if worktree_dir:
                     bits.append(worktree_dir)
                 if cleanup_path:
                     bits.append(f"cleanup={cleanup_path}")
+                if cleanup_operation:
+                    bits.append(f"op={cleanup_operation}")
+                if permission_detail:
+                    bits.append(f"permission={permission_detail}")
+                if reboot_guidance:
+                    bits.append(f"reboot={reboot_guidance}")
+                if admin_guidance:
+                    bits.append(f"admin={admin_guidance}")
                 if message:
                     bits.append(message)
                 print(f"  - {path}: {' | '.join(str(bit) for bit in bits)}")
@@ -1286,7 +1301,18 @@ class RunnerShell:
                 details = issue.get("details") if isinstance(issue.get("details"), dict) else {}
                 detail_bits = []
                 if isinstance(details, dict):
-                    for key in ("reason", "run_dir", "worktree_dir", "patch_path", "cleanup_path"):
+                    for key in (
+                        "reason",
+                        "run_dir",
+                        "worktree_dir",
+                        "patch_path",
+                        "cleanup_path",
+                        "cleanup_operation",
+                        "permission_detail",
+                        "reboot_guidance",
+                        "admin_guidance",
+                        "residual_directory",
+                    ):
                         value = str(details.get(key) or "").strip()
                         if value:
                             detail_bits.append(f"{key}={value}")

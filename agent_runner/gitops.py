@@ -165,6 +165,7 @@ def worktree_resolution_actions(
     source_repo_text = str(source_repo).strip()
     artifact_path_text = str(artifact_path).strip()
     reconciliation_data = dict(reconciliation or {})
+    residual_directory = bool(reconciliation_data.get("residual_directory"))
     actions: list[dict[str, object]] = []
 
     if normalized in {"discarded", "discard_cleanup_failed"}:
@@ -230,6 +231,10 @@ def worktree_resolution_actions(
         reconcile_status = "done" if reconciliation_data.get("reconciled") else "required"
         if reconcile_status == "done":
             reconcile_detail = "Cleanup-failed artifact reconciled after the worktree path and marker state were cleared."
+        elif residual_directory and blocking_paths:
+            reconcile_detail = f"Git no longer registers the worktree; residual directory remains at: {', '.join(blocking_paths)}"
+        elif residual_directory:
+            reconcile_detail = "Git no longer registers the worktree; residual directory cleanup is still pending."
         elif blocking_paths:
             reconcile_detail = f"Still blocked by: {', '.join(blocking_paths)}"
         else:
@@ -1449,6 +1454,40 @@ def _git_is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
     return code == 0
 
 
+def _git_worktree_registration_state(repo: Path, worktree_dir: Path) -> dict[str, object]:
+    repo_resolved = repo.expanduser().resolve()
+    worktree_resolved = worktree_dir.expanduser().resolve()
+    code, out = run_cmd(["git", "worktree", "list", "--porcelain"], cwd=repo_resolved, timeout_sec=60)
+    registered: bool | None = None
+    registered_path = ""
+    if code == 0:
+        for raw_line in (out or "").splitlines():
+            line = raw_line.strip()
+            if not line or not line.startswith("worktree "):
+                continue
+            candidate = line[len("worktree ") :].strip()
+            if not candidate:
+                continue
+            try:
+                candidate_path = Path(candidate).expanduser().resolve()
+            except Exception:
+                candidate_path = Path(candidate).expanduser()
+            if candidate_path == worktree_resolved:
+                registered = True
+                registered_path = candidate_path.as_posix()
+                break
+        if registered is None:
+            registered = False
+    return {
+        "repo": repo_resolved.as_posix(),
+        "worktree_dir": worktree_resolved.as_posix(),
+        "registered": registered,
+        "registered_path": registered_path,
+        "rc": int(code),
+        "output": "" if code == 0 else str(out or "").strip(),
+    }
+
+
 WORKTREE_MERGE_PENDING = "WORKTREE_MERGE_PENDING.json"
 WORKTREE_MERGE_PENDING_MD = "WORKTREE_MERGE_PENDING.md"
 WORKTREE_REUSE_CONTRACT = "WORKTREE_REUSE_CONTRACT.json"
@@ -1473,6 +1512,43 @@ def _worktree_text_path(value: Path | str | None) -> str:
         return Path(raw).expanduser().resolve().as_posix()
     except Exception:
         return raw.replace("\\", "/")
+
+
+def _worktree_cleanup_permission_detail(
+    cleanup_details: dict[str, object] | None,
+    cleanup_attempts: Sequence[dict[str, object]] | None,
+) -> str:
+    details = dict(cleanup_details or {})
+    for key in ("permission_detail", "permissionDetail"):
+        value = str(details.get(key) or "").strip()
+        if value:
+            return value
+
+    attempts = [dict(item) for item in cleanup_attempts or [] if isinstance(item, dict)]
+    if not attempts:
+        return ""
+
+    last_attempt = attempts[-1]
+    error_type = str(last_attempt.get("error_type") or last_attempt.get("errorType") or "").strip()
+    message = str(last_attempt.get("message") or "").strip()
+    errno_value = last_attempt.get("errno")
+    winerror_value = last_attempt.get("winerror")
+
+    detail = ""
+    if error_type and message:
+        detail = f"{error_type}: {message}"
+    else:
+        detail = message or error_type
+
+    extras: list[str] = []
+    if errno_value not in {None, ""}:
+        extras.append(f"errno={errno_value}")
+    if winerror_value not in {None, ""}:
+        extras.append(f"winerror={winerror_value}")
+    if extras:
+        suffix = "; ".join(extras)
+        detail = f"{detail} ({suffix})" if detail else suffix
+    return detail
 
 
 def _worktree_excerpt_line(line: str, *, max_chars: int = 200) -> str:
@@ -2117,6 +2193,12 @@ def _cleanup_failed_reconciliation_state(
     final_status = str(artifact_mapping.get("final_status") or "").strip().lower()
     worktree_dir = _worktree_text_path(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree"))
     cleanup_path = _worktree_text_path(payload.get("cleanup_path") or payload.get("cleanupPath") or worktree_dir)
+    cleanup_details = payload.get("cleanup_details") if isinstance(payload.get("cleanup_details"), dict) else payload.get("cleanupDetails")
+    if not isinstance(cleanup_details, dict):
+        cleanup_details = {}
+    git_worktree_registration = cleanup_details.get("git_worktree_registration")
+    if not isinstance(git_worktree_registration, dict):
+        git_worktree_registration = {}
     pending_candidates = _pending_companion_paths(payload, artifact_path.with_name(WORKTREE_MERGE_PENDING))
     existing_pending_markers = [
         candidate.resolve().as_posix() if candidate.exists() else candidate.as_posix()
@@ -2125,6 +2207,11 @@ def _cleanup_failed_reconciliation_state(
     ]
     worktree_exists = _path_exists_safely(worktree_dir)
     cleanup_path_exists = _path_exists_safely(cleanup_path)
+    residual_directory = bool(cleanup_details.get("residual_directory"))
+    if git_worktree_registration:
+        registered = git_worktree_registration.get("registered")
+        if registered is False and (worktree_exists or cleanup_path_exists):
+            residual_directory = True
     blocking_paths: list[str] = []
     if worktree_exists and worktree_dir:
         blocking_paths.append(worktree_dir)
@@ -2145,6 +2232,8 @@ def _cleanup_failed_reconciliation_state(
         "worktree_exists": worktree_exists,
         "cleanup_path": cleanup_path,
         "cleanup_path_exists": cleanup_path_exists,
+        "git_worktree_registration": dict(git_worktree_registration),
+        "residual_directory": residual_directory,
         "pending_marker_paths": [candidate.as_posix() for candidate in pending_candidates],
         "existing_pending_markers": existing_pending_markers,
         "marker_state": marker_state,
@@ -2459,6 +2548,23 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
             cleanup_categories = ["cleanup_failed", "active"]
             if payload_patch_path and not Path(payload_patch_path).exists():
                 cleanup_categories.append("missing_patch")
+            last_attempt = payload_cleanup_attempts[-1] if payload_cleanup_attempts else {}
+            cleanup_operation = _payload_text(payload_cleanup_details, "operation", "cleanup_operation", "cleanupOperation") or (
+                _payload_text(last_attempt, "operation") if isinstance(last_attempt, dict) else ""
+            )
+            permission_detail = _worktree_cleanup_permission_detail(payload_cleanup_details, payload_cleanup_attempts)
+            git_registration = payload_cleanup_details.get("git_worktree_registration") if isinstance(payload_cleanup_details.get("git_worktree_registration"), dict) else {}
+            residual_directory = bool(payload_cleanup_details.get("residual_directory") or reconciliation.get("residual_directory"))
+            if isinstance(git_registration, dict) and git_registration.get("registered") is False and (payload_worktree_dir or payload_cleanup_path):
+                residual_directory = True
+            reboot_guidance = _payload_text(payload_cleanup_details, "reboot_guidance", "rebootGuidance")
+            admin_guidance = _payload_text(payload_cleanup_details, "admin_guidance", "adminGuidance", "admin_cleanup_guidance", "adminCleanupGuidance")
+            reconciliation_blocking_paths = [
+                str(path).strip()
+                for path in reconciliation.get("blocking_paths", [])
+                if str(path).strip()
+            ] if isinstance(reconciliation.get("blocking_paths"), list) else []
+            residual_target = reconciliation_blocking_paths[0] if reconciliation_blocking_paths else ""
             resolution_actions = worktree_resolution_actions(
                 status,
                 source_repo=_worktree_text_path(payload.get("source_repo") or payload.get("sourceRepo")),
@@ -2469,6 +2575,18 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
                 artifact_path=artifact_path.resolve().as_posix(),
                 reconciliation=reconciliation,
             )
+            issue_target = (
+                residual_target
+                if residual_directory and residual_target
+                else payload_worktree_dir
+                if residual_directory and payload_worktree_dir
+                else payload_cleanup_path or payload_worktree_dir or artifact_path.resolve().as_posix()
+            )
+            issue_severity = "warn" if residual_directory else "error"
+            if residual_directory:
+                issue_message = f"Residual worktree directory remains at {issue_target}: {payload_cleanup_message or status}"
+            else:
+                issue_message = f"Cleanup failed for {issue_target}: {payload_cleanup_message or status}"
             cleanup_failed.append(
                 {
                     "path": artifact_path.resolve().as_posix(),
@@ -2481,6 +2599,18 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
                     "cleanup_message": payload_cleanup_message,
                     "cleanup_details": payload_cleanup_details,
                     "cleanup_attempts": payload_cleanup_attempts,
+                    "cleanup_operation": cleanup_operation,
+                    "cleanupOperation": cleanup_operation,
+                    "permission_detail": permission_detail,
+                    "permissionDetail": permission_detail,
+                    "reboot_guidance": reboot_guidance,
+                    "rebootGuidance": reboot_guidance,
+                    "admin_guidance": admin_guidance,
+                    "adminGuidance": admin_guidance,
+                    "residual_directory": residual_directory,
+                    "residualDirectory": residual_directory,
+                    "git_worktree_registration": dict(git_registration) if isinstance(git_registration, dict) else {},
+                    "gitWorktreeRegistration": dict(git_registration) if isinstance(git_registration, dict) else {},
                     "categories": cleanup_categories,
                     "reconciliation": reconciliation,
                     "resolution_actions": resolution_actions,
@@ -2489,16 +2619,23 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
             register_reference(payload_worktree_dir)
             add_issue(
                 "cleanup_failed",
-                f"Cleanup failed for {payload_cleanup_path or payload_worktree_dir or artifact_path.as_posix()}: {payload_cleanup_message or status}",
-                severity="error",
-                path=artifact_path.resolve().as_posix(),
+                issue_message,
+                severity=issue_severity,
+                path=issue_target,
                 categories=[category for category in cleanup_categories if category != "active"],
                 details={
+                    "artifact_path": artifact_path.resolve().as_posix(),
                     "run_dir": _worktree_text_path(payload.get("run_dir") or payload.get("runDir")),
                     "worktree_dir": payload_worktree_dir,
                     "patch_path": payload_patch_path,
                     "cleanup_path": payload_cleanup_path,
                     "cleanup_message": payload_cleanup_message,
+                    "cleanup_operation": cleanup_operation,
+                    "permission_detail": permission_detail,
+                    "reboot_guidance": reboot_guidance,
+                    "admin_guidance": admin_guidance,
+                    "residual_directory": residual_directory,
+                    "git_worktree_registration": dict(git_registration) if isinstance(git_registration, dict) else {},
                     "status": status,
                     "reconciliation": reconciliation,
                 },
@@ -3002,6 +3139,22 @@ def _cleanup_failure_result(
             cleanup_details["attempts"] = cleanup_attempts
         if cleanup_path:
             cleanup_details.setdefault("path", cleanup_path)
+
+    source_repo_text = _payload_text(payload, "source_repo", "sourceRepo")
+    worktree_dir_text = _worktree_text_path(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree"))
+    if worktree_dir_text:
+        cleanup_details.setdefault("permission_detail", _worktree_cleanup_permission_detail(cleanup_details, cleanup_attempts))
+        cleanup_details.setdefault("operation", cleanup_details.get("operation") or cleanup_details.get("cleanup_operation") or "shutil.rmtree")
+    if source_repo_text and worktree_dir_text:
+        cleanup_details["git_worktree_registration"] = _git_worktree_registration_state(Path(source_repo_text), Path(worktree_dir_text))
+        registration_state = cleanup_details["git_worktree_registration"]
+        if isinstance(registration_state, dict) and registration_state.get("registered") is False:
+            cleanup_details["residual_directory"] = True
+    if os.name == "nt":
+        cleanup_details.setdefault(
+            "admin_guidance",
+            "If reboot does not clear the ACL block, ask an administrator to remove the residual directory or fix its permissions.",
+        )
 
     updates: dict[str, object] = {
         "cleanup_error": cleanup_message,

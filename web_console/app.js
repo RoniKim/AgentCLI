@@ -735,6 +735,11 @@
         cleanupActionGeneratedWorktreeRemove: 'Generated worktree removal',
         cleanupActionStaleMarkerPrune: 'Stale marker pruning',
         cleanupActionCleanupFailedReconcile: 'Cleanup-failed reconciliation',
+        cleanupOperation: 'Cleanup operation',
+        permissionDetail: 'Permission detail',
+        adminCleanupGuidance: 'Admin cleanup guidance',
+        residualWorktreeDirectory: 'Residual worktree directory',
+        residualWorktreeDirectoryNote: 'Git no longer registers {path}, but the directory still exists.',
         lockingPath: 'Locking path',
         affectedArtifact: 'Affected artifact',
         retrySchedule: 'Retry schedule',
@@ -2008,6 +2013,11 @@
       cleanupActionGeneratedWorktreeRemove: '생성된 워크트리 제거',
       cleanupActionStaleMarkerPrune: '오래된 마커 정리',
       cleanupActionCleanupFailedReconcile: '정리 실패 조정',
+      cleanupOperation: '정리 작업',
+      permissionDetail: '권한 세부 정보',
+      adminCleanupGuidance: '관리자 정리 안내',
+      residualWorktreeDirectory: '잔존 작업트리 디렉터리',
+      residualWorktreeDirectoryNote: 'Git은 {path}를 더 이상 등록하지 않지만 디렉터리는 아직 남아 있습니다.',
       lockingPath: '잠금 경로',
       affectedArtifact: '영향 아티팩트',
       retrySchedule: '재시도 일정',
@@ -5864,7 +5874,50 @@
     const cleanupMessage = toText(item.cleanupMessage || item.cleanup_message || item.message || item.cleanup_error, '');
     const cleanupDetails = toObject(item.cleanupDetails || item.cleanup_details);
     const cleanupAttempts = toArray(item.cleanupAttempts || item.cleanup_attempts);
-    const reconciliation = toObject(item.reconciliation);
+    const reconciliation = toObject(item.reconciliation || cleanupDetails.reconciliation || cleanupDetails.cleanup_reconciliation);
+    const gitWorktreeRegistration = toObject(
+      item.gitWorktreeRegistration ||
+      item.git_worktree_registration ||
+      cleanupDetails.git_worktree_registration ||
+      reconciliation.git_worktree_registration
+    );
+    const residualDirectory = Boolean(
+      item.residualDirectory ??
+        item.residual_directory ??
+        cleanupDetails.residualDirectory ??
+        cleanupDetails.residual_directory ??
+        reconciliation.residual_directory ??
+        (gitWorktreeRegistration && gitWorktreeRegistration.registered === false)
+    );
+    const cleanupOperation = toText(
+      item.cleanupOperation ||
+        item.cleanup_operation ||
+        cleanupDetails.operation ||
+        cleanupDetails.cleanup_operation ||
+        cleanupDetails.cleanupOperation,
+      ''
+    );
+    const permissionDetail = toText(
+      item.permissionDetail ||
+        item.permission_detail ||
+        cleanupDetails.permission_detail ||
+        cleanupDetails.permissionDetail,
+      ''
+    );
+    const rebootGuidance = toText(
+      item.rebootGuidance ||
+        item.reboot_guidance ||
+        cleanupDetails.reboot_guidance ||
+        cleanupDetails.rebootGuidance,
+      ''
+    );
+    const adminGuidance = toText(
+      item.adminGuidance ||
+        item.admin_guidance ||
+        cleanupDetails.admin_guidance ||
+        cleanupDetails.adminGuidance,
+      ''
+    );
     const categories = normalizeWorktreeDiagnosticCategoriesFromItem(item, ['cleanup_failed', 'active']);
     const resolutionActions = normalizeWorktreeResolutionActions(item.resolutionActions || item.resolution_actions);
     return {
@@ -5887,6 +5940,18 @@
       cleanup_details: cleanupDetails,
       cleanupAttempts,
       cleanup_attempts: cleanupAttempts,
+      cleanupOperation,
+      cleanup_operation: cleanupOperation,
+      permissionDetail,
+      permission_detail: permissionDetail,
+      rebootGuidance,
+      reboot_guidance: rebootGuidance,
+      adminGuidance,
+      admin_guidance: adminGuidance,
+      residualDirectory,
+      residual_directory: residualDirectory,
+      gitWorktreeRegistration,
+      git_worktree_registration: gitWorktreeRegistration,
       reconciliation,
       categories,
       resolutionActions,
@@ -6095,19 +6160,33 @@
     for (const artifact of toArray(data.cleanup_failed || data.cleanupFailed)) {
       const item = normalizeWorktreeDiagnosticCleanupFailed(artifact);
       const primaryAction = item.resolutionActions[0] || null;
+      const titleLabel = item.residualDirectory
+        ? t('worktree.residualWorktreeDirectory')
+        : primaryAction
+          ? worktreeResolutionActionLabel(primaryAction.kind)
+          : worktreeDiagnosticsEntryKindLabel('cleanup_failed');
+      const summary = item.residualDirectory
+        ? t('worktree.residualWorktreeDirectoryNote', { path: item.worktreeDir || item.cleanupPath || item.path || t('common.none') })
+        : item.cleanupMessage || item.status || t('common.none');
+      const metaParts = [
+        primaryAction ? `${worktreeResolutionActionLabel(primaryAction.kind)} | ${worktreeResolutionActionStatusLabel(primaryAction.status)}` : '',
+        item.path,
+        item.runDir,
+        item.cleanupPath,
+        item.worktreeDir,
+        item.patchPath,
+        item.cleanupOperation ? `${t('worktree.cleanupOperation')}: ${item.cleanupOperation}` : '',
+        item.permissionDetail ? `${t('worktree.permissionDetail')}: ${item.permissionDetail}` : '',
+        item.rebootGuidance ? `${t('worktree.rebootGuidance')}: ${item.rebootGuidance}` : '',
+        item.adminGuidance ? `${t('worktree.adminCleanupGuidance')}: ${item.adminGuidance}` : '',
+        item.residualDirectory ? t('worktree.residualWorktreeDirectory') : '',
+      ].filter(Boolean);
       entries.push({
         kind: 'cleanup_failed',
         kindLabel: worktreeDiagnosticsEntryKindLabel('cleanup_failed'),
-        title: primaryAction ? worktreeResolutionActionLabel(primaryAction.kind) : worktreeDiagnosticsEntryKindLabel('cleanup_failed'),
-        summary: item.cleanupMessage || item.status || t('common.none'),
-        meta: [
-          primaryAction ? `${worktreeResolutionActionLabel(primaryAction.kind)} | ${worktreeResolutionActionStatusLabel(primaryAction.status)}` : '',
-          item.path,
-          item.runDir,
-          item.cleanupPath,
-          item.worktreeDir,
-          item.patchPath,
-        ].filter(Boolean).join(' | '),
+        title: titleLabel,
+        summary,
+        meta: metaParts.join(' | '),
         path: item.path || item.cleanupPath || item.worktreeDir || '',
         categories: item.categories,
         tone: item.status === 'malformed' ? 'err' : 'warn',
@@ -8941,6 +9020,9 @@
     const sourceRepo = toText(review?.sourceRepo, 'the source repository');
     const patchPath = toText(review?.patchPath || review?.patch, 'the patch');
     const cleanupPath = toText(review?.cleanupPath || review?.worktreeDir || review?.worktree, '');
+    const cleanupDetails = toObject(review?.cleanupDetails || review?.cleanup_details);
+    const residualDirectory = Boolean(review?.residualDirectory ?? review?.residual_directory ?? cleanupDetails.residualDirectory ?? cleanupDetails.residual_directory);
+    const adminGuidance = toText(cleanupDetails.adminGuidance || cleanupDetails.admin_guidance, '');
     const pendingReview = status === 'pending review' || status === 'pending';
     const cleanupFailed = cleanupState === 'failed' || status === 'applied_cleanup_failed' || status === 'discard_cleanup_failed';
 
@@ -8955,19 +9037,27 @@
     }
 
     if (cleanupFailed) {
-      const recoveryPath = cleanupPath || toText(review?.worktreeDir || review?.worktree, 'the isolated worktree');
+      const recoveryPath = toText(review?.worktreeDir || review?.worktree || cleanupPath, 'the isolated worktree');
+      const residualNote = residualDirectory ? t('worktree.residualWorktreeDirectoryNote', { path: recoveryPath }) : '';
       return {
         tone: 'warn',
-        title: status === 'applied_cleanup_failed' ? t('worktree.mergeRecordedCleanupFailed') : t('worktree.discardRecordedCleanupFailed'),
+        title: residualDirectory
+          ? t('worktree.residualWorktreeDirectory')
+          : status === 'applied_cleanup_failed'
+            ? t('worktree.mergeRecordedCleanupFailed')
+            : t('worktree.discardRecordedCleanupFailed'),
         copy:
           reviewMessage ||
           cleanupMessage ||
           summary ||
+          residualNote ||
           `${t('worktree.manualCleanupRequired')} ${recoveryPath}.`,
         actionCopy:
-          status === 'discard_cleanup_failed'
-            ? `${t('worktree.manualRecovery')}: ${t('worktree.noSourceRepoChangePending')} ${sourceRepo}.`
-            : `${t('worktree.manualRecovery')}: ${t('worktree.noCommitWillBeCreated')} ${sourceRepo}.`,
+          residualDirectory
+            ? (adminGuidance ? `${t('worktree.manualRecovery')}: ${adminGuidance}` : t('worktree.manualRecovery'))
+            : status === 'discard_cleanup_failed'
+              ? `${t('worktree.manualRecovery')}: ${t('worktree.noSourceRepoChangePending')} ${sourceRepo}.`
+              : `${t('worktree.manualRecovery')}: ${t('worktree.noCommitWillBeCreated')} ${sourceRepo}.`,
         mergeHint: t('worktree.cleanupRequired'),
       };
     }
@@ -16309,8 +16399,18 @@
       cleanupDetails.affectedArtifact || cleanupDetails.affected_artifact || cleanupDetails.worktreeDir || cleanupDetails.worktree_dir || review.worktreeDir || review.cleanupPath,
       ''
     );
+    const cleanupOperation = toText(
+      cleanupDetails.operation || cleanupDetails.cleanupOperation || cleanupDetails.cleanup_operation,
+      ''
+    );
+    const permissionDetail = toText(
+      cleanupDetails.permissionDetail || cleanupDetails.permission_detail,
+      ''
+    );
     const retrySchedule = formatWorktreeRetrySchedule(cleanupDetails.retrySchedule || cleanupDetails.retry_schedule);
     const rebootGuidance = toText(cleanupDetails.rebootGuidance || cleanupDetails.reboot_guidance, '');
+    const adminGuidance = toText(cleanupDetails.adminGuidance || cleanupDetails.admin_guidance, '');
+    const residualDirectory = Boolean(review.residualDirectory ?? review.residual_directory ?? cleanupDetails.residualDirectory ?? cleanupDetails.residual_directory);
     const cleanupFailed = cleanupState === 'failed' || status === 'applied_cleanup_failed' || status === 'discard_cleanup_failed';
     const reviewRequired = Boolean(review.reviewRequired || status === 'error' || (status && status !== 'none' && status !== 'applied' && status !== 'discarded'));
     const actionEnabled = worktreeActionEnabled(review, 'merge');
@@ -16386,11 +16486,23 @@
     if (affectedArtifact) {
       detailRows.push({ label: t('worktree.affectedArtifact'), value: affectedArtifact, meta: t('worktree.cleanupTarget') });
     }
+    if (cleanupOperation) {
+      detailRows.push({ label: t('worktree.cleanupOperation'), value: cleanupOperation, meta: t('worktree.cleanupStatusDetail') });
+    }
+    if (permissionDetail) {
+      detailRows.push({ label: t('worktree.permissionDetail'), value: permissionDetail, meta: t('worktree.cleanupStatusDetail') });
+    }
     if (retrySchedule) {
       detailRows.push({ label: t('worktree.retrySchedule'), value: retrySchedule, meta: t('worktree.cleanupRequired') });
     }
     if (rebootGuidance) {
       detailRows.push({ label: t('worktree.rebootGuidance'), value: rebootGuidance, meta: t('worktree.manualRecovery') });
+    }
+    if (adminGuidance) {
+      detailRows.push({ label: t('worktree.adminCleanupGuidance'), value: adminGuidance, meta: t('worktree.manualRecovery') });
+    }
+    if (residualDirectory) {
+      detailRows.push({ label: t('worktree.residualWorktreeDirectory'), value: t('worktree.residualWorktreeDirectoryNote', { path: review.worktreeDir || review.worktree || cleanupPath || '--' }), meta: t('worktree.manualRecovery') });
     }
     const bannerTone = reviewSummary.tone;
     const bannerTitle = reviewSummary.title;
