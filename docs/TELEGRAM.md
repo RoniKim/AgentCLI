@@ -59,7 +59,7 @@ python agent_cli.py --telegram --repo "C:/Dev/YourRepo"
     "bot_token": "",
     "allowed_chat_ids": [],
     "pairing_code": "",
-    "instance_name": "home-pc-main",
+    "instance_name": "",
     "notify_events": ["run_start", "run_stop", "task_done", "task_failed", "quota", "error", "stalled", "project_complete", "backend_failover"],
     "send_cycle_summary": true,
     "notify_poll_interval_seconds": 8,
@@ -71,6 +71,23 @@ python agent_cli.py --telegram --repo "C:/Dev/YourRepo"
 }
 ```
 
+`instance_name`이 비어 있으면 실행 시 repo name을 기본 표시명으로 사용합니다.
+
+## CLI 오버라이드
+
+| 옵션 | 설명 |
+|------|------|
+| `--telegram` | Telegram 하이브리드 모드를 활성화합니다. |
+| `--telegram-runner-mode` | Telegram Runner 실행 모드를 `thread` 또는 `subprocess`로 지정합니다. |
+| `--telegram-poll-timeout` | Long Polling timeout(초)을 지정합니다. |
+| `--telegram-allowed-chat-id` | 허용할 chat_id를 반복 추가합니다. |
+| `--telegram-bot-token` | Telegram bot token을 오버라이드합니다. |
+| `--telegram-pairing-code` | `/pair` 명령의 one-time pairing code를 지정합니다. |
+| `--telegram-instance-name` | 알림에 표시할 인스턴스 이름을 오버라이드합니다. |
+| `--telegram-notify-events` | 푸시할 이벤트 목록을 CSV로 지정합니다. |
+| `--telegram-send-cycle-summary` / `--no-telegram-send-cycle-summary` | cycle summary push를 켜거나 끕니다. |
+| `--telegram-notify-interval` | push polling interval(초)을 지정합니다. |
+| `--telegram-stalled-seconds` | stalled 감지 임계값(초)을 지정합니다. |
 
 ## 명령어
 
@@ -106,7 +123,7 @@ python agent_cli.py --telegram --repo "C:/Dev/YourRepo"
 | `quota` | 쿼타 경고/소진 | ✅ | substring "quota" |
 | `error` | 에러 발생 | ✅ | level=error / rc≠0 |
 | `stalled` | 응답 없음 (멈춤 감지) | ✅ | (metrics.jsonl mtime 기반) |
-| `project_complete` | 프로젝트 완료 (Goals P0 전체 달성) | ✅ | `project_complete` |
+| `project_complete` | 프로젝트 완료 (`goals_completion_level` 달성, unresolved failures == 0) | ✅ | `project_complete` |
 | `backend_failover` | 백엔드 전환 (failover) | ✅ | `backend_failover` |
 | `goals_refresh` | Goals 자동 갱신 성공 | ❌ | `goals_refresh_ok` |
 | `escalation` | Dev 에스컬레이션 (상위 모델 전환) | ❌ | `escalate_attempt` |

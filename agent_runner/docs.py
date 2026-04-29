@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
+
+from .cli import DEFAULTS as CLI_DEFAULTS, _build_parser
+from .gitops import WORKTREE_MERGE_PENDING, WORKTREE_MERGE_PENDING_MD
+from .runtime_contract import CODEX_MODEL_DEFAULTS
+from .utils import _KNOWN_STOP_REASONS
 
 
 def resolve_docs_dir(repo: Path, docs_dir_arg: str) -> Optional[Path]:
@@ -417,5 +423,706 @@ def validate_web_console_route_claims(text: str, route_inventory: dict[str, tupl
             errors.append(
                 f"method mismatch for {path}: claimed {method}, actual {', '.join(methods)}"
             )
+
+    return errors
+
+
+def _section_text(text: str, heading: str) -> str | None:
+    lines = text.splitlines()
+    start: int | None = None
+    heading_level: int | None = None
+    in_code_block = False
+
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        if stripped == heading:
+            start = idx + 1
+            heading_level = len(stripped) - len(stripped.lstrip("#"))
+            break
+
+    if start is None or heading_level is None:
+        return None
+
+    end = len(lines)
+    in_code_block = False
+    for idx in range(start, len(lines)):
+        stripped = lines[idx].strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        if stripped.startswith("#"):
+            current_level = len(stripped) - len(stripped.lstrip("#"))
+            if current_level <= heading_level:
+                end = idx
+                break
+
+    return "\n".join(lines[start:end]).strip()
+
+
+def _markdown_table_rows(text: str) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if not cells:
+            continue
+        if all(not cell or set(cell) <= {"-", ":", " "} for cell in cells):
+            continue
+        rows.append(cells)
+    return rows
+
+
+def _normalize_doc_scalar(value: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith("`") and text.endswith("`") and len(text) >= 2:
+        text = text[1:-1].strip()
+    if text.startswith('"') and text.endswith('"') and len(text) >= 2:
+        text = text[1:-1].strip()
+    if text.startswith("'") and text.endswith("'") and len(text) >= 2:
+        text = text[1:-1].strip()
+    return text
+
+
+def _row_code_spans(cell: str) -> list[str]:
+    return [span.strip() for span in _CODE_SPAN_RE.findall(cell or "") if span.strip()]
+
+
+def _table_value_map(text: str) -> dict[str, str]:
+    rows = _markdown_table_rows(text)
+    out: dict[str, str] = {}
+    for cells in rows:
+        if len(cells) < 2:
+            continue
+        key_spans = _row_code_spans(cells[0])
+        if not key_spans:
+            continue
+        key = _normalize_doc_scalar(key_spans[0] if key_spans else cells[0])
+        if not key:
+            continue
+        value_spans = _row_code_spans(cells[1])
+        value = _normalize_doc_scalar(value_spans[0] if value_spans else cells[1])
+        out[key] = value
+    return out
+
+
+def _table_first_cell_values(text: str) -> dict[str, list[str]]:
+    rows = _markdown_table_rows(text)
+    out: dict[str, list[str]] = {}
+    for cells in rows:
+        if not cells:
+            continue
+        key_spans = _row_code_spans(cells[0])
+        if key_spans:
+            out[key_spans[0]] = key_spans
+    return out
+
+
+def _extract_json_block(text: str) -> str:
+    match = re.search(r"```json\s*\n(.*?)\n```", text, flags=re.DOTALL | re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def collect_runner_cli_flags() -> set[str]:
+    parser = _build_parser()
+    return {
+        option
+        for action in parser._actions
+        for option in getattr(action, "option_strings", []) or []
+        if option.startswith("--")
+    }
+
+
+def collect_web_cli_flags() -> set[str]:
+    source_path = Path(__file__).resolve().with_name("web.py")
+    if not source_path.exists() or not source_path.is_file():
+        return set()
+    text = source_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        tree = ast.parse(text, filename=source_path.as_posix())
+    except Exception:
+        return set()
+    flags: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr != "add_argument":
+            continue
+        for arg in node.args:
+            value = _literal_string(arg)
+            if value and value.startswith("--"):
+                flags.add(value)
+    return flags
+
+
+def collect_telegram_notify_events() -> set[str]:
+    from .remote.telegram_service import _NOTIFY_EVENT_ALLOWED
+
+    return set(_NOTIFY_EVENT_ALLOWED)
+
+
+def collect_stop_reason_values() -> set[str]:
+    return set(_KNOWN_STOP_REASONS)
+
+
+def _validate_required_sections(text: str, doc_label: str, headings: Sequence[str]) -> list[str]:
+    errors: list[str] = []
+    for heading in headings:
+        if _section_text(text, heading) is None:
+            errors.append(f"{doc_label}: missing required section: {heading}")
+    return errors
+
+
+def _validate_exact_table_map(
+    section_text: str,
+    expected: dict[str, str],
+    *,
+    doc_label: str,
+    section_label: str,
+) -> list[str]:
+    errors: list[str] = []
+    actual = _table_value_map(section_text)
+    for key, expected_value in expected.items():
+        if key not in actual:
+            errors.append(f"{doc_label}: missing {section_label} row: {key}")
+            continue
+        if actual[key] != expected_value:
+            errors.append(
+                f"{doc_label}: stale {section_label} value for {key}: expected {expected_value!r}, found {actual[key]!r}"
+            )
+    for key in sorted(set(actual) - set(expected)):
+        errors.append(f"{doc_label}: stale {section_label} row name: {key}")
+    return errors
+
+
+def _validate_flag_table(
+    section_text: str,
+    allowed_flags: set[str],
+    *,
+    doc_label: str,
+    section_label: str,
+    required_flags: set[str] | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    actual_flags: set[str] = set()
+    for cells in _markdown_table_rows(section_text):
+        if not cells:
+            continue
+        for flag in _row_code_spans(cells[0]):
+            if flag.startswith("--"):
+                actual_flags.add(flag)
+                if flag not in allowed_flags:
+                    errors.append(f"{doc_label}: stale {section_label} flag: {flag}")
+    if required_flags is not None:
+        missing = required_flags - actual_flags
+        for flag in sorted(missing):
+            errors.append(f"{doc_label}: missing {section_label} flag: {flag}")
+    return errors
+
+
+def _validate_exact_first_cell_set(
+    section_text: str,
+    expected_values: set[str],
+    *,
+    doc_label: str,
+    section_label: str,
+) -> list[str]:
+    errors: list[str] = []
+    actual_values = set(_table_first_cell_values(section_text))
+    for value in sorted(actual_values - expected_values):
+        errors.append(f"{doc_label}: stale {section_label} value: {value}")
+    for value in sorted(expected_values - actual_values):
+        errors.append(f"{doc_label}: missing {section_label} value: {value}")
+    return errors
+
+
+def validate_configuration_doc(text: str) -> list[str]:
+    doc_label = "docs/CONFIGURATION.md"
+    errors = _validate_required_sections(
+        text,
+        doc_label,
+        [
+            "# 설정(Config) 관리",
+            "# 실행 엔진(Backend) 선택",
+            "# 역할별 모델 설정",
+            "# Claude 백엔드 고급 설정",
+        ],
+    )
+
+    codex_section = _section_text(text, "## Codex 백엔드 (GPT 모델 — Codex 크레딧으로 실행)")
+    if codex_section is None:
+        errors.append(f"{doc_label}: missing required section: ## Codex 백엔드 (GPT 모델 — Codex 크레딧으로 실행)")
+    else:
+        errors.extend(
+            _validate_exact_table_map(
+                codex_section,
+                CODEX_MODEL_DEFAULTS,
+                doc_label=doc_label,
+                section_label="Codex model defaults",
+            )
+        )
+
+    claude_section = _section_text(text, "## Claude 백엔드 (Claude 모델)")
+    if claude_section is None:
+        errors.append(f"{doc_label}: missing required section: ## Claude 백엔드 (Claude 모델)")
+    else:
+        expected = {
+            "claudecode_model": _normalize_doc_scalar(str(CLI_DEFAULTS["claudecode_model"])),
+            "claudecode_pm_model": _normalize_doc_scalar(str(CLI_DEFAULTS["claudecode_pm_model"])),
+            "claudecode_dev_model": _normalize_doc_scalar(str(CLI_DEFAULTS["claudecode_dev_model"])),
+            "claudecode_dev_model_tier1": _normalize_doc_scalar(str(CLI_DEFAULTS["claudecode_dev_model_tier1"])),
+            "claudecode_dev_model_tier2": _normalize_doc_scalar(str(CLI_DEFAULTS["claudecode_dev_model_tier2"])),
+            "claudecode_qa_model": _normalize_doc_scalar(str(CLI_DEFAULTS["claudecode_qa_model"])),
+            "claudecode_reporter_model": _normalize_doc_scalar(str(CLI_DEFAULTS["claudecode_reporter_model"])),
+        }
+        errors.extend(
+            _validate_exact_table_map(
+                claude_section,
+                expected,
+                doc_label=doc_label,
+                section_label="Claude model defaults",
+            )
+        )
+
+    thinking_section = _section_text(text, "## Extended Thinking (확장 사고)")
+    if thinking_section is None:
+        errors.append(f"{doc_label}: missing required section: ## Extended Thinking (확장 사고)")
+    else:
+        payload = _extract_json_block(thinking_section)
+        if not payload:
+            errors.append(f"{doc_label}: missing JSON block for extended thinking defaults")
+        else:
+            try:
+                data = json.loads(payload)
+            except Exception as ex:
+                errors.append(f"{doc_label}: invalid JSON in extended thinking defaults: {ex}")
+            else:
+                expected = {"claudecode_max_thinking_tokens": CLI_DEFAULTS["claudecode_max_thinking_tokens"]}
+                for key, expected_value in expected.items():
+                    actual_value = data.get(key)
+                    if actual_value != expected_value:
+                        errors.append(
+                            f"{doc_label}: stale extended thinking default for {key}: expected {expected_value!r}, found {actual_value!r}"
+                        )
+                extra_keys = set(data) - set(expected)
+                for key in sorted(extra_keys):
+                    errors.append(f"{doc_label}: stale extended thinking key: {key}")
+
+    session_section = _section_text(text, "## 세션 관리")
+    if session_section is None:
+        errors.append(f"{doc_label}: missing required section: ## 세션 관리")
+    else:
+        payload = _extract_json_block(session_section)
+        if not payload:
+            errors.append(f"{doc_label}: missing JSON block for session defaults")
+        else:
+            try:
+                data = json.loads(payload)
+            except Exception as ex:
+                errors.append(f"{doc_label}: invalid JSON in session defaults: {ex}")
+            else:
+                expected = {
+                    "claudecode_user": CLI_DEFAULTS["claudecode_user"],
+                    "claudecode_fork_session": CLI_DEFAULTS["claudecode_fork_session"],
+                    "claudecode_include_partial_messages": CLI_DEFAULTS["claudecode_include_partial_messages"],
+                    "claudecode_setting_sources": CLI_DEFAULTS["claudecode_setting_sources"],
+                }
+                for key, expected_value in expected.items():
+                    actual_value = data.get(key)
+                    if actual_value != expected_value:
+                        errors.append(
+                            f"{doc_label}: stale session default for {key}: expected {expected_value!r}, found {actual_value!r}"
+                        )
+                extra_keys = set(data) - set(expected)
+                for key in sorted(extra_keys):
+                    errors.append(f"{doc_label}: stale session key: {key}")
+
+    checkpoint_section = _section_text(text, "## 파일 체크포인팅 (Beta)")
+    if checkpoint_section is None:
+        errors.append(f"{doc_label}: missing required section: ## 파일 체크포인팅 (Beta)")
+    else:
+        payload = _extract_json_block(checkpoint_section)
+        if not payload:
+            errors.append(f"{doc_label}: missing JSON block for file checkpointing defaults")
+        else:
+            try:
+                data = json.loads(payload)
+            except Exception as ex:
+                errors.append(f"{doc_label}: invalid JSON in file checkpointing defaults: {ex}")
+            else:
+                expected = {"claudecode_enable_file_checkpointing": CLI_DEFAULTS["claudecode_enable_file_checkpointing"]}
+                for key, expected_value in expected.items():
+                    actual_value = data.get(key)
+                    if actual_value != expected_value:
+                        errors.append(
+                            f"{doc_label}: stale file checkpointing default for {key}: expected {expected_value!r}, found {actual_value!r}"
+                        )
+                extra_keys = set(data) - set(expected)
+                for key in sorted(extra_keys):
+                    errors.append(f"{doc_label}: stale file checkpointing key: {key}")
+
+    return errors
+
+
+def validate_operations_doc(text: str) -> list[str]:
+    doc_label = "docs/OPERATIONS.md"
+    errors = _validate_required_sections(
+        text,
+        doc_label,
+        [
+            "# 안전/운영 옵션 (Git, Stop, No-diff)",
+            "## Stop file로 안전 종료",
+            "## CLI flags",
+            "## Stop reason reference",
+            "## Worktree 격리 모드 (권장: 안전하게 오래 돌릴 때)",
+            "# 예산 가드레일 (Budget Guardrails)",
+            "# 빌드/테스트 게이트",
+            "# 정책/시크릿 스캔(옵션)",
+        ],
+    )
+
+    stop_section = _section_text(text, "## Stop file로 안전 종료")
+    if stop_section is not None:
+        timeout_rows = _markdown_table_rows(stop_section)
+        timeout_row = next((cells for cells in timeout_rows if cells and _normalize_doc_scalar(cells[0]) == "stop_wait_timeout_seconds"), None)
+        if timeout_row is None:
+            errors.append(f"{doc_label}: missing stop_wait_timeout_seconds row")
+        else:
+            value_cell = timeout_row[1] if len(timeout_row) > 1 else ""
+            value = _row_code_spans(value_cell)[0] if _row_code_spans(value_cell) else _normalize_doc_scalar(value_cell)
+            expected = str(CLI_DEFAULTS["stop_wait_timeout_seconds"])
+            if value != expected:
+                errors.append(
+                    f"{doc_label}: stale stop_wait_timeout_seconds value: expected {expected!r}, found {value!r}"
+                )
+
+    cli_section = _section_text(text, "## CLI flags")
+    if cli_section is not None:
+        required_flags = {
+            "--repo",
+            "--config",
+            "--run-now",
+            "--non-interactive",
+            "--autopilot",
+            "--no-autopilot",
+            "--continuous",
+            "--no-continuous",
+            "--loop",
+            "--no-loop",
+            "--loop-sleep-seconds",
+            "--loop-max-cycles",
+            "--loop-idle-exit-after",
+            "--iterations",
+            "--max-turns-per-task",
+            "--stop-file",
+            "--stop-wait-timeout-seconds",
+            "--allow-no-diff",
+            "--no-allow-no-diff",
+            "--no-build",
+            "--build",
+            "--run-tests",
+            "--no-run-tests",
+            "--worktree-isolation",
+            "--no-worktree-isolation",
+            "--dangerous-git-rollback",
+            "--no-dangerous-git-rollback",
+            "--dotnet-build-target",
+            "--dotnet-test-target",
+            "--dotnet-test-filter",
+        }
+        errors.extend(
+            _validate_flag_table(
+                cli_section,
+                collect_runner_cli_flags(),
+                doc_label=doc_label,
+                section_label="CLI",
+                required_flags=required_flags,
+            )
+        )
+
+    budget_section = _section_text(text, "# 예산 가드레일 (Budget Guardrails)")
+    if budget_section is not None:
+        table = _table_value_map(budget_section)
+        expected = {
+            key: str(value)
+            for key, value in CLI_DEFAULTS["budgets"].items()
+        }
+        for key, expected_value in expected.items():
+            actual_value = table.get(key)
+            if actual_value is None:
+                errors.append(f"{doc_label}: missing budget default row: {key}")
+            elif actual_value != expected_value:
+                errors.append(
+                    f"{doc_label}: stale budget default for {key}: expected {expected_value!r}, found {actual_value!r}"
+                )
+        for key in sorted(set(table) - set(expected)):
+            errors.append(f"{doc_label}: stale budget row name: {key}")
+
+    reason_section = _section_text(text, "## Stop reason reference")
+    if reason_section is not None:
+        expected_reasons = collect_stop_reason_values()
+        actual_reasons: set[str] = set()
+        for cells in _markdown_table_rows(reason_section):
+            if not cells:
+                continue
+            reason_spans = _row_code_spans(cells[0])
+            if not reason_spans:
+                continue
+            reason = reason_spans[0]
+            actual_reasons.add(reason)
+            if reason not in expected_reasons:
+                errors.append(f"{doc_label}: stale stop reason: {reason}")
+            if reason == "project_complete":
+                description = " ".join(cells[1:]).lower()
+                if "goals_completion_level" not in description and "completion level" not in description:
+                    errors.append(
+                        f"{doc_label}: project_complete description must mention goals_completion_level or completion level"
+                    )
+        missing_reasons = expected_reasons - actual_reasons
+        for reason in sorted(missing_reasons):
+            errors.append(f"{doc_label}: missing stop reason row: {reason}")
+
+    worktree_section = _section_text(text, "## Worktree 격리 모드 (권장: 안전하게 오래 돌릴 때)")
+    if worktree_section is not None:
+        expected_modes = {"manual", "auto"}
+        actual_modes: set[str] = set()
+        for cells in _markdown_table_rows(worktree_section):
+            if not cells:
+                continue
+            mode_spans = _row_code_spans(cells[0])
+            if not mode_spans:
+                continue
+            mode = mode_spans[0]
+            actual_modes.add(mode)
+            if mode not in expected_modes:
+                errors.append(f"{doc_label}: stale worktree merge mode: {mode}")
+        for mode in sorted(expected_modes - actual_modes):
+            errors.append(f"{doc_label}: missing worktree merge mode row: {mode}")
+        if WORKTREE_MERGE_PENDING not in worktree_section:
+            errors.append(f"{doc_label}: worktree merge section must mention {WORKTREE_MERGE_PENDING}")
+        if WORKTREE_MERGE_PENDING_MD not in worktree_section:
+            errors.append(f"{doc_label}: worktree merge section must mention {WORKTREE_MERGE_PENDING_MD}")
+        if "WORKTREE_APPLY_FAILURE.md" not in worktree_section:
+            errors.append(f"{doc_label}: worktree merge section must mention WORKTREE_APPLY_FAILURE.md")
+        if "/merge-worktree" not in worktree_section or "/discard-worktree" not in worktree_section:
+            errors.append(f"{doc_label}: worktree merge section must mention /merge-worktree and /discard-worktree")
+        if "clean" not in worktree_section.lower() or "hash" not in worktree_section.lower():
+            errors.append(f"{doc_label}: worktree merge section must mention clean source repo and patch hash checks")
+
+    return errors
+
+
+def validate_telegram_doc(text: str) -> list[str]:
+    doc_label = "docs/TELEGRAM.md"
+    errors = _validate_required_sections(
+        text,
+        doc_label,
+        [
+            "# Telegram 하이브리드 모드",
+            "## 설정 키",
+            "## CLI 오버라이드",
+            "## 명령어",
+            "## 푸시 알림",
+            "### 이벤트 유형 레퍼런스",
+            "## 여러 인스턴스",
+        ],
+    )
+
+    settings_section = _section_text(text, "## 설정 키")
+    if settings_section is not None:
+        payload = _extract_json_block(settings_section)
+        if not payload:
+            errors.append(f"{doc_label}: missing Telegram config JSON block")
+        else:
+            try:
+                data = json.loads(payload)
+            except Exception as ex:
+                errors.append(f"{doc_label}: invalid Telegram config JSON: {ex}")
+            else:
+                telegram = data.get("telegram")
+                if not isinstance(telegram, dict):
+                    errors.append(f"{doc_label}: Telegram config JSON must include a telegram object")
+                else:
+                    expected = dict(CLI_DEFAULTS["telegram"])
+                    for key, expected_value in expected.items():
+                        actual_value = telegram.get(key)
+                        if actual_value != expected_value:
+                            errors.append(
+                                f"{doc_label}: stale Telegram default for {key}: expected {expected_value!r}, found {actual_value!r}"
+                            )
+                    extra_keys = set(telegram) - set(expected)
+                    for key in sorted(extra_keys):
+                        errors.append(f"{doc_label}: stale Telegram option key: {key}")
+                    if telegram.get("instance_name") == "":
+                        if "repo name" not in settings_section.lower() and "레포 이름" not in settings_section:
+                            errors.append(
+                                f"{doc_label}: Telegram settings section must note that blank instance_name falls back to the repo name"
+                            )
+
+    cli_section = _section_text(text, "## CLI 오버라이드")
+    if cli_section is not None:
+        required_flags = {
+            "--telegram",
+            "--telegram-runner-mode",
+            "--telegram-poll-timeout",
+            "--telegram-allowed-chat-id",
+            "--telegram-bot-token",
+            "--telegram-pairing-code",
+            "--telegram-instance-name",
+            "--telegram-notify-events",
+            "--telegram-send-cycle-summary",
+            "--no-telegram-send-cycle-summary",
+            "--telegram-notify-interval",
+            "--telegram-stalled-seconds",
+        }
+        errors.extend(
+            _validate_flag_table(
+                cli_section,
+                collect_runner_cli_flags(),
+                doc_label=doc_label,
+                section_label="Telegram CLI",
+                required_flags=required_flags,
+            )
+        )
+
+    event_section = _section_text(text, "### 이벤트 유형 레퍼런스")
+    if event_section is not None:
+        actual_events: set[str] = set()
+        default_events = set(CLI_DEFAULTS["telegram"]["notify_events"])
+        allowed_events = collect_telegram_notify_events()
+        for cells in _markdown_table_rows(event_section):
+            if len(cells) < 4:
+                continue
+            event_spans = _row_code_spans(cells[0])
+            if not event_spans:
+                continue
+            event = event_spans[0]
+            actual_events.add(event)
+            if event not in allowed_events:
+                errors.append(f"{doc_label}: stale Telegram event name: {event}")
+            active = _normalize_doc_scalar(cells[2])
+            if event in default_events and active != "✅":
+                errors.append(f"{doc_label}: default Telegram event must be marked active: {event}")
+            if event not in default_events and active != "❌":
+                errors.append(f"{doc_label}: optional Telegram event must be marked inactive: {event}")
+            if event == "project_complete":
+                description = _normalize_doc_scalar(cells[1]).lower()
+                if "goals_completion_level" not in description and "completion level" not in description:
+                    errors.append(
+                        f"{doc_label}: project_complete description must mention goals_completion_level or completion level"
+                    )
+        missing_events = allowed_events - actual_events
+        for event in sorted(missing_events):
+            errors.append(f"{doc_label}: missing Telegram event row: {event}")
+
+    return errors
+
+
+def validate_web_console_doc(repo: Path, text: str) -> list[str]:
+    doc_label = "docs/WEB_CONSOLE.md"
+    errors = _validate_required_sections(
+        text,
+        doc_label,
+        [
+            "# AgentCLI Web Console",
+            "## Current Status",
+            "## Web Server Flags",
+            "## Runner Controls",
+            "## Validation",
+            "## Worktree Diagnostics",
+        ],
+    )
+
+    route_inventory = collect_fastapi_route_inventory(repo)
+    errors.extend(validate_web_console_route_claims(text, route_inventory))
+
+    flags_section = _section_text(text, "## Web Server Flags")
+    if flags_section is not None:
+        required_flags = {
+            "--repo",
+            "--host",
+            "--port",
+            "--web-dir",
+            "--config-path",
+            "--enable-runner-controls",
+            "--trusted-network",
+        }
+        errors.extend(
+            _validate_flag_table(
+                flags_section,
+                collect_web_cli_flags(),
+                doc_label=doc_label,
+                section_label="web server",
+                required_flags=required_flags,
+            )
+        )
+
+    runner_controls_section = _section_text(text, "## Runner Controls")
+    if runner_controls_section is not None:
+        lowered = runner_controls_section.lower()
+        if "agentcli_web_runner_controls" not in lowered:
+            errors.append(
+                f"{doc_label}: Runner Controls section must mention AGENTCLI_WEB_RUNNER_CONTROLS"
+            )
+        if "agentcli_web_trusted_network" not in lowered:
+            errors.append(
+                f"{doc_label}: Runner Controls section must mention AGENTCLI_WEB_TRUSTED_NETWORK"
+            )
+
+    status_section = _section_text(text, "## Current Status")
+    if status_section is not None:
+        summary_lines = [
+            line
+            for line in status_section.splitlines()
+            if "no longer displayed as still running" in line.lower()
+        ]
+        if summary_lines:
+            for line in summary_lines:
+                code_values = _row_code_spans(line)
+                invalid = sorted(value for value in code_values if value not in _KNOWN_STOP_REASONS)
+                if invalid:
+                    errors.append(
+                        f"{doc_label}: stale final-reason claim in Current Status: {', '.join(invalid)}"
+                    )
+
+    return errors
+
+
+def validate_user_facing_docs(repo: Path) -> list[str]:
+    docs_root = repo / "docs"
+    errors: list[str] = []
+
+    configuration_path = docs_root / "CONFIGURATION.md"
+    if configuration_path.exists():
+        errors.extend(validate_configuration_doc(configuration_path.read_text(encoding="utf-8")))
+    else:
+        errors.append(f"missing docs file: {configuration_path.as_posix()}")
+
+    operations_path = docs_root / "OPERATIONS.md"
+    if operations_path.exists():
+        errors.extend(validate_operations_doc(operations_path.read_text(encoding="utf-8")))
+    else:
+        errors.append(f"missing docs file: {operations_path.as_posix()}")
+
+    telegram_path = docs_root / "TELEGRAM.md"
+    if telegram_path.exists():
+        errors.extend(validate_telegram_doc(telegram_path.read_text(encoding="utf-8")))
+    else:
+        errors.append(f"missing docs file: {telegram_path.as_posix()}")
+
+    web_console_path = docs_root / "WEB_CONSOLE.md"
+    if web_console_path.exists():
+        errors.extend(validate_web_console_doc(repo, web_console_path.read_text(encoding="utf-8")))
+    else:
+        errors.append(f"missing docs file: {web_console_path.as_posix()}")
 
     return errors

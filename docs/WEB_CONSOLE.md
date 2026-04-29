@@ -34,6 +34,18 @@ Known blockers:
 - The UI still needs broader Playwright coverage beyond the checked-in smoke path.
 - There is no authentication layer. Treat LAN binds as trusted-network-only until authentication exists.
 
+## Web Server Flags
+
+| 옵션 | 설명 |
+|------|------|
+| `--repo` | repo root path |
+| `--host` | bind host |
+| `--port` | listen port |
+| `--web-dir` | static web console directory |
+| `--config-path` | config file path |
+| `--enable-runner-controls` | runner control actions를 켭니다 |
+| `--trusted-network` | LAN bind를 trusted-network bind로 표시합니다 |
+
 ## Install Dependencies
 
 Use the project virtual environment:
@@ -108,6 +120,9 @@ python -m agent_runner.web `
   --port 8000 `
   --enable-runner-controls
 ```
+
+`AGENTCLI_WEB_RUNNER_CONTROLS=1`은 `--enable-runner-controls`와 같은 opt-in입니다.
+`AGENTCLI_WEB_TRUSTED_NETWORK=1`은 trusted-network bind 경로를 명시할 때 사용합니다.
 
 Mutating actions require confirmation phrases. Use localhost first before enabling controls on a LAN bind.
 The guarded config save endpoint uses the same opt-in, rejects unsafe or redacted placeholder writes, and writes a timestamped backup before replacing the config atomically.

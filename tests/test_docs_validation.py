@@ -8,7 +8,12 @@ from agent_runner.docs import (
     build_docs_digest_text,
     collect_fastapi_route_inventory,
     validate_docs_digest,
+    validate_configuration_doc,
     validate_master_index,
+    validate_operations_doc,
+    validate_telegram_doc,
+    validate_user_facing_docs,
+    validate_web_console_doc,
     validate_web_console_route_claims,
 )
 
@@ -33,7 +38,64 @@ class DocsValidationTests(unittest.TestCase):
         web_doc = ROOT / "docs" / "WEB_CONSOLE.md"
         route_inventory = collect_fastapi_route_inventory(ROOT)
 
+        self.assertEqual(validate_web_console_doc(ROOT, web_doc.read_text(encoding="utf-8")), [])
         self.assertEqual(validate_web_console_route_claims(web_doc.read_text(encoding="utf-8"), route_inventory), [])
+
+    def test_user_facing_docs_match_live_contracts(self) -> None:
+        self.assertEqual(validate_user_facing_docs(ROOT), [])
+
+    def test_configuration_doc_rejects_stale_model_defaults(self) -> None:
+        text = (ROOT / "docs" / "CONFIGURATION.md").read_text(encoding="utf-8")
+        stale = text.replace("| `pm_model` | `gpt-5.5` | PM model |", "| `pm_model` | `gpt-4o` | PM model |", 1)
+
+        errors = validate_configuration_doc(stale)
+
+        self.assertTrue(any("pm_model" in error for error in errors), errors)
+
+    def test_telegram_doc_rejects_stale_instance_name_and_event_description(self) -> None:
+        text = (ROOT / "docs" / "TELEGRAM.md").read_text(encoding="utf-8")
+        stale_instance = text.replace('"instance_name": ""', '"instance_name": "home-pc-main"', 1)
+        stale_event = text.replace(
+            "| `project_complete` | 프로젝트 완료 (`goals_completion_level` 달성, unresolved failures == 0) | ✅ | `project_complete` |",
+            "| `project_complete` | 프로젝트 완료 (Goals P0 전체 달성) | ✅ | `project_complete` |",
+            1,
+        )
+
+        instance_errors = validate_telegram_doc(stale_instance)
+        event_errors = validate_telegram_doc(stale_event)
+
+        self.assertTrue(any("instance_name" in error for error in instance_errors), instance_errors)
+        self.assertTrue(any("project_complete description" in error for error in event_errors), event_errors)
+
+    def test_operations_doc_rejects_stale_cli_flag_stop_reason_and_worktree_mode(self) -> None:
+        text = (ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
+        stale_flag = text.replace("`--allow-no-diff` / `--no-allow-no-diff`", "`--allow-everything`", 1)
+        stale_reason = text.replace(
+            "| `quota_exhausted` | API/quota 한도가 완전히 소진된 경우 |",
+            "| `quota_exceeded` | API/quota 한도가 완전히 소진된 경우 |",
+            1,
+        )
+        stale_worktree = text.replace("`manual`", "`merge`", 1)
+
+        flag_errors = validate_operations_doc(stale_flag)
+        reason_errors = validate_operations_doc(stale_reason)
+        worktree_errors = validate_operations_doc(stale_worktree)
+
+        self.assertTrue(any("stale CLI flag" in error for error in flag_errors), flag_errors)
+        self.assertTrue(any("stale stop reason" in error for error in reason_errors), reason_errors)
+        self.assertTrue(any("worktree merge mode" in error for error in worktree_errors), worktree_errors)
+
+    def test_web_console_doc_rejects_stale_server_flag(self) -> None:
+        text = (ROOT / "docs" / "WEB_CONSOLE.md").read_text(encoding="utf-8")
+        stale = text.replace(
+            "| `--trusted-network` | LAN bind를 trusted-network bind로 표시합니다 |",
+            "| `--trusted-lan` | LAN bind를 trusted-network bind로 표시합니다 |",
+            1,
+        )
+
+        errors = validate_web_console_doc(ROOT, stale)
+
+        self.assertTrue(any("stale web server flag" in error for error in errors), errors)
 
     def test_case_mismatched_paths_are_rejected(self) -> None:
         temp_root = ROOT / ".test-scratch" / "docs-validation-case-mismatch"

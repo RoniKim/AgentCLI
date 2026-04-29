@@ -23,6 +23,49 @@ Shell:
 
 > 러너가 Reporter/디스크 플러시 등으로 길게 마무리하는 워크플로면 적당히 늘리는 것을 권장합니다 (예: 300-600). 강제 종료가 필요하면 `process_guard`가 별도로 처리합니다.
 
+## CLI flags
+
+| 옵션 | 설명 |
+|------|------|
+| `--repo` | repo root path |
+| `--config` | AgentCLI config file path |
+| `--run-now` | shell 없이 즉시 실행합니다 |
+| `--non-interactive` | interactive prompt를 끕니다 |
+| `--autopilot` / `--no-autopilot` | autopilot mode를 켜거나 끕니다 |
+| `--continuous` / `--no-continuous` | continuous loop를 켜거나 끕니다 |
+| `--loop` / `--no-loop` | 반복 실행을 켜거나 끕니다 |
+| `--loop-sleep-seconds` | 반복 사이 대기 시간(초) |
+| `--loop-max-cycles` | 최대 cycle 수 |
+| `--loop-idle-exit-after` | idle exit threshold |
+| `--iterations` | 반복 횟수 |
+| `--max-turns-per-task` | 태스크당 최대 turns |
+| `--stop-file` | stop file path |
+| `--stop-wait-timeout-seconds` | stop wait timeout(초) |
+| `--allow-no-diff` / `--no-allow-no-diff` | no-diff 정책을 켜거나 끕니다 |
+| `--no-build` / `--build` | build gate를 끄거나 켭니다 |
+| `--run-tests` / `--no-run-tests` | test gate를 켜거나 끕니다 |
+| `--worktree-isolation` / `--no-worktree-isolation` | isolated worktree mode를 켜거나 끕니다 |
+| `--dangerous-git-rollback` / `--no-dangerous-git-rollback` | destructive rollback 허용 여부 |
+| `--dotnet-build-target` | dotnet build target |
+| `--dotnet-test-target` | dotnet test target |
+| `--dotnet-test-filter` | dotnet test filter |
+
+## Stop reason reference
+
+| 이유 | 설명 |
+|------|------|
+| `quota_exhausted` | API/quota 한도가 완전히 소진된 경우 |
+| `quota_utilization` | quota 사용량 기반 중지 조건에 도달한 경우 |
+| `stop_file` | STOP file이 감지된 경우 |
+| `all_tasks_done` | backlog의 모든 작업이 완료된 경우 |
+| `project_complete` | `goals_completion_level` 달성, unresolved failures == 0 |
+| `all_tasks_attempted` | backlog의 모든 작업을 최소 한 번 시도한 경우 |
+| `prepared_only` | 준비 단계만 완료되고 본 작업은 수행하지 않은 경우 |
+| `idle_exit` | idle loop 종료 조건에 도달한 경우 |
+| `no_tasks` | 실행할 태스크가 없는 경우 |
+| `pm_refresh_no_backlog` | PM refresh 이후에도 backlog가 없는 경우 |
+| `ok` | 정상 종료 |
+
 ## "변경 없음(no diff)" 정책
 
 기본값:
@@ -71,6 +114,17 @@ git apply --binary --whitespace=nowarn <run_dir>/worktree.patch
 # 충돌 시:
 git apply --reject --whitespace=nowarn <run_dir>/worktree.patch
 ```
+
+### Worktree merge contract
+
+| 모드 | 동작 |
+|------|------|
+| `manual` | 기본값. 성공 후 `WORKTREE_MERGE_PENDING.json`과 `WORKTREE_MERGE_PENDING.md`를 남기고 `/merge-worktree` 또는 `/discard-worktree` 확인을 기다립니다. |
+| `auto` | clean export가 가능할 때 바로 적용합니다. 현재 contract에서는 `auto`, `apply`, `true`, `yes`, `y` 값을 auto-apply alias로 취급합니다. |
+
+- pending merge 적용에는 clean source repo, 일치하는 run metadata, 일치하는 patch hash가 필요합니다.
+- pending merge 적용 과정은 필요하면 committed history를 fast-forward한 뒤 dirty worktree patch를 replay합니다.
+- 자동 적용 실패 시 `WORKTREE_APPLY_FAILURE.md`와 recovery artifact가 남아 수동 복구를 돕습니다.
 
 ## 파괴적 롤백(비권장, 명시적으로만)
 
