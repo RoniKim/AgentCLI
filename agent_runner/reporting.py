@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from .docs import read_text_robust
-from .gates import FAST_WEB_WORKTREE_REGRESSION_TEST_FILES, find_build_cmd, find_test_cmd
+from .gates import FAST_WEB_WORKTREE_REGRESSION_TEST_FILES, find_build_cmd, find_test_cmd, looks_like_no_tests_found
 from .goals import parse_goals_completion, read_goals
 from .gitops import find_pending_worktree_merge, git_head, git_porcelain, list_untracked, read_pending_worktree_merge
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, parse_backlog_md, load_state
@@ -535,9 +535,10 @@ def build_cycle_change_summary(
     if state_failed_items:
         task_failed = max(task_failed, len(state_failed_items))
     task_skipped = len([item for item in task_results_list if _text(item.get("status")) == "skipped"])
-    validation_passed = len([item for item in validation_results if _text(item.get("status")).lower() in {"passed", "pass", "success", "completed", "ok"}])
-    validation_failed = len([item for item in validation_results if _text(item.get("status")).lower() in {"failed", "fail", "error"}])
-    validation_skipped = len([item for item in validation_results if _text(item.get("status")).lower() == "skipped"])
+    validation_statuses = [_normalize_validation_status(item.get("status")) for item in validation_results]
+    validation_passed = len([status for status in validation_statuses if status == "passed"])
+    validation_failed = len([status for status in validation_statuses if status == "failed"])
+    validation_skipped = len([status for status in validation_statuses if status in {"tests_skipped", "validation_pending", "no_tests_found"}])
 
     summary_bits = [
         f"{len(commits)} commit(s)",
@@ -872,6 +873,85 @@ def _skipped_command_record(
     }
 
 
+_VALIDATION_STATUS_ORDER = {
+    "no_tests_found": 0,
+    "tests_skipped": 1,
+    "validation_pending": 2,
+    "stopped": 3,
+    "failed": 4,
+    "passed": 10,
+    "missing": 99,
+}
+
+
+def _normalize_validation_status(value: Any) -> str:
+    status = _text(value, "").lower()
+    if not status:
+        return ""
+    aliases = {
+        "passed": "passed",
+        "pass": "passed",
+        "success": "passed",
+        "completed": "passed",
+        "ok": "passed",
+        "validation_passed": "passed",
+        "failed": "failed",
+        "fail": "failed",
+        "error": "failed",
+        "validation_failed": "failed",
+        "stopped": "stopped",
+        "skipped": "tests_skipped",
+        "tests_skipped": "tests_skipped",
+        "validation_pending": "validation_pending",
+        "no_tests_found": "no_tests_found",
+    }
+    return aliases.get(status, status)
+
+
+def _choose_validation_status(*statuses: Any) -> str:
+    chosen = ""
+    chosen_rank = 100
+    for raw_status in statuses:
+        status = _normalize_validation_status(raw_status)
+        if not status:
+            continue
+        rank = _VALIDATION_STATUS_ORDER.get(status, 50)
+        if rank < chosen_rank:
+            chosen = status
+            chosen_rank = rank
+    return chosen
+
+
+def _infer_skip_validation_status(
+    *,
+    repo: Path,
+    attempt_raw: dict[str, Any],
+    config: dict[str, Any],
+    skip_records: list[dict[str, Any]],
+) -> str:
+    overall_status = _text(attempt_raw.get("status") or attempt_raw.get("validation_status") or attempt_raw.get("validationStatus"), "")
+    overall_reason = _text(attempt_raw.get("reason") or attempt_raw.get("validation_reason") or attempt_raw.get("validationReason"), "")
+    if overall_status == "stopped" or overall_reason == "stop_file":
+        return "validation_pending"
+    if not skip_records:
+        return ""
+    rationale_text = " ".join(
+        _text(record.get("skipped_rationale") or record.get("skippedRationale") or record.get("summary") or "")
+        for record in skip_records
+    ).lower()
+    if "not triggered by the task file scope" in rationale_text:
+        return "tests_skipped"
+    if "disabled for this run" in rationale_text:
+        return "validation_pending" if not config["run_tests"] else "tests_skipped"
+    if "not reached" in rationale_text or "before" in rationale_text:
+        return "validation_pending"
+    if "skipped because build validation failed" in rationale_text or "skipped because test validation failed" in rationale_text:
+        return "validation_pending"
+    if "stopped" in rationale_text:
+        return "validation_pending"
+    return "tests_skipped"
+
+
 def _validation_attempt_sort_key(path: Path, raw: dict[str, Any]) -> tuple[int, int, str, int, str]:
     return (
         _int(raw.get("cycle"), 0),
@@ -1046,14 +1126,38 @@ def _build_qa_attempt_report(repo: Path, attempt_path: Path, attempt_raw: dict[s
         "stopped": len([item for item in commands if item["status"] == "stopped"]),
         "skipped": len(skip_records),
     }
-    if command_counts["failed"] > 0:
+    raw_status = _normalize_validation_status(
+        attempt_raw.get("status") or attempt_raw.get("validation_status") or attempt_raw.get("validationStatus")
+    )
+    command_statuses = [_normalize_validation_status(item.get("status") or item.get("validation_status") or item.get("validationStatus")) for item in commands]
+    command_summaries = [
+        _text(item.get("summary") or item.get("failure_summary") or item.get("failureSummary") or "")
+        for item in commands
+    ]
+    if command_counts["failed"] > 0 or raw_status == "failed":
         attempt_status = "failed"
-    elif command_counts["stopped"] > 0:
+    elif command_counts["stopped"] > 0 or raw_status == "stopped":
         attempt_status = "stopped"
-    elif command_counts["executed"] == 0 and command_counts["skipped"] > 0:
-        attempt_status = "skipped"
+    elif "no_tests_found" in command_statuses or raw_status == "no_tests_found" or any(
+        looks_like_no_tests_found(text) for text in command_summaries
+    ):
+        attempt_status = "no_tests_found"
+    elif raw_status in {"validation_pending", "tests_skipped"}:
+        attempt_status = raw_status
     else:
-        attempt_status = "passed"
+        inferred_skip = ""
+        if command_counts["executed"] == 0:
+            inferred_skip = _infer_skip_validation_status(repo=repo, attempt_raw=attempt_raw, config=config, skip_records=skip_records)
+        if inferred_skip:
+            attempt_status = inferred_skip
+        elif command_counts["executed"] > 0:
+            attempt_status = "passed"
+        elif command_counts["skipped"] > 0:
+            attempt_status = "validation_pending" if not config["run_tests"] else "tests_skipped"
+        elif raw_status:
+            attempt_status = raw_status
+        else:
+            attempt_status = "skipped"
 
     attempt_summary = _text(
         attempt_raw.get("detail")
@@ -1122,10 +1226,17 @@ def build_qa_validation_report(repo: Path, run_dir: Path) -> dict[str, Any]:
     command_skipped = sum(int(item["command_counts"]["skipped"]) for item in attempts) if attempts else 0
     report_status = "missing"
     if attempts:
-        if command_failed > 0 or failed > 0:
+        attempt_statuses = [_normalize_validation_status(item.get("status")) for item in attempts]
+        if "failed" in attempt_statuses or command_failed > 0 or failed > 0:
             report_status = "failed"
-        elif command_stopped > 0 or stopped > 0:
+        elif "stopped" in attempt_statuses or command_stopped > 0 or stopped > 0:
             report_status = "stopped"
+        elif "no_tests_found" in attempt_statuses:
+            report_status = "no_tests_found"
+        elif "tests_skipped" in attempt_statuses:
+            report_status = "tests_skipped"
+        elif "validation_pending" in attempt_statuses:
+            report_status = "validation_pending"
         elif command_executed > 0:
             report_status = "passed"
         else:

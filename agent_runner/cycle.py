@@ -14,6 +14,7 @@ from .analysis_cache import merge_dev_hints_to_global_changelog
 from .docs import resolve_docs_dir, generate_docs_digest
 from .gates import (
     extract_build_warnings,
+    classify_task_validation_status,
     run_build_validation_async,
     run_build_gate_async,
     run_fast_web_worktree_regression_async,
@@ -1913,6 +1914,8 @@ async def main_async(args: argparse.Namespace) -> int:
                 _prev_gate_error: str = ""  # Carried across attempts for gate-aware retry
                 _prev_gate_error_label: str = ""
                 _blocked_env_guides_written: set[tuple[str, str, int]] = set()
+                test_validation_result: dict[str, Any] | None = None
+                fast_regression_triggered = False
 
                 def _task_failure_status(
                     reason: str,
@@ -2745,6 +2748,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 "attempt": attempt,
                             }
                         )
+                        test_validation_result = test_validation
                         validation_records.append(test_validation)
                         ok = bool(test_validation.get("ok", False))
                         metrics.event("test_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
@@ -2909,7 +2913,8 @@ async def main_async(args: argparse.Namespace) -> int:
                         fast_regression_files.extend(git_worktree_changed_files(repo))
                     except Exception:
                         pass
-                    if should_run_fast_web_worktree_regression(repo, fast_regression_files):
+                    fast_regression_triggered = should_run_fast_web_worktree_regression(repo, fast_regression_files)
+                    if fast_regression_triggered:
                         fast_regression_log = attempt_dir / "fast_web_worktree_regression.json"
                         metrics.event(
                             "fast_regression_start",
@@ -3126,12 +3131,19 @@ async def main_async(args: argparse.Namespace) -> int:
                 if task_failure_reason:
                     continue
 
+                task_validation_status = classify_task_validation_status(
+                    run_tests=run_tests,
+                    fast_regression_triggered=fast_regression_triggered,
+                    test_validation=test_validation_result,
+                    validation_records=validation_records,
+                )
+
                 if task_completed:
                     _write_task_validation_artifact(
                         task=next_task,
                         attempt_dir=attempt_dir,
                         validations=validation_records,
-                        status="passed",
+                        status=task_validation_status,
                         reason="completed",
                         task_status=TASK_STATUS_COMPLETED,
                     )
@@ -3173,7 +3185,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                     source_head_before=source_base_ref,
                                     source_head_after=source_head_after,
                                     worktree_dir=worktree_dir.as_posix(),
-                                    validation_status="validation_passed",
+                                    validation_status=task_validation_status,
                                     validation_artifacts=[
                                         str(
                                             record.get("artifact_path")
@@ -3364,7 +3376,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     "goal_ref": task_goal_ref,
                     "goal_text": task_goal_text,
                     "validation_artifact": str(attempt_dir / "validation.json"),
-                    "validation_status": "passed",
+                    "validation_status": task_validation_status,
                     "task_status": TASK_STATUS_COMPLETED,
                 })
 
@@ -4134,7 +4146,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             source_head_before=source_base_ref,
                             source_head_after=git_head(source_repo),
                             worktree_dir=worktree_dir.as_posix(),
-                            validation_status="validation_passed" if last_rc == 0 else "validation_pending",
+                            validation_status=locals().get("task_validation_status", "validation_pending") if last_rc == 0 else "validation_pending",
                             validation_artifacts=[
                                 str(value).strip()
                                 for value in (

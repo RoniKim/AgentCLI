@@ -217,6 +217,88 @@ def _validation_record(
     return record
 
 
+_NO_TESTS_FOUND_PHRASES: tuple[str, ...] = (
+    "no tests found",
+    "no test found",
+    "no tests were found",
+    "no test is available",
+    "no tests are available",
+    "no matching tests",
+    "collected 0 items",
+    "0 tests collected",
+    "ran 0 tests",
+    "0 tests run",
+    "0 tests passed",
+)
+
+
+def looks_like_no_tests_found(text: str) -> bool:
+    normalized = " ".join(str(text or "").split()).lower()
+    if not normalized:
+        return False
+    return any(phrase in normalized for phrase in _NO_TESTS_FOUND_PHRASES)
+
+
+def _normalize_validation_status(value: object) -> str:
+    status = str(value or "").strip().lower()
+    if not status:
+        return ""
+    if status in {"passed", "pass", "success", "completed", "ok", "validation_passed"}:
+        return "passed"
+    if status in {"failed", "fail", "error", "validation_failed"}:
+        return "failed"
+    if status in {"stopped", "stop"}:
+        return "stopped"
+    if status in {"skipped", "tests_skipped"}:
+        return "tests_skipped"
+    if status in {"validation_pending", "no_tests_found"}:
+        return status
+    return status
+
+
+def classify_task_validation_status(
+    *,
+    run_tests: bool,
+    fast_regression_triggered: bool,
+    test_validation: dict[str, object] | None = None,
+    validation_records: Sequence[dict[str, object]] | None = None,
+) -> str:
+    """Classify the overall task validation state without marking skipped tests as success."""
+
+    def _record_status(record: dict[str, object]) -> str:
+        return _normalize_validation_status(
+            record.get("status")
+            or record.get("validation_status")
+            or record.get("validationStatus")
+        )
+
+    for record in validation_records or []:
+        if not isinstance(record, dict):
+            continue
+        status = _record_status(record)
+        if status in {"validation_pending", "tests_skipped", "no_tests_found"}:
+            return status
+
+    if test_validation and isinstance(test_validation, dict):
+        status = _record_status(test_validation)
+        if status in {"validation_pending", "tests_skipped", "no_tests_found"}:
+            return status
+        summary_text = str(
+            test_validation.get("summary")
+            or test_validation.get("failure_summary")
+            or test_validation.get("failureSummary")
+            or ""
+        )
+        if looks_like_no_tests_found(summary_text):
+            return "no_tests_found"
+
+    if not run_tests:
+        return "validation_pending"
+    if not fast_regression_triggered:
+        return "tests_skipped"
+    return "passed"
+
+
 def repo_has_web_worktree_markers(repo: Path) -> bool:
     """Return True when the repository looks like the AgentCLI web/worktree repo."""
     try:
@@ -585,6 +667,13 @@ async def run_test_validation_async(
     )
     ended_at = now_iso()
     elapsed_sec = round(max(0.0, time.monotonic() - started_monotonic), 3)
+    validation_status = ""
+    try:
+        log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+    except Exception:
+        log_text = ""
+    if looks_like_no_tests_found(summary) or looks_like_no_tests_found(log_text):
+        validation_status = "no_tests_found"
     return _validation_record(
         name="test",
         kind="test",
@@ -596,6 +685,7 @@ async def run_test_validation_async(
         started_at=started_at,
         ended_at=ended_at,
         elapsed_sec=elapsed_sec,
+        status=validation_status,
     )
 
 

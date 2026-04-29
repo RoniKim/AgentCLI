@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Sequence
 
-from .gitops import git_changed_files
+from .gitops import find_pending_worktree_merge, git_changed_files, read_pending_worktree_merge
 from .utils import atomic_write_json, now_iso, run_cmd
 
 
@@ -158,6 +158,139 @@ def _normalize_list_value(value: Sequence[object] | object | None) -> list[objec
         return [value]
 
 
+def _load_json_dict(path: Path) -> dict[str, Any]:
+    if not path.exists() or not path.is_file():
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace").strip()
+        if not raw:
+            return {}
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return dict(data)
+    except Exception:
+        pass
+    return {}
+
+
+def _resolve_run_dir(source_repo: Path, run_id: str) -> Path | None:
+    run_id_text = str(run_id or "").strip()
+    if not run_id_text:
+        return None
+    return Path(source_repo).expanduser().resolve() / ".AgentCLI" / "agent_runs" / run_id_text
+
+
+def _is_validation_artifact_path(path_text: str) -> bool:
+    name = Path(str(path_text or "")).name.lower()
+    if not name:
+        return False
+    if name.endswith(".patch"):
+        return False
+    if name.startswith("worktree_merge_pending"):
+        return False
+    if name.startswith("worktree_merge_applied"):
+        return False
+    if name.startswith("worktree_merge_discarded"):
+        return False
+    if name.startswith("worktree_apply_failure"):
+        return False
+    return True
+
+
+def _normalize_packet_validation_status(value: object) -> str:
+    status = str(value or "").strip().lower()
+    if not status:
+        return ""
+    aliases = {
+        "passed": "validation_passed",
+        "pass": "validation_passed",
+        "success": "validation_passed",
+        "completed": "validation_passed",
+        "ok": "validation_passed",
+        "validation_passed": "validation_passed",
+        "validation_pending": "validation_pending",
+        "tests_skipped": "tests_skipped",
+        "skipped": "tests_skipped",
+        "no_tests_found": "no_tests_found",
+        "failed": "validation_failed",
+        "validation_failed": "validation_failed",
+        "stopped": "validation_pending",
+    }
+    return aliases.get(status, status)
+
+
+def _choose_packet_validation_status(explicit_status: object, artifact_statuses: Sequence[object]) -> str:
+    explicit = _normalize_packet_validation_status(explicit_status)
+    derived = [_normalize_packet_validation_status(status) for status in artifact_statuses if _normalize_packet_validation_status(status)]
+    if derived:
+        priority = {
+            "validation_failed": 0,
+            "no_tests_found": 1,
+            "tests_skipped": 2,
+            "validation_pending": 3,
+            "validation_passed": 4,
+        }
+        return min(derived, key=lambda status: priority.get(status, 99))
+    return explicit or "validation_pending"
+
+
+def _load_task_validation_artifacts(run_dir: Path | None, task_ids: Sequence[str]) -> list[tuple[Path, dict[str, Any]]]:
+    if run_dir is None:
+        return []
+    tasks_root = Path(run_dir) / "tasks"
+    if not tasks_root.exists() or not tasks_root.is_dir():
+        return []
+    candidate_task_dirs: list[Path] = []
+    normalized_task_ids = _normalize_task_ids(task_ids)
+    if normalized_task_ids:
+        for task_id in normalized_task_ids:
+            task_dir = tasks_root / task_id
+            if task_dir.exists() and task_dir.is_dir():
+                candidate_task_dirs.append(task_dir)
+    else:
+        candidate_task_dirs = [path for path in tasks_root.iterdir() if path.is_dir()]
+    artifacts: list[tuple[Path, dict[str, Any]]] = []
+    for task_dir in candidate_task_dirs:
+        validation_files = [path for path in task_dir.glob("attempt_*/validation.json") if path.is_file()]
+        if not validation_files:
+            continue
+        validation_files.sort(key=lambda path: (path.stat().st_mtime, path.as_posix()))
+        latest = validation_files[-1]
+        raw = _load_json_dict(latest)
+        if raw:
+            artifacts.append((latest, raw))
+    return artifacts
+
+
+def _task_validation_notes(raw: dict[str, Any]) -> list[str]:
+    notes: list[str] = []
+    for value in (
+        raw.get("qa_notes"),
+        raw.get("qaNotes"),
+        raw.get("summary"),
+        raw.get("detail"),
+        raw.get("failure_summary"),
+        raw.get("failureSummary"),
+    ):
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            candidates = _normalize_str_list(value)
+        else:
+            candidates = [str(value).strip()]
+        for text in candidates:
+            if text and text not in notes:
+                notes.append(text)
+    return notes
+
+
+def _task_validation_goal_trace(raw: dict[str, Any]) -> list[object]:
+    goal_trace = raw.get("goal_trace")
+    if goal_trace is None:
+        goal_trace = raw.get("goalTrace")
+    return _normalize_list_value(goal_trace)
+
+
 def load_branch_index(source_repo: Path) -> dict[str, object]:
     path = pr_branch_index_path(source_repo)
     default = {
@@ -248,6 +381,113 @@ def queue_review_packet(
     updated_at_text = str(updated_at or now).strip() or now
     packet_status = str(status or "pr_queued").strip() or "pr_queued"
 
+    run_dir = _resolve_run_dir(source_repo_path, run_id_text)
+    pending_payload: dict[str, Any] = {}
+    if run_dir is not None:
+        pending_path = find_pending_worktree_merge(source_repo_path, run_dir)
+        if pending_path is not None:
+            try:
+                pending_payload = read_pending_worktree_merge(pending_path)
+            except Exception:
+                pending_payload = {}
+            if not isinstance(pending_payload, dict):
+                pending_payload = {}
+
+    if not base_ref_text:
+        base_ref_text = str(
+            pending_payload.get("base_ref")
+            or pending_payload.get("baseRef")
+            or pending_payload.get("expected_base_ref")
+            or pending_payload.get("expectedBaseRef")
+            or ""
+        ).strip()
+    if not head_ref_text:
+        head_ref_text = str(
+            pending_payload.get("head_ref")
+            or pending_payload.get("headRef")
+            or pending_payload.get("source_head")
+            or pending_payload.get("sourceHead")
+            or ""
+        ).strip()
+    if not branch_text:
+        branch_text = str(
+            pending_payload.get("branch")
+            or pending_payload.get("source_branch")
+            or pending_payload.get("sourceBranch")
+            or ""
+        ).strip()
+    if not source_head_before:
+        source_head_before = str(
+            pending_payload.get("source_head_before")
+            or pending_payload.get("sourceHeadBefore")
+            or pending_payload.get("source_head")
+            or pending_payload.get("sourceHead")
+            or ""
+        ).strip()
+    if not source_head_after:
+        source_head_after = str(
+            pending_payload.get("source_head_after")
+            or pending_payload.get("sourceHeadAfter")
+            or ""
+        ).strip()
+    if not worktree_dir:
+        worktree_dir = str(
+            pending_payload.get("worktree_dir")
+            or pending_payload.get("worktreeDir")
+            or pending_payload.get("worktree")
+            or ""
+        ).strip()
+
+    pending_changed_files = pending_payload.get("changed_files") if isinstance(pending_payload.get("changed_files"), list) else pending_payload.get("changedFiles")
+    if not changed_files and pending_changed_files is not None:
+        changed_files = pending_changed_files
+
+    if not merge_preflight:
+        merge_preflight = pending_payload.get("preflight") if isinstance(pending_payload.get("preflight"), dict) else pending_payload.get("preflight") or pending_payload.get("apply_check") or pending_payload.get("applyCheck") or {}
+
+    derived_validation_artifacts = _load_task_validation_artifacts(run_dir, normalized_task_ids)
+    derived_validation_statuses: list[str] = []
+    derived_validation_artifact_paths: list[str] = []
+    derived_goal_trace: list[object] = []
+    derived_qa_notes: list[str] = []
+    for artifact_path, raw in derived_validation_artifacts:
+        path_text = artifact_path.as_posix()
+        if _is_validation_artifact_path(path_text):
+            derived_validation_artifact_paths.append(path_text)
+        derived_validation_statuses.append(
+            _normalize_packet_validation_status(
+                raw.get("validation_status") or raw.get("validationStatus") or raw.get("status")
+            )
+        )
+        for item in _task_validation_goal_trace(raw):
+            if item not in derived_goal_trace:
+                derived_goal_trace.append(item)
+        for note in _task_validation_notes(raw):
+            if note not in derived_qa_notes:
+                derived_qa_notes.append(note)
+
+    validation_artifacts_value = _normalize_str_list(validation_artifacts)
+    validation_artifacts_value = [item for item in validation_artifacts_value if _is_validation_artifact_path(item)]
+    for item in derived_validation_artifact_paths:
+        if item not in validation_artifacts_value:
+            validation_artifacts_value.append(item)
+
+    qa_notes_value = _normalize_str_list(qa_notes)
+    for note in derived_qa_notes:
+        if note not in qa_notes_value:
+            qa_notes_value.append(note)
+
+    goal_trace_value = _normalize_list_value(goal_trace)
+    if derived_goal_trace:
+        if not goal_trace_value:
+            goal_trace_value = list(derived_goal_trace)
+        else:
+            for item in derived_goal_trace:
+                if item not in goal_trace_value:
+                    goal_trace_value.append(item)
+
+    validation_status_text = _choose_packet_validation_status(validation_status, derived_validation_statuses)
+
     missing = [
         name
         for name, value in (
@@ -270,9 +510,6 @@ def queue_review_packet(
 
     changed_files_value = _normalize_changed_files(source_repo_path, base_ref_text, head_ref_text, changed_files)
     commits_value = _normalize_commits(source_repo_path, base_ref_text, head_ref_text, commits)
-    validation_artifacts_value = _normalize_str_list(validation_artifacts)
-    qa_notes_value = _normalize_str_list(qa_notes)
-    goal_trace_value = _normalize_list_value(goal_trace)
     merge_preflight_value = dict(merge_preflight or {})
     source_main_mutated = bool(
         str(source_head_before or "").strip()
@@ -317,7 +554,7 @@ def queue_review_packet(
         "source_head_after": str(source_head_after or "").strip(),
         "source_main_mutated": source_main_mutated,
         "worktree_dir": str(worktree_dir or "").strip(),
-        "validation_status": str(validation_status or "").strip() or "validation_pending",
+        "validation_status": validation_status_text,
         "validation_artifacts": validation_artifacts_value,
         "qa_notes": qa_notes_value,
         "goal_trace": goal_trace_value,

@@ -149,6 +149,114 @@ class PRQueueTests(unittest.TestCase):
         self.assertEqual("skipped", packet["branch_index_status"])
         self.assertEqual([], index["entries"])
 
+    def test_queue_review_packet_populates_metadata_from_run_artifacts(self) -> None:
+        source_head_before = self._init_repo()
+        run_dir = self.repo / ".AgentCLI" / "agent_runs" / self.run_dir.name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        create_worktree(self.repo, self.worktree, run_dir=run_dir)
+
+        tb = create_task_branch(
+            self.worktree,
+            "T1",
+            task_title="Queue review packet",
+            goal_trace=[{"goal_ref": "GOAL-1", "goal_text": "trace packet metadata"}],
+        )
+        (self.worktree / "feature.txt").write_text("feature\n", encoding="utf-8")
+        self._git("add", "feature.txt", cwd=self.worktree)
+        self._git("commit", "-m", "feature", cwd=self.worktree)
+        branch_head = self._git("rev-parse", "HEAD", cwd=self.worktree).strip()
+
+        pending_payload = {
+            "schema_version": 1,
+            "status": "pending",
+            "run_id": run_dir.name,
+            "source_repo": self.repo.as_posix(),
+            "branch": tb.branch_name,
+            "source_branch": tb.branch_name,
+            "base_ref": tb.base_commit,
+            "head_ref": branch_head,
+            "source_head_before": source_head_before,
+            "source_head_after": source_head_before,
+            "worktree_dir": self.worktree.as_posix(),
+            "changed_files": ["feature.txt"],
+            "preflight": {
+                "sentinel": "from-pending",
+                "base_ref": tb.base_commit,
+                "head_ref": branch_head,
+                "branch": tb.branch_name,
+                "source_head_before": source_head_before,
+                "source_head_after": source_head_before,
+                "source_main_mutated": False,
+            },
+        }
+        (run_dir / "WORKTREE_MERGE_PENDING.json").write_text(
+            json.dumps(pending_payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        validation_dir = run_dir / "tasks" / "T1" / "attempt_01"
+        validation_dir.mkdir(parents=True, exist_ok=True)
+        validation_path = validation_dir / "validation.json"
+        validation_payload = {
+            "schema_version": 1,
+            "kind": "qa_validation_attempt",
+            "task_id": "T1",
+            "task_title": "Queue review packet",
+            "cycle": 1,
+            "step": 1,
+            "attempt": 1,
+            "status": "tests_skipped",
+            "validation_status": "tests_skipped",
+            "validation_reason": "scope_skip",
+            "validation_detail": "Tests were intentionally deferred by policy.",
+            "goal_trace": tb.goal_trace,
+            "qa_notes": [
+                "artifact note one",
+                "artifact note two",
+            ],
+            "summary": "",
+            "detail": "",
+            "failure_summary": "",
+            "artifact_path": validation_path.as_posix(),
+        }
+        validation_path.write_text(json.dumps(validation_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        result = queue_review_packet(
+            self.repo,
+            run_id=run_dir.name,
+            task_ids=["T1"],
+            validation_status="validation_passed",
+            validation_artifacts=[
+                (run_dir / "WORKTREE_MERGE_PENDING.json").as_posix(),
+                (run_dir / "notes.patch").as_posix(),
+            ],
+            status="pr_queued",
+        )
+
+        packet = json.loads(Path(result["packet_path"]).read_text(encoding="utf-8"))
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["recoverable"])
+        self.assertEqual(source_head_before, packet["source_head_before"])
+        self.assertEqual(source_head_before, packet["source_head_after"])
+        self.assertEqual(tb.base_commit, packet["base_ref"])
+        self.assertEqual(branch_head, packet["head_ref"])
+        self.assertEqual(tb.branch_name, packet["branch"])
+        self.assertEqual(["feature.txt"], packet["changed_files"])
+        self.assertEqual(tb.goal_trace, packet["goal_trace"])
+        self.assertEqual(["artifact note one", "artifact note two"], packet["qa_notes"])
+        self.assertEqual("tests_skipped", packet["validation_status"])
+        self.assertEqual([validation_path.as_posix()], packet["validation_artifacts"])
+        self.assertEqual("from-pending", packet["merge_preflight"]["sentinel"])
+        self.assertEqual(False, packet["merge_preflight"]["source_main_mutated"])
+        self.assertGreaterEqual(len(packet["commits"]), 1)
+        self.assertEqual("feature", packet["commits"][0]["subject"])
+        self.assertEqual("pr_queued", packet["status"])
+
+        abandoned_branch = abandon_task_branch(self.worktree, tb)
+        self.assertEqual(tb.branch_name, abandoned_branch)
+        remove_worktree(self.repo, self.worktree)
+
 
 if __name__ == "__main__":
     unittest.main()

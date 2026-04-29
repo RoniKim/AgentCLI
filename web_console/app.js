@@ -9683,10 +9683,14 @@
       case 'ok':
       case 'passed':
         return t('history.reportPassed');
-      case 'failed':
-        return t('history.reportFailed');
+      case 'validation_pending':
+        return t('history.reportUnavailable');
+      case 'tests_skipped':
+      case 'no_tests_found':
       case 'skipped':
         return t('history.reportSkipped');
+      case 'failed':
+        return t('history.reportFailed');
       case 'stopped':
         return t('history.reportStopped');
       case 'missing':
@@ -9704,10 +9708,13 @@
       case 'ok':
       case 'passed':
         return 'chip--accent';
-      case 'failed':
-        return 'chip--err';
+      case 'validation_pending':
+      case 'tests_skipped':
+      case 'no_tests_found':
       case 'skipped':
         return 'chip--info';
+      case 'failed':
+        return 'chip--err';
       case 'stopped':
         return 'chip--warn';
       case 'missing':
