@@ -7,8 +7,10 @@ import os
 import shutil
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from agent_runner.logger import close_all_loggers, create_logger
+import agent_runner.logger as logger_module
+from agent_runner.logger import close_all_loggers, create_logger, register_structured_logger_cleanup
 
 
 def _assert_exclusive_open(path: Path) -> None:
@@ -69,6 +71,14 @@ class StructuredLoggerTests(unittest.TestCase):
             _assert_exclusive_open(run_dir / "logs" / "events.jsonl")
         finally:
             shutil.rmtree(run_dir, ignore_errors=True)
+
+    def test_register_structured_logger_cleanup_is_idempotent(self) -> None:
+        with patch.object(logger_module.atexit, "register") as register:
+            with patch.object(logger_module, "_STRUCTURED_LOGGER_CLEANUP_REGISTERED", False):
+                self.assertTrue(register_structured_logger_cleanup())
+                self.assertFalse(register_structured_logger_cleanup())
+
+        register.assert_called_once_with(logger_module.close_all_loggers)
 
 
 if __name__ == "__main__":

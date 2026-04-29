@@ -25,7 +25,7 @@ from .goals import resolve_goals_completion_level
 from .runner_entry import run as run_runner
 from .run_dir import make_run_dir
 from .run_dir import find_latest_run_dir
-from .logger import close_all_loggers
+from .logger import close_all_loggers, register_structured_logger_cleanup
 from .todo import ensure_todo_file, read_current_todo, set_current_todo, open_path
 from .preflight import check_runner_start_readiness, format_runner_start_readiness, run_preflight
 from .process_guard import init_process_guard, terminate_all_children
@@ -1602,6 +1602,10 @@ def shell_main(argv: list[str] | None = None, shell_instance: RunnerShell | None
     # Initialize process guard early (L1 Job Object, L2 atexit, L4 orphan cleanup)
     try:
         init_process_guard()
+    except Exception:
+        pass
+    try:
+        register_structured_logger_cleanup()
     except Exception:
         pass
 

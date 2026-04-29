@@ -40,6 +40,11 @@ if __name__ == "__main__":
         init_process_guard()
     except Exception:
         pass
+    try:
+        from agent_runner.logger import register_structured_logger_cleanup
+        register_structured_logger_cleanup()
+    except Exception:
+        pass
 
     argv = sys.argv[1:]
 
