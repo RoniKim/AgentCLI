@@ -441,34 +441,23 @@ claude auth login
 
 > `STOP_REASON_PRIORITY`에 직접 등장하지 않는 사유라도 `choose_stop_reason()` 호출 시 후순위로 평가됩니다. 새 reason 추가 시 `_PROPAGATE_STOP_REASONS` (manager.py)와 `GOALS_REFRESH_RESCUABLE_REASONS` (goals.py) 분류도 함께 검토하세요.
 
-## 23. Windows 핸들/메모리 누수 (재부팅 전까지 회복 불가)
+## 23. Shutdown report / artifact recovery
 
 **증상:**
-- 장시간 운영 후 `agent_cli.py` 종료 시 `error.log` 파일 락이 풀리지 않음
-- Python 자식 프로세스가 좀비로 남아 작업 관리자에 누적
-- 재시작 시 로그 디렉토리 쓰기 실패 / `WinError 32: process cannot access the file`
-- 메모리 사용량이 비정상적으로 누적
+- `SHUTDOWN_REPORT.md`가 fallback 본문만 남거나 비어 있음
+- `QA_VALIDATION_REPORT.json` / `QA_VALIDATION_REPORT.md` 또는 `FINAL_RUN_REPORT.json` / `FINAL_RUN_REPORT.md`가 없음
+- `EMERGENCY_SHUTDOWN.md`가 없지만 정상 종료 보고서는 이미 존재함
 
-**원인 (확인된 사례):**
-- Windows에서 `process_guard.py` Job Object가 종료 경로를 모두 회수하지 못함
-- `_CodexAppServerClient`(또는 SDK 채널) 등 일부 구독이 명시적 `close()` 없이 GC에 위임됨
-- `StructuredLogger`의 파일 핸들이 닫히지 않은 채 프로세스가 종료
-- 한 번 누수가 발생하면 OS 레벨 핸들이 잠겨, **현 세션에서는 회복 불가능**
+**원인:**
+- 정상 종료 경로가 먼저 local fallback `SHUTDOWN_REPORT.md`를 썼고, PM 보고서가 실패하거나 스킵됨
+- `write_emergency_shutdown_report()`가 `SHUTDOWN_REPORT.md` 존재를 보고 의도적으로 skip함
+- PM shutdown 출력이 같은 half(절반)를 반복해서 trim 되었으므로, canonical 파일은 여전히 단일 `SHUTDOWN_REPORT.md`
 
-**참조 인시던트:** `.doc/Docs/incidents/MEMORY_AND_HANDLE_LEAK_20260428.md`
-
-**임시 완화책 (재부팅 전까지의 차선책):**
-
-```text
-1. /stop --wait 후 충분한 wait 부여 (stop_wait_timeout_seconds=300+ 권장)
-2. process_guard Job Object 재초기화 — agent_cli.py 재진입 시 새 Job 생성
-3. _CodexAppServerClient.close() 명시 호출 — 종료 hook에서 정리 보장
-4. close_all_loggers() — StructuredLogger 핸들 일괄 close
-5. Codex CLI / Claude CLI 자식 프로세스 작업 관리자에서 수동 종료 (taskkill /F /IM codex.exe /T)
-```
-
-**근본 해결:**
-- **재부팅이 유일한 회복 경로**입니다. OS가 모든 좀비 핸들을 해제할 때까지 동일 디렉토리에서 재실행해도 락이 풀리지 않습니다.
-- 재부팅 후 `.AgentCLI/agent_runs/<old>/logs/` 잔존 핸들 정리 후 새 run_dir 시작을 권장합니다.
-
-> 장기 실행 환경에서는 `worktree-isolation` + 작은 `loop_max_cycles`로 분할 운영해 누수 노출을 줄이세요. 인시던트 재발 시 `.doc/Docs/incidents/`에 새 보고서를 추가하세요.
+**복구:**
+- 같은 `run_dir`에서 shutdown writer를 다시 실행하면 `SHUTDOWN_CONTEXT.json`과 `SHUTDOWN_REPORT.md`를 다시 만들 수 있음
+- `build_local_shutdown_report()`는 fallback 본문만 만들므로, 정상 shutdown 경로를 다시 돌리면 `SHUTDOWN_REPORT.md`를 현재 컨텍스트로 다시 생성할 수 있음
+- `write_run_report_artifacts()`를 다시 실행하면 QA / final run report JSON과 Markdown을 재생성할 수 있음
+- PM-authored shutdown pass는 best-effort라서 실패해도 local fallback 보고서는 그대로 남음
+- `write_emergency_shutdown_report()`는 멱등이므로, 정상 보고서가 이미 있으면 다시 실행해도 `EMERGENCY_SHUTDOWN.md`를 덮어쓰지 않음
+- PM shutdown pass가 성공하면 `PM_SHUTDOWN_REPORT_OUTPUT.txt`가 원본 출력으로 남음
+- 이 가이드는 report/artifact 복구용이며, 별도 Windows 핸들 문제는 `.doc/Docs/incidents/MEMORY_AND_HANDLE_LEAK_20260428.md`를 참조

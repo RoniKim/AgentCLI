@@ -918,6 +918,127 @@ def validate_operations_doc(text: str) -> list[str]:
         if "clean" not in worktree_section.lower() or "hash" not in worktree_section.lower():
             errors.append(f"{doc_label}: worktree merge section must mention clean source repo and patch hash checks")
 
+    shutdown_section = _section_text(text, "# 산출물(Artifacts) 구조")
+    if shutdown_section is not None:
+        required_tokens = {
+            "write_run_report_artifacts": "run report writer",
+            "build_local_shutdown_report": "local shutdown report builder",
+            "write_emergency_shutdown_report": "emergency shutdown writer",
+            "SHUTDOWN_REPORT.md": "shutdown report artifact",
+            "SHUTDOWN_CONTEXT.json": "shutdown context artifact",
+            "QA_VALIDATION_REPORT.json": "QA validation JSON artifact",
+            "QA_VALIDATION_REPORT.md": "QA validation markdown artifact",
+            "FINAL_RUN_REPORT.json": "final run JSON artifact",
+            "FINAL_RUN_REPORT.md": "final run markdown artifact",
+            "EMERGENCY_SHUTDOWN.md": "emergency shutdown artifact",
+            "PM_SHUTDOWN_REPORT_OUTPUT.txt": "raw PM shutdown output artifact",
+        }
+        for token, label in required_tokens.items():
+            if token not in shutdown_section:
+                errors.append(f"{doc_label}: shutdown report section must mention {label}: {token}")
+        lowered = shutdown_section.lower()
+        if "best-effort" not in lowered and "best effort" not in lowered:
+            errors.append(f"{doc_label}: shutdown report section must describe best-effort PM overwrite behavior")
+        if "trim" not in lowered or "half" not in lowered:
+            errors.append(f"{doc_label}: shutdown report section must mention duplicate half-content trimming")
+        if "skip" not in lowered or "SHUTDOWN_REPORT.md" not in shutdown_section or "EMERGENCY_SHUTDOWN.md" not in shutdown_section:
+            errors.append(f"{doc_label}: shutdown report section must explain emergency report skip behavior")
+
+    return errors
+
+
+def _validate_shutdown_report_section(
+    section_text: str,
+    *,
+    doc_label: str,
+    section_label: str,
+    require_recovery_guidance: bool = False,
+) -> list[str]:
+    errors: list[str] = []
+    required_tokens = {
+        "write_run_report_artifacts": "run report writer",
+        "build_local_shutdown_report": "local shutdown report builder",
+        "write_emergency_shutdown_report": "emergency shutdown writer",
+        "SHUTDOWN_REPORT.md": "shutdown report artifact",
+        "SHUTDOWN_CONTEXT.json": "shutdown context artifact",
+        "QA_VALIDATION_REPORT.json": "QA validation JSON artifact",
+        "QA_VALIDATION_REPORT.md": "QA validation markdown artifact",
+        "FINAL_RUN_REPORT.json": "final run JSON artifact",
+        "FINAL_RUN_REPORT.md": "final run markdown artifact",
+        "EMERGENCY_SHUTDOWN.md": "emergency shutdown artifact",
+        "PM_SHUTDOWN_REPORT_OUTPUT.txt": "raw PM shutdown output artifact",
+    }
+    for token, label in required_tokens.items():
+        if token not in section_text:
+            errors.append(f"{doc_label}: {section_label} must mention {label}: {token}")
+
+    lowered = section_text.lower()
+    if "best-effort" not in lowered and "best effort" not in lowered:
+        errors.append(f"{doc_label}: {section_label} must describe best-effort PM overwrite behavior")
+    if "trim" not in lowered or "half" not in lowered:
+        errors.append(f"{doc_label}: {section_label} must mention duplicate half-content trimming")
+    if "skip" not in lowered or "SHUTDOWN_REPORT.md" not in section_text or "EMERGENCY_SHUTDOWN.md" not in section_text:
+        errors.append(f"{doc_label}: {section_label} must explain emergency report skip behavior")
+    if require_recovery_guidance:
+        stale_phrases = [
+            "유일한 회복 경로",
+            "only recovery path",
+            "reboot is the only",
+            "재부팅이 유일한",
+        ]
+        if any(phrase in lowered for phrase in stale_phrases):
+            errors.append(f"{doc_label}: {section_label} contains an obsolete reboot-only recovery claim")
+    return errors
+
+
+def validate_advanced_features_doc(text: str) -> list[str]:
+    doc_label = "docs/ADVANCED_FEATURES.md"
+    errors = _validate_required_sections(
+        text,
+        doc_label,
+        [
+            "# Shutdown Report 시스템",
+            "## 보고서 생성 흐름",
+            "## SHUTDOWN_CONTEXT 수집 항목",
+            "## 비상 보고서 (Emergency)",
+        ],
+    )
+
+    shutdown_section = _section_text(text, "# Shutdown Report 시스템")
+    if shutdown_section is not None:
+        errors.extend(
+            _validate_shutdown_report_section(
+                shutdown_section,
+                doc_label=doc_label,
+                section_label="shutdown report system",
+            )
+        )
+
+    return errors
+
+
+def validate_troubleshooting_doc(text: str) -> list[str]:
+    doc_label = "docs/TROUBLESHOOTING.md"
+    errors = _validate_required_sections(
+        text,
+        doc_label,
+        [
+            "# 트러블슈팅 (문제 상황 및 해결)",
+            "## 23. Shutdown report / artifact recovery",
+        ],
+    )
+
+    recovery_section = _section_text(text, "## 23. Shutdown report / artifact recovery")
+    if recovery_section is not None:
+        errors.extend(
+            _validate_shutdown_report_section(
+                recovery_section,
+                doc_label=doc_label,
+                section_label="shutdown report recovery",
+                require_recovery_guidance=True,
+            )
+        )
+
     return errors
 
 
@@ -1112,6 +1233,18 @@ def validate_user_facing_docs(repo: Path) -> list[str]:
         errors.extend(validate_operations_doc(operations_path.read_text(encoding="utf-8")))
     else:
         errors.append(f"missing docs file: {operations_path.as_posix()}")
+
+    advanced_features_path = docs_root / "ADVANCED_FEATURES.md"
+    if advanced_features_path.exists():
+        errors.extend(validate_advanced_features_doc(advanced_features_path.read_text(encoding="utf-8")))
+    else:
+        errors.append(f"missing docs file: {advanced_features_path.as_posix()}")
+
+    troubleshooting_path = docs_root / "TROUBLESHOOTING.md"
+    if troubleshooting_path.exists():
+        errors.extend(validate_troubleshooting_doc(troubleshooting_path.read_text(encoding="utf-8")))
+    else:
+        errors.append(f"missing docs file: {troubleshooting_path.as_posix()}")
 
     telegram_path = docs_root / "TELEGRAM.md"
     if telegram_path.exists():

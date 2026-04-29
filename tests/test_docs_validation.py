@@ -8,9 +8,11 @@ from agent_runner.docs import (
     build_docs_digest_text,
     collect_fastapi_route_inventory,
     validate_docs_digest,
+    validate_advanced_features_doc,
     validate_configuration_doc,
     validate_master_index,
     validate_operations_doc,
+    validate_troubleshooting_doc,
     validate_telegram_doc,
     validate_user_facing_docs,
     validate_web_console_doc,
@@ -84,6 +86,35 @@ class DocsValidationTests(unittest.TestCase):
         self.assertTrue(any("stale CLI flag" in error for error in flag_errors), flag_errors)
         self.assertTrue(any("stale stop reason" in error for error in reason_errors), reason_errors)
         self.assertTrue(any("worktree merge mode" in error for error in worktree_errors), worktree_errors)
+
+    def test_shutdown_report_docs_reject_stale_writer_and_recovery_claims(self) -> None:
+        advanced_text = (ROOT / "docs" / "ADVANCED_FEATURES.md").read_text(encoding="utf-8")
+        stale_advanced = advanced_text.replace("write_run_report_artifacts()", "build_local_shutdown_report()")
+        stale_advanced = stale_advanced.replace("write_run_report_artifacts", "build_local_shutdown_report")
+        advanced_errors = validate_advanced_features_doc(stale_advanced)
+
+        operations_text = (ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
+        stale_operations = operations_text.replace(
+            "then best-effort PM output may overwrite the fallback copy.",
+            "then PM output always overwrites the fallback copy.",
+            1,
+        )
+        operations_errors = validate_operations_doc(stale_operations)
+
+        troubleshooting_text = (ROOT / "docs" / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+        stale_troubleshooting = troubleshooting_text.replace(
+            "PM-authored shutdown pass는 best-effort라서 실패해도 local fallback 보고서는 그대로 남음",
+            "PM-authored shutdown pass는 재부팅이 유일한 회복 경로입니다.",
+            1,
+        )
+        troubleshooting_errors = validate_troubleshooting_doc(stale_troubleshooting)
+
+        self.assertTrue(any("write_run_report_artifacts" in error for error in advanced_errors), advanced_errors)
+        self.assertTrue(any("best-effort PM overwrite behavior" in error for error in operations_errors), operations_errors)
+        self.assertTrue(
+            any("obsolete reboot-only recovery claim" in error for error in troubleshooting_errors),
+            troubleshooting_errors,
+        )
 
     def test_web_console_doc_rejects_stale_server_flag(self) -> None:
         text = (ROOT / "docs" / "WEB_CONSOLE.md").read_text(encoding="utf-8")

@@ -265,8 +265,14 @@ run_dir/
   ├─ PM_OUTPUT_cycle_*.json # 스키마 검증된 PM 원본 출력
   ├─ NOTES_PM.md           # PM 참고사항/경고
   ├─ metrics.jsonl         # 이벤트 로그 (JSONL)
-  ├─ SHUTDOWN_REPORT.md    # 종료 요약 보고서
-  ├─ SHUTDOWN_CONTEXT.json # 종료 시 컨텍스트
+  ├─ QA_VALIDATION_REPORT.json # QA validation report (browser-ready JSON)
+  ├─ QA_VALIDATION_REPORT.md   # QA validation report (Markdown)
+  ├─ FINAL_RUN_REPORT.json     # final run report (browser-ready JSON)
+  ├─ FINAL_RUN_REPORT.md       # final run report (Markdown)
+  ├─ SHUTDOWN_REPORT.md        # 종료 요약 보고서 (local fallback first)
+  ├─ SHUTDOWN_CONTEXT.json     # 종료 시 컨텍스트
+  ├─ PM_SHUTDOWN_REPORT_OUTPUT.txt # PM shutdown report raw output
+  ├─ EMERGENCY_SHUTDOWN.md     # 비상 종료 폴백 보고서
   ├─ tasks/                # 태스크별 디렉토리
   │   └─ T1/
   │       ├─ attempt_00/   # 시도별 로그
@@ -275,8 +281,16 @@ run_dir/
   │       └─ test.log      # 테스트 결과
   ├─ dev_logs/             # Dev 로그 누적
   ├─ dev_hints/            # Dev 분석 힌트 (글로벌 changelog)
-  └─ qa_final_output_*.txt # QA 결과
 ```
+
+## Shutdown / final report writers
+
+- `write_run_report_artifacts()` writes `QA_VALIDATION_REPORT.json` / `QA_VALIDATION_REPORT.md` and `FINAL_RUN_REPORT.json` / `FINAL_RUN_REPORT.md`.
+- `build_local_shutdown_report()` builds the markdown body for `SHUTDOWN_REPORT.md`; the caller writes the file.
+- The normal shutdown flow writes `SHUTDOWN_CONTEXT.json` and a local `SHUTDOWN_REPORT.md` first, then best-effort PM output may overwrite the fallback copy.
+- If the PM-authored shutdown report repeats the same half twice, the duplicate content is trimmed before the final write.
+- `write_emergency_shutdown_report()` is idempotent: it skips when `SHUTDOWN_REPORT.md` already exists and also skips when `EMERGENCY_SHUTDOWN.md` already exists.
+- `FINAL_RUN_REPORT.*` is the browser-facing final summary; `SHUTDOWN_REPORT.md` is the shutdown summary that can be overwritten by the PM-authored report.
 
 ## STATE.json 구조
 

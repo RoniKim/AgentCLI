@@ -452,17 +452,22 @@ QA 후속 태스크는 다음 사이클의 PM이 백로그를 생성할 때 자�
   │
   ├─ 1) SHUTDOWN_CONTEXT 수집 (collect_shutdown_context)
   │    └─ repo 상태, 백로그 진행률, 마지막 태스크, 로그 tail 등
+  │    └─ SHUTDOWN_CONTEXT.json에 기록
   │
-  ├─ 2) 로컬 폴백 보고서 생성 (build_local_shutdown_report)
-  │    └─ 토큰 소비 없이 즉시 생성 (항상 성공)
-  │    └─ SHUTDOWN_REPORT.md에 기록
+  ├─ 2) QA / FINAL run 보고서 생성 (write_run_report_artifacts)
+  │    └─ QA_VALIDATION_REPORT.json / QA_VALIDATION_REPORT.md + FINAL_RUN_REPORT.json / FINAL_RUN_REPORT.md 기록
   │
-  └─ 3) Reporter 에이전트로 보고서 작성 시도 (best-effort)
-       └─ 성공 시: 폴백 보고서 덮어쓰기
-       └─ 실패 시: 폴백 보고서 유지 (토큰 부족 등)
+  ├─ 3) 로컬 폴백 본문 생성 (build_local_shutdown_report)
+  │    └─ 호출자가 SHUTDOWN_REPORT.md에 기록
+  │
+  └─ 4) Reporter 에이전트로 SHUTDOWN_REPORT.md 작성 시도 (best-effort)
+       ├─ STOP 파일 종료면 skip(건너뜀)
+       ├─ 성공 시: 폴백을 PM 작성본으로 덮어씀
+       ├─ PM 출력이 같은 half(절반)를 반복하면 write 전에 trim
+       └─ 성공 시 PM_SHUTDOWN_REPORT_OUTPUT.txt도 남김
 ```
 
-> 이전 버전 문서에 있던 "Fix 4 — half-content 비교 중복 제거" 단계는 현재 코드에 존재하지 않습니다. 보고서 중복은 단일 SHUTDOWN_REPORT.md를 best-effort로 덮어쓰는 방식으로 자연스럽게 방지됩니다.
+> `write_run_report_artifacts()`는 shutdown report가 아니라 QA / final run report를 씁니다. `build_local_shutdown_report()`는 markdown 본문만 반환하고, 실제 파일 쓰기는 호출자가 담당합니다.
 
 ## SHUTDOWN_CONTEXT 수집 항목
 
@@ -488,3 +493,5 @@ EMERGENCY_SHUTDOWN.md 생성
   ├─ 기존 SHUTDOWN_REPORT.md가 있으면 → 건너뜀
   └─ 없으면 → 최소한의 상태 정보로 보고서 생성
 ```
+
+`write_emergency_shutdown_report()`는 `SHUTDOWN_REPORT.md`가 이미 있거나 `EMERGENCY_SHUTDOWN.md`가 이미 있으면 skip하고 아무것도 쓰지 않습니다.

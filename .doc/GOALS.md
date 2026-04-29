@@ -209,20 +209,20 @@
 ### P0-S. Documentation And Personal Automation Readiness
 
 - [ ] `.doc/DOCS_DIGEST.md` and `docs/MASTER_INDEX.md` are generated or validated from real files so moved, archived, or case-mismatched paths cannot mislead PM/Dev/QA runs.
-- [ ] User-facing docs for config, CLI flags, model defaults, Telegram options, stop reasons, and worktree merge behavior are checked against the live parser/defaults and fail validation on stale claims.
+- [x] User-facing docs for config, CLI flags, model defaults, Telegram options, stop reasons, and worktree merge behavior are checked against the live parser/defaults and fail validation on stale claims.
 - [ ] Web console docs are checked against the live FastAPI route inventory and do not claim nonexistent backup, config, prompt, goals, or runner endpoints.
 - [ ] Documentation for shutdown reports, duplicate-report handling, and artifact writers matches the current implementation instead of preserving obsolete incident assumptions.
 - [ ] Web documentation defines the current one-repo-one-web operating model and explicitly defers multi-repo dashboard scope to a later phase.
 - [ ] A visible identity header shows active repo, branch, run id, run dir, port, mode, runner-control status, and redaction status on every primary route.
-- [ ] A repo-level web instance lock prevents accidental duplicate local-operator control of the same repo.
+- [x] A repo-level web instance lock prevents accidental duplicate local-operator control of the same repo.
 - [ ] Reload/restart while stopped behaves as start-only or no-op and does not write STOP or stop-progress artifacts into historical runs.
-- [ ] Pre-run readiness checks verify source `.venv`, Git worktree ownership/safe-directory state, stale STOP/runner_wait artifacts, and already-merged generated worktrees before a long unattended run starts.
+- [x] Pre-run readiness checks verify source `.venv`, Git worktree ownership/safe-directory state, stale STOP/runner_wait artifacts, and already-merged generated worktrees before a long unattended run starts.
 - [ ] Worktree cleanup diagnostics can report ACL-denied residual directories after Git unregisters a worktree and provide reboot/admin cleanup guidance without blocking new runs.
 - [x] Parent watchdog cleanup does not hold parent process handles indefinitely; it polls PID/create-time state with bounded sleeps and closes handles on every check.
 - [x] Codex app-server subprocess cleanup explicitly closes stdio pipes, joins the reader thread, unregisters process-guard PIDs, and cannot leave inherited handles behind after timeout or forced termination.
 - [x] AgentCLI entrypoints register structured logger cleanup with `atexit` so `run.log`, `error.log`, `debug.log`, and `events.jsonl` handlers are closed on interpreter shutdown.
 - [ ] Web runner start rejects `run_dir` values outside the active repo's approved AgentCLI run root and rejects `config_path` values outside approved config roots.
-- [ ] LAN mode blocks raw prompt reads and keeps mutating actions disabled until authentication exists or a stronger trusted-operator gate is implemented.
+- [x] LAN mode blocks raw prompt reads and keeps mutating actions disabled until authentication exists or a stronger trusted-operator gate is implemented.
 
 ### P0-T. Local PR Queue And Deferred Validation
 
