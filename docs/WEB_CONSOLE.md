@@ -1,6 +1,6 @@
 # AgentCLI Web Console
 
-> Last verified: 2026-04-28 (against code).
+> Last verified: 2026-04-29 (against live FastAPI route inventory).
 
 AgentCLI has an alpha FastAPI web console for browser-based monitoring. It is repo-owned code in `web_console/` served by `agent_runner.web`; the exported design files under `docs/Design/project/` are reference input only.
 
@@ -11,7 +11,8 @@ This is not yet a complete operational web runner. Treat the current implementat
 Verified on 2026-04-26 with a local server and Playwright:
 
 - Static console serving works from `agent_runner.web`.
-- Read-only endpoints exist for health, status, progress, config, prompts, logs, history, and worktree review state.
+- Live FastAPI routes cover `/api/health`, `/api/status`, `/api/progress`, `/api/history`, `/api/logs`, `/api/logs/tail`, `/api/logs/live`, `/api/worktree`, `/api/worktree/diagnostics`, guarded `/api/config`, `/api/config/restore`, `/api/config/save`, `/api/prompts`, `/api/prompts/read`, `/api/prompts/content`, `/api/prompts/save`, `/api/prompts/restore`, `/api/goals`, `/api/goals/save`, `/api/runner/status`, `/api/runner/start`, `/api/runner/stop`, `/api/runner/reload`, `/api/runner/restart`, `/api/worktree/merge`, and `/api/worktree/discard`.
+- Backup creation happens inside save/restore flows; there is no standalone `/api/*/backup` route family.
 - Read-only worktree diagnostics now scan `.AgentCLI/agent_runs`, the central pending marker, patch paths, cleanup-failed artifacts, and generated worktree directories without deleting anything by default.
 - Additional read-only contracts now cover Goals metadata and backend log tailing.
 - LAN or external binds now redact logs, log file metadata, GOALS raw text, backlog/task excerpts, config snapshots, prompt previews/content, and serialized runner arguments before the browser sees them, while the browser renders hidden/unavailable copy for those fields.

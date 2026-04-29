@@ -1,8 +1,8 @@
 # AgentCLI 문서 인덱스
 
-> 마지막 갱신: 2026-04-28
+> 마지막 갱신: 2026-04-29
 > 6개 병렬 에이전트 코드 정합성 검증 + 재정렬 결과
-> 모든 항목은 코드와 file:line 단위 대조 완료
+> 모든 항목은 코드와 실제 파일 inventory + file:line 단위 대조 완료
 
 ---
 
@@ -59,7 +59,7 @@
 | `ARCHITECTURE.md` | 전체 아키텍처 + Web Console 타겟 통합 노트 |
 | `CONVENTIONS.md` | self-development 시 PM/Dev/QA 행동 계약 |
 | `WEB_CONSOLE_TARGET.md` | Web Console 시각/구조/데이터 계약 명세 (Direction A) |
-| `CLAUDE.md` | Claude backend 운영 가이드 |
+| `.doc/Docs/claude.md` | Claude backend 운영 가이드 |
 | `UNATTENDED_OPS_AUDIT_AND_FOLLOWUP.md` | 무인운영 신뢰성 검증 결과 + 후속 작업 (T-A~T-I) |
 | `LOCAL_PR_QUEUE_AND_DEFERRED_VALIDATION.md` | 로컬 PR 큐, 지연 검증, oversized GOALS task 분할 계획 |
 
@@ -75,7 +75,7 @@
 |------|------|
 | `Design/README.md` | Claude Design 핸드오프 번들 설명 |
 | `Design/project/AgentCLI Web - A.html` | **canonical Direction A 디자인 소스** (모든 Web 문서가 참조) |
-| `Design/project/directions/`, `shared/` | 보조 자료 |
+| `Design/project/directions/`, `Design/project/shared/` | 보조 자료 |
 
 > ⚠️ `CONVENTIONS.md`가 명시적으로 "Do not edit `docs/Design/project/`"로 잠금. read-only.
 
