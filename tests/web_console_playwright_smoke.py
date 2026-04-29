@@ -450,6 +450,38 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
         self.assertTrue(path.exists() and path.stat().st_size > 0, f"Screenshot was not written: {path}")
         return path
 
+    def _stop_overlay_focus_state(self, page) -> dict[str, str]:
+        return page.evaluate(
+            """() => {
+                const overlay = document.querySelector("[data-overlay='stop']");
+                const controls = overlay ? Array.from(overlay.querySelectorAll('[data-runner-option-toggle], [data-runner-option-mode], [data-runner-option-field], [data-stop-confirmation], [data-stop-close], [data-stop-confirm]')) : [];
+                const isEnabled = (el) => Boolean(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+                const keyFor = (el) => {
+                    if (!el) return '';
+                    if (el.matches('[data-runner-option-toggle]')) return `runner-option-toggle:${el.dataset.runnerOptionToggle || ''}`;
+                    if (el.matches('[data-runner-option-mode]')) return `runner-option-mode:${el.dataset.runnerOptionMode || ''}`;
+                    if (el.matches('[data-runner-option-field]')) return `runner-option-field:${el.dataset.runnerOptionField || ''}`;
+                    if (el.matches('[data-stop-confirmation]')) return 'stop-confirmation';
+                    if (el.matches('[data-stop-close]')) return 'stop-close';
+                    if (el.matches('[data-stop-confirm]')) return 'stop-confirm';
+                    return '';
+                };
+                const firstEnabled = controls.find(isEnabled) || null;
+                return {
+                    active: keyFor(document.activeElement),
+                    firstEnabled: keyFor(firstEnabled),
+                };
+            }"""
+        )
+
+    def _assert_stop_overlay_focuses_first_enabled_control(self, page) -> None:
+        focus_state = self._stop_overlay_focus_state(page)
+        self.assertTrue(focus_state["firstEnabled"], focus_state)
+        self.assertEqual(focus_state["firstEnabled"], focus_state["active"], focus_state)
+
+    def _apply_snapshot_model(self, page, snapshot: dict[str, object]) -> None:
+        page.evaluate("(model) => window.__AGENTCLI_ADAPTERS__.applySnapshotModel(model)", snapshot)
+
     def test_primary_desktop_routes_have_no_horizontal_overflow_and_stable_controls(self) -> None:
         self._start_server()
 
@@ -526,6 +558,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(stop_overlay).to_contain_text('Type "STOP RUNNER" exactly to enable Stop.')
             self.expect(stop_overlay.locator("[data-stop-confirm]")).to_be_visible()
             self.expect(stop_overlay.locator("[data-stop-confirm]")).to_have_attribute("data-action-state", re.compile("confirmation|disabled|busy|retry|failure"))
+            self._assert_stop_overlay_focuses_first_enabled_control(page)
             page.keyboard.press("Escape")
             self.expect(stop_overlay).to_be_hidden()
 
@@ -597,6 +630,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(stop_overlay).to_be_visible()
             self.expect(stop_overlay).to_contain_text('중지 작업을 활성화하려면 "STOP RUNNER"를 정확히 입력하세요.')
             self.expect(stop_overlay.locator("[data-stop-confirm]")).to_be_visible()
+            self._assert_stop_overlay_focuses_first_enabled_control(page)
             page.keyboard.press("Escape")
             self.expect(stop_overlay).to_be_hidden()
 
@@ -605,6 +639,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(reload_overlay).to_be_visible()
             self.expect(reload_overlay).to_contain_text('다시 불러오기 작업을 활성화하려면 "RELOAD RUNNER"를 정확히 입력하세요.')
             self.expect(reload_overlay.locator("[data-stop-confirm]")).to_be_visible()
+            self._assert_stop_overlay_focuses_first_enabled_control(page)
             page.keyboard.press("Escape")
             self.expect(reload_overlay).to_be_hidden()
 
@@ -613,6 +648,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(restart_overlay).to_be_visible()
             self.expect(restart_overlay).to_contain_text('재시작 작업을 활성화하려면 "RESTART RUNNER"를 정확히 입력하세요.')
             self.expect(restart_overlay.locator("[data-stop-confirm]")).to_be_visible()
+            self._assert_stop_overlay_focuses_first_enabled_control(page)
             page.keyboard.press("Escape")
             self.expect(restart_overlay).to_be_hidden()
 
@@ -753,6 +789,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             stop_overlay = page.locator("[data-overlay='stop']")
             self.expect(stop_overlay).to_be_visible()
             self.expect(stop_overlay).to_contain_text('STOP RUNNER')
+            self._assert_stop_overlay_focuses_first_enabled_control(page)
             page.keyboard.press("Escape")
             self.expect(stop_overlay).to_be_hidden()
 
@@ -777,6 +814,80 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             page.locator('#sidebar [data-nav="dashboard"]').click()
             self.expect(page.locator("#main")).to_have_attribute("data-view", "dashboard")
             self.expect(page.locator(".topbar__status")).to_be_hidden()
+        finally:
+            self._close_playwright(manager)
+
+    def test_keyboard_navigation_and_accessibility_flows(self) -> None:
+        self._start_server()
+
+        manager = self.sync_playwright()
+        try:
+            playwright = manager.__enter__()
+        except Exception as exc:
+            raise unittest.SkipTest(
+                "Playwright runtime is unavailable. Optional setup: "
+                f'"{sys.executable}" -m pip install playwright && '
+                f'"{sys.executable}" -m playwright install chromium'
+            ) from exc
+        try:
+            try:
+                page = self._open_page(playwright)
+            except Exception as exc:
+                raise unittest.SkipTest(
+                    "Playwright Chromium is unavailable. Optional setup: "
+                    f'"{sys.executable}" -m pip install playwright && '
+                    f'"{sys.executable}" -m playwright install chromium'
+                ) from exc
+
+            self.expect(page.locator("#main")).to_have_attribute("data-view", "dashboard")
+
+            page.evaluate("window.__AGENTCLI_ADAPTERS__.handleAction('runner-stop')")
+            stop_overlay = page.locator("[data-overlay='stop']")
+            self.expect(stop_overlay).to_be_visible()
+            self._assert_stop_overlay_focuses_first_enabled_control(page)
+            page.keyboard.press("Escape")
+            self.expect(stop_overlay).to_be_hidden()
+
+            page.evaluate("window.__AGENTCLI_ADAPTERS__.handleAction('runner-reload')")
+            reload_overlay = page.locator("[data-overlay='stop']")
+            self.expect(reload_overlay).to_be_visible()
+            self._assert_stop_overlay_focuses_first_enabled_control(page)
+            page.keyboard.press("Escape")
+            self.expect(reload_overlay).to_be_hidden()
+
+            page.evaluate("window.__AGENTCLI_ADAPTERS__.handleAction('runner-restart')")
+            restart_overlay = page.locator("[data-overlay='stop']")
+            self.expect(restart_overlay).to_be_visible()
+            self._assert_stop_overlay_focuses_first_enabled_control(page)
+            page.keyboard.press("Escape")
+            self.expect(restart_overlay).to_be_hidden()
+
+            snapshot = self._read_snapshot()
+            for runner_key in ("runnerControl", "runner_control"):
+                runner_control = snapshot.get(runner_key)
+                if isinstance(runner_control, dict):
+                    runner_control["enabled"] = False
+                    runner_control["message"] = "Runner controls are disabled."
+            for live_run_key in ("liveRun", "live_run"):
+                live_run = snapshot.get(live_run_key)
+                if not isinstance(live_run, dict):
+                    continue
+                for runner_key in ("runnerControl", "runner_control", "control"):
+                    live_runner_control = live_run.get(runner_key)
+                    if isinstance(live_runner_control, dict):
+                        live_runner_control["enabled"] = False
+                        live_runner_control["message"] = "Runner controls are disabled."
+            self._apply_snapshot_model(page, snapshot)
+            self.expect(page.locator('#topbar [data-action="runner-restart"]')).to_be_disabled()
+
+            page.evaluate("window.__AGENTCLI_ADAPTERS__.handleAction('runner-restart')")
+            disabled_overlay = page.locator("[data-overlay='stop']")
+            self.expect(disabled_overlay).to_be_visible()
+            self.expect(disabled_overlay).to_contain_text("Runner controls are disabled.")
+            self.expect(disabled_overlay.locator("[data-stop-confirmation]")).to_be_disabled()
+            self.expect(page.get_by_role("button", name="Cancel")).to_be_focused()
+            page.keyboard.press("Escape")
+            self.expect(disabled_overlay).to_be_hidden()
         finally:
             self._close_playwright(manager)
 

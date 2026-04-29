@@ -17181,6 +17181,13 @@
           : !actionEnabled || (startAction && startOptionsValidation && !startOptionsValidation.valid)
             ? actionPresentation(`runner-${action}`, 'disabled', bannerMessage)
             : actionPresentation(`runner-${action}`, 'confirmation', actionSummary, { disabled: !confirmEnabled });
+    const activeElement = document.activeElement;
+    const previousFocusKey = activeElement && overlayRoot().contains(activeElement)
+      ? stopOverlayControlKey(activeElement)
+      : '';
+    const previousSelection = previousFocusKey && activeElement && typeof activeElement.selectionStart === 'number' && typeof activeElement.selectionEnd === 'number'
+      ? stopOverlaySelectionRange(activeElement)
+      : null;
     overlayRoot().innerHTML = `
       <div class="overlay overlay--tight" data-overlay="stop">
         <div class="overlay__panel overlay__panel--modal">
@@ -17227,11 +17234,7 @@
         </div>
       </div>
     `;
-    const input = overlayRoot().querySelector('[data-stop-confirmation]');
-    if (input && !state.stopSubmitting) {
-      input.focus();
-      input.setSelectionRange(input.value.length, input.value.length);
-    }
+    focusStopOverlayControl(previousFocusKey, previousSelection);
   }
 
   function renderOverlay() {
@@ -18465,6 +18468,74 @@
     state.stopStartOptions = null;
     renderOverlay();
     renderShell({ preserveScroll: true });
+  }
+
+  // Keep keyboard focus on the active stop dialog control across rerenders.
+  function stopOverlayControlKey(element) {
+    if (!element || typeof element.matches !== 'function') {
+      return '';
+    }
+    if (element.matches('[data-runner-option-toggle]')) {
+      return `runner-option-toggle:${toText(element.dataset.runnerOptionToggle, '')}`;
+    }
+    if (element.matches('[data-runner-option-mode]')) {
+      return `runner-option-mode:${toText(element.dataset.runnerOptionMode, '')}`;
+    }
+    if (element.matches('[data-runner-option-field]')) {
+      return `runner-option-field:${toText(element.dataset.runnerOptionField, '')}`;
+    }
+    if (element.matches('[data-stop-confirmation]')) {
+      return 'stop-confirmation';
+    }
+    if (element.matches('[data-stop-close]')) {
+      return 'stop-close';
+    }
+    if (element.matches('[data-stop-confirm]')) {
+      return 'stop-confirm';
+    }
+    return '';
+  }
+
+  function stopOverlayControls(overlay) {
+    return Array.from(
+      overlay.querySelectorAll('[data-runner-option-toggle], [data-runner-option-mode], [data-runner-option-field], [data-stop-confirmation], [data-stop-close], [data-stop-confirm]')
+    );
+  }
+
+  function stopOverlaySelectionRange(element) {
+    if (!element || typeof element.selectionStart !== 'number' || typeof element.selectionEnd !== 'number') {
+      return null;
+    }
+    return {
+      start: element.selectionStart,
+      end: element.selectionEnd,
+      direction: element.selectionDirection || 'none',
+    };
+  }
+
+  function focusStopOverlayControl(preferredKey = '', selection = null) {
+    const overlay = overlayRoot().querySelector('[data-overlay="stop"]');
+    if (!overlay) {
+      return;
+    }
+    const controls = stopOverlayControls(overlay);
+    const enabledControl = controls.find((element) => !element.disabled && element.getAttribute('aria-disabled') !== 'true');
+    const target = preferredKey
+      ? controls.find((element) => stopOverlayControlKey(element) === preferredKey && !element.disabled && element.getAttribute('aria-disabled') !== 'true')
+      : null;
+    const focusTarget = target || enabledControl;
+    if (!focusTarget || typeof focusTarget.focus !== 'function') {
+      return;
+    }
+    focusTarget.focus();
+    if (typeof focusTarget.setSelectionRange === 'function' && focusTarget.selectionStart != null && focusTarget.selectionEnd != null) {
+      const range = selection || {
+        start: focusTarget.value.length,
+        end: focusTarget.value.length,
+        direction: 'none',
+      };
+      focusTarget.setSelectionRange(range.start, range.end, range.direction || 'none');
+    }
   }
 
   function openNewGoal(bucket) {

@@ -1214,6 +1214,7 @@ class WebConsoleStaticTests(unittest.TestCase):
                 "Action failed",
                 "refreshing status",
                 "data-stop-confirmation",
+                "data-stop-close",
                 "RESTART RUNNER",
                 "Start options",
                 "Autopilot",
@@ -1233,6 +1234,10 @@ class WebConsoleStaticTests(unittest.TestCase):
                 "Runner did not report",
                 "currentLiveRunLiveState()",
                 "runnerControlLiveStateChips(liveState)",
+                "focusStopOverlayControl",
+                "stopOverlayControlKey",
+                "document.activeElement",
+                "setSelectionRange",
             ],
             "renderBacklog": ["Work queue", "No task selected.", "No backlog artifacts were published yet.", "Dependencies unavailable", "File scope unavailable", "Failure unavailable", "Recent output unavailable."],
             "renderGoals": [
