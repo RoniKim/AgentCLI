@@ -22,6 +22,7 @@ from .gitops import (
     git_changed_files,
     git_head,
     git_repo_state,
+    git_rev_parse_ref,
     read_pending_worktree_merge,
     remove_worktree,
 )
@@ -32,6 +33,35 @@ from .utils import atomic_write_json, now_iso, run_cmd, safe_write_text
 PR_QUEUE_DIRNAME = "pr_queue"
 PR_QUEUE_SCHEMA_VERSION = 1
 PR_QUEUE_INDEX_FILENAME = "branch_index.json"
+PR_QUEUE_MERGE_CONFIRMATION_PREFIX = "MERGE PR"
+
+
+class PrQueueMergeError(RuntimeError):
+    """Structured failure raised when a queued PR cannot be approved for merge."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: dict[str, object] | None = None,
+        status_code: int = 409,
+        status: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.details = dict(details or {})
+        self.status_code = int(status_code)
+        if status:
+            self.status = str(status)
+        elif self.status_code == 404:
+            self.status = "unavailable"
+        elif self.status_code >= 500:
+            self.status = "error"
+        elif self.status_code >= 409:
+            self.status = "conflict"
+        else:
+            self.status = "invalid_request"
 
 
 def pr_queue_root(source_repo: Path) -> Path:
@@ -644,6 +674,96 @@ def load_review_packet(source_repo: Path, packet_id: str) -> dict[str, Any]:
     return _load_json_dict(pr_packet_path(source_repo, packet_id))
 
 
+def pr_queue_merge_confirmation_phrase(packet_id: str) -> str:
+    packet_id_text = str(packet_id or "").strip()
+    return f"{PR_QUEUE_MERGE_CONFIRMATION_PREFIX} {packet_id_text}".strip()
+
+
+def _pr_queue_validation_artifact_candidates(source_repo: Path, packet: dict[str, Any], packet_id: str) -> list[Path]:
+    packet_id_text = str(packet_id or "").strip()
+    candidates: list[Path] = []
+    explicit_path = str(packet.get("validation_artifact_path") or packet.get("validationArtifactPath") or "").strip()
+    if explicit_path:
+        candidates.append(Path(explicit_path))
+    run_id_text = str(packet.get("run_id") or packet.get("runId") or "").strip()
+    if run_id_text:
+        candidates.append(_resolve_run_dir(source_repo, run_id_text) / "pr_queue_validation" / packet_id_text / "attempt_01" / "validation.json")
+    for raw_path in reversed(_normalize_list_value(packet.get("validation_artifacts") or packet.get("validationArtifacts"))):
+        text = str(raw_path or "").strip()
+        if text:
+            candidates.append(Path(text))
+    unique_candidates: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = candidate.as_posix()
+        if key not in seen:
+            seen.add(key)
+            unique_candidates.append(candidate)
+    return unique_candidates
+
+
+def _load_pr_queue_validation_evidence(source_repo: Path, packet: dict[str, Any], packet_id: str) -> dict[str, object]:
+    packet_validation_status = _normalize_packet_validation_status(packet.get("validation_status") or packet.get("validationStatus") or packet.get("status"))
+    packet_validation_reason = str(
+        packet.get("validation_reason")
+        or packet.get("validationReason")
+        or packet.get("reason")
+        or ""
+    ).strip()
+    packet_validation_detail = str(
+        packet.get("validation_detail")
+        or packet.get("validationDetail")
+        or packet.get("detail")
+        or ""
+    ).strip()
+    validation_artifact_candidates = [candidate.as_posix() for candidate in _pr_queue_validation_artifact_candidates(source_repo, packet, packet_id)]
+
+    for candidate in _pr_queue_validation_artifact_candidates(source_repo, packet, packet_id):
+        if not candidate.exists() or not candidate.is_file():
+            continue
+        raw = _load_json_dict(candidate)
+        if not raw:
+            continue
+        validation_status = _normalize_packet_validation_status(
+            raw.get("validation_status") or raw.get("validationStatus") or raw.get("status")
+        )
+        if not validation_status:
+            continue
+        return {
+            "source": "artifact",
+            "artifact_path": candidate.as_posix(),
+            "artifact": raw,
+            "status": validation_status,
+            "reason": str(
+                raw.get("validation_reason")
+                or raw.get("validationReason")
+                or raw.get("reason")
+                or raw.get("status")
+                or ""
+            ).strip(),
+            "detail": str(
+                raw.get("validation_detail")
+                or raw.get("validationDetail")
+                or raw.get("detail")
+                or raw.get("summary")
+                or raw.get("failure_summary")
+                or raw.get("failureSummary")
+                or ""
+            ).strip(),
+            "candidates": validation_artifact_candidates,
+        }
+
+    return {
+        "source": "packet" if packet_validation_status else "missing",
+        "artifact_path": "",
+        "artifact": {},
+        "status": packet_validation_status,
+        "reason": packet_validation_reason or packet_validation_status,
+        "detail": packet_validation_detail,
+        "candidates": validation_artifact_candidates,
+    }
+
+
 def _load_pr_queue_validation_config(run_dir: Path | None) -> dict[str, object]:
     config: dict[str, Any] = {}
     if run_dir is not None:
@@ -815,6 +935,256 @@ def _update_packet_validation_metadata(
     updated["validationArtifacts"] = artifact_list
     updated["updated_at"] = updated_at
     return updated
+
+
+def _pr_queue_merge_validation_error(
+    packet_id: str,
+    packet_path: Path,
+    validation_evidence: dict[str, object],
+) -> None:
+    status = str(validation_evidence.get("status") or "").strip().lower()
+    artifact_path = str(validation_evidence.get("artifact_path") or "").strip()
+    details: dict[str, object] = {
+        "packet_id": str(packet_id or "").strip(),
+        "packet_path": packet_path.as_posix(),
+        "validation_status": status,
+        "validation_artifact_path": artifact_path,
+        "validation_artifact_candidates": list(validation_evidence.get("candidates") or []),
+        "validation_source": str(validation_evidence.get("source") or ""),
+        "validation_reason": str(validation_evidence.get("reason") or "").strip(),
+        "validation_detail": str(validation_evidence.get("detail") or "").strip(),
+    }
+    validation_messages = {
+        "validation_pending": "PR packet validation is still pending.",
+        "tests_skipped": "PR packet validation skipped tests.",
+        "no_tests_found": "PR packet validation found no tests.",
+        "validation_failed": "PR packet validation failed.",
+        "blocked_env": "PR packet validation is blocked by the environment.",
+    }
+    if status in validation_messages:
+        raise PrQueueMergeError(status, validation_messages[status], details=details, status_code=409)
+    if status == "validation_passed":
+        if str(validation_evidence.get("source") or "") != "artifact":
+            raise PrQueueMergeError(
+                "packet_stale",
+                "PR packet validation evidence is missing or stale.",
+                details=details,
+                status_code=409,
+            )
+        return
+    raise PrQueueMergeError(
+        "packet_stale",
+        "PR packet validation evidence is missing or stale.",
+        details=details,
+        status_code=409,
+    )
+
+
+def _pr_queue_merge_preflight(
+    source_repo: Path,
+    packet: dict[str, Any],
+    *,
+    packet_id: str,
+    validation_evidence: dict[str, object],
+) -> tuple[dict[str, object], str, str, str, str, list[str], list[str]]:
+    source_repo_path = Path(source_repo).expanduser().resolve()
+    packet_path = pr_packet_path(source_repo_path, packet_id)
+    packet_source_repo_text = str(packet.get("source_repo") or packet.get("sourceRepo") or "").strip()
+    if not packet_source_repo_text:
+        raise PrQueueMergeError(
+            "packet_stale",
+            "PR packet is missing source repository metadata.",
+            details={
+                "packet_id": packet_id,
+                "packet_path": packet_path.as_posix(),
+            },
+            status_code=409,
+        )
+    try:
+        packet_source_repo = Path(packet_source_repo_text).expanduser().resolve()
+    except Exception:
+        packet_source_repo = Path(packet_source_repo_text).expanduser()
+    if packet_source_repo != source_repo_path:
+        raise PrQueueMergeError(
+            "packet_stale",
+            "PR packet source repository does not match the current repository.",
+            details={
+                "packet_id": packet_id,
+                "packet_path": packet_path.as_posix(),
+                "expected": source_repo_path.as_posix(),
+                "actual": packet_source_repo.as_posix(),
+            },
+            status_code=409,
+        )
+
+    base_ref_text = str(packet.get("base_ref") or packet.get("baseRef") or "").strip()
+    head_ref_text = str(packet.get("head_ref") or packet.get("headRef") or "").strip()
+    branch_text = str(packet.get("branch") or "").strip()
+    if not base_ref_text or not head_ref_text or not branch_text:
+        missing = [name for name, value in (("base_ref", base_ref_text), ("head_ref", head_ref_text), ("branch", branch_text)) if not value]
+        raise PrQueueMergeError(
+            "packet_stale",
+            "PR packet is missing recorded merge metadata.",
+            details={
+                "packet_id": packet_id,
+                "packet_path": packet_path.as_posix(),
+                "missing": missing,
+            },
+            status_code=409,
+        )
+
+    packet_status = str(packet.get("status") or "").strip().lower()
+    if packet_status in {"discarded", "merged"}:
+        raise PrQueueMergeError(
+            "packet_stale",
+            "PR packet has already been finalized.",
+            details={
+                "packet_id": packet_id,
+                "packet_path": packet_path.as_posix(),
+                "status": packet_status,
+            },
+            status_code=409,
+        )
+
+    source_repo_state = git_repo_state(source_repo_path)
+    if source_repo_state != "clean":
+        raise PrQueueMergeError(
+            "source_dirty",
+            "Source repository must be clean before approving the PR packet.",
+            details={
+                "packet_id": packet_id,
+                "packet_path": packet_path.as_posix(),
+                "source_repo": source_repo_path.as_posix(),
+                "source_repo_state": source_repo_state,
+            },
+            status_code=409,
+        )
+
+    current_source_head = git_head(source_repo_path)
+    recorded_preflight = packet.get("merge_preflight") if isinstance(packet.get("merge_preflight"), dict) else packet.get("mergePreflight")
+    if not isinstance(recorded_preflight, dict):
+        recorded_preflight = {}
+    expected_source_head = str(
+        recorded_preflight.get("source_head_after")
+        or recorded_preflight.get("sourceHeadAfter")
+        or recorded_preflight.get("source_head_before")
+        or recorded_preflight.get("sourceHeadBefore")
+        or packet.get("source_head_after")
+        or packet.get("sourceHeadAfter")
+        or packet.get("source_head_before")
+        or packet.get("sourceHeadBefore")
+        or ""
+    ).strip()
+    if not expected_source_head:
+        raise PrQueueMergeError(
+            "packet_stale",
+            "PR packet is missing recorded source head metadata.",
+            details={
+                "packet_id": packet_id,
+                "packet_path": packet_path.as_posix(),
+            },
+            status_code=409,
+        )
+    if current_source_head != expected_source_head:
+        raise PrQueueMergeError(
+            "packet_stale",
+            "Source HEAD no longer matches the recorded packet metadata.",
+            details={
+                "packet_id": packet_id,
+                "packet_path": packet_path.as_posix(),
+                "expected_source_head": expected_source_head,
+                "actual_source_head": current_source_head,
+            },
+            status_code=409,
+        )
+
+    resolved_base_ref = git_rev_parse_ref(source_repo_path, base_ref_text)
+    resolved_head_ref = git_rev_parse_ref(source_repo_path, head_ref_text)
+    if not resolved_base_ref or not resolved_head_ref:
+        raise PrQueueMergeError(
+            "packet_stale",
+            "Recorded base or head ref can no longer be resolved.",
+            details={
+                "packet_id": packet_id,
+                "packet_path": packet_path.as_posix(),
+                "base_ref": base_ref_text,
+                "head_ref": head_ref_text,
+            },
+            status_code=409,
+        )
+
+    recorded_changed_files = _normalize_str_list(packet.get("changed_files") or packet.get("changedFiles"))
+    try:
+        current_changed_files = list(git_changed_files(source_repo_path, resolved_base_ref, resolved_head_ref))
+    except Exception as ex:
+        raise PrQueueMergeError(
+            "packet_stale",
+            "Recorded changed files can no longer be recomputed.",
+            details={
+                "packet_id": packet_id,
+                "packet_path": packet_path.as_posix(),
+                "base_ref": resolved_base_ref,
+                "head_ref": resolved_head_ref,
+                "error": f"{type(ex).__name__}: {str(ex).strip() or type(ex).__name__}",
+            },
+            status_code=409,
+        ) from ex
+
+    if current_changed_files != recorded_changed_files:
+        raise PrQueueMergeError(
+            "packet_stale",
+            "Recorded changed files no longer match the packet diff.",
+            details={
+                "packet_id": packet_id,
+                "packet_path": packet_path.as_posix(),
+                "base_ref": resolved_base_ref,
+                "head_ref": resolved_head_ref,
+                "recorded_changed_files": recorded_changed_files,
+                "current_changed_files": current_changed_files,
+            },
+            status_code=409,
+        )
+
+    validation_status = str(validation_evidence.get("status") or "").strip().lower()
+    validation_artifact_path = str(validation_evidence.get("artifact_path") or "").strip()
+    merge_preflight = {
+        "base_ref": resolved_base_ref,
+        "baseRef": resolved_base_ref,
+        "head_ref": resolved_head_ref,
+        "headRef": resolved_head_ref,
+        "branch": branch_text,
+        "source_head_before": expected_source_head,
+        "sourceHeadBefore": expected_source_head,
+        "source_head_after": current_source_head,
+        "sourceHeadAfter": current_source_head,
+        "source_head": current_source_head,
+        "sourceHead": current_source_head,
+        "source_main_mutated": False,
+        "sourceMainMutated": False,
+        "source_repo_state": source_repo_state,
+        "sourceRepoState": source_repo_state,
+        "source_repo_dirty": False,
+        "sourceRepoDirty": False,
+        "recorded_changed_files": recorded_changed_files,
+        "recordedChangedFiles": recorded_changed_files,
+        "current_changed_files": current_changed_files,
+        "currentChangedFiles": current_changed_files,
+        "changed_files_match": True,
+        "changedFilesMatch": True,
+        "validation_status": validation_status,
+        "validationStatus": validation_status,
+        "validation_artifact_path": validation_artifact_path,
+        "validationArtifactPath": validation_artifact_path,
+        "validation_source": str(validation_evidence.get("source") or ""),
+        "validationSource": str(validation_evidence.get("source") or ""),
+        "validation_reason": str(validation_evidence.get("reason") or "").strip(),
+        "validationReason": str(validation_evidence.get("reason") or "").strip(),
+        "validation_detail": str(validation_evidence.get("detail") or "").strip(),
+        "validationDetail": str(validation_evidence.get("detail") or "").strip(),
+        "packet_merge_preflight": recorded_preflight,
+        "packetMergePreflight": recorded_preflight,
+    }
+    return merge_preflight, resolved_base_ref, resolved_head_ref, current_source_head, source_repo_state, current_changed_files, recorded_changed_files
 
 
 async def validate_review_packet_async(
@@ -1331,3 +1701,226 @@ def validate_review_packet(
             stop_path=stop_path,
         )
     )
+
+
+def merge_review_packet(
+    source_repo: Path,
+    packet_id: str,
+    *,
+    approval_phrase: str,
+) -> dict[str, object]:
+    source_repo_path = Path(source_repo).expanduser().resolve()
+    packet_id_text = str(packet_id or "").strip()
+    if not packet_id_text:
+        raise PrQueueMergeError(
+            "packet_stale",
+            "PR packet id is required.",
+            details={"packet_id": packet_id_text},
+            status_code=400,
+            status="invalid_request",
+        )
+
+    packet_path = pr_packet_path(source_repo_path, packet_id_text)
+    if not packet_path.exists() or not packet_path.is_file():
+        raise PrQueueMergeError(
+            "packet_missing",
+            "PR packet not found.",
+            details={
+                "packet_id": packet_id_text,
+                "packet_path": packet_path.as_posix(),
+            },
+            status_code=404,
+        )
+
+    packet = load_review_packet(source_repo_path, packet_id_text)
+    if not packet:
+        raise PrQueueMergeError(
+            "packet_stale",
+            "PR packet file is empty or malformed.",
+            details={
+                "packet_id": packet_id_text,
+                "packet_path": packet_path.as_posix(),
+            },
+            status_code=409,
+        )
+
+    expected_phrase = pr_queue_merge_confirmation_phrase(packet_id_text)
+    provided_phrase = str(approval_phrase or "").strip()
+    if not provided_phrase:
+        raise PrQueueMergeError(
+            "approval_required",
+            "A merge approval phrase is required.",
+            details={
+                "packet_id": packet_id_text,
+                "packet_path": packet_path.as_posix(),
+                "expected_phrase": expected_phrase,
+            },
+            status_code=400,
+            status="invalid_request",
+        )
+    if provided_phrase != expected_phrase:
+        raise PrQueueMergeError(
+            "approval_mismatch",
+            "The merge approval phrase did not match.",
+            details={
+                "packet_id": packet_id_text,
+                "packet_path": packet_path.as_posix(),
+                "expected_phrase": expected_phrase,
+                "provided_phrase": provided_phrase,
+            },
+            status_code=400,
+            status="invalid_request",
+        )
+
+    validation_evidence = _load_pr_queue_validation_evidence(source_repo_path, packet, packet_id_text)
+    _pr_queue_merge_validation_error(packet_id_text, packet_path, validation_evidence)
+
+    (
+        merge_preflight,
+        resolved_base_ref,
+        resolved_head_ref,
+        current_source_head,
+        source_repo_state,
+        current_changed_files,
+        recorded_changed_files,
+    ) = _pr_queue_merge_preflight(
+        source_repo_path,
+        packet,
+        packet_id=packet_id_text,
+        validation_evidence=validation_evidence,
+    )
+
+    now = now_iso()
+    validation_artifact_path = str(validation_evidence.get("artifact_path") or "").strip()
+    validation_artifacts_value = _normalize_str_list(packet.get("validation_artifacts") or packet.get("validationArtifacts"))
+    if validation_artifact_path and validation_artifact_path not in validation_artifacts_value:
+        validation_artifacts_value.append(validation_artifact_path)
+    if not validation_artifacts_value and validation_artifact_path:
+        validation_artifacts_value = [validation_artifact_path]
+
+    updated_packet = _update_packet_validation_metadata(
+        packet,
+        status="validation_passed",
+        reason=str(validation_evidence.get("reason") or "validation_passed").strip() or "validation_passed",
+        detail=str(validation_evidence.get("detail") or "").strip(),
+        artifact_path=Path(validation_artifact_path or packet_path),
+        artifacts=validation_artifacts_value,
+        updated_at=now,
+    )
+
+    approval_record = {
+        "status": "approved",
+        "approval_status": "approved",
+        "approvalStatus": "approved",
+        "packet_id": packet_id_text,
+        "packetId": packet_id_text,
+        "required_phrase": expected_phrase,
+        "requiredPhrase": expected_phrase,
+        "confirmed_at": now,
+        "confirmedAt": now,
+        "matched": True,
+        "matchedPhrase": True,
+    }
+    merge_outcome = {
+        "status": "approved",
+        "approval_status": "approved",
+        "approvalStatus": "approved",
+        "approved_at": now,
+        "approvedAt": now,
+        "recorded_at": now,
+        "recordedAt": now,
+        "source_repo_state": source_repo_state,
+        "sourceRepoState": source_repo_state,
+        "source_head": current_source_head,
+        "sourceHead": current_source_head,
+        "source_main_mutated": False,
+        "sourceMainMutated": False,
+        "committed": False,
+        "applied": False,
+        "source_repo_mutated": False,
+        "sourceRepoMutated": False,
+        "validation_status": str(validation_evidence.get("status") or ""),
+        "validationStatus": str(validation_evidence.get("status") or ""),
+        "validation_artifact_path": validation_artifact_path,
+        "validationArtifactPath": validation_artifact_path,
+        "validation_reason": str(validation_evidence.get("reason") or "").strip(),
+        "validationReason": str(validation_evidence.get("reason") or "").strip(),
+        "validation_detail": str(validation_evidence.get("detail") or "").strip(),
+        "validationDetail": str(validation_evidence.get("detail") or "").strip(),
+        "preflight": merge_preflight,
+        "preflightStatus": "passed",
+        "preflight_status": "passed",
+        "base_ref": resolved_base_ref,
+        "baseRef": resolved_base_ref,
+        "head_ref": resolved_head_ref,
+        "headRef": resolved_head_ref,
+        "branch": str(packet.get("branch") or "").strip(),
+        "recorded_changed_files": recorded_changed_files,
+        "recordedChangedFiles": recorded_changed_files,
+        "current_changed_files": current_changed_files,
+        "currentChangedFiles": current_changed_files,
+        "changed_files_match": True,
+        "changedFilesMatch": True,
+        "detail": "Merge approval recorded without auto-committing source changes.",
+    }
+
+    updated_packet["status"] = "approved"
+    updated_packet["approval_status"] = "approved"
+    updated_packet["approvalStatus"] = "approved"
+    updated_packet["approved_at"] = now
+    updated_packet["approvedAt"] = now
+    updated_packet["merge_recorded_at"] = now
+    updated_packet["mergeRecordedAt"] = now
+    updated_packet["merge_status"] = "approved"
+    updated_packet["mergeStatus"] = "approved"
+    updated_packet["approval"] = approval_record
+    updated_packet["merge_outcome"] = merge_outcome
+    updated_packet["mergeOutcome"] = merge_outcome
+    updated_packet["merge_preflight"] = merge_preflight
+    updated_packet["mergePreflight"] = merge_preflight
+    updated_packet["validation_artifact_path"] = validation_artifact_path
+    updated_packet["validationArtifactPath"] = validation_artifact_path
+    updated_packet["validation_artifacts"] = validation_artifacts_value
+    updated_packet["validationArtifacts"] = validation_artifacts_value
+    updated_packet["updated_at"] = now
+
+    atomic_write_json(packet_path, updated_packet)
+
+    index = load_branch_index(source_repo_path)
+    index_entry = {
+        "id": packet_id_text,
+        "source_repo": source_repo_path.as_posix(),
+        "run_id": str(packet.get("run_id") or packet.get("runId") or "").strip(),
+        "task_ids": _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds")),
+        "base_ref": resolved_base_ref,
+        "head_ref": resolved_head_ref,
+        "branch": str(packet.get("branch") or "").strip(),
+        "created_at": str(packet.get("created_at") or packet.get("createdAt") or now),
+        "updated_at": now,
+        "packet_path": packet_path.as_posix(),
+        "status": "approved",
+        "approval_status": "approved",
+        "validation_status": "validation_passed",
+    }
+    updated_index = _upsert_index_entry(index, index_entry)
+    _write_branch_index(source_repo_path, updated_index)
+
+    return {
+        "ok": True,
+        "action": "merge",
+        "status": "approved",
+        "approval_status": "approved",
+        "packet_id": packet_id_text,
+        "packet_path": packet_path.as_posix(),
+        "packet": updated_packet,
+        "approval": approval_record,
+        "merge_preflight": merge_preflight,
+        "merge_outcome": merge_outcome,
+        "validation_status": "validation_passed",
+        "validation_artifact_path": validation_artifact_path,
+        "validation_artifacts": validation_artifacts_value,
+        "source_head": current_source_head,
+        "source_repo_state": source_repo_state,
+        "source_main_mutated": False,
+        "summary": merge_outcome,
+    }

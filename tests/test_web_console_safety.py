@@ -457,6 +457,98 @@ class WebConsoleSafetyTests(unittest.TestCase):
             "cleanupPath": worktree["cleanupPath"],
         }
 
+    def _prepare_pr_queue_merge_packet(self) -> dict[str, object]:
+        from agent_runner.gitops import git_head
+        from agent_runner.pr_queue import queue_review_packet
+
+        source_head_before = self._init_repo()
+        goal_trace = [
+            {
+                "goal_ref": "GOAL-1",
+                "goal_text": "Validate the PR queue merge gate through the web console.",
+            }
+        ]
+        feature_path = self.repo / "feature.txt"
+        feature_path.write_text("feature\n", encoding="utf-8")
+        self._git("add", "feature.txt")
+        self._git("commit", "-m", "feature")
+        branch_head = self._git("rev-parse", "HEAD")
+        branch_name = self._git("branch", "--show-current") or "master"
+
+        packet_result = queue_review_packet(
+            self.repo,
+            run_id=self.run_dir.name,
+            task_ids=["T1"],
+            base_ref=source_head_before,
+            head_ref=branch_head,
+            branch=branch_name,
+            created_at="2026-04-26T12:00:00Z",
+            source_head_before=source_head_before,
+            source_head_after=git_head(self.repo),
+            worktree_dir="",
+            validation_status="validation_pending",
+            validation_artifacts=[],
+            qa_notes=["ready for validation"],
+            goal_trace=goal_trace,
+            changed_files=["feature.txt"],
+            status="pr_queued",
+        )
+
+        run_dir = self.repo / ".AgentCLI" / "agent_runs" / self.run_dir.name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": 1,
+            "build_enabled": True,
+            "run_tests": True,
+            "build_cmd": ["python", "-B", "-m", "py_compile", "agent_runner/pr_queue.py"],
+            "test_cmd": ["python", "-B", "-m", "unittest", "discover", "-s", "tests"],
+            "build_timeout_seconds": 60,
+            "test_timeout_seconds": 60,
+        }
+        (run_dir / "last_run_summary.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        validation_root = run_dir / "pr_queue_validation" / str(packet_result["packet_id"]) / "attempt_01"
+        validation_root.mkdir(parents=True, exist_ok=True)
+        validation_path = validation_root / "validation.json"
+        validation_payload = {
+            "schema_version": 1,
+            "kind": "qa_validation_attempt",
+            "task_id": "T1",
+            "task_title": "Validate PR queue merge gate through the web console.",
+            "cycle": 1,
+            "step": 1,
+            "attempt": 1,
+            "status": "validation_passed",
+            "validation_status": "validation_passed",
+            "validation_reason": "validation_complete",
+            "validation_detail": "Validation completed for the merge gate test.",
+            "goal_trace": goal_trace,
+            "qa_notes": ["ready for validation"],
+            "summary": "Validation completed for the merge gate test.",
+            "detail": "Validation completed for the merge gate test.",
+            "failure_summary": "",
+            "artifact_path": validation_path.as_posix(),
+        }
+        validation_path.write_text(json.dumps(validation_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        packet_path = Path(packet_result["packet_path"])
+        packet_data = json.loads(packet_path.read_text(encoding="utf-8"))
+        packet_data["status"] = "validation_passed"
+        packet_data["validation_status"] = "validation_passed"
+        packet_data["validationStatus"] = "validation_passed"
+        packet_data["validation_artifact_path"] = validation_path.as_posix()
+        packet_data["validationArtifactPath"] = validation_path.as_posix()
+        packet_data["validation_artifacts"] = [validation_path.as_posix()]
+        packet_data["validationArtifacts"] = [validation_path.as_posix()]
+        packet_data["updated_at"] = packet_data.get("updated_at") or ""
+        packet_path.write_text(json.dumps(packet_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        return {
+            "packet_id": packet_result["packet_id"],
+            "packet_path": packet_path,
+            "source_head_before": source_head_before,
+        }
+
     def test_runner_controls_are_disabled_until_opt_in(self) -> None:
         client, app = _create_client(self.repo, enable_runner_controls=False, config_path=self.config_path)
 
@@ -2257,6 +2349,72 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("@@ -1 +1 @@", payload["error"]["details"]["failed_hunks"][0]["header"])
         self.assertTrue(self.pending_path.exists())
         self.assertEqual(snapshot["worktree"]["sourceRepo"], payload["worktree"]["sourceRepo"])
+
+    def test_pr_queue_merge_records_approval_without_committing(self) -> None:
+        packet = self._prepare_pr_queue_merge_packet()
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+        confirmation = f"MERGE PR {packet['packet_id']}"
+        head_before = self._git("rev-parse", "HEAD")
+
+        response = client.post(
+            "/api/pr-queue/merge",
+            json={"packetId": packet["packet_id"], "confirmation": confirmation},
+        )
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual("merge", payload["action"])
+        self.assertEqual("approved", payload["status"])
+        self.assertEqual("approved", payload["result"]["status"])
+        self.assertEqual(head_before, self._git("rev-parse", "HEAD"))
+
+        packet_data = json.loads(packet["packet_path"].read_text(encoding="utf-8"))
+        self.assertEqual("approved", packet_data["status"])
+        self.assertEqual("validation_passed", packet_data["validation_status"])
+        self.assertEqual(confirmation, packet_data["approval"]["required_phrase"])
+
+    def test_pr_queue_merge_rejects_approval_mismatch(self) -> None:
+        packet = self._prepare_pr_queue_merge_packet()
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        response = client.post(
+            "/api/pr-queue/merge",
+            json={"packetId": packet["packet_id"], "confirmation": "WRONG"},
+        )
+        self.assertEqual(400, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("approval_mismatch", payload["error"]["code"])
+
+    def test_pr_queue_merge_is_disabled_until_opt_in(self) -> None:
+        client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=self.config_path)
+
+        response = client.post(
+            "/api/pr-queue/merge",
+            json={"packetId": "pr-queue-demo", "confirmation": "MERGE PR pr-queue-demo"},
+        )
+        self.assertEqual(403, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("pr_queue_actions_disabled", payload["error"]["code"])
+
+    def test_pr_queue_merge_is_blocked_on_lan_binds_without_trusted_network(self) -> None:
+        client, _ = _create_client(
+            self.repo,
+            enable_runner_controls=True,
+            config_path=self.config_path,
+            host="0.0.0.0",
+            trusted_network=False,
+        )
+
+        response = client.post(
+            "/api/pr-queue/merge",
+            json={"packetId": "pr-queue-demo", "confirmation": "MERGE PR pr-queue-demo"},
+        )
+        self.assertEqual(403, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("lan_safety_mutation_blocked", payload["error"]["code"])
 
     def test_config_save_is_disabled_until_opt_in(self) -> None:
         _write_config(self.config_path, self.repo)

@@ -20,7 +20,7 @@ AgentCLI Web currently runs as `one repo, one web instance`.
 Verified on 2026-04-26 with a local server and Playwright:
 
 - Static console serving works from `agent_runner.web`.
-- Live FastAPI routes cover `/api/health`, `/api/status`, `/api/progress`, `/api/history`, `/api/logs`, `/api/logs/tail`, `/api/logs/live`, `/api/worktree`, `/api/worktree/diagnostics`, guarded `/api/config`, `/api/config/restore`, `/api/config/save`, `/api/prompts`, `/api/prompts/read`, `/api/prompts/content`, `/api/prompts/save`, `/api/prompts/restore`, `/api/goals`, `/api/goals/save`, `/api/runner/status`, `/api/runner/start`, `/api/runner/stop`, `/api/runner/reload`, `/api/runner/restart`, `/api/worktree/merge`, and `/api/worktree/discard`.
+- Live FastAPI routes cover `/api/health`, `/api/status`, `/api/progress`, `/api/history`, `/api/logs`, `/api/logs/tail`, `/api/logs/live`, `/api/worktree`, `/api/worktree/diagnostics`, guarded `/api/config`, `/api/config/restore`, `/api/config/save`, `/api/prompts`, `/api/prompts/read`, `/api/prompts/content`, `/api/prompts/save`, `/api/prompts/restore`, `/api/goals`, `/api/goals/save`, `/api/runner/status`, `/api/runner/start`, `/api/runner/stop`, `/api/runner/reload`, `/api/runner/restart`, `/api/worktree/merge`, `/api/worktree/discard`, and `/api/pr-queue/merge`.
 - Backup creation happens inside save/restore flows; there is no standalone `/api/*/backup` route family.
 - Read-only worktree diagnostics now scan `.AgentCLI/agent_runs`, the central pending marker, patch paths, cleanup-failed artifacts, and generated worktree directories without deleting anything by default.
 - Additional read-only contracts now cover Goals metadata and backend log tailing.
@@ -28,6 +28,7 @@ Verified on 2026-04-26 with a local server and Playwright:
 - The explicit prompt-read path stays available for the editor flow after a user selects a prompt; the inventory view remains redacted and the raw-content path is only used by that explicit editor request.
 - The UI has first-pass routes for Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, and Worktree Review.
 - The shell now exposes `/worktree` for the same diagnostics summary.
+- PR queue merge approval is now gated by a validated packet, an exact `MERGE PR <packet_id>` confirmation phrase, and the same mutating-control/LAN safety rules as other write actions.
 - Checked-in Playwright smoke coverage now exercises Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, EN/KO Dashboard and Config locale switching, and a mobile-width viewport.
 - Runner controls are disabled by default and require explicit opt-in.
 - Config saves now reuse that opt-in and create a timestamped backup before atomic disk writes.

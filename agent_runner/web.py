@@ -48,6 +48,7 @@ from .gitops import (
     worktree_resolution_actions,
     WorktreeSafetyError,
 )
+from .pr_queue import PrQueueMergeError, merge_review_packet
 from .prompts import (
     DEV_INSTRUCTIONS_DEFAULT,
     DEV_TASK_TEMPLATE_DEFAULT,
@@ -8889,6 +8890,151 @@ def create_app(
                 ok=True,
                 status=result_status,
                 message=message,
+                result=result,
+                busy_override=False,
+            )
+        finally:
+            control_lock.release()
+
+    def _pr_queue_action_response(
+        *,
+        action: str,
+        status_code: int,
+        ok: bool,
+        status: str,
+        message: str,
+        error_code: str | None = None,
+        details: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+        busy_override: bool | None = None,
+    ) -> Any:
+        snapshot = _snapshot(busy_override=busy_override)
+        payload: dict[str, Any] = {
+            "ok": ok,
+            "action": action,
+            "status": status,
+            "message": message,
+            "runner_control": snapshot.get("runner_control", {}),
+            "snapshot": snapshot,
+            "repo": snapshot.get("repo", {}),
+            "latest_run_dir": snapshot.get("latest_run_dir"),
+            "progress": snapshot.get("progress", {}),
+        }
+        if error_code:
+            payload["error"] = {
+                "code": error_code,
+                "message": message,
+            }
+            if details:
+                payload["error"]["details"] = details
+        if result is not None:
+            payload["result"] = result
+        return JSONResponse(status_code=status_code, content=payload)
+
+    def _pr_queue_action_disabled(action: str) -> Any:
+        control = _runner_control_snapshot().get("runner_control", {})
+        message = str(LAN_SAFETY_MUTATION_DISABLED_MESSAGE if lan_safety_active else control.get("message") or "PR queue merge actions are disabled.")
+        details = {
+            "enabled": bool(control.get("enabled")),
+            "source": control.get("source", ""),
+            "bind_host": bind_host,
+            "trusted_network": bool(trusted_network),
+            "reason": str(message or controls_disabled_reason or ""),
+        }
+        if lan_safety_active:
+            details.update(_lan_safety_error_details(f"pr-queue-{action}"))
+        return _pr_queue_action_response(
+            action=action,
+            status_code=403,
+            ok=False,
+            status="lan_safety_blocked" if lan_safety_active else "disabled",
+            message=message,
+            error_code="lan_safety_mutation_blocked" if lan_safety_active else "pr_queue_actions_disabled",
+            details=details,
+            busy_override=False,
+        )
+
+    async def _pr_queue_action_body(request: Request) -> dict[str, Any] | None:
+        try:
+            payload = await request.json()
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @app.post("/api/pr-queue/merge")
+    @app.post("/api/pr_queue/merge")
+    async def api_pr_queue_merge(request: Request) -> Any:
+        if not controls_enabled:
+            return _pr_queue_action_disabled("merge")
+        if not control_lock.acquire(blocking=False):
+            return _pr_queue_action_response(
+                action="merge",
+                status_code=409,
+                ok=False,
+                status="busy",
+                message="A PR queue merge request is already in flight.",
+                error_code="pr_queue_actions_busy",
+                busy_override=True,
+            )
+
+        try:
+            body = await _pr_queue_action_body(request)
+            if body is None:
+                return _pr_queue_action_response(
+                    action="merge",
+                    status_code=400,
+                    ok=False,
+                    status="error",
+                    message="PR queue merge request body must be JSON.",
+                    error_code="invalid_json",
+                    busy_override=False,
+                )
+
+            packet_id = _pick_text(body.get("packetId"), body.get("packet_id"), body.get("id"))
+            if not packet_id:
+                return _pr_queue_action_response(
+                    action="merge",
+                    status_code=400,
+                    ok=False,
+                    status="invalid_request",
+                    message="A PR packet id is required.",
+                    error_code="pr_queue_packet_id_required",
+                    busy_override=False,
+                )
+
+            approval_phrase = _pick_text(body.get("confirmation"), body.get("confirm"), body.get("phrase"), body.get("token"))
+
+            try:
+                result = merge_review_packet(repo_root, packet_id, approval_phrase=approval_phrase)
+            except PrQueueMergeError as ex:
+                return _pr_queue_action_response(
+                    action="merge",
+                    status_code=ex.status_code,
+                    ok=False,
+                    status=ex.status,
+                    message=str(ex),
+                    error_code=ex.code,
+                    details=ex.details or None,
+                    busy_override=False,
+                )
+            except Exception as ex:
+                return _pr_queue_action_response(
+                    action="merge",
+                    status_code=500,
+                    ok=False,
+                    status="error",
+                    message=f"PR queue merge failed: {ex}",
+                    error_code="pr_queue_merge_failed",
+                    details={"packet_id": packet_id},
+                    busy_override=False,
+                )
+
+            return _pr_queue_action_response(
+                action="merge",
+                status_code=200,
+                ok=True,
+                status="approved",
+                message="PR packet approval recorded without auto-committing source changes.",
                 result=result,
                 busy_override=False,
             )

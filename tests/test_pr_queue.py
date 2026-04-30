@@ -24,9 +24,12 @@ from agent_runner.gitops import (
     remove_worktree,
 )
 from agent_runner.pr_queue import (
+    PrQueueMergeError,
     load_branch_index,
     pr_branch_index_path,
     pr_packet_path,
+    merge_review_packet,
+    pr_queue_merge_confirmation_phrase,
     queue_review_packet,
     validate_review_packet,
 )
@@ -347,6 +350,87 @@ class PRQueueTests(unittest.TestCase):
             "task_branch": tb,
         }
 
+    def _set_packet_validation_status(self, packet: dict[str, object], validation_status: str) -> None:
+        packet_path = Path(packet["packet_path"])
+        packet_data = json.loads(packet_path.read_text(encoding="utf-8"))
+        packet_data["status"] = validation_status
+        packet_data["validation_status"] = validation_status
+        packet_data["validationStatus"] = validation_status
+        packet_data["updated_at"] = packet_data.get("updated_at") or packet_data.get("updatedAt") or ""
+        packet_path.write_text(json.dumps(packet_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def _prepare_validated_packet(self) -> dict[str, object]:
+        packet = self._prepare_validation_packet()
+        self._write_pr_queue_validation_config(build_enabled=True, run_tests=True)
+
+        async def fake_run_build_validation_async(
+            repo: Path,
+            build_cmd: object,
+            build_timeout_sec: int,
+            legacy_build_target: str,
+            log_path: Path,
+            *,
+            stop_path: Path | None = None,
+            max_output_bytes: int = 10_000_000,
+            command_repo: Path | None = None,
+        ) -> dict[str, object]:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("build ok\n", encoding="utf-8")
+            return {
+                "name": "build",
+                "kind": "compile",
+                "gate": "build",
+                "cmd": ["python", "-B", "-m", "py_compile", "agent_runner/pr_queue.py"],
+                "rc": 0,
+                "ok": True,
+                "status": "passed",
+                "artifact_path": log_path.as_posix(),
+                "artifactPath": log_path.as_posix(),
+                "log_path": log_path.as_posix(),
+                "logPath": log_path.as_posix(),
+                "summary": "build ok",
+                "failure_summary": "",
+                "failureSummary": "",
+            }
+
+        async def fake_run_test_validation_async(
+            repo: Path,
+            test_cmd: object,
+            test_timeout_sec: int,
+            legacy_test_target: str,
+            legacy_test_filter: str,
+            log_path: Path,
+            *,
+            stop_path: Path | None = None,
+            max_output_bytes: int = 10_000_000,
+            command_repo: Path | None = None,
+        ) -> dict[str, object]:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("test ok\n", encoding="utf-8")
+            return {
+                "name": "test",
+                "kind": "test",
+                "gate": "test",
+                "cmd": ["python", "-B", "-m", "unittest", "discover", "-s", "tests"],
+                "rc": 0,
+                "ok": True,
+                "status": "passed",
+                "artifact_path": log_path.as_posix(),
+                "artifactPath": log_path.as_posix(),
+                "log_path": log_path.as_posix(),
+                "logPath": log_path.as_posix(),
+                "summary": "test ok",
+                "failure_summary": "",
+                "failureSummary": "",
+            }
+
+        with (
+            patch("agent_runner.pr_queue.run_build_validation_async", new=fake_run_build_validation_async),
+            patch("agent_runner.pr_queue.run_test_validation_async", new=fake_run_test_validation_async),
+        ):
+            validate_review_packet(self.repo, str(packet["packet_id"]))
+        return packet
+
     def test_validate_review_packet_uses_isolated_worktree_and_persists_artifacts(self) -> None:
         packet = self._prepare_validation_packet()
         self._write_pr_queue_validation_config(build_enabled=True, run_tests=True)
@@ -610,6 +694,85 @@ class PRQueueTests(unittest.TestCase):
         self.assertEqual("build_failed", packet_data["validation_reason"])
         self.assertIn("command not found", packet_data["validation_detail"])
         self.assertTrue(all(record["goal_trace"] == packet["goal_trace"] for record in result["validation_records"]))
+
+    def test_merge_review_packet_records_approval_after_validation_passed(self) -> None:
+        packet = self._prepare_validated_packet()
+        expected_phrase = pr_queue_merge_confirmation_phrase(str(packet["packet_id"]))
+        source_head_before = git_head(self.repo)
+
+        result = merge_review_packet(self.repo, str(packet["packet_id"]), approval_phrase=expected_phrase)
+        packet_data = json.loads(Path(result["packet_path"]).read_text(encoding="utf-8"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("merge", result["action"])
+        self.assertEqual("approved", result["status"])
+        self.assertEqual("approved", result["approval_status"])
+        self.assertEqual(expected_phrase, result["approval"]["required_phrase"])
+        self.assertEqual("approved", result["merge_outcome"]["status"])
+        self.assertFalse(result["merge_outcome"]["committed"])
+        self.assertFalse(result["source_main_mutated"])
+        self.assertEqual(source_head_before, git_head(self.repo))
+        self.assertEqual("approved", packet_data["status"])
+        self.assertEqual("approved", packet_data["approval_status"])
+        self.assertEqual("approved", packet_data["merge_status"])
+        self.assertEqual("validation_passed", packet_data["validation_status"])
+        self.assertEqual(expected_phrase, packet_data["approval"]["required_phrase"])
+
+    def test_merge_review_packet_rejects_missing_packet(self) -> None:
+        with self.assertRaises(PrQueueMergeError) as ctx:
+            merge_review_packet(
+                self.repo,
+                "pr-missing",
+                approval_phrase=pr_queue_merge_confirmation_phrase("pr-missing"),
+            )
+        self.assertEqual("packet_missing", ctx.exception.code)
+
+    def test_merge_review_packet_rejects_validation_statuses_that_cannot_merge(self) -> None:
+        packet = self._prepare_validation_packet()
+        for validation_status in ("validation_pending", "tests_skipped", "no_tests_found", "validation_failed", "blocked_env"):
+            with self.subTest(validation_status=validation_status):
+                self._set_packet_validation_status(packet, validation_status)
+                with self.assertRaises(PrQueueMergeError) as ctx:
+                    merge_review_packet(
+                        self.repo,
+                        str(packet["packet_id"]),
+                        approval_phrase=pr_queue_merge_confirmation_phrase(str(packet["packet_id"])),
+                    )
+                self.assertEqual(validation_status, ctx.exception.code)
+
+    def test_merge_review_packet_rejects_source_dirty(self) -> None:
+        packet = self._prepare_validated_packet()
+        dirty_path = self.repo / "dirty.txt"
+        dirty_path.write_text("dirty\n", encoding="utf-8")
+
+        with self.assertRaises(PrQueueMergeError) as ctx:
+            merge_review_packet(
+                self.repo,
+                str(packet["packet_id"]),
+                approval_phrase=pr_queue_merge_confirmation_phrase(str(packet["packet_id"])),
+            )
+        self.assertEqual("source_dirty", ctx.exception.code)
+
+    def test_merge_review_packet_rejects_stale_packet_after_source_head_changes(self) -> None:
+        packet = self._prepare_validated_packet()
+        (self.repo / "advance.txt").write_text("advance\n", encoding="utf-8")
+        self._git("add", "advance.txt")
+        self._git("commit", "-m", "advance")
+
+        with self.assertRaises(PrQueueMergeError) as ctx:
+            merge_review_packet(
+                self.repo,
+                str(packet["packet_id"]),
+                approval_phrase=pr_queue_merge_confirmation_phrase(str(packet["packet_id"])),
+            )
+        self.assertEqual("packet_stale", ctx.exception.code)
+
+    def test_merge_review_packet_rejects_approval_mismatch(self) -> None:
+        packet = self._prepare_validated_packet()
+
+        with self.assertRaises(PrQueueMergeError) as ctx:
+            merge_review_packet(self.repo, str(packet["packet_id"]), approval_phrase="WRONG")
+        self.assertEqual("approval_mismatch", ctx.exception.code)
 
 
 if __name__ == "__main__":
