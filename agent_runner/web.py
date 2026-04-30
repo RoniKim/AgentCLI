@@ -62,6 +62,7 @@ from .prompts import (
     REPORTER_INSTRUCTIONS_DEFAULT,
     _read_text_robust,
 )
+from .pr_queue import load_branch_index, pr_packet_path, pr_queue_root
 from .process_guard import _pid_alive, _pid_create_time_ticks, _pid_executable_path, init_process_guard, terminate_all_children
 from .run_dir import find_latest_run_dir
 from .shared import coerce_roles_arg
@@ -223,6 +224,14 @@ LAN_SAFETY_PROMPT_READ_DISABLED_MESSAGE = (
 WEB_INSTANCE_LOCK_FILENAME = "web_console.lock.json"
 _WEB_INSTANCE_LOCAL_HOLDS: dict[str, dict[str, Any]] = {}
 _WEB_INSTANCE_LOCAL_HOLDS_LOCK = threading.Lock()
+PR_QUEUE_MAX_ITEMS = 50
+PR_QUEUE_MAX_NOTES = 12
+PR_QUEUE_MAX_GOAL_REFS = 16
+PR_QUEUE_MAX_COMMITS = 20
+PR_QUEUE_MAX_CHANGED_FILES = 80
+PR_QUEUE_MAX_VALIDATION_ARTIFACTS = 16
+PR_QUEUE_ARTIFACT_PREVIEW_LINES = 80
+PR_QUEUE_ARTIFACT_PREVIEW_CHARS = 8000
 
 
 def _repo_root(repo: Path | str | None) -> Path:
@@ -265,6 +274,7 @@ def fallbackSectionMessage(kind: str) -> str:
         "metrics": "No metrics snapshot is available yet.",
         "history": "Run history is empty.",
         "worktree": "No pending worktree merge is available.",
+        "prQueue": "No PR queue packets are available.",
         "runnerControl": "Runner controls are unavailable in fallback mode.",
     }
     return messages.get(kind, "No data available yet.")
@@ -801,6 +811,559 @@ def _safe_jsonl(path: Path, *, max_items: int = 400) -> list[dict[str, Any]]:
     except Exception:
         return []
     return list(rows)
+
+
+def _pr_queue_string_list(value: Any, *, limit: int = 100) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        try:
+            raw_items = list(value)
+        except Exception:
+            raw_items = [value]
+    items: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        items.append(text)
+        if len(items) >= max(1, int(limit)):
+            break
+    return items
+
+
+def _pr_queue_object_list(value: Any, *, limit: int = 100) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, tuple):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+    return [item for item in raw_items if item not in (None, "")][: max(1, int(limit))]
+
+
+def _pr_queue_goal_ref(item: Any) -> str:
+    if isinstance(item, dict):
+        return _pick_text(
+            item.get("goal_ref"),
+            item.get("goalRef"),
+            item.get("ref"),
+            item.get("id"),
+            item.get("goal_id"),
+            item.get("goalId"),
+            item.get("text"),
+            item.get("goal_text"),
+            item.get("goalText"),
+        )
+    return str(item or "").strip()
+
+
+def _pr_queue_run_dir(repo_root: Path, packet: dict[str, Any]) -> Path | None:
+    run_id = _pick_text(packet.get("run_id"), packet.get("runId"))
+    run_dir_text = _pick_text(packet.get("run_dir"), packet.get("runDir"))
+    candidates: list[Path] = []
+    if run_dir_text:
+        candidates.append(Path(run_dir_text).expanduser())
+    if run_id:
+        candidates.append(repo_root / ".AgentCLI" / "agent_runs" / run_id)
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if resolved.exists() and resolved.is_dir():
+            return resolved
+    return None
+
+
+def _pr_queue_resolve_agent_artifact(repo_root: Path, path_text: str) -> Path | None:
+    raw = str(path_text or "").strip()
+    if not raw:
+        return None
+    try:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = repo_root / raw
+        resolved = candidate.resolve()
+    except Exception:
+        return None
+    agent_root = (repo_root / ".AgentCLI").resolve()
+    try:
+        if not _path_is_within(resolved, agent_root):
+            return None
+    except Exception:
+        return None
+    return resolved
+
+
+def _pr_queue_packet_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or not re.fullmatch(r"[A-Za-z0-9._-]+", text):
+        return ""
+    return text
+
+
+def _pr_queue_packet_paths(repo_root: Path) -> list[Path]:
+    queue_root = pr_queue_root(repo_root)
+    if not queue_root.exists() or not queue_root.is_dir():
+        return []
+    paths = [
+        path
+        for path in queue_root.glob("*.json")
+        if path.is_file() and path.name != "branch_index.json"
+    ]
+    try:
+        index = load_branch_index(repo_root)
+    except Exception:
+        index = {"entries": []}
+    ordered: list[Path] = []
+    seen: set[str] = set()
+    for entry in index.get("entries", []) if isinstance(index, dict) else []:
+        if not isinstance(entry, dict):
+            continue
+        packet_path_text = _pick_text(entry.get("packet_path"), entry.get("packetPath"))
+        packet_id = _pr_queue_packet_id(entry.get("id"))
+        candidate: Path | None = None
+        if packet_path_text:
+            candidate = _pr_queue_resolve_agent_artifact(repo_root, packet_path_text)
+        if candidate is None and packet_id:
+            try:
+                candidate = pr_packet_path(repo_root, packet_id).resolve()
+            except Exception:
+                candidate = None
+        if candidate is not None and candidate.exists() and candidate.is_file():
+            key = candidate.as_posix()
+            if key not in seen:
+                seen.add(key)
+                ordered.append(candidate)
+    for path in sorted(paths, key=lambda item: (item.stat().st_mtime if item.exists() else 0, item.name), reverse=True):
+        try:
+            key = path.resolve().as_posix()
+        except Exception:
+            key = path.as_posix()
+        if key not in seen:
+            seen.add(key)
+            ordered.append(path)
+    return ordered[:PR_QUEUE_MAX_ITEMS]
+
+
+def _pr_queue_load_packet(path: Path) -> dict[str, Any]:
+    payload = _safe_json(path, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _pr_queue_find_packet(repo_root: Path, packet_id: str) -> tuple[Path, dict[str, Any]] | None:
+    packet_id_text = _pr_queue_packet_id(packet_id)
+    if not packet_id_text:
+        return None
+    queue_root = pr_queue_root(repo_root).resolve()
+    try:
+        candidate = pr_packet_path(repo_root, packet_id_text).resolve()
+    except Exception:
+        return None
+    if not _path_is_within(candidate, queue_root) or not candidate.exists() or not candidate.is_file():
+        return None
+    packet = _pr_queue_load_packet(candidate)
+    if not packet:
+        return None
+    return candidate, packet
+
+
+def _pr_queue_artifact_preview(path: Path) -> dict[str, Any]:
+    exists = path.exists() and path.is_file()
+    preview = ""
+    truncated = False
+    size = 0
+    if exists:
+        try:
+            size = path.stat().st_size
+        except Exception:
+            size = 0
+        dq: deque[str] = deque(maxlen=PR_QUEUE_ARTIFACT_PREVIEW_LINES)
+        char_count = 0
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    text = line.rstrip("\n")
+                    char_count += len(text) + 1
+                    if char_count > PR_QUEUE_ARTIFACT_PREVIEW_CHARS:
+                        truncated = True
+                        break
+                    dq.append(text)
+            preview = "\n".join(dq).strip()
+            if size > PR_QUEUE_ARTIFACT_PREVIEW_CHARS:
+                truncated = True
+        except Exception:
+            preview = ""
+    return {
+        "path": path.as_posix(),
+        "name": path.name,
+        "exists": exists,
+        "size": size,
+        "preview": preview,
+        "truncated": truncated,
+    }
+
+
+def _pr_queue_artifact_records(repo_root: Path, paths: list[str]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path_text in paths:
+        resolved = _pr_queue_resolve_agent_artifact(repo_root, path_text)
+        if resolved is None:
+            records.append(
+                {
+                    "path": str(path_text or ""),
+                    "name": Path(str(path_text or "")).name,
+                    "exists": False,
+                    "size": 0,
+                    "preview": "",
+                    "truncated": False,
+                    "blocked": True,
+                    "reason": "outside_agentcli_artifact_root",
+                }
+            )
+            continue
+        key = resolved.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append(_pr_queue_artifact_preview(resolved))
+        if len(records) >= PR_QUEUE_MAX_VALIDATION_ARTIFACTS:
+            break
+    return records
+
+
+def _pr_queue_diff_artifact_paths(repo_root: Path, packet: dict[str, Any], run_dir: Path | None) -> list[str]:
+    paths = _pr_queue_string_list(
+        _pick_value(packet.get("diff_artifacts"), packet.get("diffArtifacts")),
+        limit=PR_QUEUE_MAX_VALIDATION_ARTIFACTS,
+    )
+    for key in ("patch_path", "patchPath", "patch", "diff_artifact", "diffArtifact"):
+        value = _pick_text(packet.get(key))
+        if value and value not in paths:
+            paths.append(value)
+    preflight = packet.get("merge_preflight") if isinstance(packet.get("merge_preflight"), dict) else packet.get("mergePreflight")
+    if isinstance(preflight, dict):
+        for key in ("patch_path", "patchPath", "patch", "diff_artifact", "diffArtifact"):
+            value = _pick_text(preflight.get(key))
+            if value and value not in paths:
+                paths.append(value)
+    if run_dir is not None:
+        for name in ("worktree.patch", "worktree_dirty_uncommitted.patch"):
+            candidate = run_dir / name
+            if candidate.exists():
+                value = candidate.as_posix()
+                if value not in paths:
+                    paths.append(value)
+    return paths[:PR_QUEUE_MAX_VALIDATION_ARTIFACTS]
+
+
+def _pr_queue_changed_files(repo_root: Path, packet: dict[str, Any], run_dir: Path | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    diff_artifact_paths = _pr_queue_diff_artifact_paths(repo_root, packet, run_dir)
+    diff_artifacts = _pr_queue_artifact_records(repo_root, diff_artifact_paths)
+    diff_files: list[dict[str, Any]] = []
+    for artifact in diff_artifacts:
+        path = _pr_queue_resolve_agent_artifact(repo_root, str(artifact.get("path") or ""))
+        if path is None or not path.exists() or path.suffix.lower() != ".patch":
+            continue
+        try:
+            diff_files = summarize_worktree_diff(
+                path,
+                allow_placeholder=False,
+                max_files=PR_QUEUE_MAX_CHANGED_FILES,
+                max_hunks_per_file=4,
+                max_hunk_lines=10,
+                max_preview_chars=PR_QUEUE_ARTIFACT_PREVIEW_CHARS,
+            )
+        except Exception:
+            diff_files = []
+        if diff_files:
+            break
+    if diff_files:
+        return diff_files[:PR_QUEUE_MAX_CHANGED_FILES], diff_artifacts
+
+    raw_changed = _pick_value(packet.get("changed_files"), packet.get("changedFiles"))
+    changed: list[dict[str, Any]] = []
+    for item in _pr_queue_object_list(raw_changed, limit=PR_QUEUE_MAX_CHANGED_FILES):
+        if isinstance(item, dict):
+            path = _pick_text(item.get("path"), item.get("file"), item.get("name"), item.get("newPath"), item.get("new_path"))
+            if not path:
+                continue
+            changed.append(
+                {
+                    "path": path,
+                    "oldPath": _pick_text(item.get("oldPath"), item.get("old_path"), item.get("sourcePath"), item.get("source_path"), path),
+                    "newPath": _pick_text(item.get("newPath"), item.get("new_path"), item.get("targetPath"), item.get("target_path"), path),
+                    "kind": _pick_text(item.get("kind"), item.get("state"), item.get("type"), "modified"),
+                    "state": _pick_text(item.get("state"), item.get("kind"), item.get("type"), "modified"),
+                    "summary": _pick_text(item.get("summary"), item.get("note"), item.get("message"), "Packet changed file"),
+                    "note": _pick_text(item.get("note"), item.get("message")),
+                    "binary": bool(item.get("binary")),
+                    "deleted": bool(item.get("deleted")),
+                    "renamed": bool(item.get("renamed")),
+                    "large": bool(item.get("large")),
+                    "truncated": bool(item.get("truncated")),
+                    "hunks": item.get("hunks") if isinstance(item.get("hunks"), list) else [],
+                    "lineCount": _coerce_optional_int(item.get("lineCount") or item.get("line_count")) or 0,
+                }
+            )
+        else:
+            path = str(item or "").strip()
+            if path:
+                changed.append(
+                    {
+                        "path": path,
+                        "oldPath": path,
+                        "newPath": path,
+                        "kind": "modified",
+                        "state": "modified",
+                        "summary": "Packet changed file",
+                        "note": "",
+                        "binary": False,
+                        "deleted": False,
+                        "renamed": False,
+                        "large": False,
+                        "truncated": False,
+                        "hunks": [],
+                        "lineCount": 0,
+                    }
+                )
+    return changed, diff_artifacts
+
+
+def _pr_queue_validation_payload(repo_root: Path, packet: dict[str, Any]) -> dict[str, Any]:
+    validation_artifacts = _pr_queue_string_list(
+        _pick_value(packet.get("validation_artifacts"), packet.get("validationArtifacts")),
+        limit=PR_QUEUE_MAX_VALIDATION_ARTIFACTS,
+    )
+    artifact_path = _pick_text(packet.get("validation_artifact_path"), packet.get("validationArtifactPath"))
+    if artifact_path and artifact_path not in validation_artifacts:
+        validation_artifacts.insert(0, artifact_path)
+    artifact_records = _pr_queue_artifact_records(repo_root, validation_artifacts)
+    summary_payload: dict[str, Any] = {}
+    if artifact_path:
+        resolved = _pr_queue_resolve_agent_artifact(repo_root, artifact_path)
+        if resolved is not None:
+            summary_payload = _safe_json(resolved, {})
+            if not isinstance(summary_payload, dict):
+                summary_payload = {}
+    validation_records = summary_payload.get("validation_records") if isinstance(summary_payload.get("validation_records"), list) else summary_payload.get("validationRecords")
+    if not isinstance(validation_records, list):
+        validation_records = []
+    validation_summary = summary_payload.get("validation_summary") if isinstance(summary_payload.get("validation_summary"), dict) else summary_payload.get("validationSummary")
+    if not isinstance(validation_summary, dict):
+        validation_summary = {}
+    return {
+        "status": _pick_text(packet.get("validation_status"), packet.get("validationStatus"), summary_payload.get("validation_status"), summary_payload.get("validationStatus"), summary_payload.get("status"), "validation_pending"),
+        "reason": _pick_text(packet.get("validation_reason"), packet.get("validationReason"), summary_payload.get("validation_reason"), summary_payload.get("validationReason"), summary_payload.get("reason")),
+        "detail": _pick_text(packet.get("validation_detail"), packet.get("validationDetail"), summary_payload.get("validation_detail"), summary_payload.get("validationDetail"), summary_payload.get("detail")),
+        "artifactPath": artifact_path,
+        "artifact_path": artifact_path,
+        "artifacts": artifact_records,
+        "validation_artifacts": artifact_records,
+        "records": [dict(item) for item in validation_records if isinstance(item, dict)][:PR_QUEUE_MAX_VALIDATION_ARTIFACTS],
+        "summary": dict(validation_summary),
+    }
+
+
+def _pr_queue_preflight_payload(packet: dict[str, Any]) -> dict[str, Any]:
+    preflight = packet.get("merge_preflight") if isinstance(packet.get("merge_preflight"), dict) else packet.get("mergePreflight")
+    preflight_payload = dict(preflight) if isinstance(preflight, dict) else {}
+    preflight_payload.setdefault("base_ref", _pick_text(packet.get("base_ref"), packet.get("baseRef")))
+    preflight_payload.setdefault("head_ref", _pick_text(packet.get("head_ref"), packet.get("headRef")))
+    preflight_payload.setdefault("branch", _pick_text(packet.get("branch")))
+    source_main_mutated = bool(packet.get("source_main_mutated") or packet.get("sourceMainMutated") or preflight_payload.get("source_main_mutated") or preflight_payload.get("sourceMainMutated"))
+    preflight_payload["source_main_mutated"] = source_main_mutated
+    preflight_payload["sourceMainMutated"] = source_main_mutated
+    apply_check = preflight_payload.get("applyCheck") if isinstance(preflight_payload.get("applyCheck"), dict) else preflight_payload.get("apply_check")
+    if isinstance(apply_check, dict):
+        preflight_payload["applyCheck"] = dict(apply_check)
+        preflight_payload["apply_check"] = dict(apply_check)
+    return preflight_payload
+
+
+def _pr_queue_blocking_reasons(packet: dict[str, Any], validation: dict[str, Any], preflight: dict[str, Any], changed_files: list[dict[str, Any]]) -> list[dict[str, str]]:
+    reasons: list[dict[str, str]] = []
+
+    def add(kind: str, message: str, detail: str = "") -> None:
+        if not message:
+            return
+        item = {"kind": kind, "message": message, "detail": detail}
+        if item not in reasons:
+            reasons.append(item)
+
+    packet_status = _pick_text(packet.get("status"), "pr_queued")
+    if packet_status not in {"pr_queued", "queued", "review_required"}:
+        add("packet_status", f"Packet status is {packet_status}.", _pick_text(packet.get("recoverable_reason"), packet.get("recoverableReason")))
+    recoverable_reason = _pick_text(packet.get("recoverable_reason"), packet.get("recoverableReason"))
+    if recoverable_reason:
+        add("recoverable", recoverable_reason)
+    for field in ("base_ref", "head_ref", "branch"):
+        if not _pick_text(packet.get(field), packet.get(field.replace("_", ""))):
+            add("missing_metadata", f"Missing {field}.")
+    validation_status = _pick_text(validation.get("status"), "validation_pending")
+    if validation_status != "validation_passed":
+        add("validation", f"Validation status is {validation_status}.", _pick_text(validation.get("reason"), validation.get("detail")))
+    if validation.get("detail") and validation_status in {"validation_failed", "blocked_env", "test_contract_changed"}:
+        add("validation_detail", _pick_text(validation.get("detail")), _pick_text(validation.get("reason")))
+    if bool(preflight.get("source_main_mutated") or preflight.get("sourceMainMutated")):
+        add("source_head", "Source repository HEAD changed during validation.")
+    source_state = _pick_text(preflight.get("source_repo_state"), preflight.get("sourceRepoState"))
+    if source_state and source_state != "clean":
+        add("source_dirty", f"Source repository state is {source_state}.")
+    for key in ("applyCheck", "apply_check", "dirtyPatchCheck", "dirty_patch_check"):
+        check = preflight.get(key)
+        if isinstance(check, dict) and check:
+            ok_value = check.get("ok")
+            status = _pick_text(check.get("status"))
+            if ok_value is False or status in {"failed", "error"}:
+                add("merge_preflight", _pick_text(check.get("message"), f"{key} failed."), _pick_text(check.get("output"), check.get("reason")))
+    if not changed_files:
+        add("diff", "No changed files are available for this packet.")
+    return reasons
+
+
+def _pr_queue_packet_payload(repo_root: Path, path: Path, packet: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
+    run_dir = _pr_queue_run_dir(repo_root, packet)
+    changed_files, diff_artifacts = _pr_queue_changed_files(repo_root, packet, run_dir)
+    validation = _pr_queue_validation_payload(repo_root, packet)
+    preflight = _pr_queue_preflight_payload(packet)
+    goal_trace = _pr_queue_object_list(_pick_value(packet.get("goal_trace"), packet.get("goalTrace")), limit=PR_QUEUE_MAX_GOAL_REFS)
+    goal_refs = [_pr_queue_goal_ref(item) for item in goal_trace]
+    goal_refs = [item for item in goal_refs if item][:PR_QUEUE_MAX_GOAL_REFS]
+    task_ids = _pr_queue_string_list(_pick_value(packet.get("task_ids"), packet.get("taskIds")), limit=20)
+    commits = _pr_queue_object_list(_pick_value(packet.get("commits")), limit=PR_QUEUE_MAX_COMMITS)
+    qa_notes = _pr_queue_string_list(_pick_value(packet.get("qa_notes"), packet.get("qaNotes")), limit=PR_QUEUE_MAX_NOTES)
+    blocking_reasons = _pr_queue_blocking_reasons(packet, validation, preflight, changed_files)
+    packet_id = _pick_text(packet.get("id"), path.stem)
+    base_ref = _pick_text(packet.get("base_ref"), packet.get("baseRef"), preflight.get("base_ref"), preflight.get("baseRef"))
+    head_ref = _pick_text(packet.get("head_ref"), packet.get("headRef"), preflight.get("head_ref"), preflight.get("headRef"))
+    branch = _pick_text(packet.get("branch"), preflight.get("branch"))
+    status = _pick_text(packet.get("status"), "pr_queued")
+    common = {
+        "id": packet_id,
+        "packetId": packet_id,
+        "status": status,
+        "runId": _pick_text(packet.get("run_id"), packet.get("runId")),
+        "run_id": _pick_text(packet.get("run_id"), packet.get("runId")),
+        "taskIds": task_ids,
+        "task_ids": task_ids,
+        "goalTrace": goal_trace,
+        "goal_trace": goal_trace,
+        "goalRefs": goal_refs,
+        "goal_refs": goal_refs,
+        "branch": branch,
+        "baseRef": base_ref,
+        "base_ref": base_ref,
+        "headRef": head_ref,
+        "head_ref": head_ref,
+        "createdAt": _pick_text(packet.get("created_at"), packet.get("createdAt")),
+        "created_at": _pick_text(packet.get("created_at"), packet.get("createdAt")),
+        "updatedAt": _pick_text(packet.get("updated_at"), packet.get("updatedAt")),
+        "updated_at": _pick_text(packet.get("updated_at"), packet.get("updatedAt")),
+        "sourceRepo": _pick_text(packet.get("source_repo"), packet.get("sourceRepo"), repo_root.as_posix()),
+        "source_repo": _pick_text(packet.get("source_repo"), packet.get("sourceRepo"), repo_root.as_posix()),
+        "worktreeDir": _pick_text(packet.get("worktree_dir"), packet.get("worktreeDir")),
+        "worktree_dir": _pick_text(packet.get("worktree_dir"), packet.get("worktreeDir")),
+        "packetPath": path.as_posix(),
+        "packet_path": path.as_posix(),
+        "validationStatus": validation["status"],
+        "validation_status": validation["status"],
+        "mergePreflight": preflight,
+        "merge_preflight": preflight,
+        "mergePreflightStatus": "blocked" if any(item["kind"] in {"merge_preflight", "source_head", "source_dirty"} for item in blocking_reasons) else "ready",
+        "merge_preflight_status": "blocked" if any(item["kind"] in {"merge_preflight", "source_head", "source_dirty"} for item in blocking_reasons) else "ready",
+        "changedFileCount": len(changed_files),
+        "changed_file_count": len(changed_files),
+        "qaNotes": qa_notes,
+        "qa_notes": qa_notes,
+        "blockingReasons": blocking_reasons,
+        "blocking_reasons": blocking_reasons,
+        "commits": commits,
+    }
+    if not detail:
+        return common
+    common.update(
+        {
+            "changedFiles": changed_files,
+            "changed_files": changed_files,
+            "diffFiles": changed_files,
+            "diff_files": changed_files,
+            "diffArtifacts": diff_artifacts,
+            "diff_artifacts": diff_artifacts,
+            "validation": validation,
+            "raw": {},
+        }
+    )
+    return common
+
+
+def _build_pr_queue_payload(repo_root: Path, *, packet_id: str | None = None, detail: bool = False) -> dict[str, Any]:
+    queue_root = pr_queue_root(repo_root)
+    if packet_id:
+        found = _pr_queue_find_packet(repo_root, packet_id)
+        if found is None:
+            return {
+                "ok": False,
+                "state": "missing",
+                "queueRoot": queue_root.as_posix(),
+                "queue_root": queue_root.as_posix(),
+                "items": [],
+                "detail": None,
+                "message": f"PR queue packet not found: {packet_id}",
+            }
+        path, packet = found
+        detail_payload = _pr_queue_packet_payload(repo_root, path, packet, detail=True)
+        return {
+            "ok": True,
+            "state": "ready",
+            "queueRoot": queue_root.as_posix(),
+            "queue_root": queue_root.as_posix(),
+            "items": [detail_payload],
+            "detail": detail_payload,
+            "selectedId": detail_payload["id"],
+            "selected_id": detail_payload["id"],
+            "summary": {"total": 1, "blocked": len(detail_payload.get("blockingReasons", []))},
+        }
+
+    paths = _pr_queue_packet_paths(repo_root)
+    items: list[dict[str, Any]] = []
+    for path in paths:
+        packet = _pr_queue_load_packet(path)
+        if not packet:
+            continue
+        items.append(_pr_queue_packet_payload(repo_root, path, packet, detail=detail))
+    selected_id = items[0]["id"] if items else ""
+    detail_payload = items[0] if detail and items else None
+    summary = {
+        "total": len(items),
+        "blocked": len([item for item in items if item.get("blockingReasons")]),
+        "validationPassed": len([item for item in items if item.get("validationStatus") == "validation_passed"]),
+        "validationPending": len([item for item in items if item.get("validationStatus") == "validation_pending"]),
+        "validationFailed": len([item for item in items if item.get("validationStatus") == "validation_failed"]),
+        "blockedEnv": len([item for item in items if item.get("validationStatus") == "blocked_env"]),
+    }
+    return {
+        "ok": True,
+        "state": "ready" if items else "empty",
+        "queueRoot": queue_root.as_posix(),
+        "queue_root": queue_root.as_posix(),
+        "items": items,
+        "detail": detail_payload,
+        "selectedId": selected_id,
+        "selected_id": selected_id,
+        "summary": summary,
+        "message": "" if items else fallbackSectionMessage("prQueue"),
+    }
 
 
 EXECUTION_STATUS_ALIASES = {
@@ -1386,6 +1949,123 @@ def _redact_web_history_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "items.cycleChangeSummary",
         "items.cycle_change_summary",
     )
+    return redacted
+
+
+def _redact_web_pr_queue_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    def _walk(value: Any) -> Any:
+        if isinstance(value, dict):
+            redacted_value: dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                if key_text in {
+                    "sourceRepo",
+                    "source_repo",
+                    "worktreeDir",
+                    "worktree_dir",
+                    "packetPath",
+                    "packet_path",
+                    "queueRoot",
+                    "queue_root",
+                    "path",
+                    "artifactPath",
+                    "artifact_path",
+                    "preview",
+                    "detail",
+                    "reason",
+                    "summary",
+                    "goal_text",
+                    "goalText",
+                    "validationDetail",
+                    "validation_detail",
+                    "output",
+                    "message",
+                    "qaNotes",
+                    "qa_notes",
+                }:
+                    if key_text in {"qaNotes", "qa_notes"} and isinstance(item, list):
+                        redacted_value[key] = [REDACTED_VALUE for entry in item if entry not in (None, "", False)]
+                    elif isinstance(item, (dict, list)):
+                        redacted_value[key] = _walk(item)
+                    else:
+                        redacted_value[key] = REDACTED_VALUE if item not in (None, "", False, []) else item
+                elif key_text == "lines" and isinstance(item, list):
+                    redacted_value[key] = [REDACTED_VALUE for line in item if line not in (None, "")]
+                elif key_text in {"artifacts", "validation_artifacts", "diffArtifacts", "diff_artifacts"} and isinstance(item, list):
+                    redacted_value[key] = [_walk(entry) for entry in item]
+                elif key_text in {"changedFiles", "changed_files", "diffFiles", "diff_files"} and isinstance(item, list):
+                    redacted_value[key] = [_walk(entry) for entry in item]
+                elif key_text in {"blockingReasons", "blocking_reasons"} and isinstance(item, list):
+                    redacted_value[key] = [_walk(entry) for entry in item]
+                else:
+                    redacted_value[key] = _walk(item)
+            return redacted_value
+        if isinstance(value, list):
+            return [_walk(item) for item in value]
+        return value
+
+    redacted = _walk(deepcopy(payload))
+    if isinstance(redacted, dict):
+        redacted["redaction"] = _web_redaction_meta(
+            "queueRoot",
+            "queue_root",
+            "items.sourceRepo",
+            "items.source_repo",
+            "items.worktreeDir",
+            "items.worktree_dir",
+            "items.packetPath",
+            "items.packet_path",
+            "items.qaNotes",
+            "items.qa_notes",
+            "items.goalTrace.goal_text",
+            "items.goalTrace.goalText",
+            "items.blockingReasons.message",
+            "items.blockingReasons.detail",
+            "items.blockingReasons.reason",
+            "items.blockingReasons.summary",
+            "items.changedFiles.path",
+            "items.changedFiles.summary",
+            "items.changedFiles.hunks.lines",
+            "items.diffArtifacts.path",
+            "items.diffArtifacts.preview",
+            "items.validation.reason",
+            "items.validation.detail",
+            "items.validation.summary",
+            "items.validation.records.message",
+            "items.validation.records.detail",
+            "items.validation.records.reason",
+            "items.validation.records.summary",
+            "items.validation.artifacts.path",
+            "items.validation.artifacts.preview",
+            "detail.sourceRepo",
+            "detail.source_repo",
+            "detail.worktreeDir",
+            "detail.worktree_dir",
+            "detail.packetPath",
+            "detail.packet_path",
+            "detail.qaNotes",
+            "detail.qa_notes",
+            "detail.goalTrace.goal_text",
+            "detail.goalTrace.goalText",
+            "detail.blockingReasons.message",
+            "detail.blockingReasons.detail",
+            "detail.blockingReasons.reason",
+            "detail.blockingReasons.summary",
+            "detail.changedFiles.path",
+            "detail.changedFiles.summary",
+            "detail.changedFiles.hunks.lines",
+            "detail.diffArtifacts.path",
+            "detail.diffArtifacts.preview",
+            "detail.validation.reason",
+            "detail.validation.detail",
+            "detail.validation.summary",
+            "detail.validation.records.message",
+            "detail.validation.records.detail",
+            "detail.validation.records.reason",
+            "detail.validation.records.summary",
+            "detail.validation.artifacts.path",
+            "detail.validation.artifacts.preview",
+        )
     return redacted
 
 
@@ -6750,6 +7430,7 @@ def build_snapshot(
         final_reason=str(progress.get("final_reason") or ""),
     )
     worktree = _build_worktree_payload(repo_root, latest_run_dir, branch=branch)
+    pr_queue = _build_pr_queue_payload(repo_root, detail=False)
     worktree_diagnostics = scan_worktree_diagnostics(repo_root)
     log_tail = _tail_text((latest_run_dir / "cycle_summary.log") if latest_run_dir else Path(""), 80)
     log_source_catalog = _log_tail_source_catalog(latest_run_dir)
@@ -6822,6 +7503,7 @@ def build_snapshot(
     prompt_items = list(prompt_payload.get("items") or []) if isinstance(prompt_payload, dict) else list(prompt_items)
     notifications = _web_apply_redaction(notifications, active=redaction_active, redactor=_redact_web_notifications_payload)
     history = _web_apply_redaction(history, active=redaction_active, redactor=_redact_web_history_payload)
+    pr_queue = _web_apply_redaction(pr_queue, active=redaction_active, redactor=_redact_web_pr_queue_payload)
     runner_control = _web_apply_redaction(runner_control, active=redaction_active, redactor=lambda value: _redact_web_runner_control(value, redact_start_options=True))
     log_summary_payload: dict[str, Any] = {
         "source": {
@@ -6940,6 +7622,8 @@ def build_snapshot(
     notifications_section_state = buildSectionState("notifications", "ready" if notifications else "empty", "" if notifications else fallbackSectionMessage("notifications"))
     metrics_section_state = buildSectionState("metrics", "ready" if has_metrics else "empty", "" if has_metrics else fallbackSectionMessage("metrics"))
     history_section_state = buildSectionState("history", "ready" if history.get("items") else "empty", "" if history.get("items") else fallbackSectionMessage("history"))
+    pr_queue_items = pr_queue.get("items") if isinstance(pr_queue.get("items"), list) else []
+    pr_queue_section_state = buildSectionState("prQueue", "ready" if pr_queue_items else "empty", "" if pr_queue_items else fallbackSectionMessage("prQueue"))
     worktree_status = str(worktree.get("status") or "none").strip()
     if worktree_status == "none":
         worktree_section_status = "empty"
@@ -7034,6 +7718,8 @@ def build_snapshot(
         "history": history,
         "metrics": metrics,
         "notifications": notifications,
+        "pr_queue": pr_queue,
+        "prQueue": pr_queue,
         "worktree": worktree,
         "worktree_diagnostics": worktree_diagnostics,
         "runner_control": runner_control,
@@ -7100,6 +7786,7 @@ def build_snapshot(
             "notifications": notifications_section_state,
             "metrics": metrics_section_state,
             "history": history_section_state,
+            "prQueue": pr_queue_section_state,
             "worktree": worktree_section_state,
             "runnerControl": runner_control_section_state,
         },
@@ -10152,6 +10839,19 @@ def create_app(
     @app.get("/api/history")
     def api_history() -> dict[str, Any]:
         return _section("history")
+
+    @app.get("/api/pr-queue")
+    def api_pr_queue() -> dict[str, Any]:
+        payload = _build_pr_queue_payload(repo_root, detail=False)
+        return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_pr_queue_payload)
+
+    @app.get("/api/pr-queue/{packet_id}")
+    def api_pr_queue_detail(packet_id: str) -> Any:
+        payload = _build_pr_queue_payload(repo_root, packet_id=packet_id, detail=True)
+        payload = _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_pr_queue_payload)
+        if not bool(payload.get("ok")):
+            return JSONResponse(status_code=404, content=payload)
+        return payload
 
     @app.get("/api/worktree")
     def api_worktree() -> dict[str, Any]:

@@ -33,6 +33,7 @@
     'pipeline',
     'logs',
     'backlog',
+    'pr-queue',
     'goals',
     'config',
     'prompts',
@@ -86,6 +87,7 @@
         pipeline: 'Pipeline',
         logs: 'Logs',
         backlog: 'Backlog',
+        prQueue: 'PR Queue',
         goals: 'Goals',
         config: 'Config',
         prompts: 'Prompts',
@@ -138,6 +140,7 @@
         open: 'Open',
         openDashboard: 'Open Dashboard',
         openLogs: 'Open Logs',
+        openPrQueue: 'Open PR Queue',
         openBacklog: 'Open Backlog',
         openGoals: 'Open Goals',
         openConfig: 'Open Config',
@@ -206,6 +209,7 @@
         pauseLiveTail: 'Pause live tail',
         resumeLiveTail: 'Resume live tail',
         openWorktreeReview: 'Open Worktree Review',
+        openPrQueue: 'Open PR Queue',
         openMobilePreview: 'Open mobile workflow',
         openLandingPreview: 'Open Landing preview',
       },
@@ -402,6 +406,51 @@
         environment: 'environment',
         contract: 'test contract',
         regression: 'regression',
+      },
+      prQueue: {
+        title: 'PR Queue',
+        subtitle: 'Read-only local PR packet review',
+        queueSummary: 'Queue summary',
+        packetList: 'Packets',
+        packetDetail: 'Packet detail',
+        noPackets: 'No PR queue packets are available.',
+        noPacketSelected: 'Select a packet to load details.',
+        loadingDetail: 'Loading packet detail...',
+        detailUnavailable: 'Packet detail is unavailable.',
+        taskIds: 'Task IDs',
+        goals: 'GOALS refs',
+        branch: 'Branch',
+        baseHead: 'Base -> head',
+        changedFiles: 'Changed files',
+        validation: 'Validation',
+        qaNotes: 'QA notes',
+        validationLogs: 'Validation logs',
+        mergePreflight: 'Merge preflight',
+        blockingReasons: 'Blocking reasons',
+        diff: 'Diff',
+        diffArtifacts: 'Diff artifacts',
+        commits: 'Commits',
+        readOnly: 'Read-only',
+        actionsDisabled: 'Validate, merge, discard, and rebase are disabled here.',
+        validateAction: 'Validate',
+        mergeAction: 'Merge',
+        discardAction: 'Discard',
+        rebaseAction: 'Rebase',
+        noQaNotes: 'No QA notes were recorded.',
+        noValidationLogs: 'No validation logs were published.',
+        noBlockingReasons: 'No blocking reasons are recorded.',
+        noDiff: 'No per-file diff data is available.',
+        noGoalRefs: 'No GOALS refs recorded.',
+        validationPassed: 'validation passed',
+        validationPending: 'validation pending',
+        validationFailed: 'validation failed',
+        blockedEnv: 'blocked environment',
+        testsSkipped: 'tests skipped',
+        noTestsFound: 'no tests found',
+        mergeReady: 'merge preflight ready',
+        mergeBlocked: 'merge preflight blocked',
+        packetPath: 'Packet path',
+        artifactMissing: 'artifact missing',
       },
       goals: {
         title: 'Goals',
@@ -883,6 +932,7 @@
         pipeline: '파이프라인',
         logs: '로그',
         backlog: '백로그',
+        prQueue: 'PR 큐',
         goals: '목표',
         config: '설정',
         prompts: '프롬프트',
@@ -927,6 +977,7 @@
         confirm: '확인',
         openDashboard: '대시보드 열기',
         openLogs: '로그 열기',
+        openPrQueue: 'PR 큐 열기',
         openBacklog: '백로그 열기',
         openGoals: '목표 열기',
         openConfig: '설정 열기',
@@ -986,6 +1037,7 @@
         pauseLiveTail: '라이브 tail 일시정지',
         resumeLiveTail: '라이브 tail 재개',
         openWorktreeReview: '워크트리 검토 열기',
+        openPrQueue: 'PR 큐 열기',
         openMobilePreview: '모바일 워크플로 열기',
         openLandingPreview: '랜딩 미리보기 열기',
       },
@@ -1109,6 +1161,51 @@
         environment: '환경',
         contract: '테스트 계약',
         regression: '회귀',
+      },
+      prQueue: {
+        title: 'PR 큐',
+        subtitle: '읽기 전용 로컬 PR 패킷 검토',
+        queueSummary: '큐 요약',
+        packetList: '패킷',
+        packetDetail: '패킷 상세',
+        noPackets: '사용 가능한 PR 큐 패킷이 없습니다.',
+        noPacketSelected: '상세 정보를 불러올 패킷을 선택하세요.',
+        loadingDetail: '패킷 상세 정보를 불러오는 중...',
+        detailUnavailable: '패킷 상세 정보를 사용할 수 없습니다.',
+        taskIds: '작업 ID',
+        goals: 'GOALS 참조',
+        branch: '브랜치',
+        baseHead: '기준 -> 헤드',
+        changedFiles: '변경 파일',
+        validation: '검증',
+        qaNotes: 'QA 메모',
+        validationLogs: '검증 로그',
+        mergePreflight: '병합 사전 점검',
+        blockingReasons: '차단 사유',
+        diff: '차이',
+        diffArtifacts: '차이 산출물',
+        commits: '커밋',
+        readOnly: '읽기 전용',
+        actionsDisabled: '검증, 병합, 폐기, 리베이스는 여기서 비활성화되어 있습니다.',
+        validateAction: '검증',
+        mergeAction: '병합',
+        discardAction: '폐기',
+        rebaseAction: '리베이스',
+        noQaNotes: '기록된 QA 메모가 없습니다.',
+        noValidationLogs: '게시된 검증 로그가 없습니다.',
+        noBlockingReasons: '기록된 차단 사유가 없습니다.',
+        noDiff: '파일별 차이 데이터를 사용할 수 없습니다.',
+        noGoalRefs: '기록된 GOALS 참조가 없습니다.',
+        validationPassed: '검증 통과',
+        validationPending: '검증 대기',
+        validationFailed: '검증 실패',
+        blockedEnv: '환경 차단',
+        testsSkipped: '테스트 건너뜀',
+        noTestsFound: '테스트 없음',
+        mergeReady: '병합 사전 점검 준비됨',
+        mergeBlocked: '병합 사전 점검 차단됨',
+        packetPath: '패킷 경로',
+        artifactMissing: '산출물 없음',
       },
       goals: {
         title: '목표',
@@ -2241,6 +2338,7 @@
       pipeline: 'nav.pipeline',
       logs: 'nav.logs',
       backlog: 'nav.backlog',
+      'pr-queue': 'nav.prQueue',
       goals: 'nav.goals',
       config: 'nav.config',
       prompts: 'nav.prompts',
@@ -2278,6 +2376,7 @@
     pipeline: 'g p',
     logs: 'g l',
     backlog: 'g b',
+    'pr-queue': 'g q',
     goals: 'g g',
     config: 'g c',
     prompts: 'g t',
@@ -2949,13 +3048,14 @@
     pipeline: ['stages', 'activeRun'],
     logs: ['logs'],
     backlog: ['backlog'],
+    'pr-queue': ['prQueue'],
     goals: ['goals'],
     config: ['config', 'runnerControl'],
     prompts: ['prompts'],
     history: ['history'],
     notifications: ['notifications'],
     worktree: ['worktree'],
-    mobile: ['activeRun', 'stages', 'logs', 'backlog', 'goals', 'config', 'prompts', 'notifications', 'worktree', 'runnerControl'],
+    mobile: ['activeRun', 'stages', 'logs', 'backlog', 'prQueue', 'goals', 'config', 'prompts', 'notifications', 'worktree', 'runnerControl'],
     landing: ['activeRun'],
   };
 
@@ -5058,6 +5158,7 @@
       metrics: t('common.noDataAvailableYet'),
       history: t('history.emptyState'),
       worktree: t('worktree.noPendingMerge'),
+      prQueue: t('prQueue.noPackets'),
       runnerControl: t('runner.controlsDisabled'),
     };
     return messages[kind] || t('common.noDataAvailableYet');
@@ -6976,6 +7077,109 @@
     };
   }
 
+  function normalizePrQueueArtifact(artifact) {
+    const raw = toObject(artifact);
+    return {
+      path: toText(raw.path, ''),
+      name: toText(raw.name || raw.path, ''),
+      exists: Boolean(raw.exists),
+      size: toMaybeNumber(raw.size) ?? 0,
+      preview: toText(raw.preview, ''),
+      truncated: Boolean(raw.truncated),
+      blocked: Boolean(raw.blocked),
+      reason: toText(raw.reason, ''),
+    };
+  }
+
+  function normalizePrQueueBlockingReason(reason) {
+    const raw = toObject(reason);
+    return {
+      kind: toText(raw.kind, 'blocker'),
+      message: toText(raw.message || raw.title, ''),
+      detail: toText(raw.detail || raw.reason, ''),
+    };
+  }
+
+  function normalizePrQueueValidation(validation, packet = {}) {
+    const raw = toObject(validation);
+    const packetRaw = toObject(packet);
+    return {
+      status: toText(raw.status || raw.validationStatus || packetRaw.validationStatus || packetRaw.validation_status, 'validation_pending'),
+      reason: toText(raw.reason || raw.validationReason || packetRaw.validationReason || packetRaw.validation_reason, ''),
+      detail: toText(raw.detail || raw.validationDetail || packetRaw.validationDetail || packetRaw.validation_detail, ''),
+      artifactPath: toText(raw.artifactPath || raw.artifact_path || packetRaw.validationArtifactPath || packetRaw.validation_artifact_path, ''),
+      artifacts: toArray(raw.artifacts || raw.validation_artifacts || packetRaw.validationArtifacts || packetRaw.validation_artifacts).map(normalizePrQueueArtifact),
+      records: toArray(raw.records || raw.validationRecords || raw.validation_records).filter((item) => item && typeof item === 'object').map((item) => toObject(item)),
+      summary: toObject(raw.summary || raw.validationSummary || raw.validation_summary),
+    };
+  }
+
+  function normalizePrQueuePacket(packet) {
+    const raw = toObject(packet);
+    const id = toText(raw.id || raw.packetId || raw.packet_id, '');
+    const validation = normalizePrQueueValidation(raw.validation, raw);
+    const changedFiles = toArray(raw.changedFiles || raw.changed_files || raw.diffFiles || raw.diff_files).map(normalizeWorktreeDiffFile);
+    const diffArtifacts = toArray(raw.diffArtifacts || raw.diff_artifacts).map(normalizePrQueueArtifact);
+    const blockers = toArray(raw.blockingReasons || raw.blocking_reasons).map(normalizePrQueueBlockingReason).filter((item) => item.message || item.detail);
+    return {
+      id,
+      packetId: id,
+      status: toText(raw.status, 'pr_queued'),
+      runId: toText(raw.runId || raw.run_id, ''),
+      taskIds: toArray(raw.taskIds || raw.task_ids).map((item) => toText(item, '')).filter(Boolean),
+      goalTrace: toArray(raw.goalTrace || raw.goal_trace),
+      goalRefs: toArray(raw.goalRefs || raw.goal_refs).map((item) => toText(item, '')).filter(Boolean),
+      branch: toText(raw.branch, ''),
+      baseRef: toText(raw.baseRef || raw.base_ref, ''),
+      headRef: toText(raw.headRef || raw.head_ref, ''),
+      createdAt: toText(raw.createdAt || raw.created_at, ''),
+      updatedAt: toText(raw.updatedAt || raw.updated_at, ''),
+      sourceRepo: toText(raw.sourceRepo || raw.source_repo, ''),
+      worktreeDir: toText(raw.worktreeDir || raw.worktree_dir, ''),
+      packetPath: toText(raw.packetPath || raw.packet_path, ''),
+      validationStatus: toText(raw.validationStatus || raw.validation_status || validation.status, validation.status),
+      mergePreflight: toObject(raw.mergePreflight || raw.merge_preflight),
+      mergePreflightStatus: toText(raw.mergePreflightStatus || raw.merge_preflight_status, ''),
+      changedFileCount: toNumber(raw.changedFileCount ?? raw.changed_file_count ?? changedFiles.length, changedFiles.length),
+      changedFiles,
+      diffFiles: changedFiles,
+      diffArtifacts,
+      validation,
+      qaNotes: toArray(raw.qaNotes || raw.qa_notes).map((item) => toText(item, '')).filter(Boolean),
+      blockingReasons: blockers,
+      commits: toArray(raw.commits).filter((item) => item && typeof item === 'object').map((item) => toObject(item)),
+    };
+  }
+
+  function adaptPrQueue(prQueue, context = {}) {
+    const raw = toObject(prQueue);
+    const items = toArray(raw.items).map(normalizePrQueuePacket).filter((item) => item.id);
+    const detail = raw.detail ? normalizePrQueuePacket(raw.detail) : null;
+    const summary = toObject(raw.summary);
+    const selectedId = toText(raw.selectedId || raw.selected_id || detail?.id || items[0]?.id || '', '');
+    const stateValue = toText(raw.state, items.length ? 'ready' : 'empty');
+    return {
+      ok: raw.ok !== false,
+      state: stateValue,
+      queueRoot: toText(raw.queueRoot || raw.queue_root, ''),
+      items,
+      detail,
+      selectedId,
+      summary: {
+        total: toNumber(summary.total ?? items.length, items.length),
+        blocked: toNumber(summary.blocked ?? items.filter((item) => item.blockingReasons.length).length, 0),
+        validationPassed: toNumber(summary.validationPassed ?? summary.validation_passed ?? items.filter((item) => item.validationStatus === 'validation_passed').length, 0),
+        validationPending: toNumber(summary.validationPending ?? summary.validation_pending ?? items.filter((item) => item.validationStatus === 'validation_pending').length, 0),
+        validationFailed: toNumber(summary.validationFailed ?? summary.validation_failed ?? items.filter((item) => item.validationStatus === 'validation_failed').length, 0),
+        blockedEnv: toNumber(summary.blockedEnv ?? summary.blocked_env ?? items.filter((item) => item.validationStatus === 'blocked_env').length, 0),
+      },
+      message: toText(raw.message, ''),
+      loadingDetail: false,
+      detailError: '',
+      stateInfo: buildSectionState('prQueue', items.length ? 'ready' : 'empty', items.length ? '' : fallbackSectionMessage('prQueue')),
+    };
+  }
+
   function adaptLiveRun(liveRun, context = {}) {
     const raw = toObject(liveRun);
     const rawActiveRun = toObject(raw.activeRun || raw.active_run || context.activeRun || context.active_run);
@@ -7244,6 +7448,7 @@
     const logs = adaptLogs(raw.logs);
     const notifications = adaptNotifications(raw.notifications);
     const history = adaptHistory(raw.history);
+    const prQueue = adaptPrQueue(raw.pr_queue || raw.prQueue);
     const worktree = adaptWorktree(raw.worktree);
     const worktreeDiagnostics = normalizeWorktreeDiagnostics(raw.worktree_diagnostics || raw.worktreeDiagnostics || {});
     const liveRunSource = {
@@ -7316,6 +7521,7 @@
       historySummary: history.summary,
       metrics,
       notifications: notifications.items,
+      prQueue,
       worktreeMerge: worktree,
       worktreeDiagnostics,
       runnerControl,
@@ -7340,6 +7546,7 @@
         notifications: notifications.state,
         metrics: metrics.state,
         history: history.state,
+        prQueue: prQueue.stateInfo,
         worktree: worktree.state,
         runnerControl: buildSectionState(
           'runnerControl',
@@ -7958,6 +8165,7 @@
       configRestore: createBlankConfigRestoreState(),
       prompts: [],
       promptEditor: createBlankPromptEditor(),
+      prQueue: adaptPrQueue({ items: [], state: 'empty', message: t('prQueue.noPackets') }),
       worktreeDiagnostics: normalizeWorktreeDiagnostics({}),
       worktreeDiagnosticsFilter: normalizeWorktreeDiagnosticsFilter({}),
       worktreeMerge: {
@@ -8068,6 +8276,7 @@
         notifications: buildSectionState('notifications', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         metrics: buildSectionState('metrics', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         history: buildSectionState('history', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        prQueue: buildSectionState('prQueue', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         worktree: buildSectionState('worktree', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         runnerControl: buildSectionState('runnerControl', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
       },
@@ -8499,6 +8708,7 @@
         { t: minutesAgo(28), kind: 'run_start', text: 'Fallback run loaded for offline rendering.', run: 'run_offline_20260426_000000' },
         { t: minutesAgo(12), kind: 'stalled', text: 'Offline fallback is not live data.', run: 'run_offline_20260426_000000' },
       ],
+      prQueue: adaptPrQueue({ items: [], state: 'empty', message: t('prQueue.noPackets') }),
       progress: {
         ...clone(blank.progress),
         latest_run_dir: '',
@@ -8532,6 +8742,7 @@
         notifications: buildSectionState('notifications', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         metrics: buildSectionState('metrics', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         history: buildSectionState('history', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
+        prQueue: buildSectionState('prQueue', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         worktree: buildSectionState('worktree', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         runnerControl: buildSectionState('runnerControl', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
       },
@@ -8558,7 +8769,12 @@
     adaptNotifications,
     adaptMetrics,
     adaptHistory,
+    adaptPrQueue,
     adaptWorktree,
+    currentPrQueuePacket,
+    renderPrQueue,
+    setPrQueueSelection,
+    loadPrQueueDetail,
     setLocale,
     currentTopbarIdentity,
     identityRunnerModeLabel,
@@ -8800,6 +9016,19 @@
     const nextPrompts = toArray(next.prompts);
     state.prompts = nextPrompts;
     state.promptsDir = toText(toObject(next.config || {}).prompts_dir || next.promptsDir || '', '');
+    const previousPrQueueDetail = state.prQueue?.detail ? normalizePrQueuePacket(state.prQueue.detail) : null;
+    const nextPrQueue = adaptPrQueue(next.prQueue || {});
+    if (previousPrQueueDetail && previousPrQueueDetail.id && !nextPrQueue.detail && nextPrQueue.items.some((item) => item.id === previousPrQueueDetail.id)) {
+      nextPrQueue.detail = previousPrQueueDetail;
+    }
+    state.prQueue = nextPrQueue;
+    if (state.prQueueSelectedId && !state.prQueue.items.some((item) => item.id === state.prQueueSelectedId)) {
+      state.prQueueSelectedId = '';
+    }
+    if (!state.prQueueSelectedId) {
+      state.prQueueSelectedId = state.prQueue.selectedId || state.prQueue.items[0]?.id || '';
+    }
+    state.prQueue.selectedId = state.prQueueSelectedId;
     state.worktreeMerge = toObject(next.worktreeMerge);
     state.worktreeDiagnostics = normalizeWorktreeDiagnostics(next.worktreeDiagnostics || next.worktree_diagnostics || {});
     state.runnerControl = normalizeRunnerControl(next.runnerControl);
@@ -9420,6 +9649,284 @@
         ` : ''}
       </div>
     `;
+  }
+
+  function prQueueValidationLabel(status) {
+    const normalized = toText(status, 'validation_pending').toLowerCase();
+    if (normalized === 'validation_passed' || normalized === 'passed' || normalized === 'success') return t('prQueue.validationPassed');
+    if (normalized === 'validation_failed' || normalized === 'failed' || normalized === 'error') return t('prQueue.validationFailed');
+    if (normalized === 'blocked_env' || normalized === 'environment_blocked') return t('prQueue.blockedEnv');
+    if (normalized === 'tests_skipped' || normalized === 'skipped') return t('prQueue.testsSkipped');
+    if (normalized === 'no_tests_found') return t('prQueue.noTestsFound');
+    return normalized ? normalized.replace(/_/g, ' ') : t('prQueue.validationPending');
+  }
+
+  function prQueueValidationChipClass(status) {
+    const normalized = toText(status, 'validation_pending').toLowerCase();
+    if (normalized === 'validation_passed' || normalized === 'passed' || normalized === 'success') return 'chip--accent';
+    if (normalized === 'validation_failed' || normalized === 'failed' || normalized === 'error') return 'chip--err';
+    if (normalized === 'blocked_env' || normalized === 'environment_blocked' || normalized === 'tests_skipped' || normalized === 'skipped') return 'chip--warn';
+    return 'chip--info';
+  }
+
+  function prQueuePreflightLabel(packet) {
+    const status = toText(packet?.mergePreflightStatus, '').toLowerCase();
+    if (status === 'blocked') return t('prQueue.mergeBlocked');
+    if (status === 'ready') return t('prQueue.mergeReady');
+    return status ? status.replace(/_/g, ' ') : t('common.unavailable');
+  }
+
+  function prQueuePreflightChipClass(packet) {
+    const status = toText(packet?.mergePreflightStatus, '').toLowerCase();
+    return status === 'blocked' ? 'chip--warn' : status === 'ready' ? 'chip--accent' : 'chip--info';
+  }
+
+  function currentPrQueuePacket() {
+    const queue = state.prQueue || {};
+    const selectedId = toText(state.prQueueSelectedId || queue.selectedId || queue.items?.[0]?.id || '', '');
+    const detail = queue.detail ? normalizePrQueuePacket(queue.detail) : null;
+    if (detail && detail.id && detail.id === selectedId) {
+      return detail;
+    }
+    return toArray(queue.items).map(normalizePrQueuePacket).find((item) => item.id === selectedId) || detail || null;
+  }
+
+  function prQueueDetailIsFull(packet) {
+    const item = normalizePrQueuePacket(packet);
+    return Boolean(
+      item.changedFiles.length ||
+        item.diffArtifacts.length ||
+        item.validation.artifacts.length ||
+        item.validation.records.length ||
+        item.qaNotes.length ||
+        item.blockingReasons.length
+    );
+  }
+
+  function renderPrQueueArtifact(artifact) {
+    const item = normalizePrQueueArtifact(artifact);
+    const meta = [
+      item.path || item.name,
+      item.size ? `${item.size} ${t('common.bytes')}` : '',
+      item.truncated ? t('worktree.previewTruncated') : '',
+      item.blocked ? (item.reason || t('prQueue.artifactMissing')) : '',
+    ].filter(Boolean).join(' | ');
+    return `
+      <div class="pr-queue-artifact">
+        <div class="pr-queue-artifact__head">
+          <div class="pr-queue-artifact__title">${escapeHTML(item.name || item.path || t('common.unknown'))}</div>
+          ${chip(item.exists ? t('common.available') : t('prQueue.artifactMissing'), item.exists ? 'chip--accent' : 'chip--warn')}
+        </div>
+        ${meta ? `<div class="summary-note">${escapeHTML(meta)}</div>` : ''}
+        ${item.preview ? `<pre class="pr-queue-artifact__preview">${escapeHTML(item.preview)}</pre>` : ''}
+      </div>
+    `;
+  }
+
+  function renderPrQueueSubsection(title, body) {
+    return `
+      <div class="pr-queue-subsection">
+        <div class="pr-queue-subsection__title">${escapeHTML(title)}</div>
+        <div class="pr-queue-subsection__body">${body}</div>
+      </div>
+    `;
+  }
+
+  function renderPrQueueValidation(packet) {
+    const validation = normalizePrQueueValidation(packet.validation, packet);
+    const records = toArray(validation.records);
+    const artifactHTML = validation.artifacts.length
+      ? validation.artifacts.map((artifact) => renderPrQueueArtifact(artifact)).join('')
+      : `<div class="summary-note">${escapeHTML(t('prQueue.noValidationLogs'))}</div>`;
+    const recordHTML = records.length
+      ? `
+        <div class="compact-list">
+          ${records.map((record) => {
+            const item = toObject(record);
+            const name = toText(item.name || item.gate || item.command || item.kind || item.status, t('common.status'));
+            const status = toText(item.status || item.result || '', '');
+            const summary = toText(item.summary || item.message || item.detail || item.reason || '', '');
+            return compactFactItem(name, status || summary || t('common.unknown'), summary && status ? summary : '');
+          }).join('')}
+        </div>
+      `
+      : '';
+    const detail = [validation.reason, validation.detail].filter(Boolean).join(' | ');
+    return `
+      <div class="pr-queue-section">
+        <div class="pr-queue-section__head">
+          <div class="pr-queue-section__title">${escapeHTML(t('prQueue.validation'))}</div>
+          ${chip(prQueueValidationLabel(validation.status), prQueueValidationChipClass(validation.status))}
+        </div>
+        ${detail ? `<div class="summary-note">${escapeHTML(detail)}</div>` : ''}
+        ${recordHTML}
+        <div class="pr-queue-artifacts">${artifactHTML}</div>
+      </div>
+    `;
+  }
+
+  function renderPrQueuePreflight(packet) {
+    const preflight = toObject(packet.mergePreflight);
+    const applyCheck = normalizeWorktreeFailureDetails(preflight.applyCheck || preflight.apply_check || {});
+    const sourceRepoState = toText(preflight.sourceRepoState || preflight.source_repo_state, '');
+    const sourceHead = toText(preflight.sourceHead || preflight.source_head, '');
+    const sourceMainMutated = Boolean(preflight.sourceMainMutated || preflight.source_main_mutated);
+    const facts = [
+      detailCard(t('worktree.sourceDirtyState'), sourceRepoState || t('common.unavailable'), sourceRepoState && sourceRepoState !== 'clean' ? 'runner-control__value--warn' : 'runner-control__value--muted'),
+      detailCard(t('worktree.sourceHead'), sourceHead || '--', sourceHead ? 'runner-control__value--accent' : 'runner-control__value--muted'),
+      detailCard(t('worktree.baseRef'), packet.baseRef || toText(preflight.baseRef || preflight.base_ref, '--'), 'runner-control__value--muted'),
+      detailCard(t('worktree.headRef'), packet.headRef || toText(preflight.headRef || preflight.head_ref, '--'), 'runner-control__value--muted'),
+      detailCard(t('worktree.gitApplyCheck'), applyCheck.command || applyCheck.message || t('common.unavailable'), applyCheck.ok ? 'runner-control__value--accent' : applyCheck.message ? 'runner-control__value--warn' : 'runner-control__value--muted'),
+      detailCard(t('prQueue.branch'), packet.branch || toText(preflight.branch, '--'), 'runner-control__value--muted'),
+    ].join('');
+    return `
+      <div class="pr-queue-section">
+        <div class="pr-queue-section__head">
+          <div class="pr-queue-section__title">${escapeHTML(t('prQueue.mergePreflight'))}</div>
+          ${chip(prQueuePreflightLabel(packet), prQueuePreflightChipClass(packet))}
+        </div>
+        ${sourceMainMutated ? `<div class="summary-note warn">${escapeHTML(t('prQueue.mergeBlocked'))}</div>` : ''}
+        <div class="runner-control__details pr-queue-preflight__details">${facts}</div>
+        ${renderWorktreeFailureDetails(applyCheck, t('worktree.gitApplyCheck'))}
+      </div>
+    `;
+  }
+
+  function renderPrQueueListItem(packet) {
+    const item = normalizePrQueuePacket(packet);
+    const active = item.id === state.prQueueSelectedId;
+    const title = item.taskIds.length ? item.taskIds.join(', ') : item.id;
+    const meta = [
+      item.branch || t('common.unknown'),
+      item.baseRef && item.headRef ? `${item.baseRef} -> ${item.headRef}` : '',
+      `${item.changedFileCount} ${t('prQueue.changedFiles')}`,
+    ].filter(Boolean).join(' | ');
+    return `
+      <button type="button" class="pr-queue-item${active ? ' pr-queue-item--active' : ''}" data-pr-queue-select="${escapeHTML(item.id)}" aria-pressed="${active ? 'true' : 'false'}">
+        <div class="pr-queue-item__head">
+          <span class="pr-queue-item__id">${escapeHTML(item.id)}</span>
+          ${chip(prQueueValidationLabel(item.validationStatus), prQueueValidationChipClass(item.validationStatus))}
+        </div>
+        <div class="pr-queue-item__title">${escapeHTML(title)}</div>
+        <div class="summary-note">${escapeHTML(meta || t('common.unavailable'))}</div>
+        ${item.blockingReasons.length ? `<div class="summary-note warn">${escapeHTML(`${t('prQueue.blockingReasons')}: ${item.blockingReasons.length}`)}</div>` : ''}
+      </button>
+    `;
+  }
+
+  function renderPrQueueDetail(packet) {
+    if (!packet) {
+      return `<div class="summary-note">${escapeHTML(t('prQueue.noPacketSelected'))}</div>`;
+    }
+    const item = normalizePrQueuePacket(packet);
+    const qaNotes = item.qaNotes.length
+      ? `<div class="compact-list">${item.qaNotes.map((note) => compactFactItem(t('prQueue.qaNotes'), note)).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('prQueue.noQaNotes'))}</div>`;
+    const blockers = item.blockingReasons.length
+      ? `<div class="compact-list">${item.blockingReasons.map((reason) => compactFactItem(reason.message || reason.kind, reason.detail || reason.kind)).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('prQueue.noBlockingReasons'))}</div>`;
+    const goalRefs = item.goalRefs.length
+      ? `<div class="compact-list">${item.goalRefs.map((goal) => compactFactItem(t('prQueue.goals'), goal)).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('prQueue.noGoalRefs'))}</div>`;
+    const diffFiles = item.diffFiles.length
+      ? `<div class="review-files">${item.diffFiles.map((file) => renderWorktreeDiffFile(file)).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('prQueue.noDiff'))}</div>`;
+    const diffArtifacts = item.diffArtifacts.length
+      ? `<div class="pr-queue-artifacts">${item.diffArtifacts.map((artifact) => renderPrQueueArtifact(artifact)).join('')}</div>`
+      : '';
+    const commits = item.commits.length
+      ? `<div class="compact-list">${item.commits.map((commit) => {
+        const raw = toObject(commit);
+        const label = toText(raw.hash || raw.sha || raw.id || raw.commit, t('common.unknown'));
+        const summary = toText(raw.summary || raw.subject || raw.message || '', '');
+        return compactFactItem(label, summary || t('common.unavailable'));
+      }).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('common.none'))}</div>`;
+    const facts = [
+      detailCard(t('prQueue.taskIds'), fmtList(item.taskIds) || t('common.none'), 'runner-control__value--accent'),
+      detailCard(t('prQueue.branch'), item.branch || '--', 'runner-control__value--muted'),
+      detailCard(t('prQueue.baseHead'), item.baseRef && item.headRef ? `${item.baseRef} -> ${item.headRef}` : '--', 'runner-control__value--muted'),
+      detailCard(t('prQueue.changedFiles'), String(item.changedFileCount), item.changedFileCount ? 'runner-control__value--accent' : 'runner-control__value--muted'),
+      detailCard(t('prQueue.packetPath'), item.packetPath || '--', 'runner-control__value--muted'),
+      detailCard(t('common.status'), item.status || 'pr_queued', 'runner-control__value--muted'),
+    ].join('');
+    return `
+      <div class="pr-queue-detail" data-pr-queue-detail="${escapeHTML(item.id)}">
+        <div class="pr-queue-detail__head">
+          <div>
+            <div class="pr-queue-detail__id">${escapeHTML(item.id)}</div>
+            <div class="summary-note">${escapeHTML([item.runId, item.updatedAt || item.createdAt].filter(Boolean).join(' | '))}</div>
+          </div>
+          <div class="pr-queue-detail__chips">
+            ${chip(t('prQueue.readOnly'), 'chip--info')}
+            ${chip(prQueueValidationLabel(item.validationStatus), prQueueValidationChipClass(item.validationStatus))}
+            ${chip(prQueuePreflightLabel(item), prQueuePreflightChipClass(item))}
+          </div>
+        </div>
+        <div class="runner-control__details pr-queue-detail__facts">${facts}</div>
+        <div class="pr-queue-actions" aria-label="${escapeHTML(t('prQueue.actionsDisabled'))}">
+          <button type="button" class="button button--quiet" disabled aria-disabled="true">${escapeHTML(t('prQueue.validateAction'))}</button>
+          <button type="button" class="button button--quiet" disabled aria-disabled="true">${escapeHTML(t('prQueue.mergeAction'))}</button>
+          <button type="button" class="button button--quiet" disabled aria-disabled="true">${escapeHTML(t('prQueue.discardAction'))}</button>
+          <button type="button" class="button button--quiet" disabled aria-disabled="true">${escapeHTML(t('prQueue.rebaseAction'))}</button>
+          <span class="summary-note">${escapeHTML(t('prQueue.actionsDisabled'))}</span>
+        </div>
+        <div class="pr-queue-detail-grid">
+          ${renderPrQueueSubsection(t('prQueue.goals'), goalRefs)}
+          ${renderPrQueueSubsection(t('prQueue.qaNotes'), qaNotes)}
+          ${renderPrQueueSubsection(t('prQueue.blockingReasons'), blockers)}
+          ${renderPrQueueSubsection(t('prQueue.commits'), commits)}
+        </div>
+        ${renderPrQueueValidation(item)}
+        ${renderPrQueuePreflight(item)}
+        <div class="pr-queue-section">
+          <div class="pr-queue-section__head">
+            <div class="pr-queue-section__title">${escapeHTML(t('prQueue.diff'))}</div>
+            ${item.changedFileCount ? chip(`${item.changedFileCount} ${t('common.files')}`, 'chip--accent') : chip(t('common.empty'), 'chip--info')}
+          </div>
+          ${diffFiles}
+          ${diffArtifacts ? `<div class="pr-queue-section__title">${escapeHTML(t('prQueue.diffArtifacts'))}</div>${diffArtifacts}` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderPrQueue() {
+    const queue = state.prQueue || adaptPrQueue({});
+    const items = toArray(queue.items).map(normalizePrQueuePacket).filter((item) => item.id);
+    const selected = currentPrQueuePacket();
+    const listHTML = items.length
+      ? items.map((item) => renderPrQueueListItem(item)).join('')
+      : `<div class="summary-note">${escapeHTML(t('prQueue.noPackets'))}</div>`;
+    const detailHTML = queue.loadingDetail
+      ? `<div class="summary-note">${escapeHTML(t('prQueue.loadingDetail'))}</div>`
+      : queue.detailError
+        ? `<div class="modal-banner section-banner section-banner--err">${escapeHTML(queue.detailError)}</div>${renderPrQueueDetail(selected)}`
+        : renderPrQueueDetail(selected);
+    const summary = queue.summary || {};
+    const summaryCards = `
+      <div class="kpi-grid kpi-grid--four">
+        ${kpiCard(t('common.total'), String(summary.total ?? items.length), t('prQueue.packetList'))}
+        ${kpiCard(t('prQueue.validation'), String(summary.validationPassed ?? 0), t('prQueue.validationPassed'))}
+        ${kpiCard(t('prQueue.blockingReasons'), String(summary.blocked ?? 0), t('prQueue.mergeBlocked'))}
+        ${kpiCard(t('prQueue.changedFiles'), String(items.reduce((sum, item) => sum + toNumber(item.changedFileCount, 0), 0)), t('prQueue.diff'))}
+      </div>
+    `;
+    const body = `
+      ${sectionNotice('prQueue')}
+      ${summaryCards}
+      <div class="pr-queue-layout">
+        ${panel(t('prQueue.packetList'), `${items.length} ${escapeHTML(t('common.total'))}`, `<div class="pr-queue-list">${listHTML}</div>`)}
+        ${panel(t('prQueue.packetDetail'), selected ? selected.id : t('common.none'), detailHTML)}
+      </div>
+    `;
+    return viewShell(
+      'pr-queue',
+      t('prQueue.title'),
+      t('prQueue.subtitle'),
+      `<span class="status-chip status-chip--idle"><span class="status-chip__label">${escapeHTML(t('prQueue.readOnly'))}</span><span class="status-chip__meta">${escapeHTML(t('prQueue.actionsDisabled'))}</span></span>`,
+      body
+    );
   }
 
   function renderWorktreePreflightBlock(review) {
@@ -13534,6 +14041,7 @@
         title: t('nav.project'),
         items: [
           { view: 'backlog', label: viewLabel('backlog'), shortcut: VIEW_SHORTCUTS.backlog },
+          { view: 'pr-queue', label: viewLabel('pr-queue'), shortcut: VIEW_SHORTCUTS['pr-queue'], badge: state.prQueue?.summary?.blocked ? '!' : '' },
           { view: 'goals', label: viewLabel('goals'), shortcut: VIEW_SHORTCUTS.goals },
           { view: 'config', label: viewLabel('config'), shortcut: VIEW_SHORTCUTS.config },
           { view: 'prompts', label: viewLabel('prompts'), shortcut: VIEW_SHORTCUTS.prompts },
@@ -17132,6 +17640,8 @@
         return renderLogs();
       case 'backlog':
         return renderBacklog();
+      case 'pr-queue':
+        return renderPrQueue();
       case 'goals':
         return renderGoals();
       case 'config':
@@ -17170,6 +17680,7 @@
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-restart', title: t('palette.restartRunner'), shortcut: 'restart' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'toggle-logs', title: isLiveTailPaused() ? t('palette.resumeLiveTail') : t('palette.pauseLiveTail'), shortcut: 'logs' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-worktree', title: t('palette.openWorktreeReview'), shortcut: 'worktree' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-pr-queue', title: t('palette.openPrQueue'), shortcut: 'pr queue' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-mobile', title: t('palette.openMobilePreview'), shortcut: 'mobile' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-landing', title: t('palette.openLandingPreview'), shortcut: 'landing' },
     ];
@@ -17667,6 +18178,9 @@
     if (next === 'prompts') {
       void loadPromptEditor(currentPrompt());
     }
+    if (next === 'pr-queue') {
+      requestPrQueueDetailForView();
+    }
   }
 
   function selectConfigPath(path) {
@@ -17728,6 +18242,7 @@
       'nav-pipeline': 'pipeline',
       'nav-logs': 'logs',
       'nav-backlog': 'backlog',
+      'nav-pr-queue': 'pr-queue',
       'nav-goals': 'goals',
       'nav-config': 'config',
       'nav-prompts': 'prompts',
@@ -17852,6 +18367,7 @@
       case 'nav-pipeline':
       case 'nav-logs':
       case 'nav-backlog':
+      case 'nav-pr-queue':
       case 'nav-goals':
       case 'nav-config':
       case 'nav-prompts':
@@ -17948,6 +18464,99 @@
   function setBacklogSelection(id) {
     state.backlogSelection = id;
     renderShell({ preserveScroll: true });
+  }
+
+  function requestPrQueueDetailForView() {
+    const queue = state.prQueue || {};
+    const selectedId = toText(state.prQueueSelectedId || queue.selectedId || queue.items?.[0]?.id || '', '');
+    if (!selectedId || state.sourceMode !== 'api') {
+      return false;
+    }
+    const detail = queue.detail ? normalizePrQueuePacket(queue.detail) : null;
+    if (detail && detail.id === selectedId && prQueueDetailIsFull(detail)) {
+      return true;
+    }
+    void loadPrQueueDetail(selectedId);
+    return true;
+  }
+
+  function setPrQueueSelection(id) {
+    const packetId = toText(id, '').trim();
+    if (!packetId) {
+      return;
+    }
+    state.prQueueSelectedId = packetId;
+    state.prQueue = adaptPrQueue({
+      ...toObject(state.prQueue),
+      items: toArray(state.prQueue?.items),
+      detail: state.prQueue?.detail || null,
+      selectedId: packetId,
+    });
+    state.prQueue.selectedId = packetId;
+    state.prQueue.detailError = '';
+    renderShell({ preserveScroll: true });
+    if (state.activeView === 'pr-queue') {
+      void loadPrQueueDetail(packetId);
+    }
+  }
+
+  async function loadPrQueueDetail(id, options = {}) {
+    const packetId = toText(id, '').trim();
+    if (!packetId || state.sourceMode !== 'api') {
+      return false;
+    }
+    const currentDetail = state.prQueue?.detail ? normalizePrQueuePacket(state.prQueue.detail) : null;
+    if (!options.force && currentDetail && currentDetail.id === packetId && prQueueDetailIsFull(currentDetail)) {
+      return true;
+    }
+    const requestSeq = toNumber(state.prQueueDetailRequestSeq, 0) + 1;
+    state.prQueueDetailRequestSeq = requestSeq;
+    state.prQueue.loadingDetail = true;
+    state.prQueue.detailError = '';
+    if (state.activeView === 'pr-queue') {
+      renderShell({ preserveScroll: true });
+    }
+    try {
+      const response = await fetch(`/api/pr-queue/${encodeURIComponent(packetId)}`, {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      });
+      const payload = await response.json();
+      if (!response.ok || payload.ok === false) {
+        throw new Error(toText(payload.message || payload.error?.message, '') || `HTTP ${response.status}`);
+      }
+      if (state.prQueueDetailRequestSeq !== requestSeq) {
+        return false;
+      }
+      const normalized = adaptPrQueue(payload);
+      const detail = normalized.detail || normalized.items.find((item) => item.id === packetId) || null;
+      state.prQueue = adaptPrQueue({
+        ...toObject(state.prQueue),
+        items: toArray(state.prQueue?.items).map((item) => {
+          const normalizedItem = normalizePrQueuePacket(item);
+          return detail && normalizedItem.id === packetId ? detail : normalizedItem;
+        }),
+        detail,
+        selectedId: packetId,
+      });
+      state.prQueueSelectedId = packetId;
+      state.prQueue.loadingDetail = false;
+      state.prQueue.detailError = detail ? '' : t('prQueue.detailUnavailable');
+      if (state.activeView === 'pr-queue') {
+        renderShell({ preserveScroll: true });
+      }
+      return Boolean(detail);
+    } catch (error) {
+      if (state.prQueueDetailRequestSeq !== requestSeq) {
+        return false;
+      }
+      state.prQueue.loadingDetail = false;
+      state.prQueue.detailError = error instanceof Error ? error.message : t('prQueue.detailUnavailable');
+      if (state.activeView === 'pr-queue') {
+        renderShell({ preserveScroll: true });
+      }
+      return false;
+    }
   }
 
   function createModel() {
@@ -18111,6 +18720,9 @@
     configRestore: clone(defaults.configRestore || createBlankConfigRestoreState()),
     prompts: clone(defaults.prompts),
     promptsDir: defaults.config.prompts_dir,
+    prQueue: clone(defaults.prQueue),
+    prQueueSelectedId: defaults.prQueue.selectedId || '',
+    prQueueDetailRequestSeq: 0,
     worktreeMerge: clone(defaults.worktreeMerge),
     worktreeDiagnostics: clone(defaults.worktreeDiagnostics),
     worktreeDiagnosticsFilter: clone(defaults.worktreeDiagnosticsFilter || normalizeWorktreeDiagnosticsFilter({})),
@@ -18182,6 +18794,7 @@
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-restart', title: t('palette.restartRunner'), shortcut: 'restart' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'toggle-logs', title: isLiveTailPaused() ? t('palette.resumeLiveTail') : t('palette.pauseLiveTail'), shortcut: 'logs' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-worktree', title: t('palette.openWorktreeReview'), shortcut: 'worktree' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-pr-queue', title: t('palette.openPrQueue'), shortcut: 'pr queue' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-mobile', title: t('palette.openMobilePreview'), shortcut: 'mobile' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-landing', title: t('palette.openLandingPreview'), shortcut: 'landing' },
     ];
@@ -19257,6 +19870,9 @@
     if (next === 'prompts') {
       void loadPromptEditor(currentPrompt());
     }
+    if (next === 'pr-queue') {
+      requestPrQueueDetailForView();
+    }
   }
 
   function applyPaletteSelection(index) {
@@ -19284,6 +19900,8 @@
         return renderLogs();
       case 'backlog':
         return renderBacklog();
+      case 'pr-queue':
+        return renderPrQueue();
       case 'goals':
         return renderGoals();
       case 'config':
@@ -19488,6 +20106,14 @@
           task.model,
           task.dependsOn,
         ]),
+        prQueue: normalized.prQueue.items.map((item) => [
+          item.id,
+          item.status,
+          item.validationStatus,
+          item.mergePreflightStatus,
+          item.changedFileCount,
+          item.blockingReasons.length,
+        ]),
         logs: normalized.logs.slice(-12).map((line) => [line.t, line.lvl, line.stage, line.msg]),
         notifications: normalized.notifications.slice(-12).map((item) => [item.t, item.kind, item.text]),
         runnerControl: [
@@ -19646,6 +20272,12 @@
     const backlog = event.target.closest('[data-backlog-select]');
     if (backlog) {
       setBacklogSelection(backlog.dataset.backlogSelect);
+      return;
+    }
+
+    const prQueue = event.target.closest('[data-pr-queue-select]');
+    if (prQueue) {
+      setPrQueueSelection(prQueue.dataset.prQueueSelect);
       return;
     }
 
@@ -19952,6 +20584,7 @@
         p: 'pipeline',
         l: 'logs',
         b: 'backlog',
+        q: 'pr-queue',
         g: 'goals',
         c: 'config',
         t: 'prompts',
@@ -20070,6 +20703,9 @@
       renderShell({ preserveScroll: false });
       if (next === 'prompts') {
         void loadPromptEditor(currentPrompt());
+      }
+      if (next === 'pr-queue') {
+        requestPrQueueDetailForView();
       }
     }
   });

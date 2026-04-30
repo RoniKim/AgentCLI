@@ -42,6 +42,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
         "pipeline",
         "logs",
         "backlog",
+        "pr-queue",
         "goals",
         "config",
         "prompts",
@@ -248,6 +249,76 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
                     "",
                 ]
             ),
+        )
+        packet_id = "pr-smoke-t43"
+        validation_dir = self.latest_run_dir / "pr_queue_validation" / packet_id / "attempt_01"
+        validation_log = validation_dir / "validation.log"
+        validation_json = validation_dir / "validation.json"
+        _write(validation_log, "smoke validation passed for PR queue route\n")
+        _write(
+            validation_json,
+            json.dumps(
+                {
+                    "status": "validation_passed",
+                    "validation_status": "validation_passed",
+                    "validation_records": [
+                        {"name": "playwright-smoke", "status": "passed", "summary": "PR Queue route rendered."}
+                    ],
+                    "validation_summary": {"commands_passed": 1, "commands_failed": 0},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        pr_root = self.repo / ".AgentCLI" / "pr_queue"
+        packet_path = pr_root / f"{packet_id}.json"
+        _write(
+            packet_path,
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "id": packet_id,
+                    "status": "pr_queued",
+                    "source_repo": self.repo.as_posix(),
+                    "run_id": self.latest_run_dir.name,
+                    "task_ids": ["T43"],
+                    "goal_trace": [{"goal_ref": "P0", "goal_text": "Add Playwright browser smoke coverage"}],
+                    "branch": "task/T43-pr-queue",
+                    "base_ref": "main",
+                    "head_ref": "abc12345",
+                    "changed_files": ["web_console/app.js", "tests/web_console_playwright_smoke.py"],
+                    "diff_artifacts": [(self.latest_run_dir / "worktree.patch").as_posix()],
+                    "qa_notes": ["QA smoke note for PR Queue route"],
+                    "validation_status": "validation_passed",
+                    "validation_artifact_path": validation_json.as_posix(),
+                    "validation_artifacts": [validation_log.as_posix()],
+                    "merge_preflight": {
+                        "source_repo_state": "clean",
+                        "source_head": "abc12345",
+                        "applyCheck": {"ok": True, "status": "passed", "message": "git apply --check passed", "rc": 0},
+                    },
+                    "commits": [{"sha": "abc12345", "subject": "Smoke PR queue route"}],
+                    "created_at": "2026-04-26T12:04:00Z",
+                    "updated_at": "2026-04-26T12:05:00Z",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        _write(
+            pr_root / "branch_index.json",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "updated_at": "2026-04-26T12:05:00Z",
+                    "entries": [{"id": packet_id, "branch": "task/T43-pr-queue", "packet_path": packet_path.as_posix()}],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
         )
 
     def _start_server(self) -> None:
@@ -580,6 +651,9 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self._open_view(page, "nav-pipeline", "pipeline", "Stage lane")
             self._open_view(page, "nav-logs", "logs", "Live tail")
             self._open_view(page, "nav-backlog", "backlog", "Work queue")
+            self._open_view(page, "nav-pr-queue", "pr-queue", "PR Queue")
+            self.expect(page.locator("#main")).to_contain_text("QA smoke note")
+            self.expect(page.locator("#main").get_by_role("button", name="Validate")).to_be_disabled()
             self._open_view(page, "nav-goals", "goals", "GOALS.md snapshot")
 
             self._open_view(page, "nav-config", "config", "Field details")
@@ -708,7 +782,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(mobile_root.locator("[data-mobile-editor-panel]")).to_be_visible()
             self.expect(mobile_root.locator("[data-mobile-confirmation-panel]")).to_be_visible()
             self.expect(mobile_root.locator("[data-mobile-notification-panel]")).to_be_visible()
-            self.assertEqual(10, mobile_root.locator("[data-mobile-route-grid] [data-nav]").count())
+            self.assertEqual(11, mobile_root.locator("[data-mobile-route-grid] [data-nav]").count())
             self._capture_screenshot(page, "mobile-workflow-en.png")
 
             mobile_root.locator('[data-mobile-route-grid] [data-nav="logs"]').click()
@@ -755,7 +829,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             )
             self.assertTrue(route_heights)
             self.assertGreaterEqual(min(route_heights), 58)
-            self.assertEqual(10, len(layout["routeButtons"]))
+            self.assertEqual(11, len(layout["routeButtons"]))
 
             def assert_stack(name: str, rects: list[dict[str, object]]) -> None:
                 ordered = sorted(rects, key=lambda rect: (float(rect["top"]), float(rect["left"])))
