@@ -213,7 +213,7 @@
 - [x] Web console docs are checked against the live FastAPI route inventory and do not claim nonexistent backup, config, prompt, goals, or runner endpoints.
 - [x] Documentation for shutdown reports, duplicate-report handling, and artifact writers matches the current implementation instead of preserving obsolete incident assumptions.
 - [x] Web documentation defines the current one-repo-one-web operating model and explicitly defers multi-repo dashboard scope to a later phase.
-- [ ] A visible identity header shows active repo, branch, run id, run dir, port, mode, runner-control status, and redaction status on every primary route.
+- [x] A visible identity header shows active repo, branch, run id, run dir, port, mode, runner-control status, and redaction status on every primary route.
 - [x] A repo-level web instance lock prevents accidental duplicate local-operator control of the same repo.
 - [x] Reload/restart while stopped behaves as start-only or no-op and does not write STOP or stop-progress artifacts into historical runs.
 - [x] Pre-run readiness checks verify source `.venv`, Git worktree ownership/safe-directory state, stale STOP/runner_wait artifacts, and already-merged generated worktrees before a long unattended run starts.

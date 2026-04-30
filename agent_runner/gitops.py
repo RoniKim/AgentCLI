@@ -441,6 +441,14 @@ def has_new_commits(repo: Path, before_head: str) -> bool:
     return before_head != current
 
 
+def ref_has_new_commits(repo: Path, ref: str, before_head: str) -> bool:
+    """Check whether *ref* points at a commit different from *before_head*."""
+    current = git_rev_parse_ref(repo, ref)
+    if not before_head or not current:
+        return False
+    return before_head != current
+
+
 def git_ls_files(repo: Path) -> list[str]:
     code, out = run_cmd(["git", "ls-files"], cwd=repo, timeout_sec=120)
     if code != 0:

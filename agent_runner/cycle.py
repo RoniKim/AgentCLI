@@ -33,6 +33,7 @@ from .gitops import (
     git_rev_parse_ref,
     has_working_tree_changes,
     has_new_commits,
+    ref_has_new_commits,
     git_untracked_files,
     repo_fingerprint,
     create_checkpoint,
@@ -3153,6 +3154,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
 
                 # Merge or preserve task branch
+                preserved_task_branch_has_new_commits = False
                 if task_completed and tb:
                     if worktree_dir is not None:
                         try:
@@ -3172,6 +3174,11 @@ async def main_async(args: argparse.Namespace) -> int:
                             )
                         else:
                             branch_head = git_rev_parse_ref(repo, tb.branch_name) or ""
+                            preserved_task_branch_has_new_commits = ref_has_new_commits(
+                                repo,
+                                tb.branch_name,
+                                task_head_before,
+                            )
                             source_head_after = git_head(repo)
                             try:
                                 packet_result = queue_review_packet(
@@ -3331,8 +3338,11 @@ async def main_async(args: argparse.Namespace) -> int:
                         skipped_set.add(next_task.id)
                         continue
                     return 1, "exhausted_attempts", 0, (len(done_set) > before_done)
-                # Phantom completion detection: task marked done but no git commits created
-                if not has_new_commits(repo, task_head_before):
+                # Phantom completion detection: task marked done but no git commits created.
+                # In isolated worktree mode, a completed task branch is preserved and the
+                # checkout returns to the base ref before this check, so inspect the preserved
+                # branch head instead of only the current checkout HEAD.
+                if not (preserved_task_branch_has_new_commits or has_new_commits(repo, task_head_before)):
                     logger.warning(f"Task {next_task.id} passed gates but no commits found (phantom completion)")
                     metrics.event("phantom_completion_detected", task_id=next_task.id, cycle=cycle_idx)
                     # Treat as failure - do NOT mark done

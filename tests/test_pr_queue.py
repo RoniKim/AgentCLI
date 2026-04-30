@@ -13,7 +13,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-from agent_runner.gitops import abandon_task_branch, create_task_branch, create_worktree, git_head, remove_worktree
+from agent_runner.gitops import (
+    abandon_task_branch,
+    create_task_branch,
+    create_worktree,
+    git_head,
+    has_new_commits,
+    ref_has_new_commits,
+    remove_worktree,
+)
 from agent_runner.pr_queue import load_branch_index, pr_branch_index_path, pr_packet_path, queue_review_packet
 from agent_runner.utils import run_cmd
 
@@ -120,6 +128,19 @@ class PRQueueTests(unittest.TestCase):
         self.assertEqual(result["packet_id"], index["entries"][0]["id"])
         self.assertEqual(tb.branch_name, index["entries"][0]["branch"])
         self.assertEqual(source_head_before, git_head(self.repo))
+
+    def test_preserved_task_branch_counts_commits_after_checkout_returns_to_base(self) -> None:
+        source_head_before = self._init_repo()
+        create_worktree(self.repo, self.worktree, run_dir=self.run_dir)
+
+        tb = create_task_branch(self.worktree, "T1", task_title="Preserve branch")
+        (self.worktree / "feature.txt").write_text("feature\n", encoding="utf-8")
+        self._git("add", "feature.txt", cwd=self.worktree)
+        self._git("commit", "-m", "feature", cwd=self.worktree)
+        abandon_task_branch(self.worktree, tb)
+
+        self.assertFalse(has_new_commits(self.worktree, source_head_before))
+        self.assertTrue(ref_has_new_commits(self.worktree, tb.branch_name, source_head_before))
 
     def test_queue_review_packet_reports_missing_branch_metadata_as_recoverable(self) -> None:
         source_head_before = self._init_repo()
