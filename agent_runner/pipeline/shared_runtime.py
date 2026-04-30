@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from ..scan import collect_scan_files
+from ..task_status import TASK_STATUS_REVIEW_REQUIRED
 from .session import PipelineSession
 from .stages.base import StageOutcome
 
@@ -523,6 +524,109 @@ def compute_dev_model_tiers(
     return tiers, max_attempts, dev_max_escalations
 
 
+def _short_dependency_text(value: Any, *, max_chars: int = 240) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = " ".join(text.split())
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3].rstrip() + "..."
+
+
+def _latest_failures_by_task(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    failures: dict[str, dict[str, Any]] = {}
+    failed_items = state.get("failed") if isinstance(state.get("failed"), list) else []
+    for item in failed_items:
+        if not isinstance(item, dict):
+            continue
+        task_id = str(item.get("task") or item.get("task_id") or item.get("taskId") or "").strip()
+        if task_id:
+            failures[task_id] = dict(item)
+    return failures
+
+
+def _dependency_blocker_details(
+    *,
+    blocked_ids: list[str],
+    orphaned_ids: list[str],
+    tasks: list[Any],
+    skipped_set: set[str],
+    state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    task_titles = {str(getattr(task, "id", "") or ""): str(getattr(task, "title", "") or "") for task in tasks}
+    failures = _latest_failures_by_task(state)
+    orphaned = set(orphaned_ids)
+    blockers: list[dict[str, Any]] = []
+    for dep_id in blocked_ids:
+        dep = str(dep_id or "").strip()
+        if not dep:
+            continue
+        failure = failures.get(dep, {})
+        title = _short_dependency_text(task_titles.get(dep) or failure.get("title") or failure.get("task_title") or dep)
+        status = _short_dependency_text(
+            failure.get("task_status")
+            or failure.get("taskStatus")
+            or failure.get("outcome_status")
+            or failure.get("status")
+            or ("orphaned" if dep in orphaned else "skipped" if dep in skipped_set else "blocked")
+        )
+        reason = _short_dependency_text(
+            failure.get("reason")
+            or ("dependency_orphaned" if dep in orphaned else "dependency_failed")
+        )
+        detail = _short_dependency_text(failure.get("detail") or failure.get("message") or "")
+        validation_summary = _short_dependency_text(
+            failure.get("validation_summary")
+            or failure.get("validationSummary")
+            or failure.get("failure_summary")
+            or failure.get("failureSummary")
+            or failure.get("summary")
+            or detail
+        )
+        if dep in orphaned:
+            next_action = "Regenerate the backlog or remove this missing dependency before retrying the blocked task."
+        elif status.lower() in {"blocked_env", "test_contract_changed", "review_required"}:
+            next_action = f"Resolve or review upstream task {dep}, then retry the dependent task."
+        else:
+            next_action = f"Complete upstream task {dep}, then retry the dependent task."
+        blockers.append(
+            {
+                "task_id": dep,
+                "taskId": dep,
+                "title": title,
+                "status": status,
+                "reason": reason,
+                "detail": detail,
+                "validation_summary": validation_summary,
+                "validationSummary": validation_summary,
+                "next_action": next_action,
+                "nextAction": next_action,
+            }
+        )
+    return blockers
+
+
+def _dependency_blocked_detail(blockers: list[dict[str, Any]]) -> str:
+    if not blockers:
+        return "Blocked by unresolved task dependencies."
+    lines = ["Blocked by unresolved task dependencies:"]
+    for blocker in blockers:
+        task_id = _short_dependency_text(blocker.get("task_id") or blocker.get("taskId") or "?")
+        title = _short_dependency_text(blocker.get("title") or task_id)
+        status = _short_dependency_text(blocker.get("status") or "unknown")
+        reason = _short_dependency_text(blocker.get("reason") or "unknown")
+        validation = _short_dependency_text(blocker.get("validation_summary") or blocker.get("detail") or "")
+        next_action = _short_dependency_text(blocker.get("next_action") or "")
+        line = f"- {task_id}: {title} | status={status} | reason={reason}"
+        if validation:
+            line += f" | validation={validation}"
+        if next_action:
+            line += f" | next={next_action}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def select_next_task_with_dependency_checks(
     *,
     tasks: list[Any],
@@ -589,13 +693,30 @@ def select_next_task_with_dependency_checks(
                 permanently_blocked = [dep for dep in unmet if dep in (skipped_set | failed_ids)] + orphaned
                 if permanently_blocked:
                     reason = "dependency_orphaned" if orphaned else "dependency_failed"
+                    blockers = _dependency_blocker_details(
+                        blocked_ids=permanently_blocked,
+                        orphaned_ids=orphaned,
+                        tasks=tasks,
+                        skipped_set=skipped_set,
+                        state=state,
+                    )
+                    detail = _dependency_blocked_detail(blockers)
                     eprint_fn(f"[SKIP] Task {t.id} depends on unresolvable tasks {permanently_blocked}; skipping.")
                     skipped_set.add(t.id)
                     state.setdefault("failed", []).append(
                         {
                             "task": t.id,
                             "reason": reason,
-                            "detail": f"Depends on: {permanently_blocked}",
+                            "status": TASK_STATUS_REVIEW_REQUIRED,
+                            "task_status": TASK_STATUS_REVIEW_REQUIRED,
+                            "taskStatus": TASK_STATUS_REVIEW_REQUIRED,
+                            "detail": detail,
+                            "blocked_dependencies": blockers,
+                            "blockedDependencies": blockers,
+                            "blocking_dependencies": blockers,
+                            "blockingDependencies": blockers,
+                            "next_action": "Resolve blocking upstream tasks before retrying this task.",
+                            "nextAction": "Resolve blocking upstream tasks before retrying this task.",
                         }
                     )
                     save_state_fn(state_path, state)
@@ -604,7 +725,7 @@ def select_next_task_with_dependency_checks(
                         t.title,
                         "failed",
                         reason=reason,
-                        detail=f"Depends on: {permanently_blocked}",
+                        detail=detail,
                         files=t.files,
                         cycle=cycle_idx,
                     )
@@ -614,6 +735,10 @@ def select_next_task_with_dependency_checks(
                             "title": t.title,
                             "status": "skipped",
                             "reason": reason,
+                            "task_status": TASK_STATUS_REVIEW_REQUIRED,
+                            "detail": detail,
+                            "blocked_dependencies": blockers,
+                            "blockedDependencies": blockers,
                             "duration": -1,
                         }
                     )

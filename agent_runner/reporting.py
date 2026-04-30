@@ -670,6 +670,18 @@ def _render_cycle_change_summary_md(summary: dict[str, Any]) -> str:
                 f"- {item.get('task_id') or item.get('taskId')}: {item.get('title') or '(unknown)'} "
                 f"| {item.get('reason') or 'unknown'} | {attempts.get('current', 0)}/{attempts.get('max', 0) or '?'}"
             )
+            blockers = item.get("blocked_dependencies") or item.get("blockedDependencies")
+            if isinstance(blockers, list) and blockers:
+                blocker_bits = []
+                for blocker in blockers[:5]:
+                    if not isinstance(blocker, dict):
+                        continue
+                    blocker_bits.append(
+                        f"{blocker.get('task_id') or blocker.get('taskId')}:"
+                        f"{blocker.get('reason') or 'unknown'}"
+                    )
+                if blocker_bits:
+                    lines.append(f"  - blocked_by: {', '.join(blocker_bits)}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -693,6 +705,18 @@ def _render_failed_tasks_md(artifact: dict[str, Any]) -> str:
                 f"- {item.get('task_id') or item.get('taskId')}: {item.get('title') or '(unknown)'} "
                 f"| {item.get('reason') or 'unknown'} | attempts {attempts.get('current', 0)}/{attempts.get('max', 0) or '?'}"
             )
+            blockers = item.get("blocked_dependencies") or item.get("blockedDependencies")
+            if isinstance(blockers, list) and blockers:
+                for blocker in blockers[:5]:
+                    if not isinstance(blocker, dict):
+                        continue
+                    lines.append(
+                        f"  - blocked_by: {blocker.get('task_id') or blocker.get('taskId') or '?'} "
+                        f"| {blocker.get('title') or '(unknown)'} "
+                        f"| status={blocker.get('status') or 'unknown'} "
+                        f"| reason={blocker.get('reason') or 'unknown'} "
+                        f"| next={blocker.get('next_action') or blocker.get('nextAction') or '(none)'}"
+                    )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

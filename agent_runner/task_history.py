@@ -444,6 +444,22 @@ def _build_failed_task_item(
         "source": source,
         "summary": f"{task_id or '?'} | {title} | {reason} | {current_attempt or '?'}{'/' + str(max_attempts) if max_attempts else ''}",
     }
+    blockers = (
+        row.get("blocked_dependencies")
+        or row.get("blockedDependencies")
+        or row.get("blocking_dependencies")
+        or row.get("blockingDependencies")
+    )
+    if isinstance(blockers, list):
+        normalized_blockers = [dict(blocker) for blocker in blockers if isinstance(blocker, dict)]
+        if normalized_blockers:
+            item["blocked_dependencies"] = normalized_blockers
+            item["blockedDependencies"] = normalized_blockers
+            item["blocking_dependencies"] = normalized_blockers
+            item["blockingDependencies"] = normalized_blockers
+            next_action = _text(row.get("next_action") or row.get("nextAction"), "")
+            item["next_action"] = next_action
+            item["nextAction"] = next_action
     return item
 
 

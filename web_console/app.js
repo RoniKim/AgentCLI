@@ -371,6 +371,7 @@
         stepUnavailable: 'Step unavailable',
         failureUnavailable: 'Failure unavailable',
         dependsOn: 'Depends on {items}',
+        blockedBy: 'Blocked by {items}',
         fileScope: 'File scope: {scope}',
         attemptText: 'Attempt {attempt}',
         cycleText: 'Cycle {cycle}',
@@ -1066,6 +1067,7 @@
         cycleUnavailable: '사이클 정보 없음',
         stepUnavailable: '단계 정보 없음',
         failureUnavailable: '실패 정보 없음',
+        blockedBy: '{items} 때문에 차단됨',
         recentOutputUnavailable: '최근 출력 없음.',
         noTaskSelected: '선택된 작업 없음.',
         queued: '대기 중',
@@ -5072,6 +5074,19 @@
   function normalizeBacklogItem(task) {
     const raw = toObject(task);
     const failure = toObject(raw.failure);
+    const blockedDependencies = toArray(
+      failure.blocked_dependencies || failure.blockedDependencies || raw.blocked_dependencies || raw.blockedDependencies
+    ).map((entry) => {
+      const blocker = toObject(entry);
+      return {
+        taskId: toText(blocker.task_id || blocker.taskId, ''),
+        title: toText(blocker.title || blocker.task_title || blocker.taskTitle, ''),
+        status: toText(blocker.status || blocker.task_status || blocker.taskStatus, ''),
+        reason: toText(blocker.reason, ''),
+        validationSummary: toText(blocker.validation_summary || blocker.validationSummary || blocker.detail, ''),
+        nextAction: toText(blocker.next_action || blocker.nextAction, ''),
+      };
+    }).filter((entry) => entry.taskId || entry.title || entry.reason);
     return {
       id: toText(raw.id, 'task'),
       title: toText(raw.title, 'Untitled task'),
@@ -5096,12 +5111,14 @@
         reviewRequired: Boolean(failure.review_required ?? failure.reviewRequired ?? raw.review_required ?? raw.reviewRequired),
         autoMergeAllowed: Boolean(failure.auto_merge_allowed ?? failure.autoMergeAllowed ?? raw.auto_merge_allowed ?? raw.autoMergeAllowed),
         detail: toText(failure.detail || raw.failure_detail || raw.failureDetail, ''),
+        blockedDependencies,
         cycle: toMaybeNumber(failure.cycle ?? raw.failure_cycle ?? raw.failureCycle),
         step: toMaybeNumber(failure.step ?? raw.failure_step ?? raw.failureStep),
         rc: toMaybeNumber(failure.rc ?? raw.failure_rc ?? raw.failureRc),
       },
       failureReason: toText(failure.reason || raw.failure_reason || raw.failureReason, ''),
       failureDetail: toText(failure.detail || raw.failure_detail || raw.failureDetail, ''),
+      blockedDependencies,
       recentOutput: toText(raw.recent_output || raw.recentOutput, ''),
       cycle: toMaybeNumber(raw.cycle),
       step: toMaybeNumber(raw.step),
@@ -10188,6 +10205,22 @@
     `;
   }
 
+  function blockedDependencySummary(task, limit = 3) {
+    const blockers = toArray(task.blockedDependencies || toObject(task.failure).blockedDependencies);
+    const lines = blockers.slice(0, limit).map((blocker) => {
+      const item = toObject(blocker);
+      const taskId = toText(item.taskId || item.task_id, '?');
+      const title = compactText(toText(item.title, ''), 54);
+      const reason = compactText(toText(item.reason || item.status, ''), 42);
+      const validation = compactText(toText(item.validationSummary || item.validation_summary, ''), 54);
+      return [taskId, title, reason, validation].filter(Boolean).join(' | ');
+    }).filter(Boolean);
+    if (blockers.length > limit) {
+      lines.push(`+${blockers.length - limit}`);
+    }
+    return lines.join(' ; ');
+  }
+
   function renderTaskCard(task, bucketKey) {
     const isSelected = state.backlogSelection === task.id;
     const status = normalizeBacklogStatus(task.status, 'pending');
@@ -10199,6 +10232,7 @@
     const fileScopeText = task.fileScope || (task.files && task.files.length ? task.files.join(', ') : t('backlog.fileScopeUnavailable'));
     const failureReason = toText(task.failureReason || toObject(task.failure).reason, '');
     const failureDetail = redactionAwareText(task.failureDetail || toObject(task.failure).detail);
+    const blockedSummary = blockedDependencySummary(task);
     const recentOutput = compactText(redactionAwareText(task.recentOutput), 180) || t('backlog.recentOutputUnavailable');
     return `
       <button type="button" class="task-card" data-backlog-select="${escapeHTML(task.id)}" aria-pressed="${isSelected ? 'true' : 'false'}">
@@ -10215,6 +10249,7 @@
         <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(t('backlog.fileScope', { scope: fileScopeText }), 140) || t('backlog.fileScopeUnavailable'))}</div>
         <div class="summary-note" style="margin-top:4px;">${escapeHTML(task.attempt != null ? t('backlog.attemptText', { attempt: task.attempt }) : t('backlog.attemptUnavailable'))}</div>
         <div class="summary-note" style="margin-top:4px;">${escapeHTML(failureReason ? t('backlog.failureText', { reason: `${failureReason}${failureDetail ? ` | ${compactText(failureDetail, 120)}` : ''}` }) : t('backlog.failureUnavailable'))}</div>
+        ${blockedSummary ? `<div class="summary-note" style="margin-top:4px;">${escapeHTML(t('backlog.blockedBy', { items: compactText(blockedSummary, 180) }))}</div>` : ''}
         <div class="summary-note" style="margin-top:4px;">${escapeHTML(recentOutput)}</div>
         ${status === 'in_progress' ? `
           <div class="meter" style="margin-top:8px; width: 100%;"><div class="meter__fill meter__fill--warn" style="width:${progressWidth(progress)}"></div></div>
@@ -13645,6 +13680,7 @@
                   <div class="summary-note" style="margin-top:4px;">${escapeHTML(selectedTask.fileScope ? compactText(t('backlog.fileScope', { scope: selectedTask.fileScope }), 140) : t('backlog.fileScopeUnavailable'))}</div>
                   <div class="summary-note" style="margin-top:4px;">${escapeHTML(selectedTask.attempt != null ? t('backlog.attemptText', { attempt: selectedTask.attempt }) : t('backlog.attemptUnavailable'))}</div>
                   <div class="summary-note" style="margin-top:4px;">${escapeHTML(selectedTask.failureReason ? t('backlog.failureText', { reason: `${selectedTask.failureReason}${selectedTask.failureDetail ? ` | ${compactText(selectedTask.failureDetail, 120)}` : ''}` }) : t('backlog.failureUnavailable'))}</div>
+                  ${blockedDependencySummary(selectedTask) ? `<div class="summary-note" style="margin-top:4px;">${escapeHTML(t('backlog.blockedBy', { items: compactText(blockedDependencySummary(selectedTask), 180) }))}</div>` : ''}
                 </div>
               `
               : state.backlog.length ? `<div class="summary-note">${escapeHTML(t('dashboard.noTaskSelected'))}</div>` : `<div class="summary-note">${escapeHTML(t('backlog.noArtifacts'))}</div>`
@@ -15283,6 +15319,7 @@
           <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.cycle != null ? t('backlog.cycleText', { cycle: selected.cycle }) : t('backlog.cycleUnavailable'))}</div>
           <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.step != null ? t('backlog.stepText', { step: selected.step }) : t('backlog.stepUnavailable'))}</div>
           <div class="summary-note" style="margin-top:4px;">${escapeHTML(selected.failureReason ? t('backlog.failureText', { reason: `${selected.failureReason}${redactionAwareText(selected.failureDetail || toObject(selected.failure).detail, '', redaction) ? ` | ${compactText(redactionAwareText(selected.failureDetail || toObject(selected.failure).detail, '', redaction), 120)}` : ''}` }) : t('backlog.failureUnavailable'))}</div>
+          ${blockedDependencySummary(selected) ? `<div class="summary-note" style="margin-top:4px;">${escapeHTML(t('backlog.blockedBy', { items: compactText(blockedDependencySummary(selected), 180) }))}</div>` : ''}
           <div class="summary-note" style="margin-top:4px;">${escapeHTML(compactText(redactionAwareText(selected.recentOutput, '', redaction), 220) || t('backlog.recentOutputUnavailable'))}</div>
         </div>
       `
