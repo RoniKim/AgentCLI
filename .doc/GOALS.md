@@ -239,6 +239,27 @@
 - [ ] Telegram can list queued PRs and report validation/merge status.
 - [ ] Stale branches, missing patch artifacts, and deleted worktrees are reconciled without corrupting the queue.
 
+### P0-U. Experience DB And Analyzer Stage
+
+- [ ] AgentCLI writes a durable Experience DB that links runs, tasks, GOALS refs, changed files, validation records, branches, and local PR packets.
+- [ ] Analyzer artifacts summarize successful work, failed work, oversized tasks, blocked environments, missing tests, and merge risks with evidence pointers.
+- [ ] PM receives a bounded experience summary even when a custom PM prompt is configured.
+- [ ] Experience lessons can recommend task sizing, validation selection, and retry avoidance without mutating source code or marking GOALS complete.
+- [ ] Local PR queue validation and user merge/discard decisions are recorded as high-value experience signals.
+- [ ] Web Console shows recent lessons, repeated failure patterns, validation gaps, and merge blockers.
+- [ ] Telegram can summarize latest experience blockers and queued PR validation needs.
+- [ ] Experience retention and redaction settings prevent stale or sensitive raw logs from leaking into future prompts.
+
+### P0-V. Maintainability And Module Decomposition
+
+- [ ] `agent_runner.web` remains a stable compatibility facade while web redaction, GOALS, prompts, config contract, log tail, history, worktree, and snapshot helpers are extracted into focused modules.
+- [ ] Web endpoint golden tests protect `/api/status`, `/api/progress`, `/api/worktree`, `/api/runner/status`, `/api/config`, `/api/goals`, `/api/prompts`, and `/api/logs` payload contracts during decomposition.
+- [ ] Runner context objects explicitly distinguish source repo, execution worktree, run directory, task directory, attempt directory, and task branch state before `cycle.py` phase extraction.
+- [ ] Validation artifact writing, failed-task result recording, stop progress recording, and task branch preserve/abandon dispatch are shared by Codex and Claude backends.
+- [ ] Codex and Claude PM output postprocessing use the same GOALS gating, task splitting, and `goal_trace` preservation logic.
+- [ ] Backend-specific code is reduced to model invocation, message streaming, model option construction, and backend quota probing behind a small adapter interface.
+- [ ] Decomposition PRs are extraction-only: no product behavior changes, no endpoint contract changes, and no run artifact filename changes.
+
 ## P1 (Should-Have)
 
 - [ ] Run History supports comparing two runs side-by-side with commits, task outcomes, token/quota usage, validation results, and worktree outcomes.

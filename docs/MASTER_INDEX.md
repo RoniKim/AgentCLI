@@ -62,6 +62,8 @@
 | `.doc/Docs/claude.md` | Claude backend 운영 가이드 |
 | `UNATTENDED_OPS_AUDIT_AND_FOLLOWUP.md` | 무인운영 신뢰성 검증 결과 + 후속 작업 (T-A~T-I) |
 | `LOCAL_PR_QUEUE_AND_DEFERRED_VALIDATION.md` | 로컬 PR 큐, 지연 검증, oversized GOALS task 분할 계획 |
+| `EXPERIENCE_DB_AND_ANALYZER_STAGE.md` | Experience DB, Analyzer stage, lesson feedback loop 설계 |
+| `LARGE_MODULE_DECOMPOSITION_PLAN.md` | `web.py`, `cycle.py`, `claudecode.py` 대형 모듈 분해 계획 |
 
 ## 5. 인시던트 (.doc/Docs/incidents/, 미해결)
 
