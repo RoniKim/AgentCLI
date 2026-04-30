@@ -231,7 +231,7 @@
 - [x] Task branches are preserved and indexed after worktree cleanup.
 - [x] PR queue records base/head refs, branch, commits, changed files, GOALS trace, QA notes, validation status, and merge preflight state.
 - [x] Dev-stage test skipping is recorded as `validation_pending`, `tests_skipped`, or `no_tests_found`, never as success.
-- [ ] Full validation runs on demand in an isolated temporary worktree.
+- [x] Full validation runs on demand in an isolated temporary worktree.
 - [ ] Merge requires validation result plus explicit user approval.
 - [ ] Web PR Queue shows diff, QA notes, validation logs, merge preflight, and blocking reasons.
 - [x] Dependency-blocked tasks expose the blocking upstream task id, title, status, reason, validation summary, and next action instead of only `Depends on: ['Tn']`.
@@ -292,6 +292,20 @@
 - [ ] Web snapshot polling uses route-appropriate payloads so Dashboard refresh does not require multi-megabyte `/api/status` responses containing full GOALS raw text/history data.
 - [ ] Web PR Queue route lists queued local PR packets with task id, GOALS refs, branch, changed files, validation status, QA notes, and merge preflight status.
 - [ ] Web PR Queue detail view shows per-file diff, validation logs, blockers, dependency detail, and explicit read-only vs mutating validate/merge/discard affordances.
+
+### P0-X. Unattended Operations Follow-Up
+
+- [ ] Direct runner and resume entrypoints reconcile stale STOP files using heartbeat age and an audit event without deleting fresh operator STOP requests.
+- [ ] Long sleeps, quota waits, and loop idle waits refresh `HEARTBEAT` at bounded intervals while remaining STOP-aware.
+- [ ] Claude backend quota and wait paths use the shared STOP-aware sleep helper instead of raw long `asyncio.sleep` calls.
+- [ ] Startup readiness can auto-reconcile stale `WORKTREE_MERGE_PENDING.json` markers when the patch/worktree is missing or source `HEAD` already reflects the pending head, while preserving valid pending merges.
+- [ ] Stale task branches and attempt directories are listed by doctor/readiness with age, status, reason, and owning run before any cleanup is offered.
+- [ ] Stale branch, stale attempt, and old run cleanup require explicit operator approval and write dry-run plus applied cleanup artifacts.
+- [ ] An unattended preset documents or configures `goals_auto_refresh`, quota wait, loop, loop idle exit, iteration limits, diagnostics, and safe cleanup defaults as one operator-facing profile.
+- [ ] Backlog scheduling records task effort, priority, touched file globs, and dependencies before selection.
+- [ ] Backlog selection uses dependency-aware ordering plus remaining-window budget caps so overnight runs prefer small unblocked tasks before large risky tasks.
+- [ ] Overnight runs write a concise post-run operations summary covering completed, queued, review-required, blocked-env, stale-cleanup, handle/process warnings, and next operator actions.
+- [ ] Windows handle/process diagnostic collection is linked to run artifacts and flags process-count or handle-growth anomalies before Explorer/CMD instability recurs.
 
 ## P1 (Should-Have)
 

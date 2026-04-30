@@ -223,6 +223,7 @@ It is generated from the current `.doc/Docs` file inventory.
   - # HEARTBEAT
   - # Worktree merge atomicity
   - ## 5. 변경 이력
+  - ## 6. GOALS 매핑
   - ## 관련 문서
 
 ## .doc/Docs/WEB_CONSOLE_TARGET.md

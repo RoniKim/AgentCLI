@@ -230,6 +230,28 @@ grep -n "apply_pending_worktree_merge\|WORKTREE_MERGE_PENDING\|_write_pending_st
 | 날짜 | 변경 | 근거 |
 |------|------|------|
 | 2026-04-28 | 최초 작성 | 4개 병렬 코드 검증 + agent-debate 합성 결과 |
+| 2026-04-30 | P0-X GOALS 매핑 추가 | 장시간 무인운영 후 stale STOP, heartbeat, Claude wait, stale cleanup, scheduler, diagnostics 후속 작업을 실행 단위로 분리 |
+
+---
+
+## 6. GOALS 매핑
+
+본 문서의 후속 작업은 `.doc/GOALS.md`의 `P0-X. Unattended Operations Follow-Up`에 실행 단위로 반영한다.
+
+| 문서 항목 | GOALS 매핑 |
+|-----------|------------|
+| T-A. Stale STOP 파일 자동 정리 | `P0-X` direct runner/resume stale STOP reconciliation |
+| T-B. Sleep 중 HEARTBEAT 갱신 | `P0-X` long sleeps/quota waits/loop idle heartbeat refresh |
+| T-C. Stale `WORKTREE_MERGE_PENDING.json` 자동 진단/정리 | `P0-X` startup stale pending marker reconciliation |
+| T-D. Claude 백엔드 wait의 STOP 응답성 | `P0-X` Claude shared STOP-aware sleep helper |
+| T-E. `goals_auto_refresh` 기본값 정책 | `P0-X` unattended preset for goals refresh, quota wait, loop, diagnostics, cleanup defaults |
+| T-F. Stale task branch / attempt_NN 정리 정책 | `P0-X` stale branch/attempt doctor listing and explicit cleanup artifacts |
+| T-G. Phantom completion 강화 | partially covered by `P0-S`; future changes should stay branch/ref aware |
+| T-H. P0-Q items 3, 7 | already covered by completed `P0-Q` items |
+| T-I. Topological scheduler + budget caps | `P0-X` backlog scheduling effort/priority/touches/dependencies and remaining-window budget caps |
+| Windows CMD/Explorer instability diagnostics | `P0-X` Windows handle/process diagnostic linkage and anomaly flags |
+
+`P0-X` is intentionally separate from completed `P0-S` items. `P0-S` captures fixes already implemented or documented; `P0-X` captures follow-up work still needed for long unattended operation.
 
 ---
 
