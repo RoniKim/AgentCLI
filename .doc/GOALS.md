@@ -234,6 +234,7 @@
 - [ ] Full validation runs on demand in an isolated temporary worktree.
 - [ ] Merge requires validation result plus explicit user approval.
 - [ ] Web PR Queue shows diff, QA notes, validation logs, merge preflight, and blocking reasons.
+- [ ] Dependency-blocked tasks expose the blocking upstream task id, title, status, reason, validation summary, and next action instead of only `Depends on: ['Tn']`.
 - [ ] Shell commands support listing, validating, rebasing, merging, and discarding queued PRs.
 - [ ] Telegram can list queued PRs and report validation/merge status.
 - [ ] Stale branches, missing patch artifacts, and deleted worktrees are reconciled without corrupting the queue.

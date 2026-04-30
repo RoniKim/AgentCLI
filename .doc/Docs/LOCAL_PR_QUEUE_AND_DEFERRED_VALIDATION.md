@@ -113,6 +113,12 @@ The Web Console should expose the same queue with:
 - Per-file diff.
 - Validation logs.
 - Merge blocking reasons.
+- Dependency blocking detail. A blocked task must show the upstream task id,
+  title, task status, failure reason, validation summary, and recommended next
+  action. A bare `Depends on: ['T3']` is not enough for unattended operation
+  because the operator cannot tell whether the blocker is a code regression,
+  stale test contract, missing toolchain, permission problem, or an unfinished
+  task that should be discarded.
 - Confirmed validate, merge, discard, and rebase actions.
 
 ## Implementation Order
