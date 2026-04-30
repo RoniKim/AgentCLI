@@ -7,10 +7,14 @@ It is generated from the current `.doc/Docs` file inventory.
 - .doc/Docs/ARCHITECTURE.md
 - .doc/Docs/claude.md
 - .doc/Docs/CONVENTIONS.md
+- .doc/Docs/DOCS_CLASSIFICATION_AND_GOALS_GAP_20260430.md
 - .doc/Docs/EXPERIENCE_DB_AND_ANALYZER_STAGE.md
 - .doc/Docs/incidents/MEMORY_AND_HANDLE_LEAK_20260428.md
 - .doc/Docs/LARGE_MODULE_DECOMPOSITION_PLAN.md
 - .doc/Docs/LOCAL_PR_QUEUE_AND_DEFERRED_VALIDATION.md
+- .doc/Docs/POST_RUN_BACKEND_PARITY_AND_PR_QUEUE_FIX_PLAN_20260430.md
+- .doc/Docs/STABILITY_SECURITY_AUDIT_FOLLOWUP_20260430.md
+- .doc/Docs/STAGE_EXTENSIBILITY_AND_BACKLOG_REFINER_DESIGN_20260430.md
 - .doc/Docs/TASK_STATUS_CLASSIFICATION_REVIEW.md
 - .doc/Docs/UNATTENDED_OPS_AUDIT_AND_FOLLOWUP.md
 - .doc/Docs/WEB_CONSOLE_TARGET.md
@@ -49,6 +53,32 @@ It is generated from the current `.doc/Docs` file inventory.
   - ## Python
   - ## Web Console
   - ## AgentCLI PM/Dev/QA Behavior
+
+## .doc/Docs/DOCS_CLASSIFICATION_AND_GOALS_GAP_20260430.md
+- path: `.doc/Docs/DOCS_CLASSIFICATION_AND_GOALS_GAP_20260430.md`
+- decoded_as: `utf-8-sig`
+- headings:
+  - # Docs classification and GOALS gap review
+  - ## 0. 요약
+  - ## 1. Active canonical docs
+  - ## 2. Agent planning docs
+  - ## 3. Proposal docs
+  - ### `docs/proposals/PERSONAL_WORK_AUTOMATION_DESIGN_V2_EN.md`
+  - ## 4. Historical/read-only docs
+  - ### Archive
+  - ### Design
+  - ## 5. GOALS gap candidates
+  - ### G1. TODO system operational visibility
+  - ### G2. Skills system operational visibility and validation
+  - ### G3. Claude advanced controls
+  - ### G4. MCP operations
+  - ### G5. Plugin Stage loading operations
+  - ### G5a. Stage add/remove freedom and PL backlog refiner
+  - ### G6. Enterprise profile verification
+  - ### G7. `WEB_SNAPSHOT.json` artifact
+  - ### G8. Command Palette as Operator Hub
+  - ### G9. Instance Health panel
+  - ## 6. Recommended next classification update
 
 ## .doc/Docs/EXPERIENCE_DB_AND_ANALYZER_STAGE.md
 - path: `.doc/Docs/EXPERIENCE_DB_AND_ANALYZER_STAGE.md`
@@ -175,6 +205,120 @@ It is generated from the current `.doc/Docs` file inventory.
   - ## Merge Policy
   - ## Shell And Web Commands
   - ## Implementation Order
+
+## .doc/Docs/POST_RUN_BACKEND_PARITY_AND_PR_QUEUE_FIX_PLAN_20260430.md
+- path: `.doc/Docs/POST_RUN_BACKEND_PARITY_AND_PR_QUEUE_FIX_PLAN_20260430.md`
+- decoded_as: `utf-8-sig`
+- headings:
+  - # Post-run backend parity and PR queue stabilization plan
+  - ## 0. 결론
+  - ## 1. 검증된 사실
+  - ### F1. Claude backend PR queue 미연결
+  - ### F2. Phantom completion guard parity gap
+  - ### F3. `branch_index.json` read-modify-write race
+  - ### F4. `build_failure_entry()` retry metadata 의미 충돌
+  - ### F5. Approved roots empty fail-open
+  - ### 문서 drift
+  - ## 2. 구현 설계
+  - ### T1. Shared PR queue helper 추출
+  - ### T2. `branch_index.json` locking
+  - ### T3. Runner start path guard fail-closed
+  - ### T4. Failure retry metadata schema 정리
+  - ### T5. Claude phantom completion parity guard
+  - ### T6. 문서 동기화
+  - ## 3. 권장 작업 순서
+  - ### Step 1. runner 종료 확인
+  - ### Step 2. F3 cross-process lock부터 먼저 적용
+  - ### Step 3. F4 failure metadata contract 정리
+  - ### Step 4. F1 shared helper 추출 및 Codex call site 교체
+  - ### Step 5. Claude backend PR queue 연결 + F2 guard 동시 반영
+  - ### Step 6. F5 path guard fail-closed
+  - ### Step 7. 문서 동기화
+  - ### Step 8. 통합 검증
+  - ## 4. 커밋 분할 제안
+  - ## 5. 최종 acceptance criteria
+  - ## 6. 이번 검토에서 실행한 검증
+
+## .doc/Docs/STABILITY_SECURITY_AUDIT_FOLLOWUP_20260430.md
+- path: `.doc/Docs/STABILITY_SECURITY_AUDIT_FOLLOWUP_20260430.md`
+- decoded_as: `utf-8-sig`
+- headings:
+  - # Stability and security audit follow-up plan
+  - ## 0. Executive summary
+  - ## 1. Verified findings
+  - ### A1. Claude backend does not call `decide_failure_disposition`
+  - ### A2. Claude backend validation status pipeline is incomplete
+  - ### A3. Claude backend local PR queue missing
+  - ### A4. Claude backend does not write cycle/run report artifacts with Codex parity
+  - ### A5. Claude phantom completion guard parity gap
+  - ## 2. Concurrency and state integrity
+  - ### R1. `STATE.json` has unlocked read-modify-write patterns
+  - ### R2. GOALS auto-check writes non-atomically and without compare-and-swap
+  - ### R3/R4. Event and STOP progress append/update races
+  - ## 3. Resource lifecycle and Windows handle safety
+  - ### L1. Subprocess handle inheritance should be explicit
+  - ### L2. Preflight stale lock coverage is incomplete
+  - ### L3. Run/cache retention is still mostly future work
+  - ## 4. Crash recovery and panic safety
+  - ### E1. PR queue packet/index ordering can desync
+  - ### E2. Attempt directories have no STARTED/FINISHED marker
+  - ### E5. Goals refresh failed attempts do not consume budget
+  - ### E6. Emergency shutdown does not mark interrupted STATE
+  - ## 5. Security interpretation
+  - ## 6. Five-day implementation plan
+  - ### Day 1: PR queue lock and backend parity foundation
+  - ### Day 2: State, event, and queue recovery integrity
+  - ### Day 3: GOALS/attempt crash safety
+  - ### Day 4: Windows resource/readiness hardening
+  - ### Day 5: Critical path tests and docs
+  - ## 7. Proposed GOALS additions after current runner stops
+  - ## 8. P1 backlog appendix for lower-priority audit items
+  - ## 9. Relationship to existing follow-up notes
+  - ## 10. Validation performed for this note
+
+## .doc/Docs/STAGE_EXTENSIBILITY_AND_BACKLOG_REFINER_DESIGN_20260430.md
+- path: `.doc/Docs/STAGE_EXTENSIBILITY_AND_BACKLOG_REFINER_DESIGN_20260430.md`
+- decoded_as: `utf-8-sig`
+- headings:
+  - # Stage Extensibility And Backlog Refiner Design
+  - ## 1. Problem
+  - ## 2. Design Goal
+  - ## 3. Current Constraint
+  - ## 4. Target Architecture
+  - ### 4.1 Stage Metadata
+  - ### 4.2 Stage Effects
+  - ### 4.3 Manager Effect Application
+  - ### 4.4 Session Task API
+  - ## 5. Backlog Refiner / PL Stage
+  - ### 5.1 Responsibility
+  - ### 5.2 Oversized Task Heuristics
+  - ### 5.3 T2 Split Example
+  - ### 5.4 PL Output Artifacts
+  - ## 6. Built-In Stage Vs Plugin Stage
+  - ### 6.1 Built-In PL
+  - ### 6.2 Plugin PL
+  - ## 7. Runtime Flow
+  - ## 8. Configuration
+  - ## 9. CLI And Web Console
+  - ## 10. Metrics And Events
+  - ## 11. Backend Symmetry
+  - ## 12. Compatibility
+  - ## 13. Implementation Plan
+  - ### Phase 1: Stage Contract
+  - ### Phase 2: Session APIs
+  - ### Phase 3: Built-In PL Stage And Runtime Wiring
+  - ### Phase 4: Shared Runtime Parity Check
+  - ### Phase 5: UI And Docs
+  - ## 14. Test Plan
+  - ## 15. Risks
+  - ### R1. PL Creates Too Many Tiny Tasks
+  - ### R2. PL Breaks Dependency Graph
+  - ### R3. Plugin Stages Mutate Core Files Unsafely
+  - ### R4. Backend Parity Drift
+  - ### R5. Stale In-Memory Tasks
+  - ## 16. Acceptance Criteria
+  - ## 17. GOALS Candidates
+  - ## 18. Recommended First Patch Set
 
 ## .doc/Docs/TASK_STATUS_CLASSIFICATION_REVIEW.md
 - path: `.doc/Docs/TASK_STATUS_CLASSIFICATION_REVIEW.md`
