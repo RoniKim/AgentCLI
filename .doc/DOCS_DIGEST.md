@@ -7,7 +7,9 @@ It is generated from the current `.doc/Docs` file inventory.
 - .doc/Docs/ARCHITECTURE.md
 - .doc/Docs/claude.md
 - .doc/Docs/CONVENTIONS.md
+- .doc/Docs/EXPERIENCE_DB_AND_ANALYZER_STAGE.md
 - .doc/Docs/incidents/MEMORY_AND_HANDLE_LEAK_20260428.md
+- .doc/Docs/LARGE_MODULE_DECOMPOSITION_PLAN.md
 - .doc/Docs/LOCAL_PR_QUEUE_AND_DEFERRED_VALIDATION.md
 - .doc/Docs/TASK_STATUS_CLASSIFICATION_REVIEW.md
 - .doc/Docs/UNATTENDED_OPS_AUDIT_AND_FOLLOWUP.md
@@ -47,6 +49,55 @@ It is generated from the current `.doc/Docs` file inventory.
   - ## Web Console
   - ## AgentCLI PM/Dev/QA Behavior
 
+## .doc/Docs/EXPERIENCE_DB_AND_ANALYZER_STAGE.md
+- path: `.doc/Docs/EXPERIENCE_DB_AND_ANALYZER_STAGE.md`
+- decoded_as: `utf-8-sig`
+- headings:
+  - # Experience DB And Analyzer Stage Design
+  - ## 1. Purpose
+  - ## 2. ASI-Evolve Mapping
+  - ## 3. Problems To Solve
+  - ## 4. Non-Goals
+  - ## 5. Target Loop
+  - ## 6. Artifact Layout
+  - ## 7. Experience DB Schema
+  - ### `runs`
+  - ### `task_experiences`
+  - ### `validation_experiences`
+  - ### `file_patterns`
+  - ### `lessons`
+  - ## 8. Analyzer Stage Responsibilities
+  - ## 9. Analyzer Output Contract
+  - ## 10. PM Integration
+  - ## 10A. Token-Bounded Experience Injection Contract
+  - ## 10B. Lesson Relevance Ranking
+  - ## 10C. Token-Bounded Lesson Confidence Updates
+  - ### Lesson Identity
+  - ### Evidence Weights
+  - ### Confidence Formula
+  - ### Stale Evidence Decay
+  - ### Pass And Merge Semantics
+  - ## 10D. Privacy, Redaction, And Prompt-Injection Safety
+  - ## 10E. Analyzer Authority Matrix
+  - ## 10F. Analyzer Failure Isolation
+  - ## 11. Local PR Queue Integration
+  - ## 12. Sampling And Prioritization
+  - ## 12A. Task Status And Validation Status Mapping
+  - ## 13. Web Console
+  - ## 14. Telegram
+  - ## 15. Safety And Trust
+  - ## 16. Configuration
+  - ## 17. Implementation Plan
+  - ### Phase 1: Read-only Experience Capture
+  - ### Phase 2: Analyzer Stage
+  - ### Phase 3: PM Prompt Injection
+  - ### Phase 4: PR Queue Feedback
+  - ### Phase 5: Web And Telegram
+  - ## 18. Proposed GOALS Items
+  - ### P0-U. Experience DB And Analyzer Stage
+  - ## 19. Validation Plan
+  - ## 20. Open Questions
+
 ## .doc/Docs/incidents/MEMORY_AND_HANDLE_LEAK_20260428.md
 - path: `.doc/Docs/incidents/MEMORY_AND_HANDLE_LEAK_20260428.md`
 - decoded_as: `utf-8-sig`
@@ -82,6 +133,33 @@ It is generated from the current `.doc/Docs` file inventory.
   - ## 8. 관련 파일 인덱스
   - ## 9. 추가 분석 자료
   - ## 10. 후속 조치
+
+## .doc/Docs/LARGE_MODULE_DECOMPOSITION_PLAN.md
+- path: `.doc/Docs/LARGE_MODULE_DECOMPOSITION_PLAN.md`
+- decoded_as: `utf-8-sig`
+- headings:
+  - # Large Module Decomposition Plan
+  - ## Purpose
+  - ## Debate Summary
+  - ## Non-Goals
+  - ## Compatibility Surfaces
+  - ## Target Shape
+  - ### Web
+  - ### Runner
+  - ### Backend Parity
+  - ## Extraction Order
+  - ### Phase 0. Guardrails
+  - ### Phase 1. Web Leaf Helpers
+  - ### Phase 2. Web Payload Builders
+  - ### Phase 3. Runner Context And Artifact Writers
+  - ### Phase 4. Shared Runner Lifecycle
+  - ### Phase 5. Backend Adapter Boundary
+  - ## Risk Register
+  - ## Validation Plan
+  - ## Proposed GOALS Items
+  - ### P0-V. Maintainability And Module Decomposition
+  - ## First Implementation Candidates
+  - ## Open Questions
 
 ## .doc/Docs/LOCAL_PR_QUEUE_AND_DEFERRED_VALIDATION.md
 - path: `.doc/Docs/LOCAL_PR_QUEUE_AND_DEFERRED_VALIDATION.md`

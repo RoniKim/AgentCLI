@@ -337,6 +337,7 @@ class ProcessGuardTests(unittest.TestCase):
             SetInformationJobObject=MagicMock(),
             AssignProcessToJobObject=MagicMock(),
             GetCurrentProcess=MagicMock(),
+            QueryFullProcessImageNameW=MagicMock(),
             TerminateProcess=MagicMock(),
             CreateToolhelp32Snapshot=MagicMock(),
             Process32FirstW=MagicMock(),
