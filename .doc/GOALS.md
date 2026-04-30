@@ -196,41 +196,41 @@
 ### P0-R. Web UI Production Polish And Accessibility
 
 - [x] All primary routes have dense but readable desktop layouts with no nested-card clutter, no text overlap, and stable control dimensions.
-- [ ] Mobile routes match the intended operational workflow, not only a visual preview, with usable navigation, filters, editors, and confirmations.
+- [x] Mobile routes match the intended operational workflow, not only a visual preview, with usable navigation, filters, editors, and confirmations.
 - [x] Background and surface colors use a neutral charcoal base; green is reserved for success/accent/status signals rather than global page tint.
-- [ ] Direction A visual fidelity is reviewed against `docs/Design/project/AgentCLI Web - A.html`, covering shell/nav density, command palette, dashboard/Pipeline composition, mobile Telegram-style view, and status color semantics with desktop/mobile screenshots.
-- [ ] Design-token audit aligns production `web_console/styles.css` with Direction A's deep near-black/green terminal palette while preserving readable contrast and reserving green for success/accent/status semantics.
-- [ ] Destructive, mutating, and long-running actions use consistent confirmation, busy, disabled, success, failure, timeout, and retry states.
-- [ ] Empty, partial, loading, stale, permission-denied, and backend-unavailable states are visually distinct across every screen.
+- [x] Direction A visual fidelity is reviewed against `docs/Design/project/AgentCLI Web - A.html`, covering shell/nav density, command palette, dashboard/Pipeline composition, mobile Telegram-style view, and status color semantics with desktop/mobile screenshots.
+- [x] Design-token audit aligns production `web_console/styles.css` with Direction A's deep near-black/green terminal palette while preserving readable contrast and reserving green for success/accent/status semantics.
+- [x] Destructive, mutating, and long-running actions use consistent confirmation, busy, disabled, success, failure, timeout, and retry states.
+- [x] Empty, partial, loading, stale, permission-denied, and backend-unavailable states are visually distinct across every screen.
 - [x] Keyboard navigation covers route switching, command palette, modals, editors, diff views, logs, and confirmation dialogs.
 - [x] Accessibility checks cover focus visibility, labels, contrast, reduced motion, and screen-reader names for icon-only controls.
 - [x] Playwright screenshots validate Dashboard, Pipeline, Logs, Goals, Config, Prompts, History, Notifications, Worktree Review, Runner Controls, and mobile in both locales.
 
 ### P0-S. Documentation And Personal Automation Readiness
 
-- [ ] `.doc/DOCS_DIGEST.md` and `docs/MASTER_INDEX.md` are generated or validated from real files so moved, archived, or case-mismatched paths cannot mislead PM/Dev/QA runs.
+- [x] `.doc/DOCS_DIGEST.md` and `docs/MASTER_INDEX.md` are generated or validated from real files so moved, archived, or case-mismatched paths cannot mislead PM/Dev/QA runs.
 - [x] User-facing docs for config, CLI flags, model defaults, Telegram options, stop reasons, and worktree merge behavior are checked against the live parser/defaults and fail validation on stale claims.
-- [ ] Web console docs are checked against the live FastAPI route inventory and do not claim nonexistent backup, config, prompt, goals, or runner endpoints.
+- [x] Web console docs are checked against the live FastAPI route inventory and do not claim nonexistent backup, config, prompt, goals, or runner endpoints.
 - [x] Documentation for shutdown reports, duplicate-report handling, and artifact writers matches the current implementation instead of preserving obsolete incident assumptions.
 - [x] Web documentation defines the current one-repo-one-web operating model and explicitly defers multi-repo dashboard scope to a later phase.
 - [ ] A visible identity header shows active repo, branch, run id, run dir, port, mode, runner-control status, and redaction status on every primary route.
 - [x] A repo-level web instance lock prevents accidental duplicate local-operator control of the same repo.
-- [ ] Reload/restart while stopped behaves as start-only or no-op and does not write STOP or stop-progress artifacts into historical runs.
+- [x] Reload/restart while stopped behaves as start-only or no-op and does not write STOP or stop-progress artifacts into historical runs.
 - [x] Pre-run readiness checks verify source `.venv`, Git worktree ownership/safe-directory state, stale STOP/runner_wait artifacts, and already-merged generated worktrees before a long unattended run starts.
 - [x] Worktree cleanup diagnostics can report ACL-denied residual directories after Git unregisters a worktree and provide reboot/admin cleanup guidance without blocking new runs.
 - [x] Parent watchdog cleanup does not hold parent process handles indefinitely; it polls PID/create-time state with bounded sleeps and closes handles on every check.
 - [x] Codex app-server subprocess cleanup explicitly closes stdio pipes, joins the reader thread, unregisters process-guard PIDs, and cannot leave inherited handles behind after timeout or forced termination.
 - [x] AgentCLI entrypoints register structured logger cleanup with `atexit` so `run.log`, `error.log`, `debug.log`, and `events.jsonl` handlers are closed on interpreter shutdown.
-- [ ] Web runner start rejects `run_dir` values outside the active repo's approved AgentCLI run root and rejects `config_path` values outside approved config roots.
+- [x] Web runner start rejects `run_dir` values outside the active repo's approved AgentCLI run root and rejects `config_path` values outside approved config roots.
 - [x] LAN mode blocks raw prompt reads and keeps mutating actions disabled until authentication exists or a stronger trusted-operator gate is implemented.
 
 ### P0-T. Local PR Queue And Deferred Validation
 
 - [x] GOALS-constrained PM task generation prevents oversized task bundles by splitting tasks that match more than two unchecked GOALS items while preserving `goal_trace`.
-- [ ] Runner can create a local PR review packet for each completed task or run without mutating source `main`.
-- [ ] Task branches are preserved and indexed after worktree cleanup.
-- [ ] PR queue records base/head refs, branch, commits, changed files, GOALS trace, QA notes, validation status, and merge preflight state.
-- [ ] Dev-stage test skipping is recorded as `validation_pending`, `tests_skipped`, or `no_tests_found`, never as success.
+- [x] Runner can create a local PR review packet for each completed task or run without mutating source `main`.
+- [x] Task branches are preserved and indexed after worktree cleanup.
+- [x] PR queue records base/head refs, branch, commits, changed files, GOALS trace, QA notes, validation status, and merge preflight state.
+- [x] Dev-stage test skipping is recorded as `validation_pending`, `tests_skipped`, or `no_tests_found`, never as success.
 - [ ] Full validation runs on demand in an isolated temporary worktree.
 - [ ] Merge requires validation result plus explicit user approval.
 - [ ] Web PR Queue shows diff, QA notes, validation logs, merge preflight, and blocking reasons.
