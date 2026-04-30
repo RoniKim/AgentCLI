@@ -299,6 +299,26 @@ def classify_task_validation_status(
     return "passed"
 
 
+def classify_pr_queue_validation_status(
+    *,
+    pending: bool = False,
+    failed: bool = False,
+    blocked_env: bool = False,
+) -> str:
+    """Return the PR-queue validation status vocabulary.
+
+    The PR queue only needs the four operator-facing statuses:
+    validation_pending, validation_failed, blocked_env, and validation_passed.
+    """
+    if blocked_env:
+        return "blocked_env"
+    if failed:
+        return "validation_failed"
+    if pending:
+        return "validation_pending"
+    return "validation_passed"
+
+
 def repo_has_web_worktree_markers(repo: Path) -> bool:
     """Return True when the repository looks like the AgentCLI web/worktree repo."""
     try:

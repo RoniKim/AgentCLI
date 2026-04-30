@@ -9,6 +9,7 @@ import re
 import shutil
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
@@ -1170,6 +1171,18 @@ def default_worktree_dir(repo: Path, run_dir: Path) -> Path:
     else:
         base = repo_resolved.parent / ".agentcli_worktrees"
     return (base / repo_name / run_name).resolve()
+
+
+def allocate_temporary_worktree_dir(repo: Path, *, prefix: str = "pr-queue-validation") -> Path:
+    """Return a unique external worktree path for a one-off isolated run."""
+    root = _generated_worktree_home(repo)
+    root.mkdir(parents=True, exist_ok=True)
+    prefix_text = _worktree_safe_name(prefix, "validation")
+    for _ in range(256):
+        candidate = root / f"{prefix_text}-{uuid.uuid4().hex[:12]}"
+        if not candidate.exists():
+            return candidate.resolve()
+    raise RuntimeError("Unable to allocate a unique temporary worktree path.")
 
 
 def _worktree_validation_error(repo: Path, worktree_dir: Path) -> str | None:

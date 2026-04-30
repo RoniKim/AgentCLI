@@ -1,13 +1,32 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
-from .gitops import find_pending_worktree_merge, git_changed_files, read_pending_worktree_merge
-from .utils import atomic_write_json, now_iso, run_cmd
+from .gates import (
+    classify_pr_queue_validation_status,
+    repo_has_web_worktree_markers,
+    run_build_validation_async,
+    run_fast_web_worktree_regression_async,
+    run_test_validation_async,
+)
+from .gitops import (
+    allocate_temporary_worktree_dir,
+    create_worktree,
+    find_pending_worktree_merge,
+    git_changed_files,
+    git_head,
+    git_repo_state,
+    read_pending_worktree_merge,
+    remove_worktree,
+)
+from .task_status import classify_task_failure
+from .utils import atomic_write_json, now_iso, run_cmd, safe_write_text
 
 
 PR_QUEUE_DIRNAME = "pr_queue"
@@ -209,11 +228,14 @@ def _normalize_packet_validation_status(value: object) -> str:
         "ok": "validation_passed",
         "validation_passed": "validation_passed",
         "validation_pending": "validation_pending",
+        "validation_running": "validation_pending",
+        "running": "validation_pending",
         "tests_skipped": "tests_skipped",
         "skipped": "tests_skipped",
         "no_tests_found": "no_tests_found",
         "failed": "validation_failed",
         "validation_failed": "validation_failed",
+        "blocked_env": "blocked_env",
         "stopped": "validation_pending",
     }
     return aliases.get(status, status)
@@ -225,10 +247,11 @@ def _choose_packet_validation_status(explicit_status: object, artifact_statuses:
     if derived:
         priority = {
             "validation_failed": 0,
-            "no_tests_found": 1,
-            "tests_skipped": 2,
-            "validation_pending": 3,
-            "validation_passed": 4,
+            "blocked_env": 1,
+            "no_tests_found": 2,
+            "tests_skipped": 3,
+            "validation_pending": 4,
+            "validation_passed": 5,
         }
         return min(derived, key=lambda status: priority.get(status, 99))
     return explicit or "validation_pending"
@@ -615,3 +638,696 @@ def queue_review_packet(
 
 def write_review_packet(source_repo: Path, **kwargs: object) -> dict[str, object]:
     return queue_review_packet(source_repo, **kwargs)
+
+
+def load_review_packet(source_repo: Path, packet_id: str) -> dict[str, Any]:
+    return _load_json_dict(pr_packet_path(source_repo, packet_id))
+
+
+def _load_pr_queue_validation_config(run_dir: Path | None) -> dict[str, object]:
+    config: dict[str, Any] = {}
+    if run_dir is not None:
+        for candidate in (
+            Path(run_dir) / "last_run_summary.json",
+            Path(run_dir) / "run_summary.json",
+        ):
+            config = _load_json_dict(candidate)
+            if config:
+                break
+    return {
+        "build_enabled": bool(config.get("build_enabled") or config.get("buildEnabled")),
+        "run_tests": bool(config.get("run_tests") or config.get("runTests")),
+        "build_cmd": config.get("build_cmd") or config.get("buildCmd") or [],
+        "legacy_build_target": str(
+            config.get("legacy_build_target")
+            or config.get("legacyBuildTarget")
+            or ""
+        ).strip(),
+        "test_cmd": config.get("test_cmd") or config.get("testCmd") or [],
+        "legacy_test_target": str(
+            config.get("legacy_test_target")
+            or config.get("legacyTestTarget")
+            or ""
+        ).strip(),
+        "legacy_test_filter": str(
+            config.get("legacy_test_filter")
+            or config.get("legacyTestFilter")
+            or ""
+        ).strip(),
+        "build_timeout_seconds": int(config.get("build_timeout_seconds") or config.get("buildTimeoutSeconds") or 1800),
+        "test_timeout_seconds": int(config.get("test_timeout_seconds") or config.get("testTimeoutSeconds") or 3600),
+    }
+
+
+def _pr_queue_validation_artifact_root(run_dir: Path, packet_id: str) -> Path:
+    return Path(run_dir) / "pr_queue_validation" / str(packet_id or "").strip() / "attempt_01"
+
+
+def _attach_goal_trace_to_record(record: dict[str, Any], goal_trace: Sequence[object] | object | None) -> None:
+    goal_trace_value = _normalize_list_value(goal_trace)
+    record["goal_trace"] = goal_trace_value
+    record["goalTrace"] = goal_trace_value
+
+
+def _pr_queue_validation_stage_status(
+    record: dict[str, Any],
+    *,
+    reason: str,
+    detail: str = "",
+) -> str:
+    raw_status = str(
+        record.get("status")
+        or record.get("validation_status")
+        or record.get("validationStatus")
+        or ""
+    ).strip().lower()
+    summary = str(
+        record.get("summary")
+        or record.get("failure_summary")
+        or record.get("failureSummary")
+        or detail
+        or ""
+    ).strip()
+    if not record.get("cmd") and summary.lower() == "empty command":
+        return "validation_pending"
+    if raw_status in {"validation_passed", "passed", "pass", "success", "completed", "ok"}:
+        return "validation_passed"
+    if bool(record.get("ok", False)) and raw_status not in {"validation_pending", "tests_skipped", "no_tests_found", "stopped"}:
+        return "validation_passed"
+    if raw_status in {"validation_pending", "tests_skipped", "no_tests_found", "stopped"}:
+        return "validation_pending"
+    if raw_status == "blocked_env":
+        return "blocked_env"
+    if raw_status in {"validation_failed", "failed", "fail", "error"}:
+        task_status = classify_task_failure(
+            reason,
+            validations=[record],
+            detail=summary,
+        )
+        return "blocked_env" if task_status == "blocked_env" else "validation_failed"
+    if not record.get("cmd"):
+        return "validation_pending"
+    return "validation_passed"
+
+
+def _pr_queue_validation_note_record(
+    *,
+    name: str,
+    kind: str,
+    gate: str,
+    artifact_path: Path,
+    note: str,
+    goal_trace: Sequence[object] | object | None,
+    required: bool,
+    applicable: bool,
+    status: str,
+) -> dict[str, object]:
+    safe_write_text(artifact_path, note.rstrip() + "\n")
+    record: dict[str, object] = {
+        "name": str(name),
+        "kind": str(kind),
+        "gate": str(gate),
+        "cmd": [],
+        "rc": 0,
+        "ok": str(status or "").strip().lower() == "validation_passed",
+        "status": str(status or "validation_pending"),
+        "validation_status": str(status or "validation_pending"),
+        "validationStatus": str(status or "validation_pending"),
+        "artifact_path": artifact_path.as_posix(),
+        "artifactPath": artifact_path.as_posix(),
+        "log_path": artifact_path.as_posix(),
+        "logPath": artifact_path.as_posix(),
+        "summary": note,
+        "failure_summary": "",
+        "failureSummary": "",
+        "required": bool(required),
+        "applicable": bool(applicable),
+    }
+    _attach_goal_trace_to_record(record, goal_trace)
+    return record
+
+
+def _pr_queue_validation_record_with_classification(
+    record: dict[str, Any],
+    *,
+    reason: str,
+    detail: str,
+    goal_trace: Sequence[object] | object | None,
+    required: bool,
+    applicable: bool,
+) -> dict[str, Any]:
+    stage_status = _pr_queue_validation_stage_status(record, reason=reason, detail=detail)
+    record = dict(record)
+    record["validation_status"] = stage_status
+    record["validationStatus"] = stage_status
+    record["required"] = bool(required)
+    record["applicable"] = bool(applicable)
+    if stage_status == "validation_passed":
+        record["ok"] = True
+    elif stage_status in {"validation_pending", "validation_failed", "blocked_env"}:
+        record["ok"] = False
+    _attach_goal_trace_to_record(record, goal_trace)
+    return record
+
+
+def _update_packet_validation_metadata(
+    packet: dict[str, Any],
+    *,
+    status: str,
+    reason: str,
+    detail: str,
+    artifact_path: Path,
+    artifacts: Sequence[object] | object | None,
+    updated_at: str,
+) -> dict[str, Any]:
+    artifact_list = _normalize_str_list(artifacts)
+    updated = dict(packet)
+    updated["status"] = status
+    updated["validation_status"] = status
+    updated["validationStatus"] = status
+    updated["validation_reason"] = reason
+    updated["validationReason"] = reason
+    updated["validation_detail"] = detail
+    updated["validationDetail"] = detail
+    updated["validation_artifact_path"] = artifact_path.as_posix()
+    updated["validationArtifactPath"] = artifact_path.as_posix()
+    updated["validation_artifacts"] = artifact_list
+    updated["validationArtifacts"] = artifact_list
+    updated["updated_at"] = updated_at
+    return updated
+
+
+async def validate_review_packet_async(
+    source_repo: Path,
+    packet_id: str,
+    *,
+    stop_path: Path | None = None,
+) -> dict[str, object]:
+    source_repo_path = Path(source_repo).expanduser().resolve()
+    packet_id_text = str(packet_id or "").strip()
+    if not packet_id_text:
+        raise RuntimeError("Packet id is required for PR queue validation.")
+
+    packet_path = pr_packet_path(source_repo_path, packet_id_text)
+    packet = load_review_packet(source_repo_path, packet_id_text)
+    if not packet:
+        raise FileNotFoundError(f"PR packet not found: {packet_path}")
+    if str(packet.get("source_repo") or "").strip():
+        packet_source_repo = Path(str(packet.get("source_repo") or "")).expanduser().resolve()
+        if packet_source_repo != source_repo_path:
+            raise RuntimeError(
+                f"Packet source repo mismatch: expected {source_repo_path.as_posix()}, got {packet_source_repo.as_posix()}"
+            )
+
+    run_id_text = str(packet.get("run_id") or "").strip()
+    if not run_id_text:
+        raise RuntimeError(f"PR packet {packet_id_text} is missing run_id metadata.")
+
+    run_dir = _resolve_run_dir(source_repo_path, run_id_text)
+    if run_dir is None:
+        run_dir = source_repo_path / ".AgentCLI" / "agent_runs" / run_id_text
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    config = _load_pr_queue_validation_config(run_dir)
+    goal_trace_value = _normalize_list_value(packet.get("goal_trace") or packet.get("goalTrace"))
+    qa_notes_value = _normalize_str_list(packet.get("qa_notes") or packet.get("qaNotes"))
+    changed_files_value = _normalize_str_list(packet.get("changed_files") or packet.get("changedFiles"))
+    base_ref_text = str(packet.get("base_ref") or packet.get("baseRef") or "").strip()
+    head_ref_text = str(packet.get("head_ref") or packet.get("headRef") or "").strip()
+    branch_text = str(packet.get("branch") or "").strip()
+    if not changed_files_value and base_ref_text and head_ref_text and base_ref_text != head_ref_text:
+        changed_files_value = git_changed_files(source_repo_path, base_ref_text, head_ref_text)
+
+    validation_root = _pr_queue_validation_artifact_root(run_dir, packet_id_text)
+    validation_root.mkdir(parents=True, exist_ok=True)
+    summary_path = validation_root / "validation.json"
+    build_artifact_path = validation_root / "build.txt"
+    test_artifact_path = validation_root / "test.txt"
+    fast_artifact_path = validation_root / "fast_web_worktree_regression.json"
+
+    validation_records: list[dict[str, Any]] = []
+    validation_artifacts: list[str] = []
+    pending = False
+    failed = False
+    blocked_env = False
+    terminal_reason = ""
+    terminal_detail = ""
+    worktree_dir = allocate_temporary_worktree_dir(
+        source_repo_path,
+        prefix=f"pr-queue-validation-{packet_id_text}",
+    )
+    worktree_created = False
+    worktree_removed = False
+    cleanup_error = ""
+    started_at = now_iso()
+    started_monotonic = time.monotonic()
+    source_head_before = git_head(source_repo_path)
+    source_repo_state_before = git_repo_state(source_repo_path)
+
+    try:
+        create_worktree(source_repo_path, worktree_dir)
+        worktree_created = True
+
+        if bool(config.get("build_enabled", False)):
+            try:
+                build_record = await run_build_validation_async(
+                    repo=worktree_dir,
+                    build_cmd=config.get("build_cmd") or [],
+                    build_timeout_sec=int(config.get("build_timeout_seconds") or 1800),
+                    legacy_build_target=str(config.get("legacy_build_target") or ""),
+                    log_path=build_artifact_path,
+                    stop_path=stop_path,
+                    command_repo=source_repo_path,
+                )
+            except Exception as ex:
+                build_detail = f"{type(ex).__name__}: {str(ex).strip() or type(ex).__name__}"
+                safe_write_text(build_artifact_path, build_detail + "\n")
+                build_record = {
+                    "name": "build",
+                    "kind": "compile",
+                    "gate": "build",
+                    "cmd": [],
+                    "rc": 127,
+                    "ok": False,
+                    "status": "failed",
+                    "artifact_path": build_artifact_path.as_posix(),
+                    "artifactPath": build_artifact_path.as_posix(),
+                    "log_path": build_artifact_path.as_posix(),
+                    "logPath": build_artifact_path.as_posix(),
+                    "summary": build_detail,
+                    "failure_summary": build_detail,
+                    "failureSummary": build_detail,
+                }
+            build_record = _pr_queue_validation_record_with_classification(
+                build_record,
+                reason="build_failed",
+                detail=str(build_record.get("summary") or build_record.get("failure_summary") or ""),
+                goal_trace=goal_trace_value,
+                required=True,
+                applicable=True,
+            )
+            validation_records.append(build_record)
+            validation_artifacts.append(build_artifact_path.as_posix())
+            build_status = str(build_record.get("validation_status") or "")
+            if build_status == "validation_pending":
+                pending = True
+            elif build_status == "validation_failed":
+                failed = True
+                terminal_reason = terminal_reason or "build_failed"
+                terminal_detail = terminal_detail or str(build_record.get("summary") or build_record.get("failure_summary") or "")
+            elif build_status == "blocked_env":
+                blocked_env = True
+                terminal_reason = terminal_reason or "build_failed"
+                terminal_detail = terminal_detail or str(build_record.get("summary") or build_record.get("failure_summary") or "")
+        else:
+            build_record = _pr_queue_validation_note_record(
+                name="build",
+                kind="compile",
+                gate="build",
+                artifact_path=build_artifact_path,
+                note="Build validation disabled by run configuration.",
+                goal_trace=goal_trace_value,
+                required=False,
+                applicable=True,
+                status="validation_pending",
+            )
+            validation_records.append(build_record)
+            validation_artifacts.append(build_artifact_path.as_posix())
+            pending = True
+
+        if terminal_reason:
+            test_record = _pr_queue_validation_note_record(
+                name="test",
+                kind="test",
+                gate="test",
+                artifact_path=test_artifact_path,
+                note=f"Not run because {terminal_reason} was reported first.",
+                goal_trace=goal_trace_value,
+                required=False,
+                applicable=True,
+                status="validation_pending",
+            )
+            validation_records.append(test_record)
+            validation_artifacts.append(test_artifact_path.as_posix())
+        elif bool(config.get("run_tests", False)):
+            try:
+                test_record = await run_test_validation_async(
+                    repo=worktree_dir,
+                    test_cmd=config.get("test_cmd") or [],
+                    test_timeout_sec=int(config.get("test_timeout_seconds") or 3600),
+                    legacy_test_target=str(config.get("legacy_test_target") or ""),
+                    legacy_test_filter=str(config.get("legacy_test_filter") or ""),
+                    log_path=test_artifact_path,
+                    stop_path=stop_path,
+                    max_output_bytes=10_000_000,
+                    command_repo=source_repo_path,
+                )
+            except Exception as ex:
+                test_detail = f"{type(ex).__name__}: {str(ex).strip() or type(ex).__name__}"
+                safe_write_text(test_artifact_path, test_detail + "\n")
+                test_record = {
+                    "name": "test",
+                    "kind": "test",
+                    "gate": "test",
+                    "cmd": [],
+                    "rc": 127,
+                    "ok": False,
+                    "status": "failed",
+                    "artifact_path": test_artifact_path.as_posix(),
+                    "artifactPath": test_artifact_path.as_posix(),
+                    "log_path": test_artifact_path.as_posix(),
+                    "logPath": test_artifact_path.as_posix(),
+                    "summary": test_detail,
+                    "failure_summary": test_detail,
+                    "failureSummary": test_detail,
+                }
+            test_record = _pr_queue_validation_record_with_classification(
+                test_record,
+                reason="test_failed",
+                detail=str(test_record.get("summary") or test_record.get("failure_summary") or ""),
+                goal_trace=goal_trace_value,
+                required=True,
+                applicable=True,
+            )
+            validation_records.append(test_record)
+            validation_artifacts.append(test_artifact_path.as_posix())
+            test_status = str(test_record.get("validation_status") or "")
+            if test_status == "validation_pending":
+                pending = True
+            elif test_status == "validation_failed":
+                failed = True
+                terminal_reason = terminal_reason or "test_failed"
+                terminal_detail = terminal_detail or str(test_record.get("summary") or test_record.get("failure_summary") or "")
+            elif test_status == "blocked_env":
+                blocked_env = True
+                terminal_reason = terminal_reason or "test_failed"
+                terminal_detail = terminal_detail or str(test_record.get("summary") or test_record.get("failure_summary") or "")
+        else:
+            test_record = _pr_queue_validation_note_record(
+                name="test",
+                kind="test",
+                gate="test",
+                artifact_path=test_artifact_path,
+                note="Test validation disabled by run configuration.",
+                goal_trace=goal_trace_value,
+                required=False,
+                applicable=True,
+                status="validation_pending",
+            )
+            validation_records.append(test_record)
+            validation_artifacts.append(test_artifact_path.as_posix())
+            pending = True
+
+        if terminal_reason:
+            fast_record = _pr_queue_validation_note_record(
+                name="fast_web_worktree_regression",
+                kind="regression",
+                gate="fast_web_worktree_regression",
+                artifact_path=fast_artifact_path,
+                note=f"Not run because {terminal_reason} was reported first.",
+                goal_trace=goal_trace_value,
+                required=False,
+                applicable=True,
+                status="validation_pending",
+            )
+            validation_records.append(fast_record)
+            validation_artifacts.append(fast_artifact_path.as_posix())
+        elif repo_has_web_worktree_markers(source_repo_path):
+            try:
+                fast_result = await run_fast_web_worktree_regression_async(
+                    worktree_dir,
+                    fast_artifact_path,
+                    stop_path=stop_path,
+                    trigger_files=changed_files_value,
+                )
+            except Exception as ex:
+                fast_detail = f"{type(ex).__name__}: {str(ex).strip() or type(ex).__name__}"
+                safe_write_text(fast_artifact_path, fast_detail + "\n")
+                fast_result = {
+                    "schema_version": 1,
+                    "gate": "fast_web_worktree_regression",
+                    "repo": worktree_dir.as_posix(),
+                    "started_at": now_iso(),
+                    "ended_at": now_iso(),
+                    "elapsed_sec": 0.0,
+                    "elapsedSec": 0.0,
+                    "ok": False,
+                    "commands": [],
+                    "log_path": fast_artifact_path.as_posix(),
+                    "artifact_path": fast_artifact_path.as_posix(),
+                    "artifactPath": fast_artifact_path.as_posix(),
+                    "failed_command": None,
+                    "failure_summary": fast_detail,
+                    "failureSummary": fast_detail,
+                    "trigger_files": list(changed_files_value),
+                    "triggerFiles": list(changed_files_value),
+                    "suite_files": [],
+                    "suiteFiles": [],
+                }
+            fast_record = {
+                "name": "fast_web_worktree_regression",
+                "kind": "regression",
+                "gate": "fast_web_worktree_regression",
+                "cmd": list(fast_result.get("suite_files") or fast_result.get("suiteFiles") or []),
+                "rc": 0 if bool(fast_result.get("ok", False)) else 1,
+                "ok": bool(fast_result.get("ok", False)),
+                "status": "passed" if bool(fast_result.get("ok", False)) else "failed",
+                "artifact_path": fast_artifact_path.as_posix(),
+                "artifactPath": fast_artifact_path.as_posix(),
+                "log_path": fast_artifact_path.as_posix(),
+                "logPath": fast_artifact_path.as_posix(),
+                "summary": str(fast_result.get("failure_summary") or fast_result.get("failureSummary") or fast_artifact_path.as_posix()),
+                "failure_summary": str(fast_result.get("failure_summary") or ""),
+                "failureSummary": str(fast_result.get("failureSummary") or ""),
+                "commands": list(fast_result.get("commands") or []),
+                "failed_command": fast_result.get("failed_command"),
+                "started_at": fast_result.get("started_at"),
+                "startedAt": fast_result.get("started_at"),
+                "ended_at": fast_result.get("ended_at"),
+                "endedAt": fast_result.get("ended_at"),
+                "trigger_files": list(fast_result.get("trigger_files") or fast_result.get("triggerFiles") or changed_files_value),
+                "triggerFiles": list(fast_result.get("trigger_files") or fast_result.get("triggerFiles") or changed_files_value),
+                "suite_files": list(fast_result.get("suite_files") or fast_result.get("suiteFiles") or []),
+                "suiteFiles": list(fast_result.get("suite_files") or fast_result.get("suiteFiles") or []),
+            }
+            fast_record = _pr_queue_validation_record_with_classification(
+                fast_record,
+                reason="fast_regression_failed",
+                detail=str(fast_record.get("summary") or fast_record.get("failure_summary") or ""),
+                goal_trace=goal_trace_value,
+                required=True,
+                applicable=True,
+            )
+            validation_records.append(fast_record)
+            validation_artifacts.append(fast_artifact_path.as_posix())
+            fast_status = str(fast_record.get("validation_status") or "")
+            if fast_status == "validation_pending":
+                pending = True
+            elif fast_status == "validation_failed":
+                failed = True
+                terminal_reason = terminal_reason or "fast_regression_failed"
+                terminal_detail = terminal_detail or str(fast_record.get("summary") or fast_record.get("failure_summary") or "")
+            elif fast_status == "blocked_env":
+                blocked_env = True
+                terminal_reason = terminal_reason or "fast_regression_failed"
+                terminal_detail = terminal_detail or str(fast_record.get("summary") or fast_record.get("failure_summary") or "")
+        else:
+            fast_record = _pr_queue_validation_note_record(
+                name="fast_web_worktree_regression",
+                kind="regression",
+                gate="fast_web_worktree_regression",
+                artifact_path=fast_artifact_path,
+                note="Fast web/worktree regression is not applicable to this repository.",
+                goal_trace=goal_trace_value,
+                required=False,
+                applicable=False,
+                status="validation_passed",
+            )
+            validation_records.append(fast_record)
+            validation_artifacts.append(fast_artifact_path.as_posix())
+
+    except Exception as ex:
+        blocked_env = True
+        terminal_reason = terminal_reason or "worktree_creation_failed"
+        terminal_detail = terminal_detail or f"{type(ex).__name__}: {str(ex).strip() or type(ex).__name__}"
+    finally:
+        if worktree_created:
+            try:
+                remove_worktree(source_repo_path, worktree_dir)
+                worktree_removed = True
+            except Exception as ex:
+                cleanup_error = f"{type(ex).__name__}: {str(ex).strip() or type(ex).__name__}"
+                blocked_env = True
+
+    ended_at = now_iso()
+    elapsed_sec = round(max(0.0, time.monotonic() - started_monotonic), 3)
+    source_head_after = git_head(source_repo_path)
+    source_repo_state_after = git_repo_state(source_repo_path)
+    source_main_mutated = bool(source_head_before and source_head_after and source_head_before != source_head_after)
+    if source_main_mutated:
+        blocked_env = True
+        if not terminal_reason:
+            terminal_reason = "source_repo_mutated"
+        if not terminal_detail:
+            terminal_detail = "Validation mutated the source repository HEAD."
+    if cleanup_error:
+        if not terminal_reason:
+            terminal_reason = "worktree_cleanup_failed"
+        if terminal_detail:
+            terminal_detail = f"{terminal_detail}\nCleanup: {cleanup_error}"
+        else:
+            terminal_detail = cleanup_error
+
+    validation_status = classify_pr_queue_validation_status(
+        pending=pending,
+        failed=failed,
+        blocked_env=blocked_env,
+    )
+    if terminal_reason in {"source_repo_mutated", "worktree_cleanup_failed"}:
+        validation_status = "blocked_env"
+    validation_reason = terminal_reason or validation_status
+    validation_detail = terminal_detail or validation_reason
+
+    validation_summary = {
+        "records_total": len(validation_records),
+        "records_passed": len([record for record in validation_records if str(record.get("validation_status") or "").strip().lower() == "validation_passed"]),
+        "records_pending": len([record for record in validation_records if str(record.get("validation_status") or "").strip().lower() == "validation_pending"]),
+        "records_failed": len([record for record in validation_records if str(record.get("validation_status") or "").strip().lower() == "validation_failed"]),
+        "records_blocked_env": len([record for record in validation_records if str(record.get("validation_status") or "").strip().lower() == "blocked_env"]),
+    }
+
+    validation_plan = {
+        "build_enabled": bool(config.get("build_enabled", False)),
+        "run_tests": bool(config.get("run_tests", False)),
+        "fast_regression_applicable": repo_has_web_worktree_markers(source_repo_path),
+    }
+
+    summary_payload: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "pr_queue_validation_attempt",
+        "packet_id": packet_id_text,
+        "packetId": packet_id_text,
+        "packet_path": packet_path.as_posix(),
+        "packetPath": packet_path.as_posix(),
+        "run_id": run_id_text,
+        "runId": run_id_text,
+        "source_repo": source_repo_path.as_posix(),
+        "sourceRepo": source_repo_path.as_posix(),
+        "task_ids": _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds")),
+        "taskIds": _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds")),
+        "branch": branch_text,
+        "base_ref": base_ref_text,
+        "head_ref": head_ref_text,
+        "goal_trace": goal_trace_value,
+        "goalTrace": goal_trace_value,
+        "qa_notes": qa_notes_value,
+        "qaNotes": qa_notes_value,
+        "status": validation_status,
+        "validation_status": validation_status,
+        "validationStatus": validation_status,
+        "reason": validation_reason,
+        "validation_reason": validation_reason,
+        "validationReason": validation_reason,
+        "detail": validation_detail,
+        "validation_detail": validation_detail,
+        "validationDetail": validation_detail,
+        "artifact_path": summary_path.as_posix(),
+        "artifactPath": summary_path.as_posix(),
+        "validation_artifact_path": summary_path.as_posix(),
+        "validationArtifactPath": summary_path.as_posix(),
+        "validation_artifacts": list(validation_artifacts),
+        "validationArtifacts": list(validation_artifacts),
+        "validation_records": validation_records,
+        "validationRecords": validation_records,
+        "validation_summary": validation_summary,
+        "validationSummary": validation_summary,
+        "validation_plan": validation_plan,
+        "validationPlan": validation_plan,
+        "worktree_dir": worktree_dir.as_posix(),
+        "worktreeDir": worktree_dir.as_posix(),
+        "worktree_created": worktree_created,
+        "worktreeCreated": worktree_created,
+        "worktree_removed": worktree_removed,
+        "worktreeRemoved": worktree_removed,
+        "cleanup_error": cleanup_error,
+        "cleanupError": cleanup_error,
+        "started_at": started_at,
+        "startedAt": started_at,
+        "ended_at": ended_at,
+        "endedAt": ended_at,
+        "elapsed_sec": elapsed_sec,
+        "elapsedSec": elapsed_sec,
+        "source_head_before": source_head_before,
+        "source_head_after": source_head_after,
+        "source_repo_state_before": source_repo_state_before,
+        "source_repo_state_after": source_repo_state_after,
+        "source_main_mutated": source_main_mutated,
+    }
+    atomic_write_json(summary_path, summary_payload)
+
+    updated_packet = _update_packet_validation_metadata(
+        packet,
+        status=validation_status,
+        reason=validation_reason,
+        detail=validation_detail,
+        artifact_path=summary_path,
+        artifacts=validation_artifacts,
+        updated_at=ended_at,
+    )
+    atomic_write_json(packet_path, updated_packet)
+
+    index = load_branch_index(source_repo_path)
+    index_entry = {
+        "id": packet_id_text,
+        "source_repo": source_repo_path.as_posix(),
+        "run_id": run_id_text,
+        "task_ids": _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds")),
+        "base_ref": base_ref_text,
+        "head_ref": head_ref_text,
+        "branch": branch_text,
+        "created_at": str(packet.get("created_at") or packet.get("createdAt") or ended_at),
+        "updated_at": ended_at,
+        "packet_path": packet_path.as_posix(),
+    }
+    updated_index = _upsert_index_entry(index, index_entry)
+    _write_branch_index(source_repo_path, updated_index)
+
+    return {
+        "ok": validation_status == "validation_passed",
+        "status": validation_status,
+        "validation_status": validation_status,
+        "packet_id": packet_id_text,
+        "packet_path": packet_path.as_posix(),
+        "packet": updated_packet,
+        "validation_artifact_path": summary_path.as_posix(),
+        "validation_artifacts": list(validation_artifacts),
+        "validation_records": validation_records,
+        "validation_summary": validation_summary,
+        "validation_plan": validation_plan,
+        "worktree_dir": worktree_dir.as_posix(),
+        "worktree_created": worktree_created,
+        "worktree_removed": worktree_removed,
+        "cleanup_error": cleanup_error,
+        "source_head_before": source_head_before,
+        "source_head_after": source_head_after,
+        "source_repo_state_before": source_repo_state_before,
+        "source_repo_state_after": source_repo_state_after,
+        "source_main_mutated": source_main_mutated,
+        "summary_path": summary_path.as_posix(),
+        "summary": summary_payload,
+    }
+
+
+def validate_review_packet(
+    source_repo: Path,
+    packet_id: str,
+    *,
+    stop_path: Path | None = None,
+) -> dict[str, object]:
+    return asyncio.run(
+        validate_review_packet_async(
+            source_repo,
+            packet_id,
+            stop_path=stop_path,
+        )
+    )

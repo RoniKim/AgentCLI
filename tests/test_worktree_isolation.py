@@ -25,13 +25,20 @@ from agent_runner.gitops import (
     abandon_task_branch,
     create_task_branch,
     git_head,
+    git_repo_state,
     _git_data_lines,
     create_worktree,
     default_worktree_dir,
     remove_worktree,
     scan_worktree_diagnostics,
 )
-from agent_runner.pr_queue import load_branch_index, pr_branch_index_path, pr_packet_path, queue_review_packet
+from agent_runner.pr_queue import (
+    load_branch_index,
+    pr_branch_index_path,
+    pr_packet_path,
+    queue_review_packet,
+    validate_review_packet,
+)
 from agent_runner.preflight import check_runner_start_readiness
 from agent_runner.remote.controller import read_runner_control_event
 from agent_runner.shell import RunnerShell
@@ -176,6 +183,71 @@ class WorktreeIsolationTests(unittest.TestCase):
             encoding="utf-8",
         )
         return worktree_dir, locked_path
+
+    def _prepare_validation_packet(self) -> dict[str, object]:
+        source_head_before = self._init_repo()
+        create_worktree(self.repo, self.worktree, run_dir=self.run_dir)
+
+        goal_trace = [
+            {
+                "goal_ref": "GOAL-1",
+                "goal_text": "Keep validation work in an isolated temporary worktree.",
+            }
+        ]
+        tb = create_task_branch(
+            self.worktree,
+            "T1",
+            task_title="Validate isolated PR packet",
+            goal_trace=goal_trace,
+        )
+        (self.worktree / "feature.txt").write_text("feature\n", encoding="utf-8")
+        self._git("add", "feature.txt", cwd=self.worktree)
+        self._git("commit", "-m", "feature", cwd=self.worktree)
+        branch_head = self._git("rev-parse", "HEAD", cwd=self.worktree).strip()
+        abandon_task_branch(self.worktree, tb)
+        remove_worktree(self.repo, self.worktree)
+
+        (self.run_dir / "last_run_summary.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "build_enabled": True,
+                    "run_tests": True,
+                    "build_cmd": ["python", "-B", "-m", "py_compile", "agent_runner/pr_queue.py"],
+                    "test_cmd": ["python", "-B", "-m", "unittest", "discover", "-s", "tests"],
+                    "build_timeout_seconds": 60,
+                    "test_timeout_seconds": 60,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = queue_review_packet(
+            self.repo,
+            run_id=self.run_dir.name,
+            task_ids=["T1"],
+            base_ref=tb.base_commit,
+            head_ref=branch_head,
+            branch=tb.branch_name,
+            created_at=tb.created_at,
+            source_head_before=source_head_before,
+            source_head_after=git_head(self.repo),
+            worktree_dir=self.worktree.as_posix(),
+            validation_status="validation_pending",
+            validation_artifacts=[],
+            qa_notes=["ready for validation"],
+            goal_trace=goal_trace,
+            changed_files=["feature.txt"],
+            status="pr_queued",
+        )
+        return {
+            "packet_id": result["packet_id"],
+            "goal_trace": goal_trace,
+            "source_head_before": source_head_before,
+        }
 
     def test_default_worktree_dir_is_outside_source_repo(self) -> None:
         worktree_dir = default_worktree_dir(self.repo, self.run_dir)
@@ -1066,6 +1138,112 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertEqual(1, len(index["entries"]))
         self.assertEqual(result["packet_id"], index["entries"][0]["id"])
         self.assertEqual(tb.branch_name, index["entries"][0]["branch"])
+
+    def test_pr_queue_validation_keeps_source_repo_clean_and_uses_external_worktree(self) -> None:
+        packet = self._prepare_validation_packet()
+        source_head_before = git_head(self.repo)
+        source_state_before = git_repo_state(self.repo)
+        calls: list[dict[str, object]] = []
+
+        async def fake_run_build_validation_async(
+            repo: Path,
+            build_cmd: object,
+            build_timeout_sec: int,
+            legacy_build_target: str,
+            log_path: Path,
+            *,
+            stop_path: Path | None = None,
+            max_output_bytes: int = 10_000_000,
+            command_repo: Path | None = None,
+        ) -> dict[str, object]:
+            calls.append(
+                {
+                    "gate": "build",
+                    "repo": Path(repo).resolve(),
+                    "command_repo": Path(command_repo).resolve() if command_repo is not None else None,
+                }
+            )
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("build ok\n", encoding="utf-8")
+            return {
+                "name": "build",
+                "kind": "compile",
+                "gate": "build",
+                "cmd": ["python", "-B", "-m", "py_compile", "agent_runner/pr_queue.py"],
+                "rc": 0,
+                "ok": True,
+                "status": "passed",
+                "artifact_path": log_path.as_posix(),
+                "artifactPath": log_path.as_posix(),
+                "log_path": log_path.as_posix(),
+                "logPath": log_path.as_posix(),
+                "summary": "build ok",
+                "failure_summary": "",
+                "failureSummary": "",
+            }
+
+        async def fake_run_test_validation_async(
+            repo: Path,
+            test_cmd: object,
+            test_timeout_sec: int,
+            legacy_test_target: str,
+            legacy_test_filter: str,
+            log_path: Path,
+            *,
+            stop_path: Path | None = None,
+            max_output_bytes: int = 10_000_000,
+            command_repo: Path | None = None,
+        ) -> dict[str, object]:
+            calls.append(
+                {
+                    "gate": "test",
+                    "repo": Path(repo).resolve(),
+                    "command_repo": Path(command_repo).resolve() if command_repo is not None else None,
+                }
+            )
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("test ok\n", encoding="utf-8")
+            return {
+                "name": "test",
+                "kind": "test",
+                "gate": "test",
+                "cmd": ["python", "-B", "-m", "unittest", "discover", "-s", "tests"],
+                "rc": 0,
+                "ok": True,
+                "status": "passed",
+                "artifact_path": log_path.as_posix(),
+                "artifactPath": log_path.as_posix(),
+                "log_path": log_path.as_posix(),
+                "logPath": log_path.as_posix(),
+                "summary": "test ok",
+                "failure_summary": "",
+                "failureSummary": "",
+            }
+
+        with (
+            patch("agent_runner.pr_queue.run_build_validation_async", new=fake_run_build_validation_async),
+            patch("agent_runner.pr_queue.run_test_validation_async", new=fake_run_test_validation_async),
+        ):
+            result = validate_review_packet(self.repo, str(packet["packet_id"]))
+
+        after_head = git_head(self.repo)
+        after_state = git_repo_state(self.repo)
+        worktree_dir = Path(result["worktree_dir"]).resolve()
+
+        self.assertEqual(source_head_before, after_head)
+        self.assertEqual(source_state_before, after_state)
+        self.assertEqual("clean", source_state_before)
+        self.assertEqual("clean", after_state)
+        self.assertFalse(result["source_main_mutated"])
+        self.assertTrue(result["worktree_created"])
+        self.assertTrue(result["worktree_removed"])
+        self.assertFalse(_is_relative_to(worktree_dir, self.repo))
+        self.assertEqual(worktree_dir, calls[0]["repo"])
+        self.assertEqual(worktree_dir, calls[1]["repo"])
+        self.assertEqual(self.repo.resolve(), calls[0]["command_repo"])
+        self.assertEqual(self.repo.resolve(), calls[1]["command_repo"])
+        self.assertEqual(packet["goal_trace"], result["validation_records"][0]["goal_trace"])
+        self.assertEqual("validation_passed", result["status"])
 
 
 if __name__ == "__main__":
