@@ -3428,6 +3428,117 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         return response.json()
 
+    def _write_pr_queue_packet(self, *, packet_id: str = "pr-web-t2", secret: str = "") -> dict[str, Path]:
+        pr_root = self.repo / ".AgentCLI" / "pr_queue"
+        validation_dir = self.run_dir / "pr_queue_validation" / packet_id / "attempt_01"
+        patch_path = self.run_dir / f"{packet_id}.patch"
+        validation_log = validation_dir / "validation.log"
+        validation_json = validation_dir / "validation.json"
+        packet_path = pr_root / f"{packet_id}.json"
+        secret_suffix = f" {secret}" if secret else ""
+
+        _write(
+            patch_path,
+            """diff --git a/web_console/app.js b/web_console/app.js
+--- a/web_console/app.js
++++ b/web_console/app.js
+@@ -1,1 +1,1 @@
+-old
++new
+""",
+        )
+        _write(validation_log, f"validation log exposed for PR queue detail{secret_suffix}\n")
+        _write(
+            validation_json,
+            json.dumps(
+                {
+                    "status": "validation_failed",
+                    "validation_status": "validation_failed",
+                    "validation_reason": "focused test failed",
+                    "validation_detail": f"py_compile passed; web static failed{secret_suffix}",
+                    "validation_records": [
+                        {
+                            "name": "web-static",
+                            "status": "failed",
+                            "summary": f"PR queue route needs detail coverage{secret_suffix}",
+                        }
+                    ],
+                    "validation_summary": {"commands_failed": 1, "commands_passed": 1},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        packet = {
+            "schema_version": 1,
+            "id": packet_id,
+            "status": "pr_queued",
+            "source_repo": self.repo.as_posix(),
+            "run_id": self.run_dir.name,
+            "task_ids": ["T2"],
+            "goal_trace": [
+                {
+                    "goal_ref": "P0-T",
+                    "goal_text": "Web PR Queue shows diff, QA notes, validation logs, merge preflight, and blocking reasons.",
+                }
+            ],
+            "branch": "task/T2-pr-queue",
+            "base_ref": "main",
+            "head_ref": "abc12345",
+            "changed_files": ["web_console/app.js"],
+            "diff_artifacts": [patch_path.as_posix()],
+            "qa_notes": [f"QA reviewed packet detail and validation logs{secret_suffix}"],
+            "validation_status": "validation_failed",
+            "validation_reason": "focused test failed",
+            "validation_detail": f"static route assertions failed{secret_suffix}",
+            "validation_artifact_path": validation_json.as_posix(),
+            "validation_artifacts": [validation_log.as_posix()],
+            "merge_preflight": {
+                "source_repo_state": "dirty",
+                "source_head": "abc12345",
+                "applyCheck": {
+                    "ok": False,
+                    "status": "failed",
+                    "message": f"git apply --check failed{secret_suffix}",
+                    "output": f"hunk failed in web_console/app.js{secret_suffix}",
+                    "rc": 1,
+                },
+            },
+            "commits": [{"sha": "abc12345", "subject": "Expose PR queue detail"}],
+            "created_at": "2026-04-26T12:03:00Z",
+            "updated_at": "2026-04-26T12:04:00Z",
+        }
+        _write(packet_path, json.dumps(packet, ensure_ascii=False, indent=2) + "\n")
+        _write(
+            pr_root / "branch_index.json",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "updated_at": "2026-04-26T12:04:00Z",
+                    "entries": [
+                        {
+                            "id": packet_id,
+                            "branch": "task/T2-pr-queue",
+                            "base_ref": "main",
+                            "head_ref": "abc12345",
+                            "packet_path": packet_path.as_posix(),
+                            "updated_at": "2026-04-26T12:04:00Z",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        return {
+            "packet": packet_path,
+            "patch": patch_path,
+            "validation_log": validation_log,
+            "validation_json": validation_json,
+        }
+
     def _restore_home(self) -> None:
         if self._old_home is None:
             os.environ.pop("AGENTCLI_HOME", None)
@@ -3444,7 +3555,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         status = self.client.get("/api/status")
         self.assertEqual(200, status.status_code)
         payload = status.json()
-        for key in ("active_run", "stages", "backlog", "goals", "logs", "config", "prompts", "history", "metrics", "notifications", "worktree", "progress"):
+        for key in ("active_run", "stages", "backlog", "goals", "logs", "config", "prompts", "history", "metrics", "notifications", "pr_queue", "worktree", "progress"):
             self.assertIn(key, payload)
         self.assertEqual("20260426-120000", payload["active_run"]["id"])
         self.assertEqual(3, len(payload["stages"]))
@@ -4937,6 +5048,111 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(3, goals["summary"]["total"])
         self.assertEqual(1, goals["summary"]["done"])
         self.assertEqual(4, goals["items"]["p0"][0]["line_number"])
+
+    def test_api_pr_queue_missing_queue_returns_empty_state(self) -> None:
+        from fastapi.testclient import TestClient
+
+        client = TestClient(self._create_app(self.empty_repo))
+        queue = client.get("/api/pr-queue")
+        self.assertEqual(200, queue.status_code)
+        payload = queue.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual("empty", payload["state"])
+        self.assertEqual([], payload["items"])
+
+        status = client.get("/api/status").json()
+        self.assertIn("pr_queue", status)
+        self.assertEqual([], status["pr_queue"]["items"])
+        self.assertEqual("empty", status["sectionState"]["prQueue"]["status"])
+
+    def test_api_pr_queue_list_and_detail_expose_packet_data(self) -> None:
+        self._write_pr_queue_packet()
+
+        queue = self.client.get("/api/pr-queue")
+        self.assertEqual(200, queue.status_code)
+        queue_payload = queue.json()
+        self.assertTrue(queue_payload["ok"])
+        self.assertEqual("ready", queue_payload["state"])
+        self.assertEqual(1, queue_payload["summary"]["total"])
+        item = queue_payload["items"][0]
+        self.assertEqual("pr-web-t2", item["id"])
+        self.assertEqual(["T2"], item["taskIds"])
+        self.assertEqual(["P0-T"], item["goalRefs"])
+        self.assertEqual("task/T2-pr-queue", item["branch"])
+        self.assertEqual("main", item["baseRef"])
+        self.assertEqual("abc12345", item["headRef"])
+        self.assertEqual("validation_failed", item["validationStatus"])
+        self.assertEqual("blocked", item["mergePreflightStatus"])
+        self.assertGreaterEqual(len(item["blockingReasons"]), 1)
+        self.assertNotIn("changedFiles", item)
+
+        detail_response = self.client.get("/api/pr-queue/pr-web-t2")
+        self.assertEqual(200, detail_response.status_code)
+        detail_payload = detail_response.json()
+        detail = detail_payload["detail"]
+        self.assertEqual("pr-web-t2", detail["id"])
+        self.assertEqual(["T2"], detail["taskIds"])
+        self.assertEqual("Web PR Queue shows diff, QA notes, validation logs, merge preflight, and blocking reasons.", detail["goalTrace"][0]["goal_text"])
+        self.assertEqual("web_console/app.js", detail["changedFiles"][0]["path"])
+        self.assertTrue(detail["changedFiles"][0]["hunks"])
+        self.assertIn("QA reviewed packet detail", detail["qaNotes"][0])
+        self.assertEqual("validation_failed", detail["validation"]["status"])
+        self.assertIn("validation log exposed", detail["validation"]["artifacts"][1]["preview"])
+        self.assertEqual("web-static", detail["validation"]["records"][0]["name"])
+        self.assertIn("git apply --check failed", detail["mergePreflight"]["applyCheck"]["message"])
+        self.assertTrue(any(reason["kind"] == "merge_preflight" for reason in detail["blockingReasons"]))
+        self.assertTrue(detail["diffArtifacts"])
+
+        status_payload = self.client.get("/api/status").json()
+        self.assertEqual("pr-web-t2", status_payload["pr_queue"]["items"][0]["id"])
+        self.assertEqual("ready", status_payload["sectionState"]["prQueue"]["status"])
+
+    def test_api_pr_queue_redacts_lan_payload(self) -> None:
+        from fastapi.testclient import TestClient
+
+        secret = "super-secret-pr-token"
+        self._write_pr_queue_packet(secret=secret)
+        client = TestClient(self._create_app(self.repo, bind_host="0.0.0.0"))
+
+        payload = client.get("/api/pr-queue/pr-web-t2").json()
+        serialized = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn(secret, serialized)
+        self.assertIn("[redacted]", serialized)
+        self.assertTrue(payload["redaction"]["active"])
+        self.assertIn("detail.qaNotes", payload["redaction"]["fields"])
+
+    def test_api_pr_queue_missing_packet_returns_404(self) -> None:
+        response = self.client.get("/api/pr-queue/not-found")
+        self.assertEqual(404, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("missing", payload["state"])
+
+    def test_pr_queue_view_renders_read_only_packet_detail(self) -> None:
+        self._write_pr_queue_packet()
+        status_payload = self.client.get("/api/status").json()
+        detail_payload = self.client.get("/api/pr-queue/pr-web-t2").json()
+        status_payload["pr_queue"]["detail"] = detail_payload["detail"]
+        status_payload["pr_queue"]["selectedId"] = "pr-web-t2"
+        status_payload["prQueue"] = status_payload["pr_queue"]
+
+        normalized = _run_adapter_harness([{"kind": "call", "name": "normalizeSnapshot", "args": [status_payload]}])[0]
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+                {"kind": "call", "name": "setView", "args": ["pr-queue"]},
+                {"kind": "call", "name": "renderShell", "args": [{"force": True, "preserveScroll": True}]},
+            ]
+        )
+        main_html = shell["roots"]["main"]
+        self.assertEqual("pr-queue", shell["roots"]["view"])
+        self.assertIn("PR Queue", shell["title"])
+        self.assertIn("Read-only", main_html)
+        self.assertIn("QA reviewed packet detail", main_html)
+        self.assertIn("validation log exposed", main_html)
+        self.assertIn("Validate, merge, discard, and rebase are disabled here.", main_html)
+        self.assertIn("data-pr-queue-select", main_html)
+        self.assertEqual([], shell["fetchCalls"])
 
     def test_adapter_normalizes_live_run_contract_from_api_snapshot(self) -> None:
         status_payload = self.client.get("/api/status").json()
