@@ -81,6 +81,8 @@ WORKTREE_DIAGNOSTIC_CATEGORY_ORDER = (
     "missing_patch",
 )
 
+PYTEST_CACHE_TEMP_PREFIX = "pytest-cache-files-"
+
 WORKTREE_RESOLUTION_ACTION_ORDER = (
     "source_safe_discard",
     "generated_worktree_remove",
@@ -860,6 +862,74 @@ def abandon_task_branch(repo: Path, tb: TaskBranch) -> str:
     return tb.branch_name
 
 
+def _cleanup_pytest_cache_tempdirs(
+    repo: Path,
+    *,
+    max_attempts: int = 4,
+    initial_backoff_seconds: float = 0.05,
+) -> dict[str, object]:
+    """Best-effort cleanup for pytest cache bootstrap dirs left in a worktree root.
+
+    Pytest creates top-level ``pytest-cache-files-*`` directories while
+    initializing ``.pytest_cache``. On Windows those empty temporary directories
+    can remain briefly locked after a test subprocess exits, which makes
+    ``git clean -fd`` noisy and can block generated-worktree removal.
+    """
+    repo_resolved = repo.expanduser().resolve()
+    candidates = [
+        path
+        for path in repo_resolved.glob(f"{PYTEST_CACHE_TEMP_PREFIX}*")
+        if path.is_dir() and path.parent == repo_resolved
+    ]
+    removed: list[str] = []
+    locked: list[dict[str, object]] = []
+    attempts_by_path: dict[str, list[dict[str, object]]] = {}
+    total_attempts = max(1, int(max_attempts))
+    initial_backoff = max(0.0, float(initial_backoff_seconds))
+
+    for path in candidates:
+        path_key = path.as_posix()
+        backoff = initial_backoff
+        for attempt in range(1, total_attempts + 1):
+            try:
+                shutil.rmtree(path)
+                removed.append(path_key)
+                break
+            except FileNotFoundError:
+                removed.append(path_key)
+                break
+            except PermissionError as ex:
+                attempts_by_path.setdefault(path_key, []).append(
+                    _worktree_cleanup_attempt_details(ex, path, attempt=attempt, operation="pytest_cache_temp_cleanup")
+                )
+            except OSError as ex:
+                if getattr(ex, "errno", None) not in {errno.EACCES, errno.EPERM}:
+                    raise
+                attempts_by_path.setdefault(path_key, []).append(
+                    _worktree_cleanup_attempt_details(ex, path, attempt=attempt, operation="pytest_cache_temp_cleanup")
+                )
+
+            if not path.exists():
+                removed.append(path_key)
+                break
+            if attempt < total_attempts:
+                time.sleep(backoff)
+                backoff = min(backoff * 2 if backoff else initial_backoff, 0.5)
+        else:
+            locked.append(
+                {
+                    "path": path_key,
+                    "attempts": attempts_by_path.get(path_key, []),
+                }
+            )
+
+    return {
+        "found": len(candidates),
+        "removed": removed,
+        "locked": locked,
+    }
+
+
 def reset_task_branch(repo: Path, tb: TaskBranch) -> None:
     """Reset a task branch to its base commit for retry.
 
@@ -872,7 +942,24 @@ def reset_task_branch(repo: Path, tb: TaskBranch) -> None:
     if rc != 0:
         raise RuntimeError(f"reset_task_branch: git reset --hard failed: {out}")
 
+    _cleanup_pytest_cache_tempdirs(repo, max_attempts=3, initial_backoff_seconds=0.05)
     rc, out = run_cmd(["git", "clean", "-fd"], cwd=repo, timeout_sec=120)
+    if rc != 0 and PYTEST_CACHE_TEMP_PREFIX in out:
+        cleanup = _cleanup_pytest_cache_tempdirs(repo, max_attempts=6, initial_backoff_seconds=0.2)
+        rc, out = run_cmd(["git", "clean", "-fd"], cwd=repo, timeout_sec=120)
+        if rc != 0 and PYTEST_CACHE_TEMP_PREFIX in out:
+            exclude_rc, exclude_out = run_cmd(
+                ["git", "clean", "-fd", "-e", f"{PYTEST_CACHE_TEMP_PREFIX}*"],
+                cwd=repo,
+                timeout_sec=120,
+            )
+            if exclude_rc == 0:
+                locked_count = len(cleanup.get("locked") or [])
+                eprint(
+                    "[WARN] reset_task_branch: left locked pytest cache temp "
+                    f"director{'y' if locked_count == 1 else 'ies'} for later cleanup: {locked_count}"
+                )
+                rc, out = 0, exclude_out
     if rc != 0:
         eprint(f"[WARN] reset_task_branch: git clean -fd failed: {out}")
 

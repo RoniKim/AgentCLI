@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 from agent_runner.gitops import (
     WORKTREE_MERGE_PENDING,
     WorktreeSafetyError,
+    _cleanup_pytest_cache_tempdirs,
     abandon_task_branch,
     create_task_branch,
     git_head,
@@ -92,6 +93,48 @@ class WorktreeIsolationTests(unittest.TestCase):
         python_path.parent.mkdir(parents=True, exist_ok=True)
         python_path.write_text("", encoding="utf-8")
         return python_path
+
+    def test_pytest_cache_tempdir_cleanup_retries_transient_directory_lock(self) -> None:
+        temp_dir = self.repo / "pytest-cache-files-retry"
+        temp_dir.mkdir()
+        calls = {"count": 0}
+        real_rmtree = shutil.rmtree
+
+        def fake_rmtree(path: Path | str, *args: object, **kwargs: object) -> object:
+            if Path(path).resolve() == temp_dir.resolve() and calls["count"] == 0:
+                calls["count"] += 1
+                raise PermissionError(13, "Permission denied", str(temp_dir))
+            return real_rmtree(path, *args, **kwargs)
+
+        with (
+            patch("agent_runner.gitops.shutil.rmtree", side_effect=fake_rmtree),
+            patch("agent_runner.gitops.time.sleep", return_value=None),
+        ):
+            result = _cleanup_pytest_cache_tempdirs(self.repo, max_attempts=2, initial_backoff_seconds=0)
+
+        self.assertFalse(temp_dir.exists())
+        self.assertEqual([temp_dir.as_posix()], result["removed"])
+        self.assertEqual([], result["locked"])
+
+    def test_pytest_cache_tempdir_cleanup_reports_persistent_directory_lock(self) -> None:
+        temp_dir = self.repo / "pytest-cache-files-locked"
+        temp_dir.mkdir()
+
+        def fake_rmtree(path: Path | str, *args: object, **kwargs: object) -> object:
+            if Path(path).resolve() == temp_dir.resolve():
+                raise PermissionError(13, "Permission denied", str(temp_dir))
+            return shutil.rmtree(path, *args, **kwargs)
+
+        with (
+            patch("agent_runner.gitops.shutil.rmtree", side_effect=fake_rmtree),
+            patch("agent_runner.gitops.time.sleep", return_value=None),
+        ):
+            result = _cleanup_pytest_cache_tempdirs(self.repo, max_attempts=2, initial_backoff_seconds=0)
+
+        self.assertTrue(temp_dir.exists())
+        self.assertEqual([], result["removed"])
+        self.assertEqual(temp_dir.as_posix(), result["locked"][0]["path"])
+        self.assertEqual(2, len(result["locked"][0]["attempts"]))
 
     def _load_contract(self) -> dict[str, object]:
         return json.loads(self.contract_path.read_text(encoding="utf-8"))
