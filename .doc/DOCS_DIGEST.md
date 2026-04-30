@@ -14,6 +14,7 @@ It is generated from the current `.doc/Docs` file inventory.
 - .doc/Docs/TASK_STATUS_CLASSIFICATION_REVIEW.md
 - .doc/Docs/UNATTENDED_OPS_AUDIT_AND_FOLLOWUP.md
 - .doc/Docs/WEB_CONSOLE_TARGET.md
+- .doc/Docs/WEB_OPERATIONAL_UX_GAPS_20260430.md
 
 ## .doc/Docs/ARCHITECTURE.md
 - path: `.doc/Docs/ARCHITECTURE.md`
@@ -235,3 +236,21 @@ It is generated from the current `.doc/Docs` file inventory.
   - ## Data Contract
   - ## FastAPI Server Target
   - ## Non-Goals For First Pass
+
+## .doc/Docs/WEB_OPERATIONAL_UX_GAPS_20260430.md
+- path: `.doc/Docs/WEB_OPERATIONAL_UX_GAPS_20260430.md`
+- decoded_as: `utf-8-sig`
+- headings:
+  - # Web Operational UX Gaps - 2026-04-30
+  - ## Summary
+  - ## Observed Evidence
+  - ## Gap 1 - Stale Snapshot Semantics
+  - ## Gap 2 - Active Task Title
+  - ## Gap 3 - Runner Liveness Wording
+  - ## Gap 4 - Logs Route Loading State
+  - ## Gap 5 - Worktree Review Historical State
+  - ## Gap 6 - Mobile Nav Overflow
+  - ## Gap 7 - PR Queue Visibility
+  - ## Gap 8 - Snapshot Payload Size
+  - ## Implementation Order
+  - ## Verification

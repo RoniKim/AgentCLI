@@ -1,7 +1,7 @@
 # AgentCLI 문서 인덱스
 
-> 마지막 갱신: 2026-04-29
-> 6개 병렬 에이전트 코드 정합성 검증 + 재정렬 결과
+> 마지막 갱신: 2026-04-30
+> Web Operational UX QA 후속 문서 반영 + PM/Dev/QA 컨텍스트 갱신
 > 모든 항목은 코드와 실제 파일 inventory + file:line 단위 대조 완료
 
 ---
@@ -64,6 +64,7 @@
 | `LOCAL_PR_QUEUE_AND_DEFERRED_VALIDATION.md` | 로컬 PR 큐, 지연 검증, oversized GOALS task 분할 계획 |
 | `EXPERIENCE_DB_AND_ANALYZER_STAGE.md` | Experience DB, Analyzer stage, lesson feedback loop 설계 |
 | `LARGE_MODULE_DECOMPOSITION_PLAN.md` | `web.py`, `cycle.py`, `claudecode.py` 대형 모듈 분해 계획 |
+| `WEB_OPERATIONAL_UX_GAPS_20260430.md` | Web Console 실사용 QA에서 확인된 운영 UX gap과 P0-W 후속 작업 |
 
 ## 5. 인시던트 (.doc/Docs/incidents/, 미해결)
 

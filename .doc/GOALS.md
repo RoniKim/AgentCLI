@@ -280,6 +280,19 @@
 - [ ] Claude backend-specific code is limited to Claude SDK/CLI execution, Claude streaming collection, Claude quota probing, and Claude model options.
 - [ ] Every decomposition PR is extraction-only with no product behavior changes, no endpoint contract changes, and no run artifact filename changes.
 
+### P0-W. Web Operational UX Follow-Up
+
+- [ ] Dashboard stale snapshot badge only appears when the newest `/api/status` payload or selected run artifact is older than the configured freshness threshold.
+- [ ] Dashboard active task id, title, attempt, and branch are populated from live runner state, backlog state, task history, or latest task artifact instead of showing `task title unavailable`.
+- [ ] Runner liveness copy clearly separates shell runner process, task backend, tracked children, and artifact writer states without contradictory `running`/`stopped` wording.
+- [ ] Logs view renders structured `/api/logs` events immediately when `run.log` is sparse and labels structured events separately from live tail sources.
+- [ ] Log tail state leaves `loading` at EOF and shows last log line plus no-output warning when no new `run.log` lines arrive.
+- [ ] Worktree Review defaults to the active run's current pending/no-pending state and does not surface old applied/discarded artifacts unless the user opens historical context.
+- [ ] Mobile navigation confines overflow to an intentional visible horizontal scroll container or wraps route groups without hidden off-screen controls at 390px width.
+- [ ] Web snapshot polling uses route-appropriate payloads so Dashboard refresh does not require multi-megabyte `/api/status` responses containing full GOALS raw text/history data.
+- [ ] Web PR Queue route lists queued local PR packets with task id, GOALS refs, branch, changed files, validation status, QA notes, and merge preflight status.
+- [ ] Web PR Queue detail view shows per-file diff, validation logs, blockers, dependency detail, and explicit read-only vs mutating validate/merge/discard affordances.
+
 ## P1 (Should-Have)
 
 - [ ] Run History supports comparing two runs side-by-side with commits, task outcomes, token/quota usage, validation results, and worktree outcomes.
