@@ -5063,6 +5063,81 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIn("merge-worktree", worktree["reviewRequiredMessage"])
         self.assertIn("discard-worktree", worktree["reviewRequiredMessage"])
 
+    def test_topbar_identity_band_tracks_live_state_and_locale_labels(self) -> None:
+        status_payload = self.client.get("/api/status").json()
+        normalized = _run_adapter_harness([{"kind": "call", "name": "normalizeSnapshot", "args": [status_payload]}])[0]
+        web_instance = status_payload.get("webInstance") or status_payload["liveRun"]["identity"]["webInstance"]
+        expected_port = web_instance.get("port") if isinstance(web_instance, dict) else None
+        try:
+            expected_port = int(expected_port)
+        except (TypeError, ValueError):
+            expected_port = None
+        expected_runner_mode = status_payload["liveRun"]["process"].get("runnerMode") or status_payload["liveRun"]["runnerControl"]["status"].get("runnerMode")
+
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "setLocale", "args": ["en"]},
+                {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+                {"kind": "call", "name": "currentTopbarIdentity", "args": []},
+                {"kind": "call", "name": "renderIdentityBand", "args": []},
+                {"kind": "call", "name": "renderTopbar", "args": []},
+                {"kind": "call", "name": "setLocale", "args": ["ko"]},
+                {"kind": "call", "name": "renderTopbar", "args": []},
+            ]
+        )
+
+        identity = shell["results"][2]
+        band_en = shell["results"][3]
+        topbar_en = shell["results"][4]
+        topbar_ko = shell["results"][6]
+        runner_control_payload = status_payload.get("runnerControl") or status_payload.get("runner_control") or {}
+        redaction_payload = status_payload.get("redaction") or {}
+
+        self.assertEqual(status_payload["liveRun"]["identity"]["repoLabel"], identity["repoLabel"])
+        self.assertEqual(status_payload["liveRun"]["identity"]["branch"], identity["branch"])
+        self.assertEqual(status_payload["liveRun"]["identity"]["runId"], identity["runId"])
+        self.assertEqual(status_payload["liveRun"]["identity"]["runDir"], identity["runDir"])
+        self.assertEqual(expected_port, identity["port"])
+        self.assertEqual(expected_runner_mode, identity["runnerMode"])
+        self.assertEqual(runner_control_payload.get("enabled"), identity["runnerControlEnabled"])
+        self.assertEqual(redaction_payload.get("active"), identity["redactionActive"])
+
+        self.assertIn("topbar__identity-grid", band_en)
+        self.assertIn("Identity", band_en)
+        self.assertIn("Repo", band_en)
+        self.assertIn("Branch", band_en)
+        self.assertIn("Run ID", band_en)
+        self.assertIn("Run dir", band_en)
+        self.assertIn("Port", band_en)
+        self.assertIn("Runner mode", band_en)
+        self.assertIn("Runner control", band_en)
+        self.assertIn("Redaction", band_en)
+        self.assertIn(status_payload["liveRun"]["identity"]["repoLabel"], band_en)
+        self.assertIn(status_payload["liveRun"]["identity"]["branch"], band_en)
+        self.assertIn(status_payload["liveRun"]["identity"]["runId"], band_en)
+        self.assertIn(status_payload["liveRun"]["identity"]["runDir"], band_en)
+        self.assertIn("Enabled" if identity["runnerControlEnabled"] else "Disabled", band_en)
+        self.assertIn("Active" if identity["redactionActive"] else "Inactive", band_en)
+        self.assertIn("topbar__identity", topbar_en)
+        self.assertIn("topbar__identity-grid", topbar_en)
+
+        self.assertIn("식별 정보", topbar_ko)
+        self.assertIn("저장소", topbar_ko)
+        self.assertIn("브랜치", topbar_ko)
+        self.assertIn("실행 ID", topbar_ko)
+        self.assertIn("실행 디렉터리", topbar_ko)
+        self.assertIn("포트", topbar_ko)
+        self.assertIn("실행기 모드", topbar_ko)
+        self.assertIn("실행기 제어", topbar_ko)
+        self.assertIn("마스킹", topbar_ko)
+        self.assertIn("활성화됨" if identity["runnerControlEnabled"] else "비활성화됨", topbar_ko)
+        self.assertIn("활성" if identity["redactionActive"] else "비활성", topbar_ko)
+        runner_mode_label = {
+            "thread": "스레드",
+            "subprocess": "서브프로세스",
+        }.get(str(identity["runnerMode"]).lower(), "알 수 없음")
+        self.assertIn(runner_mode_label, topbar_ko)
+
     def test_web_console_live_run_fixture_sequence_covers_stop_reconnect_and_completion(self) -> None:
         fixtures = _make_web_console_live_run_fixtures()
         self.assertEqual(

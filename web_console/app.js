@@ -106,6 +106,22 @@
         quotaUsageWindow: 'Quota {window} usage',
         quotaUnavailable: 'Quota unavailable',
       },
+      identity: {
+        title: 'Identity',
+        repo: 'Repo',
+        branch: 'Branch',
+        runId: 'Run ID',
+        runDir: 'Run dir',
+        port: 'Port',
+        mode: 'Runner mode',
+        runnerControl: 'Runner control',
+        redaction: 'Redaction',
+        active: 'Active',
+        inactive: 'Inactive',
+        threadMode: 'thread',
+        subprocessMode: 'subprocess',
+        unknownMode: 'unknown',
+      },
       common: {
         loading: 'Loading',
         working: 'Working...',
@@ -882,6 +898,22 @@
         commandPaletteTitle: '명령 팔레트',
         commandPaletteHint: '/ 또는 Cmd+K / Ctrl+K',
         language: '언어',
+      },
+      identity: {
+        title: '식별 정보',
+        repo: '저장소',
+        branch: '브랜치',
+        runId: '실행 ID',
+        runDir: '실행 디렉터리',
+        port: '포트',
+        mode: '실행기 모드',
+        runnerControl: '실행기 제어',
+        redaction: '마스킹',
+        active: '활성',
+        inactive: '비활성',
+        threadMode: '스레드',
+        subprocessMode: '서브프로세스',
+        unknownMode: '알 수 없음',
       },
       common: {
         loading: '불러오는 중',
@@ -8527,9 +8559,14 @@
     adaptMetrics,
     adaptHistory,
     adaptWorktree,
+    setLocale,
+    currentTopbarIdentity,
+    identityRunnerModeLabel,
+    renderIdentityBand,
     renderDashboard,
     renderPipeline,
     renderStageHealthSignals,
+    renderTopbar,
     goalBucketLabel,
     goalBucketName,
     goalItemLineNumber,
@@ -11923,6 +11960,122 @@
     return toObject(current.notifications);
   }
 
+  function identityRunnerModeLabel(mode) {
+    const normalized = toText(mode, '').trim().toLowerCase();
+    if (normalized === 'thread') {
+      return t('identity.threadMode');
+    }
+    if (normalized === 'subprocess') {
+      return t('identity.subprocessMode');
+    }
+    return t('identity.unknownMode');
+  }
+
+  function currentTopbarIdentity(liveRun = currentLiveRun()) {
+    const current = toObject(liveRun);
+    const currentIdentity = toObject(current.identity);
+    const currentActiveRun = currentLiveRunActiveRun(current);
+    const currentRunnerControl = currentLiveRunRunnerControl(current);
+    const currentProcess = toObject(current.process);
+    const currentWebInstance = normalizeWebInstance(
+      currentIdentity.webInstance ||
+        currentIdentity.web_instance ||
+        current.webInstance ||
+        current.web_instance ||
+        currentRunnerControl.webInstance ||
+        currentRunnerControl.web_instance ||
+        state.webInstance
+    );
+    const repoLabel = toText(
+      currentIdentity.repoLabel ||
+        currentActiveRun.repoLabel ||
+        state.activeRun.repoLabel ||
+        state.repo.name ||
+        state.repo.path ||
+        currentIdentity.repo ||
+        currentActiveRun.repo ||
+        'agentcli',
+      'agentcli'
+    );
+    const branch = toText(currentIdentity.branch || currentActiveRun.branch || state.activeRun.branch || state.repo.branch || 'HEAD', 'HEAD');
+    const runId = toText(currentIdentity.runId || currentIdentity.id || currentActiveRun.id || state.activeRun.id || 'no-run', 'no-run');
+    const runDir = toText(currentIdentity.runDir || currentActiveRun.runDir || state.activeRun.runDir || '', '');
+    const port = toMaybeNumber(
+      currentIdentity.webInstance?.port ??
+        currentIdentity.web_instance?.port ??
+        current.webInstance?.port ??
+        current.web_instance?.port ??
+        currentRunnerControl.webInstance?.port ??
+        currentRunnerControl.web_instance?.port ??
+        state.webInstance?.port ??
+        null
+    );
+    const runnerMode = toText(
+      currentProcess.runnerMode ||
+        currentProcess.runner_mode ||
+        currentRunnerControl.status?.runnerMode ||
+        currentRunnerControl.status?.runner_mode ||
+        state.runnerControl?.status?.runnerMode ||
+        state.runnerControl?.status?.runner_mode ||
+        'unknown',
+      'unknown'
+    );
+    const runnerControlEnabled =
+      currentRunnerControl.enabled != null ? Boolean(currentRunnerControl.enabled) : Boolean(state.runnerControl?.enabled);
+    const redactionActive = Boolean(state.redaction?.active);
+    return {
+      repoLabel,
+      repo: repoLabel,
+      branch,
+      runId,
+      runDir,
+      port: Number.isFinite(port) && port > 0 ? port : null,
+      runnerMode,
+      runnerControlEnabled,
+      redactionActive,
+      webInstance: currentWebInstance,
+    };
+  }
+
+  function identityChip(label, value, tone = 'idle', title = '') {
+    const resolvedValue = toText(value, '').trim() || t('common.unknown');
+    const chipTitle = toText(title, '').trim() || resolvedValue;
+    const titleAttr = chipTitle ? ` title="${escapeHTML(chipTitle)}"` : '';
+    return `
+      <span class="status-chip status-chip--${tone} topbar__identity-chip"${titleAttr}>
+        <span class="status-chip__label">${escapeHTML(label)}</span>
+        <span class="status-chip__meta">${escapeHTML(resolvedValue)}</span>
+      </span>
+    `;
+  }
+
+  function renderIdentityBand(identity = currentTopbarIdentity()) {
+    const current = toObject(identity);
+    const portLabel = current.port == null ? t('common.unknown') : String(current.port);
+    const runnerControlLabel = current.runnerControlEnabled ? t('common.enabled') : t('common.disabled');
+    const runnerControlTone = current.runnerControlEnabled ? 'success' : 'warn';
+    const redactionLabel = current.redactionActive ? t('identity.active') : t('identity.inactive');
+    const redactionTone = current.redactionActive ? 'warn' : 'idle';
+    const runnerModeLabel = identityRunnerModeLabel(current.runnerMode);
+    return `
+      <div class="topbar__identity" aria-label="${escapeHTML(t('identity.title'))}">
+        <div class="topbar__identity-head">
+          <span class="topbar__identity-title">${escapeHTML(t('identity.title'))}</span>
+        </div>
+        <div class="topbar__identity-grid">
+          ${identityChip(t('identity.repo'), current.repo || current.repoLabel, 'idle', current.repoLabel || current.repo || '')}
+          ${identityChip(t('identity.branch'), current.branch, 'idle')}
+          ${identityChip(t('identity.runId'), current.runId, 'idle')}
+          ${identityChip(t('identity.runDir'), current.runDir, 'idle', current.runDir)}
+          ${identityChip(t('identity.port'), portLabel, 'idle')}
+          ${identityChip(t('identity.mode'), runnerModeLabel, 'idle')}
+          ${identityChip(t('identity.runnerControl'), runnerControlLabel, runnerControlTone)}
+          ${identityChip(t('identity.redaction'), redactionLabel, redactionTone)}
+        </div>
+      </div>
+    `;
+  }
+
   function currentBacklogTask() {
     if (!state.backlog.length) {
       return null;
@@ -13307,6 +13460,7 @@
     const runnerBusyAction = runnerControlBusyAction();
     const runnerChipTone = `status-chip--${runnerControlDisplay.chipTone}`;
     const snapshotTone = snapshotStatusClass(snapshotDisplay.tone);
+    const identity = currentTopbarIdentity();
     return `
       <div class="topbar__brand">
         <span class="brand-mark"></span>
@@ -13346,6 +13500,7 @@
           <span class="meter ${state.activeRun.budgetAvailable ? '' : 'meter--unavailable'}" aria-hidden="true"><span class="meter__fill ${state.activeRun.budgetAvailable ? 'meter__fill--warn' : 'meter__fill--muted'}" style="width:${escapeHTML(budgetWidth)}"></span></span>
         </span>
       </div>
+      ${renderIdentityBand(identity)}
     `;
   }
 

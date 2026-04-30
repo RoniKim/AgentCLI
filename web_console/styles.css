@@ -102,24 +102,30 @@ a {
   height: 100vh;
   display: grid;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
-  grid-template-rows: var(--topbar-h) minmax(0, 1fr);
+  grid-template-rows: minmax(var(--topbar-h), auto) minmax(0, 1fr);
   overflow: hidden;
 }
 
 .topbar {
   grid-column: 1 / -1;
-  height: var(--topbar-h);
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
+  grid-template-areas:
+    "brand status actions"
+    "identity identity identity";
+  row-gap: 6px;
   align-items: center;
-  gap: 12px;
-  padding: 0 14px 0 16px;
+  gap: 8px 12px;
+  padding: 8px 14px 10px 16px;
   border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, var(--surface) 0%, var(--surface-3) 100%);
   font-family: var(--mono);
   min-width: 0;
+  min-height: var(--topbar-h);
 }
 
 .topbar__brand {
+  grid-area: brand;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -162,6 +168,7 @@ a {
 }
 
 .topbar__status {
+  grid-area: status;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -179,13 +186,67 @@ a {
 }
 
 .topbar__actions {
+  grid-area: actions;
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-left: auto;
+  justify-self: end;
+  margin-left: 0;
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
+}
+
+.topbar__identity {
+  grid-area: identity;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.topbar__identity-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.topbar__identity-title {
+  min-width: 0;
+  color: var(--text-sub);
+  font-size: 11px;
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.topbar__identity-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+
+.topbar__identity-chip {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.topbar__identity .status-chip__label {
+  flex: 0 0 auto;
+  color: var(--text-sub);
+  font-size: 10.5px;
+}
+
+.topbar__identity .status-chip__meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 11.5px;
 }
 
 .topbar__actions::-webkit-scrollbar {
@@ -4877,7 +4938,7 @@ select.field-control,
 
   .app-shell {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: var(--topbar-h) minmax(0, auto) minmax(0, 1fr);
+    grid-template-rows: minmax(var(--topbar-h), auto) minmax(0, auto) minmax(0, 1fr);
   }
 
   .sidebar {
@@ -4945,8 +5006,12 @@ select.field-control,
   }
 
   .topbar {
-    padding-inline: 12px;
-    gap: 8px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "brand actions"
+      "identity identity";
+    padding: 8px 12px 10px;
+    gap: 6px 8px;
   }
 
   .brand-subtitle {
@@ -4961,6 +5026,10 @@ select.field-control,
     gap: 6px;
     justify-content: flex-end;
     overflow: hidden;
+  }
+
+  .topbar__identity-grid {
+    grid-template-columns: repeat(auto-fit, minmax(124px, 1fr));
   }
 
   .topbar__actions .status-chip--runner-control,
