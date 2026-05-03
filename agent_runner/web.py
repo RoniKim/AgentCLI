@@ -61,7 +61,6 @@ from .prompts import (
     QA_INSTRUCTIONS_DEFAULT,
     QA_TEMPLATE_DEFAULT,
     REPORTER_INSTRUCTIONS_DEFAULT,
-    _read_text_robust,
 )
 from .pr_queue import load_branch_index, pr_packet_path, pr_queue_root
 from .process_guard import _pid_alive, _pid_create_time_ticks, _pid_executable_path, init_process_guard, terminate_all_children
@@ -137,6 +136,30 @@ from .web_goals import (
     _goal_save_validate_request,
     _parse_goal_items_and_warnings,
 )
+from .web_prompts import (
+    PROMPT_RESTORE_CONFIRMATION_PHRASE,
+    PROMPT_SPECS,
+    _load_prompt_items,
+    _prompt_backup_candidates,
+    _prompt_backup_path,
+    _prompt_default_text,
+    _prompt_file_name_is_bare,
+    _prompt_inventory_item,
+    _prompt_preview,
+    _prompt_profile,
+    _prompt_read_payload,
+    _prompt_resolved_path,
+    _prompt_spec_map,
+    _prompt_summary,
+    _prompt_template_dir,
+    _prompt_template_resolved_path,
+    _prompt_validation_payload,
+    _prompt_variables,
+    _read_prompt_text,
+    resolve_prompt_target,
+    restore_prompt,
+    save_prompt,
+)
 
 try:  # Optional dependency: the app must still import when FastAPI is absent.
     from fastapi import Body, FastAPI, HTTPException, Request
@@ -153,63 +176,6 @@ try:  # Optional dependency for the run helper.
 except Exception:  # pragma: no cover - exercised in dependency-missing environments
     uvicorn = None  # type: ignore[assignment]
 
-
-PROMPT_SPECS: list[dict[str, str]] = [
-    {
-        "id": "pm_instructions",
-        "file": "pm_instructions.md",
-        "scope": "PM",
-        "default": PM_INSTRUCTIONS_DEFAULT,
-    },
-    {
-        "id": "dev_instructions",
-        "file": "dev_instructions.md",
-        "scope": "Dev",
-        "default": DEV_INSTRUCTIONS_DEFAULT,
-    },
-    {
-        "id": "qa_instructions",
-        "file": "qa_instructions.md",
-        "scope": "QA",
-        "default": QA_INSTRUCTIONS_DEFAULT,
-    },
-    {
-        "id": "pm_bootstrap",
-        "file": "pm_bootstrap_prompt.md",
-        "scope": "PM",
-        "default": PM_BOOTSTRAP_TEMPLATE_DEFAULT,
-    },
-    {
-        "id": "pm_incremental",
-        "file": "pm_incremental_prompt.md",
-        "scope": "PM",
-        "default": PM_INCREMENTAL_TEMPLATE_DEFAULT,
-    },
-    {
-        "id": "dev_task",
-        "file": "dev_task_prompt.md",
-        "scope": "Dev",
-        "default": DEV_TASK_TEMPLATE_DEFAULT,
-    },
-    {
-        "id": "qa_prompt",
-        "file": "qa_prompt.md",
-        "scope": "QA",
-        "default": QA_TEMPLATE_DEFAULT,
-    },
-    {
-        "id": "reporter_instructions",
-        "file": "reporter_instructions.md",
-        "scope": "Reporter",
-        "default": REPORTER_INSTRUCTIONS_DEFAULT,
-    },
-    {
-        "id": "pm_shutdown_report",
-        "file": "pm_shutdown_report_prompt.md",
-        "scope": "Reporter",
-        "default": PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT,
-    },
-]
 
 STAGE_ORDER = {stage.lower(): index for index, stage in enumerate(PIPELINE_STAGE_ORDER)}
 RUNNER_CONTROL_CONFIRMATIONS = {
@@ -4243,278 +4209,6 @@ def _goal_save_error(status_code: int, code: str, message: str, **details: Any) 
         if "confirmation_phrase" in details:
             payload["confirmation_phrase"] = details["confirmation_phrase"]
     return JSONResponse(status_code=status_code, content=payload)
-
-
-def _prompt_preview(text: str) -> str:
-    preview = _text_excerpt(text, max_lines=6, max_chars=420)
-    return preview or "(empty)"
-
-
-def _prompt_summary(text: str) -> str:
-    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
-    if not lines:
-        return "(empty)"
-    for line in lines:
-        if not line.startswith("#"):
-            return line[:180]
-    return lines[0][:180]
-
-
-def _prompt_variables(text: str) -> list[str]:
-    seen: set[str] = set()
-    variables: list[str] = []
-    for match in re.finditer(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_.-]*)\}(?!\})", text or ""):
-        name = match.group(1)
-        if name in seen:
-            continue
-        seen.add(name)
-        variables.append(name)
-    return variables
-
-
-def _prompt_profile(cfg: dict[str, Any]) -> str:
-    return _pick_text(cfg.get("profile"), CLI_DEFAULTS.get("profile"), "personal") or "personal"
-
-
-def _prompt_spec_map() -> dict[str, dict[str, str]]:
-    return {str(spec["id"]): spec for spec in PROMPT_SPECS}
-
-
-def _prompt_template_dir(repo_root: Path) -> Path:
-    return (repo_root / "templates" / "agent_prompts").resolve()
-
-
-def _prompt_template_resolved_path(repo_root: Path, spec: dict[str, str]) -> Path | None:
-    template_dir = _prompt_template_dir(repo_root)
-    candidate = (template_dir / str(spec.get("file") or "")).expanduser()
-    resolved = candidate.resolve()
-    try:
-        resolved.relative_to(template_dir)
-    except Exception:
-        return None
-    return resolved
-
-
-def _prompt_default_text(repo_root: Path, spec: dict[str, str]) -> str:
-    template_path = _prompt_template_resolved_path(repo_root, spec)
-    if template_path is None:
-        return spec["default"]
-    if template_path.exists() and template_path.is_file():
-        try:
-            return _read_text_robust(template_path)
-        except Exception:
-            pass
-    return spec["default"]
-
-
-def _read_prompt_text(prompt_path: Path, default_text: str) -> tuple[str, bool]:
-    if prompt_path.exists() and prompt_path.is_file():
-        try:
-            return _read_text_robust(prompt_path), True
-        except Exception:
-            return "", True
-    return default_text, False
-
-
-def _prompt_resolved_path(prompts_dir: Path, file_name: str) -> Path:
-    return (prompts_dir / file_name).resolve()
-
-
-def _prompt_file_name_is_bare(file_name: str) -> bool:
-    candidate = str(file_name or "").strip().replace("\\", "/")
-    if not candidate:
-        return False
-    if candidate in {".", ".."}:
-        return False
-    if "/" in candidate or ":" in candidate:
-        return False
-    return Path(candidate).name == candidate
-
-
-def _prompt_backup_path(prompt_path: Path) -> Path:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%fZ")
-    return prompt_path.with_name(f"{prompt_path.stem}.{stamp}.bak{prompt_path.suffix}")
-
-
-def _prompt_backup_candidates(prompt_path: Path, *, limit: int = 20) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    pattern = f"{prompt_path.stem}.*.bak{prompt_path.suffix}"
-    try:
-        parent = prompt_path.parent
-        if parent.exists() and parent.is_dir():
-            for candidate in sorted(
-                [path for path in parent.glob(pattern) if path.is_file()],
-                key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
-                reverse=True,
-            )[: max(0, int(limit)) or 0]:
-                try:
-                    stats = candidate.stat()
-                except Exception:
-                    continue
-                candidates.append(
-                    {
-                        "path": candidate.as_posix(),
-                        "name": candidate.name,
-                        "updated": _fmt_mtime(stats.st_mtime),
-                        "size": stats.st_size,
-                        "summary": f"{_fmt_mtime(stats.st_mtime)} | {stats.st_size} bytes",
-                    }
-                )
-    except Exception:
-        return []
-    return candidates
-
-
-def _prompt_validation_payload(
-    *,
-    file_name: str,
-    expected_file: str,
-    content: str,
-    required_variables: list[str],
-) -> dict[str, Any]:
-    draft_file = str(file_name or "").strip()
-    required = [str(name) for name in required_variables if str(name).strip()]
-    draft_variables = _prompt_variables(content)
-    missing_variables = [name for name in required if name not in draft_variables]
-    file_error = ""
-    file_error_code = ""
-    if not draft_file:
-        file_error = "Filename cannot be empty."
-        file_error_code = "prompt_file_required"
-    elif not _prompt_file_name_is_bare(draft_file):
-        file_error = "Filename must be a bare filename within the resolved prompts directory."
-        file_error_code = "prompt_file_invalid"
-    elif expected_file and draft_file != expected_file:
-        file_error = f"Filename must stay {expected_file}."
-        file_error_code = "prompt_file_mismatch"
-    content_error = "" if str(content or "").strip() else "Prompt content cannot be empty."
-    content_error_code = "prompt_content_required" if content_error else ""
-    template_error = ""
-    if missing_variables:
-        template_error = f"Missing template variables: {', '.join(f'{{{name}}}' for name in missing_variables)}"
-    template_error_code = "prompt_template_variables_missing" if template_error else ""
-    errors: list[dict[str, str]] = []
-    if file_error:
-        errors.append(
-            {
-                "field": "file",
-                "code": file_error_code or "prompt_file_required",
-                "message": file_error,
-            }
-        )
-    if content_error:
-        errors.append(
-            {
-                "field": "content",
-                "code": "prompt_content_required",
-                "message": content_error,
-            }
-        )
-    if template_error:
-        errors.append(
-            {
-                "field": "content",
-                "code": "prompt_template_variables_missing",
-                "message": template_error,
-            }
-        )
-    return {
-        "ok": not errors,
-        "file_error": file_error,
-        "file_error_code": file_error_code,
-        "content_error": content_error,
-        "content_error_code": content_error_code,
-        "template_error": template_error,
-        "template_error_code": template_error_code,
-        "required_variables": required,
-        "draft_variables": draft_variables,
-        "missing_variables": missing_variables,
-        "errors": errors,
-    }
-
-
-def _prompt_inventory_item(
-    spec: dict[str, str],
-    prompts_dir: Path,
-    repo_root: Path,
-    *,
-    profile: str,
-) -> dict[str, Any]:
-    prompt_path = _prompt_resolved_path(prompts_dir, spec["file"])
-    default_text = _prompt_default_text(repo_root, spec)
-    content, exists = _read_prompt_text(prompt_path, default_text)
-    mode = "override" if exists else "template"
-    source = prompts_dir.as_posix() if exists else "templates/agent_prompts"
-    updated = _fmt_mtime(prompt_path.stat().st_mtime) if exists else "template"
-    variables = _prompt_variables(content)
-    required_variables = _prompt_variables(default_text)
-    content_length = len(content or "")
-    return {
-        "id": spec["id"],
-        "file": spec["file"],
-        "path": prompt_path.as_posix(),
-        "scope": spec["scope"],
-        "profile": profile,
-        "source": source,
-        "mode": mode,
-        "updated": updated,
-        "summary": f"{profile} profile | {mode.title()} prompt available ({content_length} characters).",
-        "preview": REDACTED_VALUE,
-        "content_length": content_length,
-        "template_variables": variables,
-        "required_template_variables": required_variables,
-    }
-
-
-def _prompt_read_payload(
-    spec: dict[str, str],
-    prompts_dir: Path,
-    repo_root: Path,
-    *,
-    profile: str,
-) -> dict[str, Any]:
-    prompt_path = _prompt_resolved_path(prompts_dir, spec["file"])
-    default_text = _prompt_default_text(repo_root, spec)
-    content, exists = _read_prompt_text(prompt_path, default_text)
-    mode = "override" if exists else "template"
-    source = prompts_dir.as_posix() if exists else "templates/agent_prompts"
-    updated = _fmt_mtime(prompt_path.stat().st_mtime) if exists else "template"
-    variables = _prompt_variables(content)
-    required_variables = _prompt_variables(default_text)
-    validation = _prompt_validation_payload(
-        file_name=spec["file"],
-        expected_file=spec["file"],
-        content=content,
-        required_variables=required_variables,
-    )
-    return {
-        "ok": True,
-        "id": spec["id"],
-        "file": spec["file"],
-        "path": prompt_path.as_posix(),
-        "scope": spec["scope"],
-        "profile": profile,
-        "source": source,
-        "mode": mode,
-        "updated": updated,
-        "exists": exists,
-        "content": content,
-        "content_length": len(content or ""),
-        "preview": _prompt_preview(content),
-        "summary": _prompt_summary(content),
-        "template_variables": variables,
-        "required_template_variables": required_variables,
-        "validation": validation,
-        "backups": _prompt_backup_candidates(prompt_path),
-    }
-
-
-def _load_prompt_items(repo: Path, prompts_dir: Path, *, profile: str) -> list[dict[str, Any]]:
-    _ = repo
-    items: list[dict[str, Any]] = []
-    for spec in PROMPT_SPECS:
-        items.append(_prompt_inventory_item(spec, prompts_dir, repo, profile=profile))
-    return items
 
 
 def _load_backlog_payload(
@@ -10027,72 +9721,14 @@ def create_app(
     def _prompt_action_body(request: Request) -> dict[str, Any] | None:
         return _config_save_body(request)
 
-    def _resolve_prompt_target(
-        prompt_dir: Path,
-        prompt_id: str,
-        prompt_file: str,
-    ) -> tuple[dict[str, str] | None, Path | None, JSONResponse | None]:
-        spec = _prompt_spec_map().get(prompt_id)
-        if spec is None:
-            return None, None, _prompt_error(404, "prompt_not_found", "The requested prompt id was not found.", id=prompt_id)
-
-        expected_rel = Path(spec["file"]).as_posix()
-        requested_file = str(prompt_file or "").strip()
-        candidate = Path(requested_file.replace("\\", "/")).expanduser()
-        resolved = candidate.resolve() if candidate.is_absolute() else (prompt_dir / candidate).resolve()
-
-        try:
-            resolved.relative_to(prompt_dir)
-        except Exception:
-            return (
-                spec,
-                None,
-                _prompt_error(
-                    400,
-                    "prompt_path_outside_prompts_dir",
-                    "Prompt file must stay within the resolved prompts directory.",
-                    path=resolved.as_posix(),
-                    prompts_dir=prompt_dir.as_posix(),
-                ),
-            )
-
-        resolved_rel = resolved.relative_to(prompt_dir).as_posix()
-        if resolved_rel != expected_rel:
-            return (
-                spec,
-                None,
-                _prompt_error(
-                    400,
-                    "prompt_file_mismatch",
-                    "The requested prompt file does not match the prompt id.",
-                    expected=expected_rel,
-                    actual=resolved_rel,
-                ),
-            )
-
-        if not _prompt_file_name_is_bare(requested_file):
-            return (
-                spec,
-                None,
-                _prompt_error(
-                    400,
-                    "prompt_file_invalid",
-                    "Prompt file must be a bare filename within the resolved prompts directory.",
-                    file=requested_file,
-                    expected=expected_rel,
-                ),
-            )
-
-        return spec, resolved, None
-
-    def _prompt_target_payload(
-        spec: dict[str, str],
-        prompt_dir: Path,
-        *,
-        profile: str,
-        repo_root: Path,
-    ) -> dict[str, Any]:
-        return _prompt_read_payload(spec, prompt_dir, repo_root, profile=profile)
+    def _prompt_error_from_payload(error: dict[str, Any], *, action: str | None = None) -> JSONResponse:
+        status_code = int(error.get("status_code") or 500)
+        code = str(error.get("code") or "prompt_error")
+        message = str(error.get("message") or "Prompt request failed.")
+        details = error.get("details") if isinstance(error.get("details"), dict) else {}
+        if action:
+            return _prompt_action_error(status_code, action, code, message, **details)
+        return _prompt_error(status_code, code, message, **details)
 
     def _config_save_error(status_code: int, code: str, message: str, **details: Any) -> JSONResponse:
         payload: dict[str, Any] = {
@@ -10148,9 +9784,9 @@ def create_app(
             return _prompt_error(400, "prompt_id_required", "A prompt id is required.", field="id")
         if not prompt_file:
             return _prompt_error(400, "prompt_file_required", "A prompt file path is required.", field="file")
-        spec, _, error = _resolve_prompt_target(prompt_dir, prompt_id, prompt_file)
+        spec, _, error = resolve_prompt_target(prompt_dir, prompt_id, prompt_file)
         if error is not None:
-            return error
+            return _prompt_error_from_payload(error)
         return _prompt_read_payload(spec, prompt_dir, repo_root, profile=profile)
 
     @app.post("/api/prompts/save")
@@ -10174,7 +9810,6 @@ def create_app(
         if not control_lock.acquire(blocking=False):
             return _prompt_action_error(409, "prompt-save", "prompt_save_busy", "A prompt mutation is already in flight.")
 
-        backup_path: Path | None = None
         try:
             prompt_dir = resolve_prompts_dir(repo_root, str(cfg.get("prompts_dir") or ""))
             if not prompt_dir:
@@ -10197,56 +9832,17 @@ def create_app(
             if not prompt_file:
                 return _prompt_action_error(400, "prompt-save", "prompt_file_required", "A prompt file path is required.", field="file")
 
-            spec, prompt_path, error = _resolve_prompt_target(prompt_dir, prompt_id, prompt_file)
-            if error is not None or spec is None or prompt_path is None:
-                return error if error is not None else _prompt_action_error(404, "prompt-save", "prompt_not_found", "The requested prompt id was not found.", id=prompt_id)
-
-            if not isinstance(content, str):
-                content = str(content)
-
-            required_variables = _prompt_variables(_prompt_default_text(repo_root, spec))
-            validation = _prompt_validation_payload(
-                file_name=str(prompt_file).strip(),
-                expected_file=spec["file"],
+            response_payload, error = save_prompt(
+                repo_root=repo_root,
+                prompt_dir=prompt_dir,
+                profile=profile,
+                prompt_id=prompt_id,
+                prompt_file=prompt_file,
                 content=content,
-                required_variables=required_variables,
             )
-            if not validation["ok"]:
-                first_error = validation["errors"][0] if validation["errors"] else {"code": "prompt_validation_failed", "message": "Prompt validation failed."}
-                return _prompt_action_error(
-                    400,
-                    "prompt-save",
-                    str(first_error.get("code") or "prompt_validation_failed"),
-                    str(first_error.get("message") or "Prompt validation failed."),
-                    path=prompt_path.as_posix(),
-                    validation=validation,
-                )
-
-            current_content, current_exists = _read_prompt_text(prompt_path, _prompt_default_text(repo_root, spec))
-            backup_path = _prompt_backup_path(prompt_path)
-            backup_path.parent.mkdir(parents=True, exist_ok=True)
-            if current_exists:
-                shutil.copy2(prompt_path, backup_path)
-            else:
-                atomic_write_text(backup_path, current_content)
-
-            atomic_write_text(prompt_path, content)
-            saved_prompt = _prompt_target_payload(spec, prompt_dir, profile=profile, repo_root=repo_root)
-            response_payload: dict[str, Any] = {
-                "ok": True,
-                "action": "prompt-save",
-                "status": "saved",
-                "message": f"Prompt saved. Backup written to {backup_path.as_posix()}.",
-                "prompt": saved_prompt,
-                "backup_path": backup_path.as_posix(),
-                "saved_path": prompt_path.as_posix(),
-            }
+            if error is not None:
+                return _prompt_error_from_payload(error, action="prompt-save")
             return JSONResponse(status_code=200, content=response_payload)
-        except Exception as ex:
-            details: dict[str, Any] = {"path": ""}
-            if backup_path is not None:
-                details["backup_path"] = backup_path.as_posix()
-            return _prompt_action_error(500, "prompt-save", "prompt_save_failed", f"Prompt save failed: {ex}", **details)
         finally:
             control_lock.release()
 
@@ -10271,7 +9867,6 @@ def create_app(
         if not control_lock.acquire(blocking=False):
             return _prompt_action_error(409, "prompt-restore", "prompt_restore_busy", "A prompt mutation is already in flight.")
 
-        backup_path: Path | None = None
         try:
             prompt_dir = resolve_prompts_dir(repo_root, str(cfg.get("prompts_dir") or ""))
             if not prompt_dir:
@@ -10301,87 +9896,18 @@ def create_app(
             if not restore_path_value:
                 return _prompt_action_error(400, "prompt-restore", "prompt_backup_path_required", "A backup path is required.", field="backup_path")
 
-            spec, prompt_path, error = _resolve_prompt_target(prompt_dir, prompt_id, prompt_file)
-            if error is not None or spec is None or prompt_path is None:
-                return error if error is not None else _prompt_action_error(404, "prompt-restore", "prompt_not_found", "The requested prompt id was not found.", id=prompt_id)
-
-            expected_confirmation = "RESTORE BACKUP"
-            if not confirmation:
-                return _prompt_action_error(
-                    400,
-                    "prompt-restore",
-                    "prompt_restore_confirmation_required",
-                    "A restore confirmation phrase is required.",
-                    expected=expected_confirmation,
-                )
-            if confirmation != expected_confirmation:
-                return _prompt_action_error(
-                    400,
-                    "prompt-restore",
-                    "prompt_restore_confirmation_mismatch",
-                    "The restore confirmation phrase did not match.",
-                    expected=expected_confirmation,
-                )
-
-            candidate = Path(str(restore_path_value).strip().replace("\\", "/")).expanduser()
-            restored_from = candidate.resolve() if candidate.is_absolute() else (prompt_dir / candidate).resolve()
-            try:
-                restored_from.relative_to(prompt_dir)
-            except Exception:
-                return _prompt_action_error(
-                    400,
-                    "prompt-restore",
-                    "prompt_backup_path_outside_prompts_dir",
-                    "Backup path must stay within the resolved prompts directory.",
-                    path=restored_from.as_posix(),
-                    prompts_dir=prompt_dir.as_posix(),
-                )
-
-            if not restored_from.exists() or not restored_from.is_file():
-                return _prompt_action_error(
-                    404,
-                    "prompt-restore",
-                    "prompt_backup_not_found",
-                    "The selected backup file was not found.",
-                    path=restored_from.as_posix(),
-                )
-
-            backup_pattern = f"{prompt_path.stem}.*.bak{prompt_path.suffix}"
-            if restored_from.parent != prompt_path.parent or not restored_from.name.startswith(f"{prompt_path.stem}.") or not restored_from.name.endswith(f".bak{prompt_path.suffix}") or restored_from.name not in {path.name for path in prompt_path.parent.glob(backup_pattern)}:
-                return _prompt_action_error(
-                    400,
-                    "prompt_backup_not_found",
-                    "The selected backup file is not available for this prompt.",
-                    path=restored_from.as_posix(),
-                )
-
-            current_content, current_exists = _read_prompt_text(prompt_path, _prompt_default_text(repo_root, spec))
-            backup_path = _prompt_backup_path(prompt_path)
-            backup_path.parent.mkdir(parents=True, exist_ok=True)
-            if current_exists:
-                shutil.copy2(prompt_path, backup_path)
-            else:
-                atomic_write_text(backup_path, current_content)
-
-            restore_text = _read_text_robust(restored_from)
-            atomic_write_text(prompt_path, restore_text)
-            restored_prompt = _prompt_target_payload(spec, prompt_dir, profile=profile, repo_root=repo_root)
-            response_payload: dict[str, Any] = {
-                "ok": True,
-                "action": "prompt-restore",
-                "status": "restored",
-                "message": f"Prompt restored from {restored_from.as_posix()}. Backup written to {backup_path.as_posix()}.",
-                "prompt": restored_prompt,
-                "backup_path": backup_path.as_posix(),
-                "restored_from_path": restored_from.as_posix(),
-                "saved_path": prompt_path.as_posix(),
-            }
+            response_payload, error = restore_prompt(
+                repo_root=repo_root,
+                prompt_dir=prompt_dir,
+                profile=profile,
+                prompt_id=prompt_id,
+                prompt_file=prompt_file,
+                restore_path_value=restore_path_value,
+                confirmation=confirmation,
+            )
+            if error is not None:
+                return _prompt_error_from_payload(error, action="prompt-restore")
             return JSONResponse(status_code=200, content=response_payload)
-        except Exception as ex:
-            details: dict[str, Any] = {"path": ""}
-            if backup_path is not None:
-                details["backup_path"] = backup_path.as_posix()
-            return _prompt_action_error(500, "prompt-restore", "prompt_restore_failed", f"Prompt restore failed: {ex}", **details)
         finally:
             control_lock.release()
 

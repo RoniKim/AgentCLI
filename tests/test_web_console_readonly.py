@@ -6076,6 +6076,9 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("[redacted]", override["preview"])
         self.assertTrue(override["path"].endswith("pm_instructions.md"))
         self.assertTrue(override["source"].endswith("prompts/agentcli"))
+        self.assertNotIn("content", override)
+        self.assertNotIn("validation", override)
+        self.assertNotIn("backups", override)
 
         template = items["pm_bootstrap"]
         self.assertEqual("personal", template["profile"])
@@ -6083,6 +6086,9 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("[redacted]", template["preview"])
         self.assertTrue(template["path"].endswith("pm_bootstrap_prompt.md"))
         self.assertEqual("templates/agent_prompts", template["source"])
+        self.assertNotIn("content", template)
+        self.assertNotIn("validation", template)
+        self.assertNotIn("backups", template)
 
     def test_prompt_read_returns_full_content_for_override_and_template_prompts(self) -> None:
         override = self.client.get(

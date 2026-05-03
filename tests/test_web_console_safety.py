@@ -3153,6 +3153,7 @@ class WebConsoleSafetyTests(unittest.TestCase):
         prompt_body = payload["prompt"]
         self.assertTrue(prompt_body["validation"]["ok"])
         self.assertEqual(updated, prompt_body["content"])
+        self.assertEqual(backup_path.as_posix(), prompt_body["backups"][0]["path"])
         self.assertEqual(1, len(list(prompts_dir.glob("pm_bootstrap_prompt.*.bak.md"))))
 
     def test_prompt_restore_rejects_traversal_and_restores_selected_backup(self) -> None:
