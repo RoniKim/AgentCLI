@@ -253,9 +253,9 @@
 - [ ] Experience summary injection enforces max item count, max characters, no raw logs, no raw diffs, and redacted evidence pointers.
 - [ ] Experience lessons can recommend task sizing, validation selection, retry avoidance, and dependency cleanup based on recorded evidence.
 - [ ] Web Console shows recent lessons, repeated failure patterns, validation gaps, and merge blockers from read-only Experience DB data.
-- [ ] Telegram can summarize latest experience blockers and queued PR validation needs without exposing raw prompts or logs.
-- [ ] Experience retention settings prune old lessons and evidence pointers without deleting pending PR queue or active run artifacts.
-- [ ] Experience redaction settings prevent secrets, raw backend transcripts, raw prompts, and long test output from leaking into future PM prompts.
+- [x] Telegram can summarize latest experience blockers and queued PR validation needs without exposing raw prompts or logs.
+- [x] Experience retention settings prune old lessons and evidence pointers without deleting pending PR queue or active run artifacts.
+- [x] Experience redaction settings prevent secrets, raw backend transcripts, raw prompts, and long test output from leaking into future PM prompts.
 
 ### P0-V. Maintainability And Module Decomposition
 
