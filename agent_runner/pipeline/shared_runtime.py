@@ -200,6 +200,7 @@ def merge_pm_tasks_with_existing_pending(
                     "skills": t.skills or [],
                     "skills_rationale": t.skills_rationale,
                     "depends_on": t.depends_on,
+                    "goal_trace": [dict(trace) for trace in (t.goal_trace or []) if isinstance(trace, dict)],
                 }
             )
     return merged_tasks
