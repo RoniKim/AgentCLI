@@ -644,6 +644,8 @@ def select_next_task_with_dependency_checks(
     metrics: Any,
     eprint_fn: Callable[[str], None],
     task_results: list[dict[str, Any]],
+    step_idx: int = 0,
+    record_task_experience_fn: Callable[..., None] | None = None,
 ) -> Optional[Any]:
     processed = done_set | skipped_set
     for t in tasks:
@@ -682,6 +684,20 @@ def select_next_task_with_dependency_checks(
                         "duration": -1,
                     }
                 )
+                if callable(record_task_experience_fn):
+                    record_task_experience_fn(
+                        task_id=t.id,
+                        title=t.title,
+                        status="skipped",
+                        task_status=TASK_STATUS_REVIEW_REQUIRED,
+                        reason="persistent_failure",
+                        cycle_idx=cycle_idx,
+                        step_idx=step_idx,
+                        attempt=0,
+                        max_attempts=max_consecutive_failures,
+                        validation_summary=f"Failed {consec} consecutive times across runs",
+                        outcome_action="skipped_after_repeated_failures",
+                    )
                 continue
 
         if t.depends_on:
@@ -742,6 +758,20 @@ def select_next_task_with_dependency_checks(
                             "duration": -1,
                         }
                     )
+                    if callable(record_task_experience_fn):
+                        record_task_experience_fn(
+                            task_id=t.id,
+                            title=t.title,
+                            status="skipped",
+                            task_status=TASK_STATUS_REVIEW_REQUIRED,
+                            reason=reason,
+                            cycle_idx=cycle_idx,
+                            step_idx=step_idx,
+                            attempt=0,
+                            max_attempts=0,
+                            blocked_dependencies=blockers,
+                            outcome_action="not_run_dependency_blocked",
+                        )
                     continue
                 continue
 
