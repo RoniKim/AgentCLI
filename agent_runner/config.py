@@ -19,6 +19,105 @@ from .utils import atomic_write_json, eprint
 # Design documents stay in ".doc/"; runtime outputs go here.
 AGENT_WORK_DIR = ".AgentCLI"
 
+EXPERIENCE_REDACTION_DEFAULTS: Dict[str, Any] = {
+    "pm_use_experience_summary": True,
+    "experience_prompt_max_items": 12,
+    "experience_prompt_max_chars": 4000,
+    "experience_lesson_max_chars": 240,
+    "experience_evidence_max_items": 3,
+    "experience_raw_log_excerpt_chars": 0,
+    "experience_redact_paths": True,
+    "experience_redact_secrets": True,
+    "experience_redact_backend_transcripts": True,
+    "experience_redact_prompt_text": True,
+    "experience_redact_prompt_injection": True,
+    "experience_redact_test_output": True,
+}
+
+
+def experience_artifacts_dir(repo: Path) -> Path:
+    return (repo / AGENT_WORK_DIR / "experience").resolve()
+
+
+def latest_experience_summary_path(repo: Path) -> Path:
+    return (experience_artifacts_dir(repo) / "latest_summary.json").resolve()
+
+
+def resolve_experience_redaction_settings(source: Any = None) -> Dict[str, Any]:
+    resolved: Dict[str, Any] = dict(EXPERIENCE_REDACTION_DEFAULTS)
+
+    if isinstance(source, dict):
+        raw = dict(source)
+    else:
+        try:
+            raw = dict(vars(source))
+        except Exception:
+            raw = {}
+
+    nested = raw.get("experience_redaction")
+    if not isinstance(nested, dict):
+        nested = {}
+
+    alias_map = {
+        "enabled": "pm_use_experience_summary",
+        "prompt_max_items": "experience_prompt_max_items",
+        "prompt_max_chars": "experience_prompt_max_chars",
+        "lesson_max_chars": "experience_lesson_max_chars",
+        "evidence_max_items": "experience_evidence_max_items",
+        "raw_log_excerpt_chars": "experience_raw_log_excerpt_chars",
+        "redact_paths": "experience_redact_paths",
+        "redact_secrets": "experience_redact_secrets",
+        "redact_backend_transcripts": "experience_redact_backend_transcripts",
+        "redact_prompt_text": "experience_redact_prompt_text",
+        "redact_prompt_injection": "experience_redact_prompt_injection",
+        "redact_test_output": "experience_redact_test_output",
+    }
+
+    for key in list(resolved.keys()):
+        if key in raw:
+            resolved[key] = raw.get(key)
+            continue
+        for nested_key, target_key in alias_map.items():
+            if target_key == key and nested_key in nested:
+                resolved[key] = nested.get(nested_key)
+                break
+
+    bool_keys = {
+        "pm_use_experience_summary",
+        "experience_redact_paths",
+        "experience_redact_secrets",
+        "experience_redact_backend_transcripts",
+        "experience_redact_prompt_text",
+        "experience_redact_prompt_injection",
+        "experience_redact_test_output",
+    }
+    int_keys = {
+        "experience_prompt_max_items",
+        "experience_prompt_max_chars",
+        "experience_lesson_max_chars",
+        "experience_evidence_max_items",
+        "experience_raw_log_excerpt_chars",
+    }
+
+    for key in bool_keys:
+        resolved[key] = normalize_config_value(
+            resolved.get(key),
+            {"kind": "bool"},
+            key,
+        )
+    for key in int_keys:
+        normalized = normalize_config_value(
+            resolved.get(key),
+            {"kind": "number"},
+            key,
+        )
+        try:
+            resolved[key] = max(0, int(normalized))
+        except Exception:
+            resolved[key] = int(EXPERIENCE_REDACTION_DEFAULTS[key])
+
+    return resolved
+
 def app_home() -> Path:
     """
     AgentCLI 홈 디렉토리(파이썬쪽 저장 기준점).
