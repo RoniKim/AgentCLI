@@ -21,6 +21,7 @@ import inspect
 from ..process_guard import register_pid, unregister_pid_if_exited
 from ..analysis_cache import merge_dev_hints_to_global_changelog
 from ..docs import resolve_docs_dir, generate_docs_digest
+from ..experience import load_pm_experience_summary
 from ..gates import (
     extract_build_warnings,
     run_build_gate_async,
@@ -1298,6 +1299,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             goals_evaluation_instruction=GOALS_EVALUATION_INSTRUCTION,
             goals_generation_instruction=GOALS_GENERATION_INSTRUCTION,
         )
+        experience_repo = source_repo if worktree_dir is not None else repo
+        pm_experience_summary = load_pm_experience_summary(experience_repo, run_dir, args=args)
 
         try:
             if need_bootstrap:
@@ -1317,6 +1320,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "docs_read_mode": docs_read_mode, "digest_rel": str(digest_rel),
                     "skills_index_summary": skills_index_summary,
                     "codex_call_hint": "Use Claude Code built-in tools (Read, Write, Edit, Grep, Glob, Bash) directly. Do NOT call Codex MCP.",
+                    "pm_experience_summary": pm_experience_summary,
                     "task_history_block": _format_history_block(repo, max_items=_hist_max) if _hist_enabled else "(disabled)",
                 }
                 pm_prompt = _patch_prompt_for_claude(append_pm_essential_context(
@@ -1326,6 +1330,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     failed_tasks_block=_failed_blk,
                     goals_block=goals_block,
                     goals_instruction=goals_instruction,
+                    experience_summary_block=pm_experience_summary,
                 ))
                 pm_out = await _run_pm_structured(pm_prompt, max_turns=_pm_max_turns_boot, cycle_idx=cycle_idx, kind="bootstrap", output_path=pm_output_path)
                 if pm_out is None:
@@ -1426,6 +1431,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "current_backlog_block": current_backlog_block,
                     "failed_tasks_block": failed_tasks_block,
                     "hint_block": hint_block,
+                    "pm_experience_summary": pm_experience_summary,
                     "task_history_block": _format_history_block(repo, max_items=_hist_max_i) if _hist_enabled_i else "(disabled)",
                 }
                 pm_prompt = _patch_prompt_for_claude(append_pm_essential_context(
@@ -1436,6 +1442,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     goals_block=goals_block,
                     goals_instruction=goals_instruction,
                     build_warnings_block=build_warnings_block,
+                    experience_summary_block=pm_experience_summary,
                 ))
                 pm_out = await _run_pm_structured(pm_prompt, max_turns=_pm_max_turns_inc, cycle_idx=cycle_idx, kind="incremental" if need_incremental else "refresh", output_path=pm_output_path)
                 if pm_out is None:
