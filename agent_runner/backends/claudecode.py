@@ -80,6 +80,10 @@ from ..prompts import (
     PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT,
     PM_TURN_BUDGET_WARNING,
 )
+from ..experience import (
+    ExperienceRedactionSettings,
+    render_pm_experience_summary_from_run,
+)
 from ..reporting import collect_shutdown_context, build_local_shutdown_report
 from ..pipeline import PipelineManager, make_stages
 from ..pipeline.shared_runtime import (
@@ -1029,6 +1033,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
     dev_hints_dir = run_dir / "analysis_hints"
     dev_hints_dir.mkdir(parents=True, exist_ok=True)
+    experience_redaction = ExperienceRedactionSettings.from_source(args)
 
     continuous = bool(getattr(args, "continuous", False) or getattr(args, "loop", False))
 
@@ -1349,6 +1354,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         try:
             if need_bootstrap:
                 metrics.event("pm_start", cycle=cycle_idx, kind="bootstrap")
+                experience_summary_block = render_pm_experience_summary_from_run(
+                    run_dir,
+                    settings=experience_redaction,
+                    repo_root=repo,
+                )
                 _hist_enabled = bool(getattr(args, "task_history_enabled", True))
                 _hist_max = int(getattr(args, "task_history_max_items", 50) or 50)
                 if _hist_enabled:
@@ -1374,7 +1384,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     failed_tasks_block=_failed_blk,
                     goals_block=goals_block,
                     goals_instruction=goals_instruction,
-                    experience_summary_block=pm_experience_summary,
+                    experience_summary_block=experience_summary_block,
                 ))
                 pm_out = await _run_pm_structured(pm_prompt, max_turns=_pm_max_turns_boot, cycle_idx=cycle_idx, kind="bootstrap", output_path=pm_output_path)
                 if pm_out is None:
@@ -1434,17 +1444,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             if need_incremental or force_refresh:
                 metrics.event("pm_start", cycle=cycle_idx, kind="incremental" if need_incremental else "refresh")
                 changed_files_block = "\n".join([f"- {p}" for p in (changed_files or [])]) or "- (none)"
-                hint_lines: list[str] = []
-                if dev_hints_dir.exists():
-                    for hf in sorted(dev_hints_dir.glob("*.md"), key=lambda x: x.stat().st_mtime)[-12:]:
-                        try:
-                            rel = hf.relative_to(run_dir).as_posix()
-                            content = hf.read_text(encoding="utf-8", errors="replace").strip()
-                            hint_lines.append(f"- {rel}:")
-                            hint_lines.extend([f"  {ln}" for ln in content.splitlines()[:10]])
-                        except Exception:
-                            continue
-                hint_block = "\n".join(hint_lines) or "(none)"
+                experience_summary_block = render_pm_experience_summary_from_run(
+                    run_dir,
+                    settings=experience_redaction,
+                    repo_root=repo,
+                )
+                hint_block = "(see <pm_experience_summary>)" if experience_summary_block not in {"(none)", "(disabled)"} else "(none)"
                 current_backlog_block, _, _, _ = _load_backlog_context_for_pm()
                 failed_tasks_block = _build_failed_tasks_block()
 
@@ -1486,7 +1491,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     goals_block=goals_block,
                     goals_instruction=goals_instruction,
                     build_warnings_block=build_warnings_block,
-                    experience_summary_block=pm_experience_summary,
+                    experience_summary_block=experience_summary_block,
                 ))
                 pm_out = await _run_pm_structured(pm_prompt, max_turns=_pm_max_turns_inc, cycle_idx=cycle_idx, kind="incremental" if need_incremental else "refresh", output_path=pm_output_path)
                 if pm_out is None:

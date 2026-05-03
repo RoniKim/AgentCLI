@@ -143,6 +143,7 @@ def append_pm_essential_context(
     goals_instruction: str = "",
     experience_summary_block: str = "",
     build_warnings_block: str = "",
+    experience_summary_block: str = "",
 ) -> str:
     """Programmatically append essential runtime context to a PM prompt.
 
@@ -206,6 +207,10 @@ def append_pm_essential_context(
             f"{failed_tasks_block}\n"
             "</pm_failed_tasks>"
         )
+
+    # --- Experience summary (advisory, sanitized) ---
+    if experience_summary_block and experience_summary_block.strip() not in {"(none)", "(disabled)"} and "<pm_experience_summary" not in s:
+        s += "\n\n" + experience_summary_block.strip()
 
     return s.strip() + "\n"
 
@@ -356,8 +361,7 @@ Git:
 Current backlog (from run_dir; [x]=done, [ ]=pending):
 {current_backlog_block}
 
-Dev change-hints (optional, run-local; use as clues):
-{hint_block}
+Recent experience is injected separately as a sanitized advisory `<pm_experience_summary>` block when available.
 
 SKILLS_INDEX summary (select skill_id per task; do NOT inline full skill text):
 {skills_index_summary}
