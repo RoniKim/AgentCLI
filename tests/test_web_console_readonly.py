@@ -4488,6 +4488,83 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertTrue(payload["active_run"]["quotaAvailable"])
         self.assertTrue(payload["metrics"]["quotaAvailable"])
 
+    def test_api_status_snapshot_builder_keeps_web_payload_facades_patchable(self) -> None:
+        from agent_runner import web as web_module
+        from fastapi.testclient import TestClient
+
+        controller = FakeRunnerController(
+            self._controller_status(
+                self.run_dir,
+                running=False,
+                reason="project_complete",
+                exit_code=0,
+                stage="QA",
+            )
+        )
+
+        original_build_progress = web_module._build_progress_payload
+        original_stage_payload = web_module._stage_payload
+        original_history_payload = web_module._history_payload
+        original_worktree_payload = web_module._build_worktree_payload
+        original_live_state_payload = web_module._build_live_state_payload
+
+        def fake_build_progress_payload(*args: object, **kwargs: object) -> dict[str, object]:
+            progress = dict(original_build_progress(*args, **kwargs))
+            progress["final_reason"] = "facade-progress-marker"
+            return progress
+
+        def fake_stage_payload(*args: object, **kwargs: object) -> list[dict[str, object]]:
+            stages = [dict(item) for item in original_stage_payload(*args, **kwargs)]
+            stages[0]["reason"] = "facade-stage-marker"
+            return stages
+
+        def fake_history_payload(*args: object, **kwargs: object) -> dict[str, object]:
+            history = dict(original_history_payload(*args, **kwargs))
+            history["summary"] = dict(history.get("summary") or {})
+            history["summary"]["runs"] = 4242
+            return history
+
+        def fake_worktree_payload(*args: object, **kwargs: object) -> dict[str, object]:
+            worktree = dict(original_worktree_payload(*args, **kwargs))
+            worktree["reviewRequiredMessage"] = "facade-worktree-marker"
+            return worktree
+
+        def fake_live_state_payload(*args: object, **kwargs: object) -> dict[str, object]:
+            live_state = dict(original_live_state_payload(*args, **kwargs))
+            live_state["source"] = "facade-live-state"
+            return live_state
+
+        with patch.object(web_module, "_build_runner_controller", return_value=controller), patch.object(
+            web_module,
+            "_build_progress_payload",
+            side_effect=fake_build_progress_payload,
+        ), patch.object(
+            web_module,
+            "_stage_payload",
+            side_effect=fake_stage_payload,
+        ), patch.object(
+            web_module,
+            "_history_payload",
+            side_effect=fake_history_payload,
+        ), patch.object(
+            web_module,
+            "_build_worktree_payload",
+            side_effect=fake_worktree_payload,
+        ), patch.object(
+            web_module,
+            "_build_live_state_payload",
+            side_effect=fake_live_state_payload,
+        ):
+            client = TestClient(self._create_app(self.repo))
+            payload = client.get("/api/status").json()
+
+        self.assertEqual("facade-progress-marker", payload["progress"]["final_reason"])
+        self.assertEqual("facade-stage-marker", payload["stages"][0]["reason"])
+        self.assertEqual(4242, payload["history"]["summary"]["runs"])
+        self.assertEqual("facade-worktree-marker", payload["worktree"]["reviewRequiredMessage"])
+        self.assertEqual("facade-live-state", payload["runner_control"]["live_state"]["source"])
+        self.assertEqual("facade-live-state", payload["liveRun"]["liveState"]["source"])
+
     def test_api_status_normalizes_terminal_snapshots(self) -> None:
         success_run_dir = self._make_live_run_dir("20260426-111000")
         success = self._api_status(
