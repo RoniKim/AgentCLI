@@ -141,6 +141,7 @@ def append_pm_essential_context(
     failed_tasks_block: str = "",
     goals_block: str = "",
     goals_instruction: str = "",
+    experience_summary_block: str = "",
     build_warnings_block: str = "",
 ) -> str:
     """Programmatically append essential runtime context to a PM prompt.
@@ -171,6 +172,10 @@ def append_pm_essential_context(
             section += f"\n{goals_instruction}\n"
         section += "</pm_goals>"
         s += section
+
+    # --- Experience summary (advisory only) ---
+    if experience_summary_block and "<pm_experience_summary" not in s:
+        s += "\n\n" + experience_summary_block.strip()
 
     # --- Done tasks (CRITICAL: prevents duplicate task creation) ---
     if done_tasks_block and "<pm_done_tasks>" not in s:
