@@ -253,16 +253,16 @@
 - [ ] Experience summary injection enforces max item count, max characters, no raw logs, no raw diffs, and redacted evidence pointers.
 - [ ] Experience lessons can recommend task sizing, validation selection, retry avoidance, and dependency cleanup based on recorded evidence.
 - [ ] Web Console shows recent lessons, repeated failure patterns, validation gaps, and merge blockers from read-only Experience DB data.
-- [x] Telegram can summarize latest experience blockers and queued PR validation needs without exposing raw prompts or logs.
-- [x] Experience retention settings prune old lessons and evidence pointers without deleting pending PR queue or active run artifacts.
-- [x] Experience redaction settings prevent secrets, raw backend transcripts, raw prompts, and long test output from leaking into future PM prompts.
+- [ ] Telegram can summarize latest experience blockers and queued PR validation needs without exposing raw prompts or logs.
+- [ ] Experience retention settings prune old lessons and evidence pointers without deleting pending PR queue or active run artifacts.
+- [ ] Experience redaction settings prevent secrets, raw backend transcripts, raw prompts, and long test output from leaking into future PM prompts.
 
 ### P0-V. Maintainability And Module Decomposition
 
 - [x] Web import compatibility tests protect `agent_runner.web` public and test-used private helper names before any helper extraction.
-- [x] Web endpoint golden tests protect `/api/status`, `/api/progress`, `/api/worktree`, and `/api/runner/status` payload contracts.
-- [x] Web endpoint golden tests protect `/api/config`, `/api/goals`, `/api/prompts`, and `/api/logs` payload contracts.
-- [ ] Web redaction helpers are extracted into a focused module while `agent_runner.web` re-exports the old helper names.
+- [ ] Web endpoint golden tests protect `/api/status`, `/api/progress`, `/api/worktree`, and `/api/runner/status` payload contracts.
+- [ ] Web endpoint golden tests protect `/api/config`, `/api/goals`, `/api/prompts`, and `/api/logs` payload contracts.
+- [x] Web redaction helpers are extracted into a focused module while `agent_runner.web` re-exports the old helper names.
 - [ ] Web GOALS parse, serialize, validate, backup, and save helpers are extracted while `/api/goals` behavior stays unchanged.
 - [ ] Web prompt inventory, read, validation, backup, and save helpers are extracted while `/api/prompts` behavior stays unchanged.
 - [ ] Web config schema, normalization, validation, backup, and save helpers are extracted while `/api/config` behavior stays unchanged.

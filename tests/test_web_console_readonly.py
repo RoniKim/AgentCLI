@@ -6756,9 +6756,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(404, response.status_code)
 
     def test_api_goals_returns_metadata_items_and_warnings(self) -> None:
-        _write(
-            self.repo / ".doc" / "GOALS.md",
-            """# Project Goals
+        raw_text = """# Project Goals
 
 Intro line that should be ignored.
 
@@ -6775,14 +6773,14 @@ Another unsupported line.
 
 ## Notes
 - [ ] Ignore outside sections
-""",
-        )
+"""
+        _write(self.repo / ".doc" / "GOALS.md", raw_text)
 
         payload = self.client.get("/api/goals").json()
 
         self.assertTrue(payload["exists"])
         self.assertTrue(payload["path"].endswith(".doc/GOALS.md"))
-        self.assertIn("Expose read-only progress views", payload["raw_text"])
+        self.assertEqual(raw_text, payload["raw_text"])
         self.assertGreater(payload["size"], 0)
         self.assertIsNotNone(payload["mtime"])
         self.assertEqual("all", payload["completion_level"])

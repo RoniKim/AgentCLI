@@ -2829,6 +2829,7 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual([], backups)
 
     def test_goals_save_creates_backup_and_updates_file(self) -> None:
+        from agent_runner import web_goals
         from agent_runner.web import _goal_save_serialize_draft
 
         _write_config(self.config_path, self.repo)
@@ -2845,7 +2846,12 @@ class WebConsoleSafetyTests(unittest.TestCase):
             ],
         }
 
-        response = client.post("/api/goals/save", json={"draft": draft})
+        expected_text = _goal_save_serialize_draft(draft)
+        with patch("agent_runner.web_goals.atomic_write_text", wraps=web_goals.atomic_write_text) as atomic_write_mock:
+            with patch("agent_runner.web_goals.shutil.copy2", wraps=web_goals.shutil.copy2) as copy2_mock:
+                response = client.post("/api/goals/save", json={"draft": draft})
+        atomic_write_calls = [(Path(call.args[0]), call.args[1]) for call in atomic_write_mock.call_args_list]
+        backup_copy_calls = [(Path(call.args[0]), Path(call.args[1])) for call in copy2_mock.call_args_list]
         self.assertEqual(200, response.status_code)
         payload = response.json()
         self.assertTrue(payload["ok"])
@@ -2857,9 +2863,14 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual(self.goals_path.as_posix(), payload["saved_path"])
         backup_path = Path(payload["backup_path"])
         self.assertTrue(backup_path.exists())
+        self.assertEqual(self.goals_path.parent, backup_path.parent)
+        self.assertTrue(backup_path.name.startswith(f"{self.goals_path.stem}."))
+        self.assertTrue(backup_path.name.endswith(f".bak{self.goals_path.suffix}"))
         self.assertEqual(original, backup_path.read_text(encoding="utf-8"))
         self.assertEqual(self.goals_path.read_text(encoding="utf-8"), payload["snapshot"]["goals"]["raw_text"])
-        self.assertEqual(_goal_save_serialize_draft(draft), self.goals_path.read_text(encoding="utf-8"))
+        self.assertEqual(expected_text, self.goals_path.read_text(encoding="utf-8"))
+        self.assertEqual([(self.goals_path, expected_text)], atomic_write_calls)
+        self.assertEqual([(self.goals_path, backup_path)], backup_copy_calls)
         backups = list(self.goals_path.parent.glob(f"{self.goals_path.stem}.*.bak{self.goals_path.suffix}"))
         self.assertEqual(1, len(backups))
 
