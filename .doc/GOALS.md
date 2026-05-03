@@ -259,10 +259,10 @@
 
 ### P0-V. Maintainability And Module Decomposition
 
-- [ ] Web import compatibility tests protect `agent_runner.web` public and test-used private helper names before any helper extraction.
+- [x] Web import compatibility tests protect `agent_runner.web` public and test-used private helper names before any helper extraction.
 - [ ] Web endpoint golden tests protect `/api/status`, `/api/progress`, `/api/worktree`, and `/api/runner/status` payload contracts.
 - [ ] Web endpoint golden tests protect `/api/config`, `/api/goals`, `/api/prompts`, and `/api/logs` payload contracts.
-- [ ] Web redaction helpers are extracted into a focused module while `agent_runner.web` re-exports the old helper names.
+- [x] Web redaction helpers are extracted into a focused module while `agent_runner.web` re-exports the old helper names.
 - [ ] Web GOALS parse, serialize, validate, backup, and save helpers are extracted while `/api/goals` behavior stays unchanged.
 - [ ] Web prompt inventory, read, validation, backup, and save helpers are extracted while `/api/prompts` behavior stays unchanged.
 - [ ] Web config schema, normalization, validation, backup, and save helpers are extracted while `/api/config` behavior stays unchanged.
