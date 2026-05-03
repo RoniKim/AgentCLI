@@ -679,6 +679,135 @@ def pr_queue_merge_confirmation_phrase(packet_id: str) -> str:
     return f"{PR_QUEUE_MERGE_CONFIRMATION_PREFIX} {packet_id_text}".strip()
 
 
+def _review_packet_paths(source_repo: Path) -> list[Path]:
+    queue_root = pr_queue_root(source_repo)
+    if not queue_root.exists() or not queue_root.is_dir():
+        return []
+
+    def _sort_key(path: Path) -> tuple[float, str]:
+        try:
+            stamp = float(path.stat().st_mtime)
+        except Exception:
+            stamp = 0.0
+        return (stamp, path.name)
+
+    return sorted(
+        [
+            path
+            for path in queue_root.glob("*.json")
+            if path.is_file() and path.name != PR_QUEUE_INDEX_FILENAME
+        ],
+        key=_sort_key,
+        reverse=True,
+    )
+
+
+def _summary_artifact_name(packet: dict[str, Any]) -> str:
+    candidates = [
+        packet.get("validation_artifact_path"),
+        packet.get("validationArtifactPath"),
+    ]
+    artifacts = packet.get("validation_artifacts")
+    if not isinstance(artifacts, list):
+        artifacts = packet.get("validationArtifacts")
+    if isinstance(artifacts, list):
+        candidates.extend(artifacts)
+    for raw in candidates:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        name = Path(text).name.strip()
+        if name:
+            return name
+    return ""
+
+
+def _append_summary_ref(values: list[str], value: str) -> None:
+    text = str(value or "").strip()
+    if not text or text in values:
+        return
+    values.append(text)
+
+
+def _review_packet_evidence_refs(packet: dict[str, Any], packet_id: str) -> list[str]:
+    refs: list[str] = []
+    run_id = str(packet.get("run_id") or packet.get("runId") or "").strip()
+    if run_id:
+        _append_summary_ref(refs, f"run:{run_id}")
+    for task_id in _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds"))[:2]:
+        _append_summary_ref(refs, f"task:{task_id}")
+    artifact_name = _summary_artifact_name(packet)
+    if artifact_name:
+        _append_summary_ref(refs, f"artifact:{artifact_name}")
+    if packet_id:
+        _append_summary_ref(refs, f"pr:{packet_id}")
+    return refs
+
+
+def _review_packet_need(packet: dict[str, Any]) -> tuple[str, str]:
+    packet_status = str(packet.get("status") or "pr_queued").strip().lower()
+    approval_status = str(packet.get("approval_status") or packet.get("approvalStatus") or "").strip().lower()
+    validation_status = _normalize_packet_validation_status(
+        packet.get("validation_status") or packet.get("validationStatus") or packet.get("status")
+    )
+    if validation_status == "validation_passed" and approval_status != "approved":
+        return "approval", "approval_required"
+    if packet_status == "branch_metadata_missing":
+        return "validation", "metadata_blocked"
+    labels = {
+        "validation_failed": "validation_failed",
+        "blocked_env": "validation_blocked_env",
+        "tests_skipped": "validation_skipped",
+        "no_tests_found": "validation_no_tests",
+        "validation_pending": "validation_pending",
+    }
+    return "validation", labels.get(validation_status, "validation_pending")
+
+
+def build_telegram_pr_queue_summary(source_repo: Path, *, limit: int = 3) -> dict[str, object]:
+    source_repo_path = Path(source_repo).expanduser().resolve()
+    attention_items: list[dict[str, object]] = []
+    for path in _review_packet_paths(source_repo_path):
+        packet = _load_json_dict(path)
+        if not packet:
+            continue
+        packet_status = str(packet.get("status") or "pr_queued").strip().lower()
+        if packet_status in {"approved", "discarded", "merged", "closed"}:
+            continue
+        packet_id = str(packet.get("id") or path.stem).strip() or path.stem
+        validation_status = _normalize_packet_validation_status(
+            packet.get("validation_status") or packet.get("validationStatus") or packet.get("status")
+        )
+        approval_status = str(packet.get("approval_status") or packet.get("approvalStatus") or "").strip().lower()
+        need, label = _review_packet_need(packet)
+        if validation_status == "validation_passed" and approval_status == "approved":
+            continue
+        attention_items.append(
+            {
+                "id": packet_id,
+                "status": packet_status or "pr_queued",
+                "need": need,
+                "label": label,
+                "run_id": str(packet.get("run_id") or packet.get("runId") or "").strip(),
+                "task_ids": _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds")),
+                "branch": str(packet.get("branch") or "").strip(),
+                "validation_status": validation_status or "validation_pending",
+                "approval_status": approval_status,
+                "updated_at": str(packet.get("updated_at") or packet.get("updatedAt") or "").strip(),
+                "evidence_refs": _review_packet_evidence_refs(packet, packet_id),
+            }
+        )
+    needs_validation = len([item for item in attention_items if item.get("need") == "validation"])
+    needs_approval = len([item for item in attention_items if item.get("need") == "approval"])
+    max_items = max(1, int(limit))
+    return {
+        "total": len(attention_items),
+        "needs_validation": needs_validation,
+        "needs_approval": needs_approval,
+        "items": attention_items[:max_items],
+    }
+
+
 def _pr_queue_validation_artifact_candidates(source_repo: Path, packet: dict[str, Any], packet_id: str) -> list[Path]:
     packet_id_text = str(packet_id or "").strip()
     candidates: list[Path] = []
