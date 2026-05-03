@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from .analyzer import write_analyzer_artifacts
 from .docs import read_text_robust
 from .gates import FAST_WEB_WORKTREE_REGRESSION_TEST_FILES, find_build_cmd, find_test_cmd, looks_like_no_tests_found
 from .goals import parse_goals_completion, read_goals
@@ -1609,6 +1610,7 @@ def write_run_report_artifacts(
     """Write QA and final run reports for browser consumption."""
     qa_report = build_qa_validation_report(repo, run_dir)
     final_report = _build_final_run_report(repo, run_dir, stop_reason=stop_reason, qa_report=qa_report)
+    analyzer_result: dict[str, Any] = {}
     if last_task_id:
         final_report["last_task_id"] = last_task_id
     try:
@@ -1635,16 +1637,35 @@ def write_run_report_artifacts(
         safe_write_text(final_md, _render_final_run_report_md(final_report))
     except Exception:
         pass
+    try:
+        analyzer_result = write_analyzer_artifacts(repo, run_dir)
+    except Exception:
+        analyzer_result = {}
     return {
         "qa_validation_report": qa_report,
         "final_run_report": final_report,
-        "analyzer_summary": analyzer_summary,
+        "analyzer_summary": analyzer_result.get("summary") if isinstance(analyzer_result, dict) else None,
         "artifacts": {
             "qa_validation_json": qa_json.as_posix(),
             "qa_validation_markdown": qa_md.as_posix(),
             "final_run_json": final_json.as_posix(),
             "final_run_markdown": final_md.as_posix(),
-            "analyzer_summary_json": (run_dir / "ANALYZER_SUMMARY.json").as_posix(),
+            "analyzer_summary_json": str(
+                (
+                    (analyzer_result.get("artifacts") or {}).get("summary_json")
+                    if isinstance(analyzer_result, dict)
+                    else ""
+                )
+                or (run_dir / "ANALYZER_SUMMARY.json").as_posix()
+            ),
+            "experience_updates_jsonl": str(
+                (
+                    (analyzer_result.get("artifacts") or {}).get("experience_updates_jsonl")
+                    if isinstance(analyzer_result, dict)
+                    else ""
+                )
+                or (run_dir / "EXPERIENCE_UPDATES.jsonl").as_posix()
+            ),
         },
     }
 
