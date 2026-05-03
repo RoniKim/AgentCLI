@@ -231,12 +231,31 @@ _NO_TESTS_FOUND_PHRASES: tuple[str, ...] = (
     "0 tests passed",
 )
 
+_POSITIVE_TEST_COUNT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bran\s+([1-9]\d*)\s+tests?\b", re.IGNORECASE),
+    re.compile(r"\bcollected\s+([1-9]\d*)\s+items?\b", re.IGNORECASE),
+    re.compile(r"\b([1-9]\d*)\s+tests?\s+(?:collected|run|passed)\b", re.IGNORECASE),
+)
+
+
+def _has_positive_test_count(text: str) -> bool:
+    for pattern in _POSITIVE_TEST_COUNT_PATTERNS:
+        for match in pattern.finditer(text):
+            try:
+                if int(match.group(1)) > 0:
+                    return True
+            except Exception:
+                continue
+    return False
+
 
 def looks_like_no_tests_found(text: str) -> bool:
     normalized = " ".join(str(text or "").split()).lower()
     if not normalized:
         return False
-    return any(phrase in normalized for phrase in _NO_TESTS_FOUND_PHRASES)
+    if not any(phrase in normalized for phrase in _NO_TESTS_FOUND_PHRASES):
+        return False
+    return not _has_positive_test_count(normalized)
 
 
 def _normalize_validation_status(value: object) -> str:
