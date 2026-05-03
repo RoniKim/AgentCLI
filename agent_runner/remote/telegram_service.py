@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from ..cli import DEFAULTS, parse_args
+from ..config import AGENT_WORK_DIR
 from ..config import load_config, save_config
+from ..pr_queue import build_telegram_pr_queue_summary
 from ..shell import _parse_kv_tokens
 from .controller import RunnerController
 
@@ -203,6 +205,206 @@ def _chunk_text(text: str, limit: int = 3500) -> list[str]:
     if current:
         chunks.append(current.rstrip("\n"))
     return chunks if chunks else [""]
+
+def _load_json_object(path: Path) -> dict[str, Any]:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace").strip()
+        if not raw:
+            return {}
+        payload = json.loads(raw)
+        if isinstance(payload, dict):
+            return dict(payload)
+    except Exception:
+        pass
+    return {}
+
+
+def _redact_path_like_text(text: str) -> str:
+    out = re.sub(r"(?i)[A-Z]:\[^\s]+", "[path]", text)
+    out = re.sub(r"(?<!\w)/(?:[^/\s]+/)+[^/\s]+", "[path]", out)
+    return out
+
+
+def _looks_like_raw_summary_text(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    lowered = raw.lower()
+    markers = (
+        "system prompt",
+        "user prompt",
+        "assistant prompt",
+        "ignore previous",
+        "backend transcript",
+        "raw transcript",
+        "prompt injection",
+        "diff --git",
+        "traceback (most recent call last)",
+        "stack trace",
+        "<assistant",
+        "<system",
+        "<user",
+    )
+    if any(marker in lowered for marker in markers):
+        return True
+    if re.search(r"(?m)^\s*@@\s", raw):
+        return True
+    if re.search(r"(?m)^\d{4}-\d{2}-\d{2}[ T].*(?:ERROR|WARN|INFO|DEBUG)", raw):
+        return True
+    return False
+
+
+def _sanitize_summary_text(value: object, *, limit: int = 160) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    masked = _mask_sensitive(_redact_path_like_text(raw))
+    normalized = re.sub(r"\s+", " ", masked).strip(" -:")
+    if not normalized:
+        return ""
+    if _looks_like_raw_summary_text(raw) or _looks_like_raw_summary_text(normalized):
+        return "[redacted]"
+    if len(normalized) > limit:
+        return normalized[: max(1, limit - 3)].rstrip() + "..."
+    return normalized
+
+
+def _append_summary_value(values: list[str], value: str) -> None:
+    text = str(value or "").strip()
+    if not text or text in values:
+        return
+    values.append(text)
+
+
+def _safe_summary_ref(value: object, *, label: str = "") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if label == "artifact":
+        name = Path(raw).name.strip()
+        return f"artifact:{name}" if name else ""
+    text = _sanitize_summary_text(raw, limit=48)
+    if text == "[redacted]":
+        return text
+    return f"{label}:{text}" if label else text
+
+
+def _experience_evidence_refs(item: dict[str, Any], *, run_dir: Path | None) -> list[str]:
+    refs: list[str] = []
+    task_id = _safe_summary_ref(item.get("task_id") or item.get("taskId"), label="task")
+    if task_id:
+        _append_summary_value(refs, task_id)
+    run_id = _safe_summary_ref(item.get("run_id") or item.get("runId"), label="run")
+    if run_id:
+        _append_summary_value(refs, run_id)
+    pr_id = _safe_summary_ref(item.get("pr_id") or item.get("prId") or item.get("packet_id") or item.get("packetId"), label="pr")
+    if pr_id:
+        _append_summary_value(refs, pr_id)
+    goal_trace = item.get("goal_trace") if isinstance(item.get("goal_trace"), list) else item.get("goalTrace")
+    if isinstance(goal_trace, list):
+        for raw_goal in goal_trace[:2]:
+            if not isinstance(raw_goal, dict):
+                continue
+            goal_ref = _safe_summary_ref(raw_goal.get("goal_ref") or raw_goal.get("goalRef"), label="goal")
+            if goal_ref:
+                _append_summary_value(refs, goal_ref)
+    evidence = item.get("evidence")
+    if isinstance(evidence, list):
+        for raw_ref in evidence[:2]:
+            if isinstance(raw_ref, dict):
+                candidate = (
+                    _safe_summary_ref(raw_ref.get("task_id") or raw_ref.get("taskId"), label="task")
+                    or _safe_summary_ref(raw_ref.get("run_id") or raw_ref.get("runId"), label="run")
+                    or _safe_summary_ref(raw_ref.get("packet_id") or raw_ref.get("packetId"), label="pr")
+                    or _safe_summary_ref(raw_ref.get("goal_ref") or raw_ref.get("goalRef"), label="goal")
+                    or _safe_summary_ref(raw_ref.get("artifact_path") or raw_ref.get("artifactPath") or raw_ref.get("path"), label="artifact")
+                )
+            else:
+                raw_text = str(raw_ref or "").strip()
+                candidate = _safe_summary_ref(raw_ref, label="artifact" if any(sep in raw_text for sep in ('/', '\\')) or raw_text.endswith('.json') else "")
+            if candidate:
+                _append_summary_value(refs, candidate)
+    if run_dir is not None and len(refs) < 2:
+        run_ref = _safe_summary_ref(run_dir.name, label="run")
+        if run_ref:
+            _append_summary_value(refs, run_ref)
+    return refs[:3]
+
+
+def _experience_source_priority(source_key: str) -> int:
+    order = {
+        "operator_actions": 0,
+        "validation_lessons": 1,
+        "merge_hints": 2,
+        "task_lessons": 3,
+        "lessons": 4,
+        "items": 5,
+    }
+    return order.get(source_key, 99)
+
+
+def _load_telegram_experience_blockers(repo: Path, *, run_dir: Path | None, limit: int = 3) -> dict[str, Any]:
+    candidates: list[Path] = []
+    if run_dir is not None:
+        candidates.append(run_dir / "ANALYZER_SUMMARY.json")
+    candidates.append(repo / AGENT_WORK_DIR / "experience" / "latest_summary.json")
+
+    payload: dict[str, Any] = {}
+    source_path = ""
+    for candidate in candidates:
+        payload = _load_json_object(candidate)
+        if payload:
+            source_path = candidate.as_posix()
+            break
+    if not payload:
+        return {"source_path": "", "total": 0, "items": []}
+
+    entries: list[tuple[str, dict[str, Any]]] = []
+    for key in ("operator_actions", "validation_lessons", "merge_hints", "task_lessons", "lessons", "items"):
+        raw_items = payload.get(key)
+        if not isinstance(raw_items, list):
+            continue
+        for raw_item in raw_items:
+            if isinstance(raw_item, dict):
+                entries.append((key, dict(raw_item)))
+            elif raw_item not in (None, "", False):
+                entries.append((key, {"lesson": str(raw_item)}))
+
+    normalized: list[dict[str, Any]] = []
+    for source_key, raw_item in entries:
+        text = _sanitize_summary_text(
+            raw_item.get("lesson")
+            or raw_item.get("summary")
+            or raw_item.get("action")
+            or raw_item.get("title")
+            or raw_item.get("message")
+            or raw_item.get("detail")
+            or raw_item.get("text")
+        )
+        if not text:
+            continue
+        severity = str(raw_item.get("severity") or raw_item.get("status") or "").strip().lower()
+        normalized.append(
+            {
+                "source_key": source_key,
+                "priority": _experience_source_priority(source_key),
+                "severity": severity,
+                "text": text,
+                "kind": _sanitize_summary_text(raw_item.get("kind") or source_key.replace("_", " "), limit=32) or source_key,
+                "evidence_refs": _experience_evidence_refs(raw_item, run_dir=run_dir),
+            }
+        )
+    normalized.sort(key=lambda item: (int(item.get("priority", 99)), 0 if item.get("severity") == "high" else 1, str(item.get("kind") or "")))
+    return {
+        "source_path": source_path,
+        "total": len(normalized),
+        "items": normalized[: max(1, int(limit))],
+    }
+
+
+def _humanize_summary_label(value: object) -> str:
+    text = str(value or "").strip().replace("_", " ")
+    return text or "-"
 
 
 def _token_fingerprint(token: str) -> str:
@@ -1096,7 +1298,7 @@ class TelegramControlService:
             f"  \uc800\uc7a5\uc18c: {self.repo}",                      # 저장소
             f"  \uc778\uc99d: {'\uc644\ub8cc' if authorized else '\ubbf8\uc778\uc99d'}",  # 인증: 완료/미인증
             f"  \uc5f0\uacb0\ub41c \ucc44\ud305: {len(self.allowed_chat_ids)}\uac1c",    # 연결된 채팅: N개
-            "\uba85\ub839\uc5b4: /whoami /pair /status /detail /errors /events /grep /run_start /run_stop /runs /tail /notify",  # 명령어
+            "\uba85\ub839\uc5b4: /whoami /pair /status /detail /experience /errors /events /grep /run_start /run_stop /runs /tail /notify",  # 명령어
         ]
         if not authorized:
             if self.pairing_code:
@@ -1104,6 +1306,54 @@ class TelegramControlService:
             else:
                 lines.append("\ud398\uc5b4\ub9c1 \ube44\ud65c\uc131. telegram.pairing_code \ub610\ub294 allowed_chat_ids\ub97c \uc124\uc815\ud558\uc138\uc694.")  # 페어링 비활성...
         await self._reply(update, "\n".join(lines))
+
+
+    def _build_experience_summary_text(self) -> str:
+        status = self.controller.status()
+        run_dir_text = str(status.get("run_dir") or "").strip()
+        run_dir = Path(run_dir_text) if run_dir_text else None
+        blockers = _load_telegram_experience_blockers(self.repo, run_dir=run_dir, limit=3)
+        pr_queue = build_telegram_pr_queue_summary(self.repo, limit=4)
+
+        lines = [f"{_EMOJI['info']} {self.instance_name} experience summary"]
+        blocker_items = blockers.get("items") if isinstance(blockers.get("items"), list) else []
+        if blocker_items:
+            lines.append(f"Blockers ({len(blocker_items)}/{int(blockers.get('total') or 0)}):")
+            for item in blocker_items:
+                if not isinstance(item, dict):
+                    continue
+                evidence = item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) else []
+                evidence_text = ", ".join(str(entry) for entry in evidence[:3] if str(entry).strip()) or "summary-only"
+                kind_text = _humanize_summary_label(item.get("kind"))
+                lines.append(f"- [{kind_text}] {item.get('text') or '[redacted]'} | evidence={evidence_text}")
+        else:
+            lines.append("Blockers: none from the latest experience summary.")
+
+        queue_items = pr_queue.get("items") if isinstance(pr_queue.get("items"), list) else []
+        if queue_items:
+            lines.append(
+                "PR queue: "
+                f"{int(pr_queue.get('needs_validation') or 0)} validation, "
+                f"{int(pr_queue.get('needs_approval') or 0)} approval."
+            )
+            for item in queue_items:
+                if not isinstance(item, dict):
+                    continue
+                evidence = item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) else []
+                evidence_text = ", ".join(str(entry) for entry in evidence[:3] if str(entry).strip()) or "packet-only"
+                task_ids = item.get("task_ids")
+                task_text = ",".join(str(task_id) for task_id in task_ids[:2]) if isinstance(task_ids, list) and task_ids else "-"
+                packet_id = _sanitize_summary_text(item.get("id"), limit=48) or "-"
+                branch = _sanitize_summary_text(item.get("branch"), limit=32) or "-"
+                label = _humanize_summary_label(item.get("label") or item.get("validation_status"))
+                need = _humanize_summary_label(item.get("need"))
+                lines.append(
+                    f"- {packet_id} | {need} | {label} | branch={branch} | task={task_text} | evidence={evidence_text}"
+                )
+        else:
+            lines.append("PR queue: no queued PRs need validation or approval.")
+        return "\n".join(lines)
+
 
     async def cmd_notify(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._require_auth(update):
@@ -1131,6 +1381,13 @@ class TelegramControlService:
                 lines = max(10, min(400, int(raw)))
         detail = self._build_detail_text(lines=lines)
         await self._reply(update, detail)
+
+
+    async def cmd_experience(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._require_auth(update):
+            return
+        await self._reply(update, self._build_experience_summary_text())
+
 
     async def cmd_errors(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._require_auth(update):
@@ -1378,6 +1635,7 @@ class TelegramControlService:
             app.add_handler(CommandHandler("pair", self.cmd_pair))
             app.add_handler(CommandHandler("status", self.cmd_status))
             app.add_handler(CommandHandler("detail", self.cmd_detail))
+            app.add_handler(CommandHandler("experience", self.cmd_experience))
             app.add_handler(CommandHandler("errors", self.cmd_errors))
             app.add_handler(CommandHandler("events", self.cmd_events))
             app.add_handler(CommandHandler("grep", self.cmd_grep))

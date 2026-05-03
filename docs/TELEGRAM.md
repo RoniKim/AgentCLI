@@ -13,6 +13,7 @@ AgentCLI는 Telegram Long Polling 기반 하이브리드 모드를 지원합니�
 - 실행 이력 (`/runs`)
 - 로그 tail (`/tail`)
 - 상세 통합 로그 (`/detail`)
+- 최신 Experience/PR 검토 요약 (`/experience`)
 - 에러/이벤트/grep 필터 (`/errors`, `/events`, `/grep`)
 - 자동 푸시 알림 (run/task/quota/error/stalled)
 
@@ -96,6 +97,7 @@ python agent_cli.py --telegram --repo "C:/Dev/YourRepo"
 - `/pair <code>`
 - `/status`
 - `/detail [lines]`
+- `/experience`
 - `/errors [lines]`
 - `/events <event_name> [lines]`
 - `/grep <pattern> [file] [lines]`
@@ -104,6 +106,8 @@ python agent_cli.py --telegram --repo "C:/Dev/YourRepo"
 - `/runs [N]`
 - `/tail [file] [lines]`
 - `/notify`
+
+`/experience` is read-only. It summarizes the latest Experience blockers and queued PR validation or approval needs from cached summary artifacts and PR queue packet metadata only. Raw prompts, backend transcripts, raw logs, and raw diffs are omitted; evidence is shown only as redacted pointers such as `run:...`, `task:...`, `pr:...`, or `artifact:validation.json`.
 
 ## 푸시 알림
 

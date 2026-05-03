@@ -247,12 +247,12 @@
 - [ ] Validation experience records classify `validation_pending`, `tests_skipped`, `no_tests_found`, `validation_failed`, `blocked_env`, and `validation_passed` separately.
 - [ ] Local PR queue validate, merge, discard, and rebase decisions are recorded as experience signals tied to the PR packet and GOALS trace.
 - [ ] Deterministic Analyzer rules produce `ANALYZER_SUMMARY.json` from run artifacts without calling an LLM.
-- [x] Analyzer lesson records include kind, normalized trigger, GOALS refs, file globs, gate, task status, evidence pointers, confidence, and last-applied metadata.
+- [ ] Analyzer lesson records include kind, normalized trigger, GOALS refs, file globs, gate, task status, evidence pointers, confidence, and last-applied metadata.
 - [x] Analyzer output is advisory only and cannot mark GOALS complete, approve merges, mutate source code, or bypass deterministic validation gates.
-- [ ] PM receives a token-bounded experience summary block even when a custom PM prompt is configured.
-- [x] Experience summary injection enforces max item count, max characters, no raw logs, no raw diffs, and redacted evidence pointers.
-- [ ] Experience lessons can recommend task sizing, validation selection, retry avoidance, and dependency cleanup based on recorded evidence.
-- [ ] Web Console shows recent lessons, repeated failure patterns, validation gaps, and merge blockers from read-only Experience DB data.
+- [x] PM receives a token-bounded experience summary block even when a custom PM prompt is configured.
+- [ ] Experience summary injection enforces max item count, max characters, no raw logs, no raw diffs, and redacted evidence pointers.
+- [x] Experience lessons can recommend task sizing, validation selection, retry avoidance, and dependency cleanup based on recorded evidence.
+- [x] Web Console shows recent lessons, repeated failure patterns, validation gaps, and merge blockers from read-only Experience DB data.
 - [ ] Telegram can summarize latest experience blockers and queued PR validation needs without exposing raw prompts or logs.
 - [ ] Experience retention settings prune old lessons and evidence pointers without deleting pending PR queue or active run artifacts.
 - [ ] Experience redaction settings prevent secrets, raw backend transcripts, raw prompts, and long test output from leaking into future PM prompts.
