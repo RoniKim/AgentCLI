@@ -498,6 +498,26 @@ def resolve_prompts_dir(repo: Path, explicit: Optional[str]) -> Path:
     return default_prompts_dir(repo)
 
 
+def resolve_experience_dir(repo: Path, explicit: Optional[str] = None) -> Path:
+    """Resolve an experience directory that must stay under repo/.AgentCLI/experience."""
+    repo_root = repo.expanduser().resolve()
+    experience_root = (repo_root / AGENT_WORK_DIR / "experience").resolve()
+    if explicit and str(explicit).strip():
+        candidate = Path(str(explicit)).expanduser()
+        resolved = candidate.resolve() if candidate.is_absolute() else (repo_root / candidate).resolve()
+    else:
+        resolved = experience_root
+    try:
+        resolved.relative_to(experience_root)
+    except Exception as ex:
+        raise ValueError(f"Experience path escapes repo work dir: {resolved}") from ex
+    return resolved
+
+
+def default_experience_db_path(repo: Path) -> Path:
+    return (resolve_experience_dir(repo) / "experience.db").resolve()
+
+
 def ensure_gitignore_entry(repo: Path, entry: str = AGENT_WORK_DIR) -> None:
     """Ensure *entry* is listed in repo/.gitignore (idempotent, best-effort).
 
