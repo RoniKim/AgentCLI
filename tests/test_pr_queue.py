@@ -23,6 +23,7 @@ from agent_runner.gitops import (
     ref_has_new_commits,
     remove_worktree,
 )
+from agent_runner.experience import query_pr_queue_signals
 from agent_runner.pr_queue import (
     PrQueueMergeError,
     load_branch_index,
@@ -527,6 +528,7 @@ class PRQueueTests(unittest.TestCase):
         summary_path = Path(result["summary_path"])
         packet_data = json.loads(packet_path.read_text(encoding="utf-8"))
         summary_data = json.loads(summary_path.read_text(encoding="utf-8"))
+        signal_rows = query_pr_queue_signals(self.repo, packet_id=str(packet["packet_id"]), signal_kind="validate")
         expected_summary_path = validation_run_dir / "pr_queue_validation" / str(packet["packet_id"]) / "attempt_01" / "validation.json"
 
         self.assertTrue(result["ok"])
@@ -567,6 +569,13 @@ class PRQueueTests(unittest.TestCase):
         self.assertEqual("validation_passed", summary_data["status"])
         self.assertEqual(3, summary_data["validation_summary"]["records_total"])
         self.assertEqual(3, summary_data["validation_summary"]["records_passed"])
+        self.assertEqual(1, len(signal_rows))
+        self.assertEqual("validate", signal_rows[0]["signal_kind"])
+        self.assertEqual("validation_passed", signal_rows[0]["decision_status"])
+        self.assertEqual("T1", signal_rows[0]["task_id"])
+        self.assertEqual(packet["goal_trace"], signal_rows[0]["goal_trace"])
+        self.assertEqual(packet["task_branch"].branch_name, signal_rows[0]["branch"])
+        self.assertEqual(summary_path.as_posix(), signal_rows[0]["metadata"]["summary_path"])
         build_record, test_record, fast_record = result["validation_records"]
         self.assertTrue(build_record["required"])
         self.assertTrue(build_record["applicable"])
@@ -618,6 +627,12 @@ class PRQueueTests(unittest.TestCase):
             result = validate_review_packet(self.repo, str(packet["packet_id"]))
 
         packet_data = json.loads(Path(result["packet_path"]).read_text(encoding="utf-8"))
+        signal_rows = query_pr_queue_signals(
+            self.repo,
+            packet_id=str(packet["packet_id"]),
+            signal_kind="validate",
+            decision_status="validation_failed",
+        )
 
         self.assertFalse(result["ok"])
         self.assertEqual("validation_failed", result["status"])
@@ -635,6 +650,9 @@ class PRQueueTests(unittest.TestCase):
         self.assertEqual("build_failed", packet_data["validation_reason"])
         self.assertIn("expected build output", packet_data["validation_detail"])
         self.assertTrue(all(record["goal_trace"] == packet["goal_trace"] for record in result["validation_records"]))
+        self.assertEqual(1, len(signal_rows))
+        self.assertEqual("build_failed", signal_rows[0]["reason"])
+        self.assertEqual(packet["goal_trace"], signal_rows[0]["goal_trace"])
 
     def test_validate_review_packet_blocked_environment_marks_blocked_env(self) -> None:
         packet = self._prepare_validation_packet()
@@ -702,6 +720,12 @@ class PRQueueTests(unittest.TestCase):
 
         result = merge_review_packet(self.repo, str(packet["packet_id"]), approval_phrase=expected_phrase)
         packet_data = json.loads(Path(result["packet_path"]).read_text(encoding="utf-8"))
+        signal_rows = query_pr_queue_signals(
+            self.repo,
+            packet_id=str(packet["packet_id"]),
+            signal_kind="merge",
+            decision_status="approved",
+        )
 
         self.assertTrue(result["ok"])
         self.assertEqual("merge", result["action"])
@@ -717,6 +741,10 @@ class PRQueueTests(unittest.TestCase):
         self.assertEqual("approved", packet_data["merge_status"])
         self.assertEqual("validation_passed", packet_data["validation_status"])
         self.assertEqual(expected_phrase, packet_data["approval"]["required_phrase"])
+        self.assertEqual(1, len(signal_rows))
+        self.assertEqual("approval_confirmed", signal_rows[0]["reason"])
+        self.assertEqual(packet["goal_trace"], signal_rows[0]["goal_trace"])
+        self.assertEqual(packet_data["branch"], signal_rows[0]["branch"])
 
     def test_merge_review_packet_rejects_missing_packet(self) -> None:
         with self.assertRaises(PrQueueMergeError) as ctx:
@@ -773,6 +801,15 @@ class PRQueueTests(unittest.TestCase):
         with self.assertRaises(PrQueueMergeError) as ctx:
             merge_review_packet(self.repo, str(packet["packet_id"]), approval_phrase="WRONG")
         self.assertEqual("approval_mismatch", ctx.exception.code)
+        signal_rows = query_pr_queue_signals(
+            self.repo,
+            packet_id=str(packet["packet_id"]),
+            signal_kind="merge",
+            decision_status="rejected",
+        )
+        self.assertEqual(1, len(signal_rows))
+        self.assertEqual("approval_mismatch", signal_rows[0]["reason"])
+        self.assertEqual(packet["goal_trace"], signal_rows[0]["goal_trace"])
 
 
 if __name__ == "__main__":
