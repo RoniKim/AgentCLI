@@ -5,7 +5,7 @@
 > This file is the target backlog, not a status report. Current implementation notes belong in `docs/WEB_CONSOLE.md`, `docs/MASTER_INDEX.md`, or archived incident/design notes.
 > Do not downgrade, remove, or merge unmet P0 goals to make progress look complete; implement them until they are true.
 > Task sizing rule: each unchecked P0 item should be small enough for one focused AgentCLI task branch.
-> Last reviewed: 2026-04-29.
+> Last reviewed: 2026-05-03.
 
 ## P0 (Must-Have)
 
@@ -307,6 +307,31 @@
 - [ ] Overnight runs write a concise post-run operations summary covering completed, queued, review-required, blocked-env, stale-cleanup, handle/process warnings, and next operator actions.
 - [ ] Windows handle/process diagnostic collection is linked to run artifacts and flags process-count or handle-growth anomalies before Explorer/CMD instability recurs.
 
+### P0-Y. Failure Disposition, Backend Parity, And State Integrity
+
+- [ ] A `failure_policy` module decides task disposition (`retry`, `preserve_for_review`, `abandon_branch`, `restore_checkpoint`, `stop_run`) from reason, task status, and attempt budget so Codex and Claude share one policy.
+- [ ] `_isolate_or_stop` consumes a typed `FailureOutcome` so `blocked_env` and `test_contract_changed` tasks are preserved for human review instead of abandoned.
+- [ ] `backends/claudecode.py` records failures with the same task-status enriched schema as `cycle.py` so failover cannot produce mixed `STATE.json` schemas.
+- [ ] `task_status.py` classifier covers Java, Go, Rust, C/C++, Kotlin, Swift, Maven, Gradle, NuGet, Cargo, regression, and dependency-resolution patterns with multi-language tests.
+- [ ] `task_history` SQLite stores `task_status` so PM failed-task context and consecutive-failure handling distinguish environment-blocked tasks from code regressions.
+- [ ] `needs_dependency` and `blocked_dependency` reasons are first-class `BLOCKED_ENV` mappings in `classify_task_failure` without relying on text-pattern inference.
+- [ ] Shutdown reports and Web Console task counters split regression, review-needed, and blocked-env groups so environment failures do not look like code regressions.
+- [ ] Codex and Claude backends use the same failure disposition, validation artifact, local PR queue, and run report helpers so failover cannot produce mixed schemas.
+- [ ] PR queue packet and index writes are lock-protected and recoverable after interrupted packet or index updates.
+- [ ] `STATE.json` mutation helpers preserve concurrent done, failed, and warning updates across runner, controller, and future Web mutation paths.
+- [ ] GOALS auto-check writes atomically and detects operator edit conflicts instead of overwriting Web edits.
+- [ ] Attempt directories record `STARTED` and `FINISHED` markers, and preflight reports interrupted attempts before a new unattended run starts.
+- [ ] Preflight reports stale Git, web instance, and Telegram lock files with age, owner evidence when available, and safe operator guidance.
+- [ ] Runner subprocess launch paths explicitly close inherited file descriptors or document tested handle inheritance behavior on Windows.
+
+### P0-Z. Stage Effects And Backlog Refiner Runtime
+
+- [ ] `StageOutcome` supports declared effects such as `backlog_written` and `tasks_reload_required` so `PipelineManager` can safely apply stage side effects.
+- [ ] `PipelineSession` exposes safe artifact and backlog write APIs for state-mutating stages.
+- [ ] `PipelineManager` reloads task state after any stage declares backlog mutation.
+- [ ] A built-in PL/Backlog Refiner can run between PM and Dev and split oversized tasks while preserving GOALS trace and dependencies.
+- [ ] Web Config and Pipeline views support PL and plugin stages without dropping unknown role specs.
+
 ## P1 (Should-Have)
 
 - [ ] Run History supports comparing two runs side-by-side with commits, task outcomes, token/quota usage, validation results, and worktree outcomes.
@@ -321,6 +346,20 @@
 - [ ] Each run writes a concise `WORK_SUMMARY.md` suitable for daily work logs without exposing raw secrets or long transcripts.
 - [ ] Web action audit artifacts record local start, stop, restart, config, prompt, goals, and worktree actions with timestamps and results.
 - [ ] Local retention settings and dry-run prune reports manage run directories, logs, diagnostics, and backups without deleting pending worktree review state.
+- [ ] TODO management is visible from shell/web status with active TODO path, freshness, PM injection state, and safe preview/edit controls without overriding GOALS-first PM gating.
+- [ ] Skills doctor/status shows configured roots, discovered skill count, selected skill ids, missing skill warnings, and fuzzy-match suggestions.
+- [ ] PM/Dev/QA skill injection is covered by tests for disabled, enabled, missing-root, missing-skill, and fuzzy-autofix modes.
+- [ ] Claude advanced controls expose validated config, diagnostics, and tests for MCP tools, hooks, dynamic permission, strict isolation, and subagent enablement.
+- [ ] Claude backend parity tests cover PR queue, task status, failure policy, validation artifacts, and advanced-control disabled/enabled modes.
+- [ ] MCP mode diagnostics report selected mode, timeout, unavailable tools, and safe fallback behavior without blocking non-MCP runs.
+- [ ] Plugin stage loading has allowlist, strict-mode, failure diagnostics, Web config validation, and tests for allowed, blocked, missing, and load-error stages.
+- [ ] Enterprise profile has tests and Web config visibility for Security stage insertion, policy/security scan enablement, and budget floor enforcement.
+- [ ] Completed runs can persist a lightweight redacted final web-history snapshot for replay without storing raw prompts, raw logs, or full GOALS text.
+- [ ] Command Palette exposes operator actions for Runbook, PR Queue, diagnostics, run history, config changes, and safe runner controls with disabled/read-only states.
+- [ ] Instance Health view summarizes process guard state, tracked child PIDs, handle/process diagnostic warnings, web instance lock state, and stale artifact risks.
+- [ ] Critical path smoke tests cover backend failover, quota wait, outer-loop reason handling, interrupted attempt recovery, and PR queue reconcile.
+- [ ] Local retention dry-run includes `agent_runs`, `PM_CACHE`, logs, diagnostics, and backups while preserving pending review evidence.
+- [ ] Latent risk hardening covers logger rotation, agent run retention, task-history indexes, and analysis-cache size caps.
 
 ## Completion Criteria
 
