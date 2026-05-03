@@ -12,7 +12,11 @@ from typing import Optional, Any
 
 from .analysis_cache import merge_dev_hints_to_global_changelog
 from .docs import resolve_docs_dir, generate_docs_digest
-from .experience import record_completed_task_experience, record_validation_experiences
+from .experience import (
+    load_pm_experience_summary,
+    record_completed_task_experience,
+    record_validation_experiences,
+)
 from .gates import (
     extract_build_warnings,
     classify_task_validation_status,
@@ -1054,6 +1058,8 @@ async def main_async(args: argparse.Namespace) -> int:
                 goals_evaluation_instruction=GOALS_EVALUATION_INSTRUCTION,
                 goals_generation_instruction=GOALS_GENERATION_INSTRUCTION,
             )
+            experience_repo = source_repo if worktree_dir is not None else repo
+            pm_experience_summary = load_pm_experience_summary(experience_repo, run_dir, args=args)
 
             def _goal_trace_map(tasks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
                 trace_map: dict[str, list[dict[str, Any]]] = {}
@@ -1175,6 +1181,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "digest_rel": str(digest_rel),
                         "skills_index_summary": skills_index_summary,
                         "codex_call_hint": codex_call_hint(autopilot),
+                        "pm_experience_summary": pm_experience_summary,
                         "task_history_block": _format_history_block(repo, max_items=_hist_max) if _hist_enabled else "(disabled)",
                     }
                     pm_prompt = append_pm_essential_context(
@@ -1184,6 +1191,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         failed_tasks_block=_failed_blk,
                         goals_block=goals_block,
                         goals_instruction=goals_instruction,
+                        experience_summary_block=pm_experience_summary,
                     )
                     pm_out = await _run_pm_structured(
                         pm_prompt,
@@ -1343,6 +1351,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "current_backlog_block": current_backlog_block,
                         "failed_tasks_block": failed_tasks_block,
                         "hint_block": hint_block,
+                        "pm_experience_summary": pm_experience_summary,
                         "task_history_block": _format_history_block(repo, max_items=_hist_max_i) if _hist_enabled_i else "(disabled)",
                     }
                     pm_prompt = append_pm_essential_context(
@@ -1353,6 +1362,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         goals_block=goals_block,
                         goals_instruction=goals_instruction,
                         build_warnings_block=build_warnings_block,
+                        experience_summary_block=pm_experience_summary,
                     )
                     pm_out = await _run_pm_structured(
                         pm_prompt,
