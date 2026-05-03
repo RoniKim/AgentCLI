@@ -109,6 +109,7 @@ from .utils import (
     choose_stop_reason,
     detect_stop_reason,
     write_heartbeat,
+    loop_cycle_indices,
     check_codex_quota_utilization,
     seconds_until_unix_reset,
     severity_at_or_above,
@@ -3642,7 +3643,10 @@ async def main_async(args: argparse.Namespace) -> int:
 
         idle_accum = 0
         idle_cycle_count = 0
-        idle_exit_cycles = int(getattr(args, "idle_exit_cycles", 3) or 3)
+        try:
+            idle_exit_cycles = max(0, int(getattr(args, "idle_exit_cycles", 3)))
+        except (TypeError, ValueError):
+            idle_exit_cycles = 3
         last_rc = 0
         last_reason = ""
         consecutive_failures = 0
@@ -3657,9 +3661,11 @@ async def main_async(args: argparse.Namespace) -> int:
             quota_5h_max = 95.0
             quota_7d_max = 95.0
         loop_sleep_seconds = int(getattr(args, "loop_sleep_seconds", 60) or 60)
-        if args.loop and (not args.loop_max_cycles or args.loop_max_cycles <= 0):
-            eprint("[WARN] loop_max_cycles not set; defaulting to 1000 to prevent infinite loops.")
-        cycles = 1 if not args.loop else (args.loop_max_cycles if args.loop_max_cycles and args.loop_max_cycles > 0 else 1000)
+        loop_idle_exit_after = int(getattr(args, "loop_idle_exit_after", 0) or 0)
+        cycle_indices = loop_cycle_indices(
+            bool(getattr(args, "loop", False)),
+            getattr(args, "loop_max_cycles", 0),
+        )
 
         # Goals auto-refresh state
         goals_refresh_count = 0
@@ -3734,7 +3740,7 @@ async def main_async(args: argparse.Namespace) -> int:
             return statuses
 
         try:
-            for cycle_idx in range(int(cycles)):
+            for cycle_idx in cycle_indices:
                 pm_stop_reason.clear()
 
                 if stop_path.exists():
@@ -4034,14 +4040,21 @@ async def main_async(args: argparse.Namespace) -> int:
                     # no_tasks and pm_refresh_no_backlog fall through to consecutive-failure handling.
 
                 if reason == STOP_REASON_ALL_TASKS_DONE:
-                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
                     if not args.loop:
+                        append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
                         break
                     # In loop mode: allow ONE more cycle for PM to generate new tasks.
-                    # If delta==0 (no progress), PM produced no new work - stop now.
+                    # If idle exits are disabled, keep polling for new PM work.
                     if delta <= 0:
-                        logger.stop_event("All tasks done and PM produced no new work - stopping loop.")
-                        break
+                        if idle_exit_cycles <= 0 and loop_idle_exit_after <= 0:
+                            append_cycle_summary(f"{now_iso()} cycle={cycle_idx} all_tasks_done_keepalive idle_exits=disabled")
+                            logger.info("All tasks done and PM produced no new work - keeping loop alive because idle exits are disabled.")
+                        else:
+                            append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
+                            logger.stop_event("All tasks done and PM produced no new work - stopping loop.")
+                            break
+                    else:
+                        append_cycle_summary(f"{now_iso()} cycle={cycle_idx} all_tasks_done progress_delta={delta}")
                 if reason == STOP_REASON_ALL_TASKS_ATTEMPTED:
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_attempted")
                     if not args.loop:
@@ -4064,7 +4077,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     else:
                         idle_accum = 0
 
-                    if args.loop_idle_exit_after and args.loop_idle_exit_after > 0 and idle_accum >= args.loop_idle_exit_after:
+                    if loop_idle_exit_after > 0 and idle_accum >= loop_idle_exit_after:
                         append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=idle_exit idle_accum={idle_accum}")
                         break
 

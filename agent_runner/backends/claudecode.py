@@ -153,6 +153,7 @@ from ..utils import (
     choose_stop_reason,
     detect_stop_reason,
     write_heartbeat,
+    loop_cycle_indices,
     check_quota_utilization,
     seconds_until_reset,
     severity_at_or_above,
@@ -2916,7 +2917,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
     idle_accum = 0
     idle_cycle_count = 0
-    idle_exit_cycles = int(getattr(args, "idle_exit_cycles", 3) or 3)
+    try:
+        idle_exit_cycles = max(0, int(getattr(args, "idle_exit_cycles", 3)))
+    except (TypeError, ValueError):
+        idle_exit_cycles = 3
     last_rc = 0
     last_reason = ""
     consecutive_failures = 0
@@ -2927,12 +2931,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     quota_7d_max = float(getattr(args, "quota_seven_day_max_utilization", 95) or 95)
     quota_wait_for_reset = bool(getattr(args, "quota_wait_for_reset", True))
     loop_mode = bool(getattr(args, "loop", False))
-    loop_max_cycles = int(getattr(args, "loop_max_cycles", 0) or 0)
+    loop_max_cycles = getattr(args, "loop_max_cycles", 0)
     loop_sleep_seconds = int(getattr(args, "loop_sleep_seconds", 60) or 60)
     loop_idle_exit_after = int(getattr(args, "loop_idle_exit_after", 0) or 0)
-    if loop_mode and loop_max_cycles <= 0:
-        eprint("[WARN] loop_max_cycles not set; defaulting to 1000 to prevent infinite loops.")
-    cycles = 1 if not loop_mode else (loop_max_cycles if loop_max_cycles > 0 else 1000)
+    cycle_indices = loop_cycle_indices(loop_mode, loop_max_cycles)
 
     # Goals auto-refresh state
     goals_refresh_count = 0
@@ -3007,7 +3009,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         return statuses
 
     try:
-        for cycle_idx in range(int(cycles)):
+        for cycle_idx in cycle_indices:
             if stop_path.exists():
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=stop_file")
                 break
@@ -3221,15 +3223,21 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 # no_tasks and pm_refresh_no_backlog fall through to consecutive-failure handling.
 
             if reason == STOP_REASON_ALL_TASKS_DONE:
-                append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
                 if not loop_mode:
+                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
                     break
                 # In loop mode: allow ONE more cycle for PM to generate new tasks.
-                # If delta==0 (no progress), next cycle's idle detection will trigger.
+                # If idle exits are disabled, keep polling for new PM work.
                 if delta <= 0:
-                    # PM refresh already ran and produced no new work - stop now.
-                    logger.stop_event("All tasks done and PM produced no new work - stopping loop.")
-                    break
+                    if idle_exit_cycles <= 0 and loop_idle_exit_after <= 0:
+                        append_cycle_summary(f"{now_iso()} cycle={cycle_idx} all_tasks_done_keepalive idle_exits=disabled")
+                        logger.info("All tasks done and PM produced no new work - keeping loop alive because idle exits are disabled.")
+                    else:
+                        append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_done")
+                        logger.stop_event("All tasks done and PM produced no new work - stopping loop.")
+                        break
+                else:
+                    append_cycle_summary(f"{now_iso()} cycle={cycle_idx} all_tasks_done progress_delta={delta}")
             if reason == STOP_REASON_ALL_TASKS_ATTEMPTED:
                 # All tasks tried but some skipped - in loop mode, next cycle may get new tasks from PM
                 append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=all_tasks_attempted")

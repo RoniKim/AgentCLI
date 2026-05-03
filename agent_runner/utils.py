@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from datetime import datetime
+from itertools import count
 from pathlib import Path
 from typing import Sequence, Tuple, Any, Optional, Iterable
 
@@ -74,6 +75,23 @@ def force_utf8_stdio() -> None:
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def coerce_nonnegative_int(value: Any, default: int) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return max(0, int(default))
+
+
+def loop_cycle_indices(loop_enabled: bool, loop_max_cycles: Any) -> Iterable[int]:
+    """Return cycle indexes; loop_max_cycles <= 0 means unbounded loop mode."""
+    if not loop_enabled:
+        return range(1)
+    max_cycles = coerce_nonnegative_int(loop_max_cycles, 0)
+    if max_cycles > 0:
+        return range(max_cycles)
+    return count()
 
 
 def eprint(msg: str) -> None:

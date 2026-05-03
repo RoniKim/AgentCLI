@@ -125,7 +125,7 @@
 | `loop_max_cycles` | int | `0` | 최대 루프 횟수. `0`이면 무제한. |
 | `loop_idle_exit_after` | int | `0` | 할 일이 없을 때 자동 종료까지 대기 시간 (초). `0`이면 종료 안 함. |
 | `max_consecutive_failed_cycles` | int | `3` | 연속 실패 사이클 허용 횟수. 초과 시 파이프라인 자동 중단. |
-| `idle_exit_cycles` | int | `3` | 연속 무진전(delta=0) 사이클 허용 횟수. 초과 시 `idle_exit`으로 자동 중단. |
+| `idle_exit_cycles` | int | `3` | 연속 무진전(delta=0) 사이클 허용 횟수. `0`이면 cycle-count 기반 idle 종료를 비활성화. |
 | `budget_reset_per_cycle` | bool | `true` | `true`면 매 사이클 시작 시 예산 카운터(에스컬레이션, continuation 등)를 초기화. |
 | `continuous` | bool | `false` | `true`면 한 사이클에서 여러 태스크를 연속 처리. |
 | `iterations` | int | `30` | 한 사이클에서 처리할 최대 반복(태스크) 수. |
