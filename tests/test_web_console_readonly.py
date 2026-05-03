@@ -5358,6 +5358,10 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIn("source_id", logs)
         self.assertIn("selected_source_id", logs)
         self.assertIn("sources", logs)
+        self.assertEqual("run_log", logs["source_id"])
+        self.assertEqual("run_log", logs["selected_source_id"])
+        self.assertEqual(["run_log", "error_log", "events_jsonl", "cycle_summary", "backend_transcript"], [item["id"] for item in logs["sources"]])
+        self.assertTrue(next(item["selected"] for item in logs["sources"] if item["id"] == "run_log"))
 
         goals = self.client.get("/api/goals").json()
         for key in ("path", "exists", "mtime", "size", "raw_text", "items", "completion", "completion_level", "summary", "warnings"):
@@ -5365,6 +5369,17 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(3, goals["summary"]["total"])
         self.assertEqual(1, goals["summary"]["done"])
         self.assertEqual(4, goals["items"]["p0"][0]["line_number"])
+
+    def test_api_logs_uses_next_available_source_when_run_log_is_missing(self) -> None:
+        (self.run_dir / "logs" / "run.log").unlink()
+
+        payload = self.client.get("/api/logs").json()
+
+        self.assertEqual("error_log", payload["source_id"])
+        self.assertEqual("error_log", payload["selected_source_id"])
+        self.assertEqual("error_log", payload["source"]["id"])
+        self.assertFalse(next(item["available"] for item in payload["sources"] if item["id"] == "run_log"))
+        self.assertTrue(next(item["selected"] for item in payload["sources"] if item["id"] == "error_log"))
 
     def test_api_pr_queue_missing_queue_returns_empty_state(self) -> None:
         from fastapi.testclient import TestClient
@@ -6658,6 +6673,35 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("loading", no_match["state"])
         self.assertEqual(5, no_match["next_cursor"])
         self.assertEqual([], no_match["entries"])
+
+    def test_log_tail_helpers_are_reexported_and_preserve_source_selection_order(self) -> None:
+        from agent_runner import web as web_module
+        from agent_runner import web_logs
+
+        self.assertIs(web_module._build_log_tail_payload, web_logs._build_log_tail_payload)
+        self.assertIs(web_module._log_tail_source_catalog, web_logs._log_tail_source_catalog)
+        self.assertIs(web_module._resolve_log_tail_source_record, web_logs._resolve_log_tail_source_record)
+
+        catalog = web_logs._log_tail_source_catalog(self.run_dir)
+        self.assertEqual(
+            ["run_log", "error_log", "events_jsonl", "cycle_summary", "backend_transcript"],
+            [item["id"] for item in catalog],
+        )
+        self.assertEqual("run_log", web_logs._resolve_log_tail_source_record(self.run_dir)["id"])
+        self.assertEqual("backend_transcript", web_logs._resolve_log_tail_source_record(self.run_dir, "backend_transcript")["id"])
+        self.assertEqual(
+            (self.run_dir / "telegram_runner_subprocess.log").as_posix(),
+            web_logs._resolve_log_tail_source(self.run_dir, "backend_transcript").as_posix(),
+        )
+
+        (self.run_dir / "logs" / "run.log").unlink()
+        self.assertEqual("error_log", web_logs._resolve_log_tail_source_record(self.run_dir)["id"])
+        (self.run_dir / "logs" / "error.log").unlink()
+        self.assertEqual("events_jsonl", web_logs._resolve_log_tail_source_record(self.run_dir)["id"])
+        (self.run_dir / "logs" / "events.jsonl").unlink()
+        self.assertEqual("cycle_summary", web_logs._resolve_log_tail_source_record(self.run_dir)["id"])
+        (self.run_dir / "cycle_summary.log").unlink()
+        self.assertEqual("backend_transcript", web_logs._resolve_log_tail_source_record(self.run_dir)["id"])
 
     def test_api_logs_tail_handles_missing_log_file(self) -> None:
         from agent_runner.web import create_app
