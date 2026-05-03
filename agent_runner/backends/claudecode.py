@@ -175,6 +175,7 @@ from ..exc_detect import (
     is_model_invalid_exception,
     is_transient_exception,
 )
+from ..experience import record_task_experience
 from ..qa_utils import (
     extract_qa_followups,
     followups_from_structured,
@@ -1139,6 +1140,49 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             task_history_enabled=bool(getattr(args, "task_history_enabled", True)),
         )
 
+    def _record_task_experience_event(
+        *,
+        task_id: str,
+        title: str,
+        status: str,
+        reason: str = "",
+        task_status: str = "",
+        cycle_idx: int = 0,
+        step_idx: int = 0,
+        attempt: int = 0,
+        max_attempts: int = 0,
+        validation_status: str = "",
+        validation_summary: str = "",
+        validations: list[dict[str, Any]] | None = None,
+        blocked_dependencies: list[dict[str, Any]] | None = None,
+        artifact_pointers: list[str] | None = None,
+        outcome_action: str = "",
+        outcome_note: str = "",
+        detail: str = "",
+    ) -> None:
+        record_task_experience(
+            repo,
+            run_id=run_dir.name,
+            backend="claudecode",
+            task_id=task_id,
+            title=title,
+            status=status,
+            reason=reason,
+            task_status=task_status,
+            cycle_idx=cycle_idx,
+            step_idx=step_idx,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            validation_status=validation_status,
+            validation_summary=validation_summary,
+            validations=validations,
+            blocked_dependencies=blocked_dependencies,
+            artifact_pointers=artifact_pointers,
+            outcome_action=outcome_action,
+            outcome_note=outcome_note,
+            detail=detail,
+        )
+
     # ---------------------------------------------------------------------------
     # PM phase (structured output with repair - same as Codex)
     # ---------------------------------------------------------------------------
@@ -1664,6 +1708,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 metrics=metrics,
                 eprint_fn=eprint,
                 task_results=task_results,
+                step_idx=step,
+                record_task_experience_fn=_record_task_experience_event,
             )
             if not next_task:
                 break
@@ -1762,7 +1808,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 *,
                 task_status: str,
                 detail: str = "",
+                validation_artifact: str = "",
             ) -> None:
+                validation_artifacts = [validation_artifact] if validation_artifact else []
                 if task_status == TASK_STATUS_BLOCKED_ENV and reason != "needs_dependency":
                     guide_key = (next_task.id, reason, attempt)
                     if guide_key not in _blocked_env_guides_written:
@@ -1783,6 +1831,22 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                                 )
                         except Exception:
                             pass
+                _record_task_experience_event(
+                    task_id=next_task.id,
+                    title=next_task.title,
+                    status="failed",
+                    reason=reason,
+                    task_status=task_status,
+                    cycle_idx=cycle_idx,
+                    step_idx=step,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                    validation_status="validation_failed" if validation_artifacts else "",
+                    validation_summary=detail,
+                    artifact_pointers=validation_artifacts,
+                    outcome_action="preserved_for_review" if should_preserve_for_review(task_status) else "discarded",
+                    detail=detail,
+                )
                 task_results.append({
                     "id": next_task.id,
                     "title": next_task.title,
@@ -2242,6 +2306,22 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                             _berr_lines = [ln for ln in _berr_raw.splitlines() if "error " in ln.lower()]
                             _prev_gate_error = "\n".join(_berr_lines[:50]) or _berr_raw[-4000:]
                             _prev_gate_error_label = "BUILD FAILED"
+                            _record_task_experience_event(
+                                task_id=next_task.id,
+                                title=next_task.title,
+                                status="failed",
+                                reason="build_failed",
+                                task_status=task_status_for_retry,
+                                cycle_idx=cycle_idx,
+                                step_idx=step,
+                                attempt=attempt + 1,
+                                max_attempts=max_attempts,
+                                validation_status="validation_failed",
+                                validation_summary=build_detail_for_retry,
+                                artifact_pointers=[str(attempt_dir / "build.txt")],
+                                outcome_action="retry_scheduled",
+                                detail=build_detail_for_retry,
+                            )
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="build_failed")
                             continue
                         build_detail = ""
@@ -2252,7 +2332,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         task_status = _task_failure_status("build_failed", detail=build_detail)
                         state.setdefault("failed", []).append(_task_failure_entry("build_failed", detail=build_detail[:500], task_status=task_status))
                         save_state(state_path, state)
-                        _record_failed_task_result("build_failed", task_status=task_status, detail=build_detail[:500])
+                        _record_failed_task_result(
+                            "build_failed",
+                            task_status=task_status,
+                            detail=build_detail[:500],
+                            validation_artifact=str(attempt_dir / "build.txt"),
+                        )
                         _record_history(next_task.id, next_task.title, "failed", reason="build_failed", detail=build_detail[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                         logger.gate_event("build", next_task.id, passed=False)
                         if tb or cp:
@@ -2293,6 +2378,22 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         ):
                             _prev_gate_error = test_detail_for_retry
                             _prev_gate_error_label = "TEST FAILED"
+                            _record_task_experience_event(
+                                task_id=next_task.id,
+                                title=next_task.title,
+                                status="failed",
+                                reason="test_failed",
+                                task_status=task_status_for_retry,
+                                cycle_idx=cycle_idx,
+                                step_idx=step,
+                                attempt=attempt + 1,
+                                max_attempts=max_attempts,
+                                validation_status="validation_failed",
+                                validation_summary=test_detail_for_retry,
+                                artifact_pointers=[str(attempt_dir / "test.txt")],
+                                outcome_action="retry_scheduled",
+                                detail=test_detail_for_retry,
+                            )
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="test_failed")
                             continue
                         test_detail = ""
@@ -2303,7 +2404,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         task_status = _task_failure_status("test_failed", detail=test_detail)
                         state.setdefault("failed", []).append(_task_failure_entry("test_failed", detail=test_detail[:500], task_status=task_status))
                         save_state(state_path, state)
-                        _record_failed_task_result("test_failed", task_status=task_status, detail=test_detail[:500])
+                        _record_failed_task_result(
+                            "test_failed",
+                            task_status=task_status,
+                            detail=test_detail[:500],
+                            validation_artifact=str(attempt_dir / "test.txt"),
+                        )
                         _record_history(next_task.id, next_task.title, "failed", reason="test_failed", detail=test_detail[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                         logger.gate_event("test", next_task.id, passed=False)
                         if tb or cp:
@@ -2352,7 +2458,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         task_status = _task_failure_status("policy_violation", detail=policy_detail)
                         state.setdefault("failed", []).append(_task_failure_entry("policy_violation", detail=policy_detail, task_status=task_status))
                         save_state(state_path, state)
-                        _record_failed_task_result("policy_violation", task_status=task_status, detail=policy_detail)
+                        _record_failed_task_result(
+                            "policy_violation",
+                            task_status=task_status,
+                            detail=policy_detail,
+                            validation_artifact=str(attempt_dir / "policy_scan.json"),
+                        )
                         _record_history(next_task.id, next_task.title, "failed", reason="policy_violation", detail=policy_detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                         logger.gate_event("policy", next_task.id, passed=False)
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="policy_violation", task_status=task_status, violations=len(fail_hits))
@@ -2431,6 +2542,22 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                                 fast_regression_log,
                             )
                             _prev_gate_error_label = "FAST REGRESSION FAILED"
+                            _record_task_experience_event(
+                                task_id=next_task.id,
+                                title=next_task.title,
+                                status="failed",
+                                reason="fast_regression_failed",
+                                task_status=task_status,
+                                cycle_idx=cycle_idx,
+                                step_idx=step,
+                                attempt=attempt + 1,
+                                max_attempts=max_attempts,
+                                validation_status="validation_failed",
+                                validation_summary=failed_summary,
+                                artifact_pointers=[str(fast_regression_log)],
+                                outcome_action="retry_scheduled",
+                                detail=failed_summary,
+                            )
                             metrics.event(
                                 "dev_attempt_retry",
                                 cycle=cycle_idx,
@@ -2444,6 +2571,22 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                             continue
                         state.setdefault("failed", []).append(_task_failure_entry("fast_regression_failed", detail=failed_summary[:500], task_status=task_status))
                         save_state(state_path, state)
+                        _record_task_experience_event(
+                            task_id=next_task.id,
+                            title=next_task.title,
+                            status="failed",
+                            reason="fast_regression_failed",
+                            task_status=task_status,
+                            cycle_idx=cycle_idx,
+                            step_idx=step,
+                            attempt=attempt + 1,
+                            max_attempts=max_attempts,
+                            validation_status="validation_failed",
+                            validation_summary=failed_summary,
+                            artifact_pointers=[str(fast_regression_log)],
+                            outcome_action="preserved_for_review" if should_preserve_for_review(task_status) else "discarded",
+                            detail=failed_summary,
+                        )
                         _record_history(
                             next_task.id,
                             next_task.title,
