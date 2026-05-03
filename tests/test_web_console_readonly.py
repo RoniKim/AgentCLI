@@ -6421,6 +6421,60 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("[redacted]", redacted["nested"][0]["password"])
         self.assertEqual("safe", redacted["nested"][1]["name"])
 
+    def test_web_config_helper_facade_preserves_list_normalization(self) -> None:
+        import agent_runner.web as web_module
+        import agent_runner.web_config as web_config_module
+
+        self.assertIs(web_module._build_config_contract, web_config_module._build_config_contract)
+        self.assertIs(web_module._config_save_validate_change, web_config_module._config_save_validate_change)
+        self.assertIs(web_module._config_path_get, web_config_module._config_path_get)
+        self.assertIs(web_module._config_path_set, web_config_module._config_path_set)
+
+        _write_config(self.config_path, self.repo, telegram={"allowed_chat_ids": [], "notify_events": []})
+        contract = web_module._build_config_contract(
+            self.repo,
+            {},
+            self.config_path,
+            "explicit",
+            self.prompts_dir,
+            save_enabled=True,
+        )
+        schema = contract["schema"]
+
+        string_ids, string_ids_code, _ = web_module._config_save_validate_change(
+            "telegram.allowed_chat_ids",
+            "101, 202",
+            schema["telegram.allowed_chat_ids"],
+            [],
+        )
+        array_ids, array_ids_code, _ = web_module._config_save_validate_change(
+            "telegram.allowed_chat_ids",
+            ["101", 202],
+            schema["telegram.allowed_chat_ids"],
+            [],
+        )
+        string_events, string_events_code, _ = web_module._config_save_validate_change(
+            "telegram.notify_events",
+            "run_start, task_done",
+            schema["telegram.notify_events"],
+            [],
+        )
+        array_events, array_events_code, _ = web_module._config_save_validate_change(
+            "telegram.notify_events",
+            ["run_start", "task_done"],
+            schema["telegram.notify_events"],
+            [],
+        )
+
+        self.assertEqual("", string_ids_code)
+        self.assertEqual("", array_ids_code)
+        self.assertEqual([101, 202], string_ids)
+        self.assertEqual(string_ids, array_ids)
+        self.assertEqual("", string_events_code)
+        self.assertEqual("", array_events_code)
+        self.assertEqual(["run_start", "task_done"], string_events)
+        self.assertEqual(string_events, array_events)
+
     def test_static_console_assets_are_served(self) -> None:
         root = self.client.get("/")
         self.assertEqual(200, root.status_code)
