@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import socket
+import sqlite3
 import threading
 import time
 import sys
@@ -232,6 +233,11 @@ PR_QUEUE_MAX_CHANGED_FILES = 80
 PR_QUEUE_MAX_VALIDATION_ARTIFACTS = 16
 PR_QUEUE_ARTIFACT_PREVIEW_LINES = 80
 PR_QUEUE_ARTIFACT_PREVIEW_CHARS = 8000
+EXPERIENCE_MAX_ITEMS = 6
+EXPERIENCE_MAX_EVIDENCE_ITEMS = 3
+EXPERIENCE_UNAVAILABLE_MESSAGE = "Experience DB is unavailable. No read-only Experience data was found."
+EXPERIENCE_EMPTY_MESSAGE = "Experience DB is available, but no recent lessons or blockers were recorded yet."
+EXPERIENCE_SUMMARY_FALLBACK_MESSAGE = "Experience DB is unavailable. Showing cached analyzer summary data only."
 
 
 def _repo_root(repo: Path | str | None) -> Path:
@@ -273,6 +279,7 @@ def fallbackSectionMessage(kind: str) -> str:
         "notifications": "No notifications have been recorded yet.",
         "metrics": "No metrics snapshot is available yet.",
         "history": "Run history is empty.",
+        "experience": EXPERIENCE_UNAVAILABLE_MESSAGE,
         "worktree": "No pending worktree merge is available.",
         "prQueue": "No PR queue packets are available.",
         "runnerControl": "Runner controls are unavailable in fallback mode.",
@@ -811,6 +818,631 @@ def _safe_jsonl(path: Path, *, max_items: int = 400) -> list[dict[str, Any]]:
     except Exception:
         return []
     return list(rows)
+
+
+def _experience_root_candidates(repo: Path) -> list[Path]:
+    roots: list[Path] = []
+    for candidate in (repo / AGENT_WORK_DIR / "experience", app_home() / "experience"):
+        resolved = candidate.expanduser().resolve()
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def _experience_db_candidates(repo: Path) -> list[Path]:
+    return [root / "experience.db" for root in _experience_root_candidates(repo)]
+
+
+def _experience_summary_candidates(repo: Path, run_dir: Path | None) -> list[Path]:
+    candidates: list[Path] = []
+    for root in _experience_root_candidates(repo):
+        candidates.append(root / "latest_summary.json")
+    if run_dir is not None:
+        candidates.append(run_dir / "ANALYZER_SUMMARY.json")
+    return candidates
+
+
+def _experience_text(value: Any, *, max_chars: int = 0) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    if max_chars and len(text) > max_chars:
+        return text[: max(0, max_chars - 3)].rstrip() + "..."
+    return text
+
+
+def _experience_json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return [raw]
+        if isinstance(parsed, list):
+            return list(parsed)
+        if isinstance(parsed, tuple):
+            return list(parsed)
+        if parsed is None:
+            return []
+        return [parsed]
+    if value is None:
+        return []
+    return [value]
+
+
+def _experience_artifact_kind(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "artifact reference"
+    if "prompt" in text:
+        return "prompt artifact"
+    if "patch" in text or text.endswith(".diff") or text.endswith(".patch") or "diff --git" in text:
+        return "diff artifact"
+    if "log" in text or "trace" in text or text.endswith(".log") or text.endswith(".txt") or text.endswith(".jsonl"):
+        return "log artifact"
+    if "report" in text or text.endswith(".json") or text.endswith(".md"):
+        return "report artifact"
+    return "artifact reference"
+
+
+def _experience_evidence_pointer(
+    raw: Any,
+    *,
+    run_id: str = "",
+    task_id: str = "",
+    gate: str = "",
+    pr_id: str = "",
+) -> str:
+    parts: list[str] = []
+    if run_id:
+        parts.append(f"run {run_id}")
+    if task_id:
+        parts.append(f"task {task_id}")
+    if pr_id:
+        parts.append(f"pr {pr_id}")
+    if gate:
+        parts.append(f"gate {gate}")
+    parts.append(_experience_artifact_kind(raw))
+    return " | ".join(parts)
+
+
+def _experience_evidence_pointers(
+    value: Any,
+    *,
+    run_id: str = "",
+    task_id: str = "",
+    gate: str = "",
+    pr_id: str = "",
+    limit: int = EXPERIENCE_MAX_EVIDENCE_ITEMS,
+) -> list[str]:
+    pointers: list[str] = []
+    seen: set[str] = set()
+    for item in _experience_json_list(value):
+        item_run_id = run_id
+        item_task_id = task_id
+        item_gate = gate
+        item_pr_id = pr_id
+        item_raw = item
+        if isinstance(item, dict):
+            item_run_id = _pick_text(item.get("run_id"), item.get("runId"), run_id)
+            item_task_id = _pick_text(item.get("task_id"), item.get("taskId"), task_id)
+            item_gate = _pick_text(item.get("gate"), gate)
+            item_pr_id = _pick_text(item.get("pr_id"), item.get("prId"), pr_id)
+            item_raw = _pick_text(
+                item.get("artifact_path"),
+                item.get("artifactPath"),
+                item.get("path"),
+                item.get("file"),
+                item.get("ref"),
+                item.get("pointer"),
+                item.get("evidence"),
+            )
+        pointer = _experience_evidence_pointer(
+            item_raw,
+            run_id=item_run_id,
+            task_id=item_task_id,
+            gate=item_gate,
+            pr_id=item_pr_id,
+        )
+        if not pointer or pointer in seen:
+            continue
+        seen.add(pointer)
+        pointers.append(pointer)
+        if len(pointers) >= max(1, int(limit)):
+            break
+    if pointers:
+        return pointers
+    if run_id or task_id or gate or pr_id:
+        return [_experience_evidence_pointer("", run_id=run_id, task_id=task_id, gate=gate, pr_id=pr_id)]
+    return []
+
+
+def _experience_table_rows(db_path: Path, table: str) -> list[dict[str, Any]]:
+    if not db_path.exists() or not db_path.is_file():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=2)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(f"SELECT * FROM {table}").fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return []
+    return [dict(row) for row in rows]
+
+
+def _experience_sort_key(*values: Any) -> tuple[str, int]:
+    timestamp = ""
+    for value in values:
+        text = _experience_text(value)
+        if text:
+            timestamp = text
+            break
+    return timestamp, len(timestamp)
+
+
+def _experience_lesson_items(lesson_rows: list[dict[str, Any]], task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    source_rows = lesson_rows
+    if not source_rows:
+        source_rows = [row for row in task_rows if _experience_text(row.get("lesson"))]
+    for row in source_rows:
+        lesson = _experience_text(row.get("lesson"), max_chars=240)
+        if not lesson:
+            continue
+        run_id = _experience_text(row.get("run_id"), max_chars=32)
+        task_id = _experience_text(row.get("task_id"), max_chars=32)
+        trigger = _experience_text(row.get("trigger"), max_chars=140)
+        evidence = _experience_evidence_pointers(
+            row.get("evidence"),
+            run_id=run_id,
+            task_id=task_id,
+            pr_id=_experience_text(row.get("pr_id"), max_chars=32),
+        )
+        items.append(
+            {
+                "kind": _experience_text(row.get("kind"), max_chars=32) or "general",
+                "severity": _experience_text(row.get("severity"), max_chars=16) or "medium",
+                "confidence": _coerce_optional_float(row.get("confidence")) or 0.0,
+                "trigger": trigger,
+                "lesson": lesson,
+                "evidenceCount": max(len(_experience_json_list(row.get("evidence"))), len(evidence)),
+                "evidencePointers": evidence,
+                "lastSeenAt": _experience_text(row.get("last_seen_at"), max_chars=64) or _experience_text(row.get("created_at"), max_chars=64),
+                "createdAt": _experience_text(row.get("created_at"), max_chars=64),
+                "seenCount": _coerce_optional_int(row.get("seen_count")) or 0,
+                "runId": run_id,
+                "taskId": task_id,
+            }
+        )
+    items.sort(
+        key=lambda item: (
+            _experience_sort_key(item.get("lastSeenAt"), item.get("createdAt")),
+            float(item.get("confidence") or 0.0),
+            int(item.get("seenCount") or 0),
+        ),
+        reverse=True,
+    )
+    return items[:EXPERIENCE_MAX_ITEMS]
+
+
+def _experience_failure_pattern_label(classification: str, gate: str, status: str) -> str:
+    label_map = {
+        "blocked_env": "Environment blocker repeated",
+        "regression_failed": "Regression failure repeated",
+        "test_contract_changed": "Contract drift repeated",
+        "no_tests_found": "No-tests finding repeated",
+        "failed": "Validation failure repeated",
+        "timeout": "Validation timeout repeated",
+        "stopped": "Validation stop repeated",
+    }
+    key = classification or status
+    if key in label_map:
+        return label_map[key]
+    if gate and key:
+        return f"{gate} {key} repeated"
+    if gate:
+        return f"{gate} repeated"
+    if key:
+        return f"{key} repeated"
+    return "Validation failure repeated"
+
+
+def _experience_failure_patterns(validation_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in validation_rows:
+        status = _experience_text(row.get("status"), max_chars=32).lower()
+        classification = _experience_text(row.get("classification"), max_chars=48).lower()
+        gate = _experience_text(row.get("gate"), max_chars=48).lower()
+        if not (classification or status):
+            continue
+        key = (classification or status, gate, status)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "classification": classification or status,
+                "gate": gate,
+                "status": status,
+                "occurrences": 0,
+                "lastSeenAt": "",
+                "evidencePointers": [],
+                "evidenceSeen": set(),
+            },
+        )
+        bucket["occurrences"] += 1
+        bucket["lastSeenAt"] = max(bucket["lastSeenAt"], _experience_text(row.get("recorded_at"), max_chars=64))
+        for pointer in _experience_evidence_pointers(
+            row.get("artifact_path"),
+            run_id=_experience_text(row.get("run_id"), max_chars=32),
+            task_id=_experience_text(row.get("task_id"), max_chars=32),
+            gate=gate,
+        ):
+            if pointer in bucket["evidenceSeen"]:
+                continue
+            bucket["evidenceSeen"].add(pointer)
+            if len(bucket["evidencePointers"]) < EXPERIENCE_MAX_EVIDENCE_ITEMS:
+                bucket["evidencePointers"].append(pointer)
+    items: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        if int(bucket.get("occurrences") or 0) < 2:
+            continue
+        items.append(
+            {
+                "classification": bucket["classification"],
+                "gate": bucket["gate"],
+                "status": bucket["status"],
+                "occurrences": int(bucket.get("occurrences") or 0),
+                "summary": _experience_failure_pattern_label(
+                    str(bucket.get("classification") or ""),
+                    str(bucket.get("gate") or ""),
+                    str(bucket.get("status") or ""),
+                ),
+                "evidenceCount": len(bucket["evidenceSeen"]),
+                "evidencePointers": list(bucket.get("evidencePointers") or []),
+                "lastSeenAt": bucket.get("lastSeenAt") or "",
+            }
+        )
+    items.sort(key=lambda item: (_experience_sort_key(item.get("lastSeenAt")), int(item.get("occurrences") or 0)), reverse=True)
+    return items[:EXPERIENCE_MAX_ITEMS]
+
+
+def _experience_validation_gap_label(validation_status: str, gate: str, classification: str) -> str:
+    if validation_status == "validation_pending":
+        return "Validation is pending before merge"
+    if validation_status == "no_tests_found" or classification == "no_tests_found":
+        return "No tests were found for the affected change"
+    if validation_status == "skipped":
+        return f"{gate or 'Validation'} was skipped"
+    if classification == "blocked_env":
+        return "Validation was blocked by the environment"
+    return "Validation coverage gap detected"
+
+
+def _experience_validation_gaps(task_rows: list[dict[str, Any]], validation_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    def _add_gap(*, validation_status: str, gate: str, classification: str, run_id: str, task_id: str, pr_id: str = "") -> None:
+        key = (validation_status or classification or "gap", gate, classification)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "validationStatus": validation_status,
+                "gate": gate,
+                "classification": classification,
+                "occurrences": 0,
+                "lastSeenAt": "",
+                "evidencePointers": [],
+                "evidenceSeen": set(),
+            },
+        )
+        bucket["occurrences"] += 1
+        bucket["lastSeenAt"] = max(bucket["lastSeenAt"], run_id)
+        for pointer in _experience_evidence_pointers(
+            [],
+            run_id=run_id,
+            task_id=task_id,
+            gate=gate,
+            pr_id=pr_id,
+        ):
+            if pointer in bucket["evidenceSeen"]:
+                continue
+            bucket["evidenceSeen"].add(pointer)
+            if len(bucket["evidencePointers"]) < EXPERIENCE_MAX_EVIDENCE_ITEMS:
+                bucket["evidencePointers"].append(pointer)
+
+    for row in task_rows:
+        validation_status = _experience_text(row.get("validation_status"), max_chars=32).lower()
+        if validation_status not in {"validation_pending", "skipped", "no_tests_found"}:
+            continue
+        _add_gap(
+            validation_status=validation_status,
+            gate="",
+            classification="",
+            run_id=_experience_text(row.get("run_id"), max_chars=32),
+            task_id=_experience_text(row.get("task_id"), max_chars=32),
+            pr_id=_experience_text(row.get("pr_id"), max_chars=32),
+        )
+    for row in validation_rows:
+        validation_status = _experience_text(row.get("status"), max_chars=32).lower()
+        classification = _experience_text(row.get("classification"), max_chars=48).lower()
+        if validation_status not in {"skipped"} and classification not in {"no_tests_found", "blocked_env"}:
+            continue
+        _add_gap(
+            validation_status=validation_status,
+            gate=_experience_text(row.get("gate"), max_chars=48).lower(),
+            classification=classification,
+            run_id=_experience_text(row.get("run_id"), max_chars=32),
+            task_id=_experience_text(row.get("task_id"), max_chars=32),
+        )
+    items: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        items.append(
+            {
+                "validationStatus": bucket["validationStatus"],
+                "gate": bucket["gate"],
+                "classification": bucket["classification"],
+                "occurrences": int(bucket.get("occurrences") or 0),
+                "summary": _experience_validation_gap_label(
+                    str(bucket.get("validationStatus") or ""),
+                    str(bucket.get("gate") or ""),
+                    str(bucket.get("classification") or ""),
+                ),
+                "evidenceCount": len(bucket["evidenceSeen"]),
+                "evidencePointers": list(bucket.get("evidencePointers") or []),
+                "lastSeenAt": bucket.get("lastSeenAt") or "",
+            }
+        )
+    items.sort(key=lambda item: (_experience_sort_key(item.get("lastSeenAt")), int(item.get("occurrences") or 0)), reverse=True)
+    return items[:EXPERIENCE_MAX_ITEMS]
+
+
+def _experience_merge_blocker_label(status: str, task_status: str, validation_status: str) -> str:
+    blocker = task_status or status or validation_status
+    if blocker == "review_required":
+        return "Manual review is still required before merge"
+    if blocker == "blocked_env":
+        return "Environment blocker still prevents merge"
+    if blocker == "test_contract_changed":
+        return "Contract update review still blocks merge"
+    if blocker == "regression_failed":
+        return "Regression failure still blocks merge"
+    if validation_status in {"validation_pending", "skipped", "no_tests_found"}:
+        return "Merge is blocked on incomplete validation"
+    return "Merge remains blocked"
+
+
+def _experience_merge_blockers(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in task_rows:
+        status = _experience_text(row.get("status"), max_chars=32).lower()
+        task_status = _experience_text(row.get("task_status"), max_chars=32).lower()
+        validation_status = _experience_text(row.get("validation_status"), max_chars=32).lower()
+        blocker_key = task_status or status or validation_status
+        if blocker_key not in {
+            "review_required",
+            "blocked_env",
+            "test_contract_changed",
+            "regression_failed",
+            "validation_pending",
+            "skipped",
+            "no_tests_found",
+        }:
+            continue
+        run_id = _experience_text(row.get("run_id"), max_chars=32)
+        task_id = _experience_text(row.get("task_id"), max_chars=32)
+        pr_id = _experience_text(row.get("pr_id"), max_chars=32)
+        key = (pr_id or task_id or run_id or blocker_key, status, task_status, validation_status)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "status": status,
+                "taskStatus": task_status,
+                "validationStatus": validation_status,
+                "taskId": task_id,
+                "prId": pr_id,
+                "occurrences": 0,
+                "lastSeenAt": "",
+                "evidencePointers": [],
+                "evidenceSeen": set(),
+            },
+        )
+        bucket["occurrences"] += 1
+        bucket["lastSeenAt"] = max(bucket["lastSeenAt"], run_id)
+        for pointer in _experience_evidence_pointers([], run_id=run_id, task_id=task_id, pr_id=pr_id):
+            if pointer in bucket["evidenceSeen"]:
+                continue
+            bucket["evidenceSeen"].add(pointer)
+            if len(bucket["evidencePointers"]) < EXPERIENCE_MAX_EVIDENCE_ITEMS:
+                bucket["evidencePointers"].append(pointer)
+    items: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        items.append(
+            {
+                "status": bucket["status"],
+                "taskStatus": bucket["taskStatus"],
+                "validationStatus": bucket["validationStatus"],
+                "taskId": bucket["taskId"],
+                "prId": bucket["prId"],
+                "occurrences": int(bucket.get("occurrences") or 0),
+                "summary": _experience_merge_blocker_label(
+                    str(bucket.get("status") or ""),
+                    str(bucket.get("taskStatus") or ""),
+                    str(bucket.get("validationStatus") or ""),
+                ),
+                "evidenceCount": len(bucket["evidenceSeen"]),
+                "evidencePointers": list(bucket.get("evidencePointers") or []),
+                "lastSeenAt": bucket.get("lastSeenAt") or "",
+            }
+        )
+    items.sort(key=lambda item: (_experience_sort_key(item.get("lastSeenAt")), int(item.get("occurrences") or 0)), reverse=True)
+    return items[:EXPERIENCE_MAX_ITEMS]
+
+
+def _experience_from_summary_payload(summary_payload: dict[str, Any]) -> dict[str, Any]:
+    run_id = _experience_text(summary_payload.get("run_id"), max_chars=32)
+    recent_lessons: list[dict[str, Any]] = []
+    for item in list(_experience_json_list(summary_payload.get("task_lessons"))) + list(_experience_json_list(summary_payload.get("validation_lessons"))):
+        if not isinstance(item, dict):
+            continue
+        lesson = _experience_text(item.get("lesson"), max_chars=240)
+        if not lesson:
+            continue
+        task_id = _experience_text(item.get("task_id"), max_chars=32)
+        evidence = _experience_evidence_pointers(item.get("evidence"), run_id=run_id, task_id=task_id)
+        recent_lessons.append(
+            {
+                "kind": _experience_text(item.get("kind"), max_chars=32) or "general",
+                "severity": _experience_text(item.get("severity"), max_chars=16) or "medium",
+                "confidence": _coerce_optional_float(item.get("confidence")) or 0.0,
+                "trigger": "",
+                "lesson": lesson,
+                "evidenceCount": max(len(_experience_json_list(item.get("evidence"))), len(evidence)),
+                "evidencePointers": evidence,
+                "lastSeenAt": run_id,
+                "createdAt": run_id,
+                "seenCount": 1,
+                "runId": run_id,
+                "taskId": task_id,
+            }
+        )
+    merge_blockers: list[dict[str, Any]] = []
+    for hint in _experience_json_list(summary_payload.get("merge_hints")):
+        text = _experience_text(hint, max_chars=180)
+        if not text:
+            continue
+        merge_blockers.append(
+            {
+                "status": "review_required",
+                "taskStatus": "review_required",
+                "validationStatus": "",
+                "taskId": "",
+                "prId": "",
+                "occurrences": 1,
+                "summary": text,
+                "evidenceCount": 1 if run_id else 0,
+                "evidencePointers": _experience_evidence_pointers([], run_id=run_id),
+                "lastSeenAt": run_id,
+            }
+        )
+    validation_gaps: list[dict[str, Any]] = []
+    for hint in _experience_json_list(summary_payload.get("pm_hints")):
+        text = _experience_text(hint, max_chars=180)
+        lowered = text.lower()
+        if not text or not any(token in lowered for token in ("validation", "test", "no_tests", "no tests", "skipped")):
+            continue
+        validation_gaps.append(
+            {
+                "validationStatus": "validation_pending",
+                "gate": "",
+                "classification": "",
+                "occurrences": 1,
+                "summary": text,
+                "evidenceCount": 1 if run_id else 0,
+                "evidencePointers": _experience_evidence_pointers([], run_id=run_id),
+                "lastSeenAt": run_id,
+            }
+        )
+    return {
+        "recentLessons": recent_lessons[:EXPERIENCE_MAX_ITEMS],
+        "failurePatterns": [],
+        "validationGaps": validation_gaps[:EXPERIENCE_MAX_ITEMS],
+        "mergeBlockers": merge_blockers[:EXPERIENCE_MAX_ITEMS],
+        "summaryText": _experience_text(summary_payload.get("summary"), max_chars=240),
+    }
+
+
+def _build_experience_payload(repo: Path, run_dir: Path | None) -> dict[str, Any]:
+    db_path = next((path for path in _experience_db_candidates(repo) if path.exists() and path.is_file()), None)
+    summary_payload: dict[str, Any] = {}
+    summary_source = ""
+    for candidate in _experience_summary_candidates(repo, run_dir):
+        payload = _safe_json(candidate, {})
+        if isinstance(payload, dict) and payload:
+            summary_payload = payload
+            summary_source = candidate.name
+            break
+
+    recent_lessons: list[dict[str, Any]] = []
+    failure_patterns: list[dict[str, Any]] = []
+    validation_gaps: list[dict[str, Any]] = []
+    merge_blockers: list[dict[str, Any]] = []
+    source = "unavailable"
+    available = False
+    message = EXPERIENCE_UNAVAILABLE_MESSAGE
+    summary_text = _experience_text(summary_payload.get("summary"), max_chars=240)
+
+    if db_path is not None:
+        lesson_rows = _experience_table_rows(db_path, "lessons")
+        task_rows = _experience_table_rows(db_path, "task_experiences")
+        validation_rows = _experience_table_rows(db_path, "validation_experiences")
+        recent_lessons = _experience_lesson_items(lesson_rows, task_rows)
+        failure_patterns = _experience_failure_patterns(validation_rows)
+        validation_gaps = _experience_validation_gaps(task_rows, validation_rows)
+        merge_blockers = _experience_merge_blockers(task_rows)
+        available = True
+        source = "experience_db"
+        message = summary_text or EXPERIENCE_EMPTY_MESSAGE
+        if recent_lessons or failure_patterns or validation_gaps or merge_blockers:
+            message = summary_text or "Read-only Experience insights were loaded from the Experience DB."
+    elif summary_payload:
+        summary_data = _experience_from_summary_payload(summary_payload)
+        recent_lessons = list(summary_data.get("recentLessons") or [])
+        failure_patterns = list(summary_data.get("failurePatterns") or [])
+        validation_gaps = list(summary_data.get("validationGaps") or [])
+        merge_blockers = list(summary_data.get("mergeBlockers") or [])
+        summary_text = _experience_text(summary_data.get("summaryText"), max_chars=240)
+        available = True
+        source = "summary"
+        message = summary_text or EXPERIENCE_SUMMARY_FALLBACK_MESSAGE
+
+    total_items = len(recent_lessons) + len(failure_patterns) + len(validation_gaps) + len(merge_blockers)
+    state = "ready" if total_items else ("partial" if source == "summary" else ("empty" if available else "unavailable"))
+    if state == "empty":
+        message = summary_text or EXPERIENCE_EMPTY_MESSAGE
+    elif state == "unavailable":
+        message = EXPERIENCE_UNAVAILABLE_MESSAGE
+
+    payload = {
+        "available": available,
+        "state": state,
+        "source": source,
+        "message": message,
+        "summaryText": summary_text,
+        "summary_text": summary_text,
+        "recentLessons": recent_lessons,
+        "recent_lessons": recent_lessons,
+        "failurePatterns": failure_patterns,
+        "failure_patterns": failure_patterns,
+        "validationGaps": validation_gaps,
+        "validation_gaps": validation_gaps,
+        "mergeBlockers": merge_blockers,
+        "merge_blockers": merge_blockers,
+        "summary": {
+            "source": source,
+            "dbAvailable": db_path is not None,
+            "db_available": db_path is not None,
+            "summaryAvailable": bool(summary_payload),
+            "summary_available": bool(summary_payload),
+            "summarySource": summary_source,
+            "summary_source": summary_source,
+            "lessons": len(recent_lessons),
+            "failurePatterns": len(failure_patterns),
+            "failure_patterns": len(failure_patterns),
+            "validationGaps": len(validation_gaps),
+            "validation_gaps": len(validation_gaps),
+            "mergeBlockers": len(merge_blockers),
+            "merge_blockers": len(merge_blockers),
+            "total": total_items,
+        },
+    }
+    return payload
 
 
 def _pr_queue_string_list(value: Any, *, limit: int = 100) -> list[str]:
@@ -7419,6 +8051,7 @@ def build_snapshot(
         branch=branch,
         completion_level=resolve_goals_completion_level(cfg.get("goals_completion_level")),
     )
+    experience = _build_experience_payload(repo_root, latest_run_dir)
     notifications = _build_notifications(
         run_id=active_run["id"],
         started_at_ms=int(active_run.get("startedAt") or 0),
@@ -7622,6 +8255,18 @@ def build_snapshot(
     notifications_section_state = buildSectionState("notifications", "ready" if notifications else "empty", "" if notifications else fallbackSectionMessage("notifications"))
     metrics_section_state = buildSectionState("metrics", "ready" if has_metrics else "empty", "" if has_metrics else fallbackSectionMessage("metrics"))
     history_section_state = buildSectionState("history", "ready" if history.get("items") else "empty", "" if history.get("items") else fallbackSectionMessage("history"))
+    experience_state = str(experience.get("state") or "empty").strip().lower()
+    if experience_state == "unavailable":
+        experience_section_status = "empty"
+    elif experience_state in {"ready", "partial", "empty", "error"}:
+        experience_section_status = experience_state
+    else:
+        experience_section_status = "empty"
+    experience_section_state = buildSectionState(
+        "experience",
+        experience_section_status,
+        experience.get("message") or fallbackSectionMessage("experience"),
+    )
     pr_queue_items = pr_queue.get("items") if isinstance(pr_queue.get("items"), list) else []
     pr_queue_section_state = buildSectionState("prQueue", "ready" if pr_queue_items else "empty", "" if pr_queue_items else fallbackSectionMessage("prQueue"))
     worktree_status = str(worktree.get("status") or "none").strip()
@@ -7716,6 +8361,7 @@ def build_snapshot(
             "redaction": prompts_redaction,
         },
         "history": history,
+        "experience": experience,
         "metrics": metrics,
         "notifications": notifications,
         "pr_queue": pr_queue,
@@ -7786,6 +8432,7 @@ def build_snapshot(
             "notifications": notifications_section_state,
             "metrics": metrics_section_state,
             "history": history_section_state,
+            "experience": experience_section_state,
             "prQueue": pr_queue_section_state,
             "worktree": worktree_section_state,
             "runnerControl": runner_control_section_state,
@@ -10839,6 +11486,10 @@ def create_app(
     @app.get("/api/history")
     def api_history() -> dict[str, Any]:
         return _section("history")
+
+    @app.get("/api/experience")
+    def api_experience() -> dict[str, Any]:
+        return _section("experience")
 
     @app.get("/api/pr-queue")
     def api_pr_queue() -> dict[str, Any]:

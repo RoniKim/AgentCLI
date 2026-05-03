@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import textwrap
 import unittest
@@ -59,6 +60,221 @@ def _write_config(path: Path, repo: Path, **overrides: object) -> None:
         else:
             payload[key] = value
     _write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+
+def _write_experience_db(repo: Path, *, secret: str = "") -> Path:
+    experience_root = repo / ".AgentCLI" / "experience"
+    experience_root.mkdir(parents=True, exist_ok=True)
+    db_path = experience_root / "experience.db"
+    if db_path.exists():
+        db_path.unlink()
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE lessons (
+                id INTEGER PRIMARY KEY,
+                kind TEXT,
+                severity TEXT,
+                confidence REAL,
+                trigger TEXT,
+                lesson TEXT,
+                evidence TEXT,
+                created_at TEXT,
+                last_seen_at TEXT,
+                seen_count INTEGER
+            );
+            CREATE TABLE task_experiences (
+                task_id TEXT,
+                run_id TEXT,
+                title TEXT,
+                goal_refs TEXT,
+                files TEXT,
+                status TEXT,
+                reason TEXT,
+                task_status TEXT,
+                attempts INTEGER,
+                validation_status TEXT,
+                branch TEXT,
+                pr_id TEXT,
+                lesson TEXT
+            );
+            CREATE TABLE validation_experiences (
+                id INTEGER PRIMARY KEY,
+                run_id TEXT,
+                task_id TEXT,
+                gate TEXT,
+                cmd_hash TEXT,
+                rc INTEGER,
+                status TEXT,
+                classification TEXT,
+                summary TEXT,
+                artifact_path TEXT,
+                recorded_at TEXT
+            );
+            """
+        )
+        evidence = json.dumps(
+            [
+                {"run_id": "20260429-150347", "task_id": "T17", "artifact_path": f"logs/run.log {secret}"},
+                {"run_id": "20260429-150347", "task_id": "T17", "artifact_path": f"prompts/system_prompt.md {secret}"},
+                {"run_id": "20260429-150347", "task_id": "T17", "artifact_path": f"worktree.patch {secret}"},
+            ],
+            ensure_ascii=False,
+        )
+        conn.executemany(
+            """
+            INSERT INTO lessons (kind, severity, confidence, trigger, lesson, evidence, created_at, last_seen_at, seen_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "task_sizing",
+                    "high",
+                    0.86,
+                    "When Playwright is required",
+                    "Split keyboard navigation and accessibility into separate tasks before Playwright.",
+                    evidence,
+                    "2026-04-29T15:03:47Z",
+                    "2026-04-30T09:12:00Z",
+                    3,
+                ),
+                (
+                    "validation",
+                    "medium",
+                    0.78,
+                    "For app.js and styles.css changes",
+                    "Run static web console tests and smoke validation before merge.",
+                    evidence,
+                    "2026-04-28T09:00:00Z",
+                    "2026-04-30T09:10:00Z",
+                    2,
+                ),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO task_experiences (
+                task_id, run_id, title, goal_refs, files, status, reason, task_status, attempts,
+                validation_status, branch, pr_id, lesson
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "T17",
+                    "20260429-150347",
+                    "Experience panel",
+                    "[]",
+                    json.dumps(["web_console/app.js", "web_console/styles.css"]),
+                    "review_required",
+                    f"raw prompt excerpt {secret}",
+                    "review_required",
+                    2,
+                    "no_tests_found",
+                    "task/T17-experience",
+                    "pr-T17",
+                    "Keep review-only browser surfaces small and validation-specific.",
+                ),
+                (
+                    "T18",
+                    "20260430-091500",
+                    "Validation routing",
+                    "[]",
+                    json.dumps(["agent_runner/web.py"]),
+                    "blocked_env",
+                    f"diff --git a/web_console/app.js b/web_console/app.js {secret}",
+                    "blocked_env",
+                    1,
+                    "skipped",
+                    "task/T18-validation",
+                    "pr-T18",
+                    "",
+                ),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO validation_experiences (
+                run_id, task_id, gate, cmd_hash, rc, status, classification, summary, artifact_path, recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "20260429-150347",
+                    "T17",
+                    "build",
+                    "hash-build-1",
+                    1,
+                    "failed",
+                    "regression_failed",
+                    f"tail excerpt {secret}",
+                    f"logs/error.log {secret}",
+                    "2026-04-29T15:10:00Z",
+                ),
+                (
+                    "20260430-091500",
+                    "T18",
+                    "build",
+                    "hash-build-2",
+                    1,
+                    "failed",
+                    "regression_failed",
+                    f"tail excerpt {secret}",
+                    f"logs/error.log {secret}",
+                    "2026-04-30T09:18:00Z",
+                ),
+                (
+                    "20260430-091500",
+                    "T18",
+                    "playwright",
+                    "hash-playwright-1",
+                    0,
+                    "skipped",
+                    "blocked_env",
+                    f"system prompt {secret}",
+                    f"prompts/dev_prompt.md {secret}",
+                    "2026-04-30T09:19:00Z",
+                ),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    _write(
+        experience_root / "latest_summary.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "20260430-091500",
+                "summary": "Experience DB highlights recurring validation blockers before merge.",
+                "task_lessons": [
+                    {
+                        "task_id": "T17",
+                        "kind": "task_sizing",
+                        "severity": "high",
+                        "confidence": 0.86,
+                        "lesson": "Split keyboard navigation and accessibility into separate tasks before Playwright.",
+                        "evidence": [f"logs/run.log {secret}"],
+                    }
+                ],
+                "validation_lessons": [],
+                "pm_hints": [
+                    "If validation is pending or no tests are found, preserve the work and mark it for review."
+                ],
+                "merge_hints": [
+                    "Do not merge browser changes until static web console tests and smoke validation pass."
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+    )
+    return db_path
 
 
 def _make_log_entries(count):
@@ -3716,6 +3932,91 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         kinds = {item["kind"] for item in payload["notifications"]}
         self.assertIn("run_start", kinds)
         self.assertIn("task_done", kinds)
+
+    def test_api_experience_and_history_panel_show_explicit_unavailable_state_when_db_missing(self) -> None:
+        experience_response = self.client.get("/api/experience")
+        self.assertEqual(200, experience_response.status_code)
+        experience_payload = experience_response.json()
+
+        self.assertFalse(experience_payload["available"])
+        self.assertEqual("unavailable", experience_payload["state"])
+        self.assertIn("Experience DB is unavailable", experience_payload["message"])
+        self.assertEqual([], experience_payload["recentLessons"])
+        self.assertEqual([], experience_payload["failurePatterns"])
+        self.assertEqual([], experience_payload["validationGaps"])
+        self.assertEqual([], experience_payload["mergeBlockers"])
+
+        status_payload = self.client.get("/api/status").json()
+        self.assertIn("experience", status_payload)
+        self.assertEqual("empty", status_payload["sectionState"]["experience"]["status"])
+        self.assertIn("Experience DB is unavailable", status_payload["sectionState"]["experience"]["message"])
+
+        normalized, history_html, _history_title = self._render_history_view(status_payload)
+        self.assertFalse(normalized["experience"]["available"])
+        self.assertIn("Experience", history_html)
+        self.assertIn("Experience DB is unavailable", history_html)
+        self.assertIn("No recent lessons were recorded.", history_html)
+
+    def test_api_experience_and_history_panel_render_all_sections_without_raw_artifacts(self) -> None:
+        secret = "SECRET-EXPERIENCE-DO-NOT-LEAK"
+        _write_experience_db(self.repo, secret=secret)
+
+        experience_payload = self.client.get("/api/experience").json()
+        self.assertTrue(experience_payload["available"])
+        self.assertEqual("ready", experience_payload["state"])
+        self.assertEqual(2, experience_payload["summary"]["lessons"])
+        self.assertEqual(1, experience_payload["summary"]["failurePatterns"])
+        self.assertEqual(3, experience_payload["summary"]["validationGaps"])
+        self.assertEqual(2, experience_payload["summary"]["mergeBlockers"])
+        self.assertTrue(experience_payload["recentLessons"])
+        self.assertTrue(experience_payload["failurePatterns"])
+        self.assertTrue(experience_payload["validationGaps"])
+        self.assertTrue(experience_payload["mergeBlockers"])
+
+        payload_text = json.dumps(experience_payload, ensure_ascii=False)
+        self.assertNotIn(secret, payload_text)
+        self.assertNotIn("diff --git", payload_text)
+        self.assertNotIn("system prompt", payload_text)
+        self.assertNotIn("tail excerpt", payload_text)
+
+        status_payload = self.client.get("/api/status").json()
+        self.assertEqual("ready", status_payload["sectionState"]["experience"]["status"])
+        self.assertIn("experience", status_payload)
+        self.assertNotIn(secret, json.dumps(status_payload["experience"], ensure_ascii=False))
+
+        normalized, history_html, _history_title = self._render_history_view(status_payload)
+        self.assertTrue(normalized["experience"]["available"])
+        self.assertIn("Recent lessons", history_html)
+        self.assertIn("Repeated failure patterns", history_html)
+        self.assertIn("Validation gaps", history_html)
+        self.assertIn("Merge blockers", history_html)
+        self.assertIn("Split keyboard navigation and accessibility into separate tasks before Playwright.", history_html)
+        self.assertIn("Manual review is still required before merge", history_html)
+        self.assertIn("No tests were found for the affected change", history_html)
+        self.assertIn("Environment blocker still prevents merge", history_html)
+        self.assertNotIn(secret, history_html)
+        self.assertNotIn("No recent lessons were recorded.", history_html)
+        self.assertNotIn("No repeated failure patterns were recorded.", history_html)
+        self.assertNotIn("No validation gaps were recorded.", history_html)
+        self.assertNotIn("No merge blockers were recorded.", history_html)
+
+    def test_api_experience_stays_safe_on_lan_read_only_bind(self) -> None:
+        secret = "SECRET-LAN-EXPERIENCE"
+        _write_experience_db(self.repo, secret=secret)
+
+        from fastapi.testclient import TestClient
+
+        client = TestClient(self._create_app(self.repo, bind_host="0.0.0.0"))
+        experience_payload = client.get("/api/experience").json()
+        status_payload = client.get("/api/status").json()
+
+        self.assertTrue(experience_payload["available"])
+        self.assertEqual("experience_db", experience_payload["source"])
+        self.assertNotIn(secret, json.dumps(experience_payload, ensure_ascii=False))
+        self.assertNotIn("diff --git", json.dumps(experience_payload, ensure_ascii=False))
+        self.assertEqual("ready", status_payload["sectionState"]["experience"]["status"])
+        self.assertNotIn(secret, json.dumps(status_payload["experience"], ensure_ascii=False))
+        self.assertFalse(status_payload["runner_control"]["enabled"])
 
     def test_api_history_and_history_view_show_missing_report_state(self) -> None:
         missing_run_dir = self._make_live_run_dir("20260426-130500")
