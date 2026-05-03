@@ -1611,6 +1611,10 @@ def write_run_report_artifacts(
     final_report = _build_final_run_report(repo, run_dir, stop_reason=stop_reason, qa_report=qa_report)
     if last_task_id:
         final_report["last_task_id"] = last_task_id
+    try:
+        analyzer_summary = write_analyzer_summary_artifacts(run_dir)
+    except Exception:
+        analyzer_summary = {}
     qa_json = run_dir / "QA_VALIDATION_REPORT.json"
     qa_md = run_dir / "QA_VALIDATION_REPORT.md"
     final_json = run_dir / "FINAL_RUN_REPORT.json"
@@ -1634,13 +1638,21 @@ def write_run_report_artifacts(
     return {
         "qa_validation_report": qa_report,
         "final_run_report": final_report,
+        "analyzer_summary": analyzer_summary,
         "artifacts": {
             "qa_validation_json": qa_json.as_posix(),
             "qa_validation_markdown": qa_md.as_posix(),
             "final_run_json": final_json.as_posix(),
             "final_run_markdown": final_md.as_posix(),
+            "analyzer_summary_json": (run_dir / "ANALYZER_SUMMARY.json").as_posix(),
         },
     }
+
+
+def write_analyzer_summary_artifacts(run_dir: Path) -> dict[str, Any]:
+    from .analyzer import write_analyzer_summary
+
+    return write_analyzer_summary(run_dir)
 
 
 def build_local_shutdown_report(
