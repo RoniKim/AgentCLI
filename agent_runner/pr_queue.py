@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
+from .experience import record_validation_experiences
 from .gates import (
     classify_pr_queue_validation_status,
     repo_has_web_worktree_markers,
@@ -1634,6 +1635,22 @@ async def validate_review_packet_async(
         "source_main_mutated": source_main_mutated,
     }
     atomic_write_json(summary_path, summary_payload)
+
+    task_ids_value = _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds"))
+    record_validation_experiences(
+        source_repo_path,
+        source_kind="pr_queue_validation",
+        run_id=run_id_text,
+        task_id=task_ids_value[0] if task_ids_value else "",
+        task_ids=task_ids_value,
+        packet_id=packet_id_text,
+        validation_status=validation_status,
+        validation_reason=validation_reason,
+        validation_detail=validation_detail,
+        validation_artifact_path=summary_path.as_posix(),
+        validation_artifacts=validation_artifacts,
+        validation_records=validation_records,
+    )
 
     updated_packet = _update_packet_validation_metadata(
         packet,

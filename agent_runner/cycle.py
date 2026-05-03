@@ -12,6 +12,7 @@ from typing import Optional, Any
 
 from .analysis_cache import merge_dev_hints_to_global_changelog
 from .docs import resolve_docs_dir, generate_docs_digest
+from .experience import record_validation_experiences
 from .gates import (
     extract_build_warnings,
     classify_task_validation_status,
@@ -1712,6 +1713,26 @@ async def main_async(args: argparse.Namespace) -> int:
                     safe_write_text(attempt_dir / "validation.txt", "\n".join(summary_lines).rstrip() + "\n")
                 except Exception:
                     pass
+                validation_artifacts: list[str] = [artifact_path.as_posix()]
+                for record in validations:
+                    for key in ("artifact_path", "artifactPath", "log_path", "logPath"):
+                        record_artifact = str(record.get(key) or "").strip()
+                        if record_artifact and record_artifact not in validation_artifacts:
+                            validation_artifacts.append(record_artifact)
+                record_validation_experiences(
+                    source_repo,
+                    source_kind="task_validation",
+                    run_id=run_dir.name,
+                    task_id=task.id,
+                    task_title=task.title,
+                    task_ids=[task.id],
+                    validation_status=validation_status,
+                    validation_reason=validation_reason,
+                    validation_detail=validation_detail,
+                    validation_artifact_path=artifact_path.as_posix(),
+                    validation_artifacts=validation_artifacts,
+                    validation_records=validations,
+                )
                 return artifact_path
 
             # --- Cycle-start git health check ---
