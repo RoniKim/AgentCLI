@@ -22,10 +22,12 @@ from ..process_guard import register_pid, unregister_pid_if_exited
 from ..analysis_cache import merge_dev_hints_to_global_changelog
 from ..docs import resolve_docs_dir, generate_docs_digest
 from ..gates import (
+    classify_task_validation_status,
     extract_build_warnings,
+    run_build_validation_async,
     run_build_gate_async,
     run_fast_web_worktree_regression_async,
-    run_test_gate_async,
+    run_test_validation_async,
     should_run_fast_web_worktree_regression,
     should_retry_fast_web_worktree_regression_failure,
     summarize_fast_web_worktree_regression_failure,
@@ -128,6 +130,7 @@ from ..shared import (
     format_skill_selection as _format_skill_selection,
     coerce_roles_arg as _coerce_roles_arg,
 )
+from ..validation_artifacts import write_task_validation_artifacts
 from ..task_history import format_history_block as _format_history_block, format_split_history_blocks as _format_split_history_blocks, count_unresolved_failures as _count_unresolved_failures, count_consecutive_title_failures as _count_consecutive_title_failures
 from ..task_status import (
     TASK_STATUS_BLOCKED_ENV,
@@ -1718,15 +1721,31 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             _prev_gate_error: str = ""  # Carried across attempts for gate-aware retry
             _prev_gate_error_label: str = ""
             _blocked_env_guides_written: set[tuple[str, str, int]] = set()
+            test_validation_result: dict[str, Any] | None = None
+            fast_regression_triggered = False
+            task_validation_status = "validation_pending"
 
-            def _task_failure_status(reason: str, *, detail: str = "") -> str:
-                return classify_task_failure(reason, detail=detail)
+            def _task_failure_status(
+                reason: str,
+                *,
+                validations: list[dict[str, Any]] | None = None,
+                detail: str = "",
+            ) -> str:
+                return classify_task_failure(reason, validations=validations or [], detail=detail)
 
-            def _task_failure_entry(reason: str, *, detail: str = "", task_status: str = "", **extra: Any) -> dict[str, Any]:
+            def _task_failure_entry(
+                reason: str,
+                *,
+                validations: list[dict[str, Any]] | None = None,
+                detail: str = "",
+                task_status: str = "",
+                **extra: Any,
+            ) -> dict[str, Any]:
                 return build_failure_entry(
                     task_id=next_task.id,
                     reason=reason,
                     task_status=task_status,
+                    validations=validations or [],
                     detail=detail,
                     **extra,
                 )
@@ -1762,6 +1781,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 *,
                 task_status: str,
                 detail: str = "",
+                validation_artifact: str = "",
             ) -> None:
                 if task_status == TASK_STATUS_BLOCKED_ENV and reason != "needs_dependency":
                     guide_key = (next_task.id, reason, attempt)
@@ -1769,6 +1789,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         _blocked_env_guides_written.add(guide_key)
                         guide_path = run_dir / "DEPENDENCIES_NEEDED.md"
                         branch = tb.branch_name if tb else ""
+                        log_hint = validation_artifact or str(attempt_dir)
                         try:
                             with guide_path.open("a", encoding="utf-8", errors="replace") as f:
                                 f.write(
@@ -1777,7 +1798,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                                     f"- task_status: {task_status}\n"
                                     f"- branch: {branch or '(none)'}\n"
                                     f"- attempt: {attempt + 1}/{max_attempts}\n"
-                                    f"- evidence: {attempt_dir}\n"
+                                    f"- evidence: {log_hint}\n"
                                     f"- detail: {detail or '(none)'}\n\n"
                                     "---\n"
                                 )
@@ -1792,8 +1813,33 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "duration": time.time() - task_outer_t0,
                     "attempt": attempt + 1,
                     "max_attempts": max_attempts,
+                    "validation_artifact": validation_artifact,
+                    "validation_status": "failed",
                     "task_status": task_status,
                 })
+
+            def _write_task_validation_artifact(
+                *,
+                validations: list[dict[str, Any]],
+                status: str,
+                reason: str,
+                detail: str = "",
+                task_status: str = "",
+            ) -> Path:
+                return write_task_validation_artifacts(
+                    attempt_dir=attempt_dir,
+                    task_id=next_task.id,
+                    task_title=next_task.title,
+                    task_files=next_task.files,
+                    cycle=cycle_idx,
+                    step=step,
+                    attempt=attempt,
+                    validations=validations,
+                    status=status,
+                    reason=reason,
+                    detail=detail,
+                    task_status=task_status,
+                )
 
             def _isolate_or_stop(reason: str, *, task_status: str = "", detail: str = "") -> tuple[bool, str]:
                 """Isolate failed task work.
@@ -1891,6 +1937,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 model_name = tiers[attempt]
                 attempt_dir = task_dir / f"attempt_{attempt:02d}"
                 attempt_dir.mkdir(parents=True, exist_ok=True)
+                validation_records: list[dict[str, Any]] = []
 
                 before = git_porcelain(repo)
                 before_untracked = set(git_untracked_files(repo))
@@ -2201,13 +2248,26 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
                 if build_enabled:
                     metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
-                    ok = await run_build_gate_async(
-                        repo=repo, build_cmd=getattr(args, "build_cmd", []),
+                    build_validation = await run_build_validation_async(
+                        repo=repo,
+                        build_cmd=getattr(args, "build_cmd", []),
                         build_timeout_sec=int(getattr(args, "build_timeout_seconds", 1800)),
                         legacy_build_target=str(getattr(args, "dotnet_build_target", "") or ""),
-                        log_path=attempt_dir / "build.txt", stop_path=stop_path,
+                        log_path=attempt_dir / "build.txt",
+                        stop_path=stop_path,
                         command_repo=source_repo,
                     )
+                    build_validation.update(
+                        {
+                            "cycle": cycle_idx,
+                            "step": step,
+                            "task_id": next_task.id,
+                            "task_title": next_task.title,
+                            "attempt": attempt,
+                        }
+                    )
+                    validation_records.append(build_validation)
+                    ok = bool(build_validation.get("ok", False))
                     metrics.event("build_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
                     if ok and tb:
                         # Auto-commit on task branch as incremental checkpoint
@@ -2227,34 +2287,54 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         except Exception as _cp_ex:
                             eprint(f"[WARN] Incremental checkpoint failed: {_cp_ex}")
                     if not ok:
-                        try:
-                            _berr_raw = (attempt_dir / "build.txt").read_text(encoding="utf-8", errors="replace")
-                        except Exception:
-                            _berr_raw = ""
-                        build_detail_for_retry = _berr_raw[-4000:]
-                        task_status_for_retry = _task_failure_status("build_failed", detail=build_detail_for_retry)
+                        build_detail = str(build_validation.get("failure_summary") or build_validation.get("summary") or "")
+                        task_status = _task_failure_status("build_failed", validations=validation_records, detail=build_detail)
                         if (
-                            is_auto_retry_allowed(task_status_for_retry)
+                            is_auto_retry_allowed(task_status)
                             and dev_auto_escalate
                             and (attempt + 1) < max_attempts
                             and "build_failed" in dev_escalate_on
                         ):
+                            try:
+                                _berr_raw = (attempt_dir / "build.txt").read_text(encoding="utf-8", errors="replace")
+                            except Exception:
+                                _berr_raw = ""
                             _berr_lines = [ln for ln in _berr_raw.splitlines() if "error " in ln.lower()]
-                            _prev_gate_error = "\n".join(_berr_lines[:50]) or _berr_raw[-4000:]
+                            _prev_gate_error = "\n".join(_berr_lines[:50]) or build_detail or _berr_raw[-4000:]
                             _prev_gate_error_label = "BUILD FAILED"
+                            _write_task_validation_artifact(
+                                validations=validation_records,
+                                status="failed",
+                                reason="build_failed",
+                                detail=build_detail,
+                                task_status=task_status,
+                            )
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="build_failed")
                             continue
-                        build_detail = ""
-                        try:
-                            build_detail = (attempt_dir / "build.txt").read_text(encoding="utf-8", errors="replace")[-4000:]
-                        except Exception:
-                            build_detail = ""
-                        task_status = _task_failure_status("build_failed", detail=build_detail)
-                        state.setdefault("failed", []).append(_task_failure_entry("build_failed", detail=build_detail[:500], task_status=task_status))
+                        state.setdefault("failed", []).append(
+                            _task_failure_entry(
+                                "build_failed",
+                                validations=validation_records,
+                                detail=build_detail[:500],
+                                task_status=task_status,
+                            )
+                        )
                         save_state(state_path, state)
-                        _record_failed_task_result("build_failed", task_status=task_status, detail=build_detail[:500])
+                        _record_failed_task_result(
+                            "build_failed",
+                            task_status=task_status,
+                            detail=build_detail[:500],
+                            validation_artifact=str(attempt_dir / "validation.json"),
+                        )
                         _record_history(next_task.id, next_task.title, "failed", reason="build_failed", detail=build_detail[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                         logger.gate_event("build", next_task.id, passed=False)
+                        _write_task_validation_artifact(
+                            validations=validation_records,
+                            status="failed",
+                            reason="build_failed",
+                            detail=build_detail,
+                            task_status=task_status,
+                        )
                         if tb or cp:
                             ok_r, fr = _isolate_or_stop("build_failed", task_status=task_status, detail=build_detail[:500])
                             if not ok_r:
@@ -2269,43 +2349,76 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
                 if run_tests:
                     metrics.event("test_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
-                    ok = await run_test_gate_async(
-                        repo=repo, test_cmd=getattr(args, "test_cmd", []),
+                    test_validation = await run_test_validation_async(
+                        repo=repo,
+                        test_cmd=getattr(args, "test_cmd", []),
                         test_timeout_sec=int(getattr(args, "test_timeout_seconds", 3600)),
                         legacy_test_target=str(getattr(args, "dotnet_test_target", "") or ""),
                         legacy_test_filter=str(getattr(args, "dotnet_test_filter", "") or ""),
-                        log_path=attempt_dir / "test.txt", stop_path=stop_path,
+                        log_path=attempt_dir / "test.txt",
+                        stop_path=stop_path,
                         command_repo=source_repo,
                     )
+                    test_validation.update(
+                        {
+                            "cycle": cycle_idx,
+                            "step": step,
+                            "task_id": next_task.id,
+                            "task_title": next_task.title,
+                            "attempt": attempt,
+                        }
+                    )
+                    test_validation_result = test_validation
+                    validation_records.append(test_validation)
+                    ok = bool(test_validation.get("ok", False))
                     metrics.event("test_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
                     if not ok:
-                        try:
-                            _test_raw = (attempt_dir / "test.txt").read_text(encoding="utf-8", errors="replace")
-                        except Exception:
-                            _test_raw = ""
-                        test_detail_for_retry = _test_raw[-4000:]
-                        task_status_for_retry = _task_failure_status("test_failed", detail=test_detail_for_retry)
+                        test_detail = str(test_validation.get("failure_summary") or test_validation.get("summary") or "")
+                        task_status = _task_failure_status("test_failed", validations=validation_records, detail=test_detail)
                         if (
-                            is_auto_retry_allowed(task_status_for_retry)
+                            is_auto_retry_allowed(task_status)
                             and dev_auto_escalate
                             and (attempt + 1) < max_attempts
                             and "test_failed" in dev_escalate_on
                         ):
-                            _prev_gate_error = test_detail_for_retry
+                            try:
+                                _prev_gate_error = (attempt_dir / "test.txt").read_text(encoding="utf-8", errors="replace")[-4000:]
+                            except Exception:
+                                _prev_gate_error = test_detail
                             _prev_gate_error_label = "TEST FAILED"
+                            _write_task_validation_artifact(
+                                validations=validation_records,
+                                status="failed",
+                                reason="test_failed",
+                                detail=test_detail,
+                                task_status=task_status,
+                            )
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="test_failed")
                             continue
-                        test_detail = ""
-                        try:
-                            test_detail = (attempt_dir / "test.txt").read_text(encoding="utf-8", errors="replace")[-4000:]
-                        except Exception:
-                            test_detail = ""
-                        task_status = _task_failure_status("test_failed", detail=test_detail)
-                        state.setdefault("failed", []).append(_task_failure_entry("test_failed", detail=test_detail[:500], task_status=task_status))
+                        state.setdefault("failed", []).append(
+                            _task_failure_entry(
+                                "test_failed",
+                                validations=validation_records,
+                                detail=test_detail[:500],
+                                task_status=task_status,
+                            )
+                        )
                         save_state(state_path, state)
-                        _record_failed_task_result("test_failed", task_status=task_status, detail=test_detail[:500])
+                        _record_failed_task_result(
+                            "test_failed",
+                            task_status=task_status,
+                            detail=test_detail[:500],
+                            validation_artifact=str(attempt_dir / "validation.json"),
+                        )
                         _record_history(next_task.id, next_task.title, "failed", reason="test_failed", detail=test_detail[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                         logger.gate_event("test", next_task.id, passed=False)
+                        _write_task_validation_artifact(
+                            validations=validation_records,
+                            status="failed",
+                            reason="test_failed",
+                            detail=test_detail,
+                            task_status=task_status,
+                        )
                         if tb or cp:
                             ok_r, fr = _isolate_or_stop("test_failed", task_status=task_status, detail=test_detail[:500])
                             if not ok_r:
@@ -2376,7 +2489,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     fast_regression_files.extend(git_worktree_changed_files(repo))
                 except Exception:
                     pass
-                if should_run_fast_web_worktree_regression(repo, fast_regression_files):
+                fast_regression_triggered = should_run_fast_web_worktree_regression(repo, fast_regression_files)
+                if fast_regression_triggered:
                     fast_regression_log = attempt_dir / "fast_web_worktree_regression.json"
                     metrics.event(
                         "fast_regression_start",
@@ -2390,7 +2504,32 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         repo=repo,
                         log_path=fast_regression_log,
                         stop_path=stop_path,
+                        trigger_files=fast_regression_files,
                     )
+                    fast_validation = {
+                        "name": "fast_web_worktree_regression",
+                        "kind": "regression",
+                        "gate": "fast_web_worktree_regression",
+                        "cmd": list(fast_regression.get("suite_files") or fast_regression.get("suiteFiles") or []),
+                        "rc": 0 if bool(fast_regression.get("ok", False)) else 1,
+                        "ok": bool(fast_regression.get("ok", False)),
+                        "artifact_path": str(fast_regression_log),
+                        "artifactPath": str(fast_regression_log),
+                        "log_path": str(fast_regression_log),
+                        "logPath": str(fast_regression_log),
+                        "summary": str(fast_regression.get("failure_summary") or fast_regression.get("failureSummary") or fast_regression_log),
+                        "failure_summary": str(fast_regression.get("failure_summary") or ""),
+                        "failureSummary": str(fast_regression.get("failureSummary") or ""),
+                        "trigger_files": list(fast_regression.get("trigger_files") or fast_regression.get("triggerFiles") or fast_regression_files),
+                        "triggerFiles": list(fast_regression.get("trigger_files") or fast_regression.get("triggerFiles") or fast_regression_files),
+                        "suite_files": list(fast_regression.get("suite_files") or fast_regression.get("suiteFiles") or []),
+                        "suiteFiles": list(fast_regression.get("suite_files") or fast_regression.get("suiteFiles") or []),
+                        "commands": list(fast_regression.get("commands") or []),
+                        "failed_command": fast_regression.get("failed_command"),
+                        "started_at": fast_regression.get("started_at"),
+                        "ended_at": fast_regression.get("ended_at"),
+                    }
+                    validation_records.append(fast_validation)
                     fast_command_count = len(fast_regression.get("commands", []) or [])
                     fast_ok = bool(fast_regression.get("ok", False))
                     metrics.event(
@@ -2410,13 +2549,16 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     if not fast_ok:
                         failed_command = fast_regression.get("failed_command") or {}
                         failed_name = str(failed_command.get("name") or failed_command.get("test_file") or "fast_regression")
-                        failed_summary = str(fast_regression_log)
-                        try:
-                            if isinstance(failed_command, dict):
-                                failed_summary = json.dumps(failed_command, ensure_ascii=False, default=str)
-                        except Exception:
-                            pass
-                        task_status = _task_failure_status("fast_regression_failed", detail=failed_summary)
+                        failed_summary = str(fast_regression.get("failure_summary") or fast_regression.get("failureSummary") or "")
+                        if not failed_summary:
+                            try:
+                                failed_summary = summarize_fast_web_worktree_regression_failure(
+                                    fast_regression,
+                                    fast_regression_log,
+                                )
+                            except Exception:
+                                failed_summary = str(fast_regression_log)
+                        task_status = _task_failure_status("fast_regression_failed", validations=validation_records, detail=failed_summary)
                         if (
                             is_auto_retry_allowed(task_status)
                             and should_retry_fast_web_worktree_regression_failure(
@@ -2431,6 +2573,13 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                                 fast_regression_log,
                             )
                             _prev_gate_error_label = "FAST REGRESSION FAILED"
+                            _write_task_validation_artifact(
+                                validations=validation_records,
+                                status="failed",
+                                reason="fast_regression_failed",
+                                detail=failed_summary,
+                                task_status=task_status,
+                            )
                             metrics.event(
                                 "dev_attempt_retry",
                                 cycle=cycle_idx,
@@ -2442,7 +2591,14 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                                 log_path=str(fast_regression_log),
                             )
                             continue
-                        state.setdefault("failed", []).append(_task_failure_entry("fast_regression_failed", detail=failed_summary[:500], task_status=task_status))
+                        state.setdefault("failed", []).append(
+                            _task_failure_entry(
+                                "fast_regression_failed",
+                                validations=validation_records,
+                                detail=failed_summary[:500],
+                                task_status=task_status,
+                            )
+                        )
                         save_state(state_path, state)
                         _record_history(
                             next_task.id,
@@ -2456,6 +2612,13 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                             max_attempts=max_attempts,
                             task_status=task_status,
                         )
+                        _write_task_validation_artifact(
+                            validations=validation_records,
+                            status="failed",
+                            reason="fast_regression_failed",
+                            detail=failed_summary,
+                            task_status=task_status,
+                        )
                         task_results.append({
                             "id": next_task.id,
                             "title": next_task.title,
@@ -2463,6 +2626,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                             "reason": "fast_regression_failed",
                             "detail": failed_name,
                             "duration": time.time() - task_outer_t0,
+                            "validation_artifact": str(attempt_dir / "validation.json"),
+                            "validation_status": "failed",
                             "task_status": task_status,
                         })
                         metrics.event(
@@ -2495,6 +2660,21 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
             if task_failure_reason:
                 continue
+
+            task_validation_status = classify_task_validation_status(
+                run_tests=run_tests,
+                fast_regression_triggered=fast_regression_triggered,
+                test_validation=test_validation_result,
+                validation_records=validation_records,
+            )
+
+            if task_completed:
+                _write_task_validation_artifact(
+                    validations=validation_records,
+                    status=task_validation_status,
+                    reason="completed",
+                    task_status=TASK_STATUS_COMPLETED,
+                )
 
             # Merge or abandon task branch
             if task_completed and tb:
@@ -2563,7 +2743,15 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             save_state(state_path, state)
             mark_backlog_done(backlog_md_path, next_task.id)
             _record_history(next_task.id, next_task.title, "done", files=next_task.files, cycle=cycle_idx, task_status=TASK_STATUS_COMPLETED)
-            task_results.append({"id": next_task.id, "title": next_task.title, "status": "done", "duration": time.time() - task_outer_t0, "task_status": TASK_STATUS_COMPLETED})
+            task_results.append({
+                "id": next_task.id,
+                "title": next_task.title,
+                "status": "done",
+                "duration": time.time() - task_outer_t0,
+                "validation_artifact": str(attempt_dir / "validation.json"),
+                "validation_status": task_validation_status,
+                "task_status": TASK_STATUS_COMPLETED,
+            })
 
             # Use current-cycle task IDs to avoid cross-cycle accumulation (done=16/11 bug)
             _done_this_cycle = len(done_set.intersection(task_ids))
