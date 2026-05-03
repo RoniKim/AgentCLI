@@ -203,6 +203,12 @@ class WebConsoleSafetyTests(unittest.TestCase):
         except Exception as exc:
             raise unittest.SkipTest(f"FastAPI is unavailable: {exc}") from exc
 
+    def test_lan_safety_helper_is_reexported_from_web(self) -> None:
+        import agent_runner.web as web_module
+        import agent_runner.web_redaction as web_redaction
+
+        self.assertIs(web_module._lan_safety_blocks_mutations, web_redaction._lan_safety_blocks_mutations)
+
     def setUp(self) -> None:
         self._tmp_root = ROOT / ".test-scratch"
         self._tmp_root.mkdir(parents=True, exist_ok=True)
