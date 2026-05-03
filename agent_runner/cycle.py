@@ -86,6 +86,7 @@ from .reporting import (
     write_run_report_artifacts,
 )
 from .run_dir import make_run_dir, find_latest_run_dir
+from .stop_progress import write_stop_snapshot
 from .state import (
     TaskItem,
     count_state_task_ids,
@@ -336,54 +337,16 @@ async def main_async(args: argparse.Namespace) -> int:
         message: str = "",
     ) -> dict[str, Any]:
         """Persist a lightweight stop snapshot so manual stops leave usable context."""
-        try:
-            reason = detect_stop_reason([stop_path]) or STOP_REASON_STOP_FILE
-        except Exception:
-            reason = STOP_REASON_STOP_FILE
-        payload: dict[str, Any] = {
-            "ts": now_iso(),
-            "reason": reason,
-            "stage": str(stage or ""),
-            "cycle": int(cycle),
-            "step": int(step),
-            "task_id": str(task_id or ""),
-            "message": str(message or ""),
-            "run_dir": str(run_dir),
-        }
-        if attempt is not None:
-            payload["attempt"] = int(attempt)
-        try:
-            progress_path = run_dir / "progress.txt"
-            if progress_path.exists():
-                payload["progress"] = progress_path.read_text(encoding="utf-8", errors="replace").strip()
-        except Exception:
-            pass
-        try:
-            state_path = run_dir / "STATE.json"
-            if state_path.exists():
-                state_obj = load_state(state_path)
-                backlog_task_ids = load_backlog_task_ids(run_dir / "BACKLOG.json")
-                state_counts = count_state_task_ids(state_obj, backlog_task_ids)
-                payload["state_counts"] = {
-                    "done": state_counts["done"],
-                    "failed": state_counts["failed"],
-                    "warnings": state_counts["warnings"],
-                }
-        except Exception:
-            pass
-        try:
-            (run_dir / "STOP_SNAPSHOT.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-                errors="replace",
-            )
-        except Exception:
-            pass
-        try:
-            with (run_dir / "STOP_SNAPSHOT.log").open("a", encoding="utf-8", errors="replace") as handle:
-                handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
-        except Exception:
-            pass
+        payload = write_stop_snapshot(
+            run_dir,
+            stage=stage,
+            cycle=cycle,
+            step=step,
+            task_id=task_id,
+            attempt=attempt,
+            message=message,
+            stop_paths=[stop_path],
+        )
         try:
             metrics.event(
                 "stop_checkpoint",

@@ -29,7 +29,7 @@ from .logger import close_all_loggers, register_structured_logger_cleanup
 from .todo import ensure_todo_file, read_current_todo, set_current_todo, open_path
 from .preflight import check_runner_start_readiness, format_runner_start_readiness, run_preflight
 from .process_guard import init_process_guard, terminate_all_children
-from .stop_progress import clear_stop_progress, read_stop_progress, write_stop_progress
+from .stop_progress import build_stop_file_paths, clear_stop_progress, read_stop_progress, record_stop_progress
 from .utils import STOP_REASON_STOP_FILE
 from .remote.controller import (
     RUNNER_CONTROL_EVENT_FILE,
@@ -400,13 +400,7 @@ class RunnerShell:
         return targets
 
     def _shell_stop_file_paths(self, run_dirs: list[Path], stop_file: str) -> dict[str, str]:
-        paths: dict[str, str] = {}
-        for idx, run_dir in enumerate(run_dirs):
-            suffix = "" if idx == 0 else f"_{idx + 1}"
-            paths[f"stop_file_path{suffix}"] = (run_dir / stop_file).as_posix()
-            paths[f"stop_progress_path{suffix}"] = (run_dir / "STOP_PROGRESS.json").as_posix()
-            paths[f"stop_progress_log_path{suffix}"] = (run_dir / "stop_progress.log").as_posix()
-        return paths
+        return build_stop_file_paths(run_dirs, stop_file)
 
     def _sync_controller_args(self) -> None:
         if self._controller is None:
@@ -732,7 +726,7 @@ class RunnerShell:
         stop_path = target_run_dirs[0] / stop_file
         stop_file_paths = self._shell_stop_file_paths(target_run_dirs, stop_file)
         requested_at = time.monotonic()
-        request_progress = write_stop_progress(
+        request_progress = record_stop_progress(
             self.run_dir,
             phase="requested",
             message="Stop requested.",
@@ -763,7 +757,7 @@ class RunnerShell:
             print(f"[OK] Stop requested via: {stop_path}")
             for alternate_stop_path in written_stop_paths[1:]:
                 print(f"[INFO] Also wrote stop file: {alternate_stop_path}")
-            stop_file_progress = write_stop_progress(
+            stop_file_progress = record_stop_progress(
                 self.run_dir,
                 phase="stop_file_written",
                 message=f"Stop file written: {stop_path}",
@@ -785,7 +779,7 @@ class RunnerShell:
                 stop_progress=stop_file_progress,
             )
         except Exception as ex:
-            failed_progress = write_stop_progress(
+            failed_progress = record_stop_progress(
                 self.run_dir,
                 phase="failed",
                 message=f"Failed to create stop file: {ex}",
@@ -811,7 +805,7 @@ class RunnerShell:
 
         # Kill any tracked child processes immediately
         try:
-            child_progress = write_stop_progress(
+            child_progress = record_stop_progress(
                 self.run_dir,
                 phase="terminating_children",
                 message="Terminating tracked child processes.",
@@ -843,7 +837,7 @@ class RunnerShell:
                 wait_timeout = 180
             wait_timeout = max(1, wait_timeout)
             deadline = time.monotonic() + wait_timeout
-            wait_progress = write_stop_progress(
+            wait_progress = record_stop_progress(
                 self.run_dir,
                 phase="waiting_runner",
                 message="Waiting for runner shutdown and final artifacts.",
@@ -865,7 +859,7 @@ class RunnerShell:
             )
             while self._runner_thread.is_alive() and time.monotonic() < deadline:
                 self._print_stop_progress(
-                    write_stop_progress(
+                    record_stop_progress(
                         self.run_dir,
                         phase="waiting_runner",
                         message="Waiting for runner shutdown and final artifacts.",
@@ -882,7 +876,7 @@ class RunnerShell:
             alive = self._runner_thread.is_alive()
             if not alive:
                 close_all_loggers()
-            final_wait_progress = write_stop_progress(
+            final_wait_progress = record_stop_progress(
                 self.run_dir,
                 phase="timeout" if alive else "finalized",
                 message=f"Runner is still alive after {wait_timeout}s stop wait timeout." if alive else "Runner stop sequence finished.",

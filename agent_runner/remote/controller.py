@@ -21,11 +21,12 @@ from ..runner_entry import run as run_runner
 from ..stop_progress import (
     STOP_PROGRESS_FILE,
     STOP_PROGRESS_LOG_FILE,
+    build_stop_file_paths,
     clear_stop_progress,
     file_write_signal,
     normalize_stop_progress_payload,
     read_stop_progress,
-    write_stop_progress,
+    record_stop_progress,
 )
 from ..state import count_state_task_ids, load_backlog_task_ids, load_state
 from ..utils import STOP_REASON_STOP_FILE, atomic_write_json, detect_stop_reason, now_iso, rotate_log_file
@@ -1012,15 +1013,15 @@ class RunnerController:
 
     def _stop_file_paths(self, run_dir: Path) -> dict[str, str]:
         stop_file_name = self._stop_file_name()
-        paths = {
-            "stop_file_path": (run_dir / stop_file_name).as_posix(),
-            "stop_progress_path": (run_dir / STOP_PROGRESS_FILE).as_posix(),
-            "stop_progress_log_path": (run_dir / STOP_PROGRESS_LOG_FILE).as_posix(),
-        }
+        runner_process_log_path = None
         runner_pid = self._runner_process_pid()
         if runner_pid is not None:
-            paths["runner_process_log_path"] = (run_dir / "telegram_runner_subprocess.log").as_posix()
-        return paths
+            runner_process_log_path = run_dir / "telegram_runner_subprocess.log"
+        return build_stop_file_paths(
+            run_dir,
+            stop_file_name,
+            runner_process_log_path=runner_process_log_path,
+        )
 
     def _stop_artifact_candidates(self, run_dir: Path) -> list[Path]:
         return [
@@ -1576,19 +1577,14 @@ class RunnerController:
             locked_file_paths=list(locked_file_paths or []),
         )
         context_fields.update(extra_fields)
-        runner_alive = bool(context_fields.pop("runner_alive", False))
-        context_fields.pop("runnerAlive", None)
-        context_fields.pop("running", None)
-        progress = write_stop_progress(
+        progress = record_stop_progress(
             run_dir,
             phase=phase,
             message=message,
             requested_at_monotonic=requested_at_monotonic,
-            running=runner_alive,
-            runner_alive=runner_alive,
+            context_fields=context_fields,
             runner_mode=self.runner_mode,
             last_event=self._latest_event(run_dir),
-            **context_fields,
         )
         if progress_callback is not None:
             try:
