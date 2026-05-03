@@ -149,6 +149,18 @@ DEFAULTS: Dict[str, Any] = {
         "worktree_merge_mode": "manual",
     },
 
+    # Experience analyzer / prompt / retention defaults
+    "experience": {
+        "experience_db_enabled": True,
+        "experience_prompt_max_items": 12,
+        "experience_prompt_max_chars": 4000,
+        "experience_lesson_max_chars": 240,
+        "experience_evidence_max_items": 3,
+        "experience_retention_days": 90,
+        "experience_redact_paths": True,
+        "pm_use_experience_summary": True,
+    },
+
     # Safety / gates
     "no_policy_scan": False,
     "policy_rules_file": "",
