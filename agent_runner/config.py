@@ -18,6 +18,7 @@ from .utils import atomic_write_json, eprint
 # Runtime artifacts directory name (under target repo root).
 # Design documents stay in ".doc/"; runtime outputs go here.
 AGENT_WORK_DIR = ".AgentCLI"
+EXPERIENCE_DIRNAME = "experience"
 
 def app_home() -> Path:
     """
@@ -557,5 +558,22 @@ def ensure_work_dir(repo: Path) -> Path:
     if first_time:
         ensure_gitignore_entry(repo)
     return work_root
+
+
+def experience_root(repo: Path) -> Path:
+    """Return the repo-local Experience artifact root."""
+    return ensure_work_dir(repo) / EXPERIENCE_DIRNAME
+
+
+def ensure_experience_dir(repo: Path) -> Path:
+    """Create *repo/.AgentCLI/experience/* if needed."""
+    root = experience_root(repo)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def experience_database_path(repo: Path) -> Path:
+    """Return the default repo-local Experience DB path."""
+    return ensure_experience_dir(repo) / "experience.db"
 
 
