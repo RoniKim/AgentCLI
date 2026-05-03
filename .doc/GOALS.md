@@ -241,9 +241,9 @@
 
 ### P0-U. Experience DB And Analyzer Stage
 
-- [ ] Experience DB schema and migration exist under `.AgentCLI/experience` with tables for runs, task experiences, validation experiences, file patterns, and lessons.
-- [ ] Completed task experience records link run id, task id, GOALS refs, changed files, branch/head refs, validation artifacts, and local PR packet ids.
-- [ ] Failed task experience records preserve task status, reason, dependency blockers, validation summary, artifact pointers, and retry/discard outcome without storing raw logs.
+- [x] Experience DB schema and migration exist under `.AgentCLI/experience` with tables for runs, task experiences, validation experiences, file patterns, and lessons.
+- [x] Completed task experience records link run id, task id, GOALS refs, changed files, branch/head refs, validation artifacts, and local PR packet ids.
+- [x] Failed task experience records preserve task status, reason, dependency blockers, validation summary, artifact pointers, and retry/discard outcome without storing raw logs.
 - [ ] Validation experience records classify `validation_pending`, `tests_skipped`, `no_tests_found`, `validation_failed`, `blocked_env`, and `validation_passed` separately.
 - [ ] Local PR queue validate, merge, discard, and rebase decisions are recorded as experience signals tied to the PR packet and GOALS trace.
 - [ ] Deterministic Analyzer rules produce `ANALYZER_SUMMARY.json` from run artifacts without calling an LLM.
