@@ -8,6 +8,7 @@ from agent_runner.failure_policy import (
     decide_failure_disposition,
     should_count_cycle_failure_for_stop,
 )
+from agent_runner.task_failures import build_task_failure_result, record_task_failure_state
 from agent_runner.task_status import TASK_STATUS_BLOCKED_ENV, TASK_STATUS_REGRESSION_FAILED
 
 
@@ -85,6 +86,90 @@ class FailurePolicyTests(unittest.TestCase):
         self.assertEqual(1, counts["blocked_env"])
         self.assertEqual(2, counts["review"])
         self.assertEqual(2, counts["regression"])
+
+    def test_regression_failure_record_keeps_failed_bucket_and_skips_pending_review(self) -> None:
+        state = {"failed": []}
+
+        failed_entry = record_task_failure_state(
+            state,
+            task_id="T2",
+            reason="fast_regression_failed",
+            task_status=TASK_STATUS_REGRESSION_FAILED,
+            detail="playwright smoke failed",
+        )
+        pending_entry = record_task_failure_state(
+            state,
+            bucket="pending_review",
+            task_id="T2",
+            reason="fast_regression_failed",
+            task_status=TASK_STATUS_REGRESSION_FAILED,
+            detail="playwright smoke failed",
+        )
+
+        self.assertIsNotNone(failed_entry)
+        self.assertEqual(1, len(state["failed"]))
+        self.assertEqual(TASK_STATUS_REGRESSION_FAILED, failed_entry["status"])
+        self.assertEqual(TASK_STATUS_REGRESSION_FAILED, failed_entry["task_status"])
+        self.assertEqual(TASK_STATUS_REGRESSION_FAILED, failed_entry["taskStatus"])
+        self.assertEqual(TASK_STATUS_REGRESSION_FAILED, failed_entry["outcome_status"])
+        self.assertTrue(failed_entry["review_required"])
+        self.assertIsNone(pending_entry)
+        self.assertNotIn("pending_review", state)
+
+    def test_blocked_env_pending_review_record_is_preserved(self) -> None:
+        state: dict[str, object] = {}
+
+        entry = record_task_failure_state(
+            state,
+            bucket="pending_review",
+            task_id="T3",
+            reason="needs_dependency",
+            detail="mvn: command not found",
+            extra={
+                "title": "Install dependency",
+                "cycle": 2,
+                "step": 4,
+                "attempt": 1,
+                "max_attempts": 3,
+                "validation_artifact": "C:/tmp/validation.json",
+            },
+        )
+
+        self.assertIsNotNone(entry)
+        self.assertEqual(TASK_STATUS_BLOCKED_ENV, entry["task_status"])
+        self.assertTrue(entry["review_required"])
+        self.assertEqual("Install dependency", entry["title"])
+        self.assertEqual("C:/tmp/validation.json", entry["validation_artifact"])
+        self.assertEqual(1, len(state["pending_review"]))
+
+    def test_failure_result_preserves_validation_artifact_and_detail_metadata(self) -> None:
+        result = build_task_failure_result(
+            task_id="T4",
+            task_title="Validate browser console",
+            reason="build_failed",
+            task_status=TASK_STATUS_REGRESSION_FAILED,
+            detail="BrowserTests failed with stale lock reuse.",
+            duration=3.5,
+            attempt=2,
+            max_attempts=3,
+            validation_artifact="C:/tmp/tasks/T4/attempt_02/validation.json",
+            validation_status="failed",
+            extra={"goal_ref": "G4"},
+        )
+
+        self.assertEqual(TASK_STATUS_REGRESSION_FAILED, result["status"])
+        self.assertEqual(TASK_STATUS_REGRESSION_FAILED, result["task_status"])
+        self.assertEqual(TASK_STATUS_REGRESSION_FAILED, result["taskStatus"])
+        self.assertEqual(TASK_STATUS_REGRESSION_FAILED, result["outcome_status"])
+        self.assertTrue(result["review_required"])
+        self.assertEqual("BrowserTests failed with stale lock reuse.", result["detail"])
+        self.assertEqual(2, result["attempt"])
+        self.assertEqual(3, result["max_attempts"])
+        self.assertEqual("C:/tmp/tasks/T4/attempt_02/validation.json", result["validation_artifact"])
+        self.assertEqual("C:/tmp/tasks/T4/attempt_02/validation.json", result["validationArtifact"])
+        self.assertEqual("failed", result["validation_status"])
+        self.assertEqual("failed", result["validationStatus"])
+        self.assertEqual("G4", result["goal_ref"])
 
 
 if __name__ == "__main__":
