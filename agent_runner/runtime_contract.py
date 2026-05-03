@@ -5,7 +5,7 @@ import posixpath
 import re
 from dataclasses import dataclass, field
 from os import PathLike
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 
@@ -158,6 +158,29 @@ def _path_name(value: str) -> str:
     return PurePosixPath(text).name
 
 
+def _normalize_context_root(path: str | PathLike[str]) -> Path:
+    return Path(path).expanduser().resolve(strict=False)
+
+
+def _normalize_leaf_name(filename: str) -> str:
+    text = str(filename or "").strip()
+    if not text:
+        raise ValueError("Artifact filename must not be empty.")
+    if Path(text).name != text or text in {".", ".."}:
+        raise ValueError(f"Artifact filename must be a leaf name: {filename!r}")
+    return text
+
+
+def _normalize_child_path(parent: str | PathLike[str], child: str | PathLike[str]) -> Path:
+    root = _normalize_context_root(parent)
+    candidate = (root / Path(child)).resolve(strict=False)
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Context path {child!r} escapes root {root}.") from exc
+    return candidate
+
+
 def _missing_required_fields(required_fields: dict[str, str]) -> list[str]:
     return [name for name, value in required_fields.items() if not str(value or "").strip()]
 
@@ -230,38 +253,42 @@ class TaskBranchState:
 class RunnerContext:
     """Normalized runtime paths for a single runner session."""
 
-    source_repo: str
-    run_dir: str
-    execution_worktree: str = ""
+    source_repo: str | PathLike[str]
+    run_dir: str | PathLike[str] | None = None
+    execution_worktree: str | PathLike[str] | None = ""
     execution_repo: str = field(init=False)
     worktree_isolated: bool = field(init=False)
     run_id: str = field(init=False)
-    tasks_dir: str = field(init=False)
+    tasks_dir: Any = field(init=False)
     missing_fields: tuple[str, ...] = field(init=False)
     valid: bool = field(init=False)
+    _path_mode: bool = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        source_repo = _normalize_path(self.source_repo)
-        run_dir = _normalize_path(self.run_dir)
-        execution_worktree = _normalize_path(self.execution_worktree)
+        run_dir_missing = self.run_dir is None or not str(self.run_dir or "").strip()
+        path_mode = run_dir_missing and bool(str(self.source_repo or "").strip())
+        source_repo_input: str | PathLike[str] | None = "" if path_mode else self.source_repo
+        run_dir_input: str | PathLike[str] | None = self.source_repo if path_mode else self.run_dir
+        execution_worktree_input: str | PathLike[str] | None = "" if path_mode else self.execution_worktree
+
+        source_repo = _normalize_path(source_repo_input)
+        run_dir = _normalize_path(run_dir_input)
+        execution_worktree = _normalize_path(execution_worktree_input)
         execution_repo = execution_worktree or source_repo
-        missing_fields = tuple(
-            _missing_required_fields(
-                {
-                    "source_repo": source_repo,
-                    "run_dir": run_dir,
-                }
-            )
-        )
+        required_fields = {"run_dir": run_dir} if path_mode else {"source_repo": source_repo, "run_dir": run_dir}
+        missing_fields = tuple(_missing_required_fields(required_fields))
+        run_dir_value: Any = _normalize_context_root(run_dir) if path_mode and run_dir else run_dir
+        tasks_dir: Any = (run_dir_value / "tasks") if path_mode and run_dir else _join_path(run_dir, "tasks")
         object.__setattr__(self, "source_repo", source_repo)
-        object.__setattr__(self, "run_dir", run_dir)
+        object.__setattr__(self, "run_dir", run_dir_value)
         object.__setattr__(self, "execution_worktree", execution_worktree)
         object.__setattr__(self, "execution_repo", execution_repo)
         object.__setattr__(self, "worktree_isolated", bool(execution_worktree and execution_repo != source_repo))
         object.__setattr__(self, "run_id", _path_name(run_dir))
-        object.__setattr__(self, "tasks_dir", _join_path(run_dir, "tasks"))
+        object.__setattr__(self, "tasks_dir", tasks_dir)
         object.__setattr__(self, "missing_fields", missing_fields)
         object.__setattr__(self, "valid", not missing_fields)
+        object.__setattr__(self, "_path_mode", path_mode)
 
     @classmethod
     def from_paths(
@@ -301,15 +328,29 @@ class RunnerContext:
             strict=strict,
         )
 
+    def task_context(self, *, cycle: int, step: int, task_id: str) -> TaskContext:
+        return self.task(cycle=cycle, step=step, task_id=task_id, strict=False)
+
+    def artifact_path(self, filename: str) -> Path:
+        return _normalize_child_path(self.run_dir, _normalize_leaf_name(filename))
+
+    @property
+    def dependency_required_path(self) -> Path:
+        return self.artifact_path("DEPENDENCY_REQUIRED.md")
+
+    @property
+    def notes_path(self) -> Path:
+        return self.artifact_path("NOTES.md")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "source_repo": self.source_repo,
             "execution_repo": self.execution_repo,
             "execution_worktree": self.execution_worktree,
             "worktree_isolated": self.worktree_isolated,
-            "run_dir": self.run_dir,
+            "run_dir": self.run_dir.as_posix() if isinstance(self.run_dir, Path) else self.run_dir,
             "run_id": self.run_id,
-            "tasks_dir": self.tasks_dir,
+            "tasks_dir": self.tasks_dir.as_posix() if isinstance(self.tasks_dir, Path) else self.tasks_dir,
             "missing_fields": list(self.missing_fields),
             "valid": self.valid,
         }
@@ -326,14 +367,17 @@ class TaskContext:
     task_title: str = ""
     task_branch: TaskBranchState | None = None
     task_key: str = field(init=False)
-    task_dir: str = field(init=False)
+    task_dir: Any = field(init=False)
     missing_fields: tuple[str, ...] = field(init=False)
     valid: bool = field(init=False)
 
     def __post_init__(self) -> None:
         task_id = str(self.task_id or "").strip()
         task_key = f"c{int(self.cycle):03d}_s{int(self.step):03d}_{task_id}" if task_id else ""
-        task_dir = _join_path(self.runner.tasks_dir, task_key)
+        if getattr(self.runner, "_path_mode", False):
+            task_dir = _normalize_child_path(self.runner.tasks_dir, task_key) if task_key else _normalize_context_root(self.runner.tasks_dir)
+        else:
+            task_dir = _join_path(str(self.runner.tasks_dir), task_key)
         missing_fields = tuple(
             list(self.runner.missing_fields)
             + _missing_required_fields({"task_id": task_id})
@@ -372,6 +416,13 @@ class TaskContext:
     def attempt(self, attempt: int, *, strict: bool = True) -> AttemptContext:
         return AttemptContext.from_task(self, attempt=attempt, strict=strict)
 
+    @property
+    def task_dir_name(self) -> str:
+        return self.task_key
+
+    def attempt_context(self, attempt: int) -> AttemptContext:
+        return self.attempt(attempt, strict=False)
+
     def to_dict(self) -> dict[str, Any]:
         payload = self.runner.to_dict()
         payload.update(
@@ -381,7 +432,7 @@ class TaskContext:
                 "task_id": self.task_id,
                 "task_title": self.task_title,
                 "task_key": self.task_key,
-                "task_dir": self.task_dir,
+                "task_dir": self.task_dir.as_posix() if isinstance(self.task_dir, Path) else self.task_dir,
                 "task_branch": self.task_branch.to_dict() if self.task_branch is not None else {},
                 "missing_fields": list(self.missing_fields),
                 "valid": self.valid,
@@ -397,13 +448,16 @@ class AttemptContext:
     task: TaskContext
     attempt: int
     attempt_dir_name: str = field(init=False)
-    attempt_dir: str = field(init=False)
+    attempt_dir: Any = field(init=False)
     missing_fields: tuple[str, ...] = field(init=False)
     valid: bool = field(init=False)
 
     def __post_init__(self) -> None:
         attempt_dir_name = f"attempt_{int(self.attempt):02d}"
-        attempt_dir = _join_path(self.task.task_dir, attempt_dir_name)
+        if getattr(self.task.runner, "_path_mode", False):
+            attempt_dir = _normalize_child_path(self.task.task_dir, attempt_dir_name)
+        else:
+            attempt_dir = _join_path(str(self.task.task_dir), attempt_dir_name)
         object.__setattr__(self, "attempt_dir_name", attempt_dir_name)
         object.__setattr__(self, "attempt_dir", attempt_dir)
         object.__setattr__(self, "missing_fields", self.task.missing_fields)
@@ -422,13 +476,56 @@ class AttemptContext:
             _raise_for_missing_fields("AttemptContext", list(context.missing_fields))
         return context
 
+    @property
+    def run_dir(self) -> Path:
+        return _normalize_context_root(self.task.runner.run_dir)
+
+    @property
+    def task_dir(self) -> Path:
+        return _normalize_context_root(self.task.task_dir)
+
+    def artifact_path(self, filename: str) -> Path:
+        return _normalize_child_path(self.attempt_dir, _normalize_leaf_name(filename))
+
+    @property
+    def build_log_path(self) -> Path:
+        return self.artifact_path("build.txt")
+
+    @property
+    def test_log_path(self) -> Path:
+        return self.artifact_path("test.txt")
+
+    @property
+    def fast_web_worktree_regression_path(self) -> Path:
+        return self.artifact_path("fast_web_worktree_regression.json")
+
+    @property
+    def validation_json_path(self) -> Path:
+        return self.artifact_path("validation.json")
+
+    @property
+    def validation_txt_path(self) -> Path:
+        return self.artifact_path("validation.txt")
+
+    @property
+    def dev_output_path(self) -> Path:
+        return self.artifact_path("dev_output.txt")
+
+    @property
+    def notes_path(self) -> Path:
+        return self.artifact_path("NOTES.md")
+
+    @property
+    def dependency_required_path(self) -> Path:
+        return self.artifact_path("DEPENDENCY_REQUIRED.md")
+
     def to_dict(self) -> dict[str, Any]:
         payload = self.task.to_dict()
         payload.update(
             {
                 "attempt": self.attempt,
                 "attempt_dir_name": self.attempt_dir_name,
-                "attempt_dir": self.attempt_dir,
+                "attempt_dir": self.attempt_dir.as_posix() if isinstance(self.attempt_dir, Path) else self.attempt_dir,
                 "missing_fields": list(self.missing_fields),
                 "valid": self.valid,
             }
