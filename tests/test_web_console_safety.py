@@ -2452,20 +2452,23 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual([], backups)
 
     def test_config_save_creates_backup_and_updates_file(self) -> None:
+        from agent_runner.utils import atomic_write_json as real_atomic_write_json
+
         _write_config(self.config_path, self.repo, iterations=2, prompts_dir="prompts/agentcli")
         client, app = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
 
         original = self.config_path.read_text(encoding="utf-8")
-        response = client.post(
-            "/api/config/save",
-            json={
-                "changes": [
-                    {"path": "iterations", "value": 4},
-                    {"path": "prompts_dir", "value": "prompts/agentcli-updated"},
-                    {"path": "telegram.runner_mode", "value": "subprocess"},
-                ]
-            },
-        )
+        with patch("agent_runner.web_config.atomic_write_json", wraps=real_atomic_write_json) as atomic_write:
+            response = client.post(
+                "/api/config/save",
+                json={
+                    "changes": [
+                        {"path": "iterations", "value": 4},
+                        {"path": "prompts_dir", "value": "prompts/agentcli-updated"},
+                        {"path": "telegram.runner_mode", "value": "subprocess"},
+                    ]
+                },
+            )
         self.assertEqual(200, response.status_code)
         payload = response.json()
         self.assertTrue(payload["ok"])
@@ -2478,6 +2481,10 @@ class WebConsoleSafetyTests(unittest.TestCase):
         backup_path = Path(payload["backup_path"])
         self.assertTrue(backup_path.exists())
         self.assertEqual(original, backup_path.read_text(encoding="utf-8"))
+        self.assertIn(
+            self.config_path.resolve(),
+            [Path(call.args[0]).resolve() for call in atomic_write.call_args_list],
+        )
 
         saved = json.loads(self.config_path.read_text(encoding="utf-8"))
         self.assertEqual(4, saved["iterations"])
@@ -2487,6 +2494,37 @@ class WebConsoleSafetyTests(unittest.TestCase):
         controller = app.state.runner_controller
         self.assertEqual("subprocess", controller.runner_mode)
         self.assertEqual("subprocess", controller.base_args.telegram["runner_mode"])
+
+    def test_config_save_normalizes_string_and_array_list_payloads_consistently(self) -> None:
+        def _save_and_read(changes: list[dict[str, object]]) -> dict[str, object]:
+            _write_config(
+                self.config_path,
+                self.repo,
+                telegram={"allowed_chat_ids": [], "notify_events": []},
+            )
+            client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+            response = client.post("/api/config/save", json={"changes": changes})
+            self.assertEqual(200, response.status_code)
+            self.assertTrue(response.json()["ok"])
+            return json.loads(self.config_path.read_text(encoding="utf-8"))
+
+        saved_from_string = _save_and_read(
+            [
+                {"path": "telegram.allowed_chat_ids", "value": "101, 202"},
+                {"path": "telegram.notify_events", "value": "run_start, task_done"},
+            ]
+        )
+        saved_from_array = _save_and_read(
+            [
+                {"path": "telegram.allowed_chat_ids", "value": ["101", 202]},
+                {"path": "telegram.notify_events", "value": ["run_start", "task_done"]},
+            ]
+        )
+
+        self.assertEqual([101, 202], saved_from_string["telegram"]["allowed_chat_ids"])
+        self.assertEqual(saved_from_string["telegram"]["allowed_chat_ids"], saved_from_array["telegram"]["allowed_chat_ids"])
+        self.assertEqual(["run_start", "task_done"], saved_from_string["telegram"]["notify_events"])
+        self.assertEqual(saved_from_string["telegram"]["notify_events"], saved_from_array["telegram"]["notify_events"])
 
     def test_config_save_preserves_plugin_roles_when_unrelated_fields_change(self) -> None:
         _write_config(
