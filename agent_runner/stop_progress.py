@@ -4,11 +4,15 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
+from .state import count_state_task_ids, load_backlog_task_ids, load_state
+from .utils import STOP_REASON_STOP_FILE, detect_stop_reason, now_iso
 
 STOP_PROGRESS_FILE = "STOP_PROGRESS.json"
 STOP_PROGRESS_LOG_FILE = "stop_progress.log"
+STOP_SNAPSHOT_FILE = "STOP_SNAPSHOT.json"
+STOP_SNAPSHOT_LOG_FILE = "STOP_SNAPSHOT.log"
 
 STOP_PROGRESS_PHASE_ALIASES = {
     "requested": "request",
@@ -278,6 +282,30 @@ def file_write_signal(path: Path, *, kind: str | None = None) -> dict[str, Any] 
     return payload
 
 
+def build_stop_file_paths(
+    run_dirs: Sequence[Path] | Path,
+    stop_file_name: str,
+    *,
+    runner_process_log_path: Path | None = None,
+) -> dict[str, str]:
+    if isinstance(run_dirs, Path):
+        values = [run_dirs]
+    else:
+        values = [value for value in run_dirs if isinstance(value, Path)]
+    paths: dict[str, str] = {}
+    for idx, run_dir in enumerate(values):
+        suffix = "" if idx == 0 else f"_{idx + 1}"
+        paths[f"stop_file_path{suffix}"] = (run_dir / stop_file_name).as_posix()
+        paths[f"stop_progress_path{suffix}"] = (run_dir / STOP_PROGRESS_FILE).as_posix()
+        paths[f"stop_progress_log_path{suffix}"] = (run_dir / STOP_PROGRESS_LOG_FILE).as_posix()
+    if runner_process_log_path is not None:
+        try:
+            paths["runner_process_log_path"] = runner_process_log_path.as_posix()
+        except Exception:
+            paths["runner_process_log_path"] = str(runner_process_log_path).replace("\\", "/")
+    return paths
+
+
 def _stop_progress_phase_entry(raw: dict[str, Any], *, fallback_phase: object | None = None) -> dict[str, Any]:
     entry = {key: value for key, value in raw.items() if key not in {"history", "phase_history", "phaseHistory", "current_phase", "currentPhase"}}
     phase = canonical_stop_phase(entry.get("phase") or fallback_phase)
@@ -311,6 +339,8 @@ def _stop_progress_history(history: object, current_phase: dict[str, Any]) -> li
             if not isinstance(raw, dict):
                 continue
             entry = _stop_progress_phase_entry(raw)
+            if entry["phase"] == "unknown" and raw.get("phase") in (None, ""):
+                continue
             items.append(
                 {
                     "phase": entry["phase"],
@@ -526,6 +556,40 @@ def read_stop_progress(run_dir: Path | None) -> dict[str, Any]:
         return {}
 
 
+def record_stop_progress(
+    run_dir: Path,
+    *,
+    phase: str,
+    message: str = "",
+    requested_at_monotonic: float | None = None,
+    context_fields: dict[str, Any] | None = None,
+    **fields: Any,
+) -> dict[str, Any]:
+    payload_fields = dict(context_fields or {})
+    for key, value in fields.items():
+        if value is not None:
+            payload_fields[key] = value
+    runner_alive_raw = payload_fields.get("runner_alive")
+    if runner_alive_raw in (None, ""):
+        runner_alive_raw = payload_fields.get("runnerAlive")
+    running_raw = payload_fields.get("running")
+    if running_raw in (None, "") and runner_alive_raw not in (None, ""):
+        running_raw = runner_alive_raw
+    if runner_alive_raw not in (None, ""):
+        runner_alive = bool(runner_alive_raw)
+        payload_fields["runner_alive"] = runner_alive
+        payload_fields["runnerAlive"] = runner_alive
+    if running_raw not in (None, ""):
+        payload_fields["running"] = bool(running_raw)
+    return write_stop_progress(
+        run_dir,
+        phase=phase,
+        message=message,
+        requested_at_monotonic=requested_at_monotonic,
+        **payload_fields,
+    )
+
+
 def clear_stop_progress(run_dir: Path | None) -> None:
     if run_dir is None:
         return
@@ -608,6 +672,91 @@ def write_stop_progress(
     except Exception:
         pass
 
+    return payload
+
+
+def read_stop_snapshot(run_dir: Path | None) -> dict[str, Any]:
+    if run_dir is None:
+        return {}
+    path = run_dir / STOP_SNAPSHOT_FILE
+    try:
+        if not path.exists() or not path.is_file():
+            return {}
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace").strip() or "{}")
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _stop_snapshot_state_counts(run_dir: Path) -> dict[str, int] | None:
+    try:
+        state_path = run_dir / "STATE.json"
+        if not state_path.exists():
+            return None
+        state_obj = load_state(state_path)
+        backlog_task_ids = load_backlog_task_ids(run_dir / "BACKLOG.json")
+        state_counts = count_state_task_ids(state_obj, backlog_task_ids)
+        return {
+            "done": state_counts["done"],
+            "failed": state_counts["failed"],
+            "warnings": state_counts["warnings"],
+        }
+    except Exception:
+        return None
+
+
+def write_stop_snapshot(
+    run_dir: Path,
+    *,
+    stage: str,
+    cycle: int,
+    step: int = -1,
+    task_id: str = "",
+    attempt: int | None = None,
+    message: str = "",
+    stop_paths: Sequence[Path] | None = None,
+) -> dict[str, Any]:
+    paths = list(stop_paths or [run_dir / "STOP"])
+    try:
+        reason = detect_stop_reason(paths) or STOP_REASON_STOP_FILE
+    except Exception:
+        reason = STOP_REASON_STOP_FILE
+
+    payload: dict[str, Any] = {
+        "ts": now_iso(),
+        "reason": reason,
+        "stage": str(stage or ""),
+        "cycle": int(cycle),
+        "step": int(step),
+        "task_id": str(task_id or ""),
+        "message": str(message or ""),
+        "run_dir": str(run_dir),
+    }
+    if attempt is not None:
+        payload["attempt"] = int(attempt)
+    try:
+        progress_path = run_dir / "progress.txt"
+        if progress_path.exists():
+            payload["progress"] = progress_path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        pass
+    state_counts = _stop_snapshot_state_counts(run_dir)
+    if state_counts is not None:
+        payload["state_counts"] = state_counts
+
+    path = run_dir / STOP_SNAPSHOT_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+        tmp.replace(path)
+    except Exception:
+        pass
+    try:
+        with (run_dir / STOP_SNAPSHOT_LOG_FILE).open("a", encoding="utf-8", errors="replace") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
     return payload
 
 

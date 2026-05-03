@@ -272,7 +272,7 @@
 - [x] `cycle.py` uses runner/task/attempt context objects for validation artifact paths without changing run artifact filenames.
 - [x] Validation artifact writing is shared by Codex and Claude backends through a neutral helper module.
 - [x] Failed-task result recording is shared by Codex and Claude backends through a neutral helper module.
-- [ ] Stop progress recording is shared by shell, Codex backend, Claude backend, and web runner controls.
+- [x] Stop progress recording is shared by shell, Codex backend, Claude backend, and web runner controls.
 - [ ] Task branch preserve, abandon, rollback, and cleanup dispatch are shared by Codex and Claude backends.
 - [ ] Codex and Claude PM output postprocessing use the same GOALS gating, task splitting, and `goal_trace` preservation logic.
 - [ ] Backend adapter interfaces isolate model invocation, message streaming, model option construction, and quota probing from orchestration code.

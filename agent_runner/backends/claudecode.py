@@ -109,6 +109,7 @@ from ..pipeline.shared_runtime import (
 )
 from ..state import count_state_task_ids
 from ..run_dir import make_run_dir, find_latest_run_dir
+from ..stop_progress import write_stop_snapshot
 from ..schemas import PMOutputV2, pm_output_json_schema
 from ..state import (
     load_backlog_json,
@@ -912,6 +913,39 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     stop_path = run_dir / str(getattr(args, "stop_file", "STOP"))
     cycle_summary_path = run_dir / "cycle_summary.log"
     last_run_summary_path = run_dir / "last_run_summary.json"
+
+    def record_stop_checkpoint(
+        *,
+        stage: str,
+        cycle: int,
+        step: int = -1,
+        task_id: str = "",
+        attempt: int | None = None,
+        message: str = "",
+    ) -> dict[str, Any]:
+        payload = write_stop_snapshot(
+            run_dir,
+            stage=stage,
+            cycle=cycle,
+            step=step,
+            task_id=task_id,
+            attempt=attempt,
+            message=message,
+            stop_paths=[stop_path],
+        )
+        try:
+            metrics.event(
+                "stop_checkpoint",
+                cycle=cycle,
+                step=step,
+                task_id=task_id,
+                attempt=attempt if attempt is not None else -1,
+                stage=stage,
+                reason=str(payload.get("reason") or STOP_REASON_STOP_FILE),
+            )
+        except Exception:
+            pass
+        return payload
 
     # Global PM cache
     from ..config import AGENT_WORK_DIR
@@ -1981,9 +2015,64 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     eprint(f"[STOP] Rollback {fail_reason}: {detail}")
                     return False, fail_reason
 
+            task_stop_recorded = False
+
+            def _record_task_stop(stage: str, attempt_num: int | None = None) -> None:
+                nonlocal task_stop_recorded
+                if task_stop_recorded:
+                    return
+                task_stop_recorded = True
+                detail = "Stop requested; partial task artifacts and worktree state were preserved."
+                state.setdefault("warnings", []).append(
+                    {
+                        "task": next_task.id,
+                        "reason": STOP_REASON_STOP_FILE,
+                        "detail": detail,
+                        "cycle": cycle_idx,
+                        "step": step,
+                        "attempt": attempt_num,
+                    }
+                )
+                save_state(state_path, state)
+                task_results.append(
+                    {
+                        "id": next_task.id,
+                        "title": next_task.title,
+                        "status": "stopped",
+                        "reason": STOP_REASON_STOP_FILE,
+                        "duration": time.time() - task_outer_t0,
+                        "attempt": attempt_num if attempt_num is not None else 0,
+                        "max_attempts": max_attempts,
+                    }
+                )
+                metrics.event(
+                    "task_stop_requested",
+                    cycle=cycle_idx,
+                    step=step,
+                    task_id=next_task.id,
+                    attempt=attempt_num if attempt_num is not None else -1,
+                    stage=stage,
+                    reason=STOP_REASON_STOP_FILE,
+                )
+                logger.stop_event(
+                    f"Stop requested during task {next_task.id}",
+                    task_id=next_task.id,
+                    attempt=attempt_num,
+                    stage=stage,
+                )
+                record_stop_checkpoint(
+                    stage=stage,
+                    cycle=cycle_idx,
+                    step=step,
+                    task_id=next_task.id,
+                    attempt=attempt_num,
+                    message=detail,
+                )
+
             for attempt in range(max_attempts):
                 if stop_path.exists():
-                    break
+                    _record_task_stop("dev_before_attempt", attempt)
+                    return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
 
                 if attempt > 0 and dev_auto_escalate:
                     if budget_exceeded("total_escalations", budget_state["total_escalations"], int(budgets_cfg.get("max_total_escalations_per_run") or 0)):
@@ -2086,6 +2175,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         ok, fail_reason = _isolate_or_stop("stop_requested")
                         if not ok:
                             return 1, fail_reason, 0, (len(done_set) > before_done)
+                    _record_task_stop("dev_attempt", attempt)
                     return 0, STOP_REASON_STOP_FILE, 0, (len(done_set) > before_done)
                 except Exception as ex:
                     dev_exc = ex
@@ -2107,6 +2197,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 (attempt_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
                 (run_dir / "dev_logs").mkdir(parents=True, exist_ok=True)
                 (run_dir / "dev_logs" / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}_a{attempt:02d}.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
+
+                if stop_path.exists():
+                    _record_task_stop("dev_attempt", attempt)
+                    return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
 
                 dev_quota_exhausted = dev_quota_exhausted or has_quota_text(dev_log)
                 if isinstance(dev_exc, BudgetExceeded):
@@ -2348,6 +2442,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     validation_records.append(build_validation)
                     ok = bool(build_validation.get("ok", False))
                     metrics.event("build_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
+                    if stop_path.exists():
+                        _record_task_stop("build_gate", attempt)
+                        return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
                     if ok and tb:
                         # Auto-commit on task branch as incremental checkpoint
                         try:
@@ -2465,6 +2562,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     validation_records.append(test_validation)
                     ok = bool(test_validation.get("ok", False))
                     metrics.event("test_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
+                    if stop_path.exists():
+                        _record_task_stop("test_gate", attempt)
+                        return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
                     if not ok:
                         test_detail = str(test_validation.get("failure_summary") or test_validation.get("summary") or "")
                         task_status = _task_failure_status("test_failed", validations=validation_records, detail=test_detail)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import threading
@@ -11,12 +12,18 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_runner.remote.controller import RunnerController, normalize_runner_start_options
+from agent_runner.shell import RunnerShell
 from agent_runner.stop_progress import (
     STOP_PROGRESS_FILE,
     STOP_PROGRESS_LOG_FILE,
+    STOP_SNAPSHOT_FILE,
+    STOP_SNAPSHOT_LOG_FILE,
+    read_stop_snapshot,
     read_stop_progress,
+    record_stop_progress,
     stop_progress_is_active,
     write_stop_progress,
+    write_stop_snapshot,
 )
 
 
@@ -113,6 +120,126 @@ class StopProgressTests(unittest.TestCase):
         self.assertEqual("C:/temp/session_321.json", read_progress["tracked_child_processes"][0]["session_file"])
         self.assertTrue((run_dir / STOP_PROGRESS_FILE).exists())
         self.assertTrue((run_dir / STOP_PROGRESS_LOG_FILE).exists())
+
+    def test_record_stop_progress_repairs_partial_existing_payload(self) -> None:
+        run_dir = _scratch_dir("stop_progress_partial")
+        (run_dir / STOP_PROGRESS_FILE).write_text(
+            json.dumps(
+                {
+                    "phase": "requested",
+                    "currentPhase": {"message": "Stop requested.", "updatedAt": "2026-05-04T00:00:00"},
+                    "history": [{"message": "Stop requested."}],
+                    "runnerAlive": "true",
+                    "stopFilePaths": {"stop_file_path": "C:\\temp\\STOP"},
+                    "timeoutGuidance": {"manualCleanupHints": "Close the runner", "canRetry": "yes"},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        record_stop_progress(
+            run_dir,
+            phase="waiting_runner",
+            message="Waiting for runner shutdown and final artifacts.",
+            requested_at_monotonic=max(0.0, time.monotonic() - 2.0),
+            context_fields={
+                "runner_alive": True,
+                "stop_file_paths": {
+                    "stop_file_path": "C:/temp/STOP",
+                    "stop_progress_path": "C:/temp/STOP_PROGRESS.json",
+                },
+                "timeout_guidance": {
+                    "summary": "Retry stop after checking the runner.",
+                    "can_retry": True,
+                    "manual_cleanup_hints": ["Close the runner"],
+                },
+            },
+        )
+
+        progress = read_stop_progress(run_dir)
+        self.assertEqual("runner_wait", progress["phase"])
+        self.assertEqual(["request", "runner_wait"], [entry["phase"] for entry in progress["history"]])
+        self.assertTrue(progress["runner_alive"])
+        self.assertEqual("C:/temp/STOP", progress["stop_file_paths"]["stop_file_path"])
+        self.assertTrue(progress["timeout_guidance"]["can_retry"])
+        self.assertEqual(["Close the runner"], progress["manual_cleanup_hints"])
+
+    def test_shell_stop_emits_shared_progress_payloads(self) -> None:
+        repo = _scratch_dir("shell_stop") / "repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        run_dir = repo / ".AgentCLI" / "agent_runs" / "run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        release = threading.Event()
+        shell = RunnerShell()
+        shell.set_repo(repo.as_posix())
+        shell.run_dir = run_dir
+        shell._runner_thread = threading.Thread(target=lambda: release.wait(5), daemon=True)
+        shell._runner_thread.start()
+
+        try:
+            with patch("agent_runner.shell.terminate_all_children") as terminate_children, patch("builtins.print"):
+                shell.stop(wait=False)
+        finally:
+            release.set()
+            if shell._runner_thread is not None:
+                shell._runner_thread.join(timeout=2)
+
+        progress = read_stop_progress(run_dir)
+        self.assertEqual("child_termination", progress["phase"])
+        self.assertEqual(
+            ["request", "stop_file_write", "child_termination"],
+            [entry["phase"] for entry in progress["history"]],
+        )
+        self.assertTrue((run_dir / "STOP").exists())
+        self.assertEqual((run_dir / STOP_PROGRESS_FILE).as_posix(), progress["stop_file_paths"]["stop_progress_path"])
+        terminate_children.assert_called()
+
+    def test_write_stop_snapshot_preserves_backend_stop_schema(self) -> None:
+        run_dir = _scratch_dir("stop_snapshot")
+        (run_dir / "STOP").write_text("stop_file\n", encoding="utf-8")
+        (run_dir / "progress.txt").write_text("done=1/3 skipped=0 last=T34\n", encoding="utf-8")
+        (run_dir / "BACKLOG.json").write_text(
+            json.dumps(
+                [
+                    {"id": "T34", "title": "Share stop progress"},
+                    {"id": "T35", "title": "Next task"},
+                ],
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (run_dir / "STATE.json").write_text(
+            json.dumps({"done": ["T34"], "failed": [{"task": "T35"}], "warnings": [{"task": "T35"}]}, ensure_ascii=False, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        snapshot = write_stop_snapshot(
+            run_dir,
+            stage="build_gate",
+            cycle=3,
+            step=1,
+            task_id="T34",
+            attempt=2,
+            message="Stop requested; partial task artifacts and worktree state were preserved.",
+        )
+
+        self.assertEqual("stop_file", snapshot["reason"])
+        self.assertEqual("build_gate", snapshot["stage"])
+        self.assertEqual(3, snapshot["cycle"])
+        self.assertEqual(1, snapshot["step"])
+        self.assertEqual("T34", snapshot["task_id"])
+        self.assertEqual(2, snapshot["attempt"])
+        self.assertEqual("done=1/3 skipped=0 last=T34", snapshot["progress"])
+        self.assertEqual({"done": 1, "failed": 1, "warnings": 1}, snapshot["state_counts"])
+        self.assertTrue((run_dir / STOP_SNAPSHOT_FILE).exists())
+        self.assertTrue((run_dir / STOP_SNAPSHOT_LOG_FILE).exists())
+        self.assertEqual(snapshot, read_stop_snapshot(run_dir))
 
     def test_controller_stop_emits_progress_payloads(self) -> None:
         repo = _scratch_dir("controller_stop") / "repo"
