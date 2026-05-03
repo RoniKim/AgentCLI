@@ -2815,6 +2815,22 @@ def _run_log_tail_session_harness(steps, fetch_responses=None):
 
 
 class WebConsoleRedactionHelperTests(unittest.TestCase):
+    def test_web_redaction_helpers_are_reexported_from_web(self) -> None:
+        import agent_runner.web as web_module
+        import agent_runner.web_redaction as web_redaction
+
+        for name in (
+            "_redact_config",
+            "_web_redaction_active",
+            "_web_redaction_meta",
+            "_web_apply_redaction",
+            "_redact_web_log_payload",
+            "_redact_web_runner_control",
+            "_redact_web_config_contract",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(web_module, name), getattr(web_redaction, name))
+
     def test_redact_web_log_payload_redacts_files_metadata(self) -> None:
         from agent_runner.web import _redact_web_log_payload
 
