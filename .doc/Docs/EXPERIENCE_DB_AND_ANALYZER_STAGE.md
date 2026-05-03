@@ -282,6 +282,14 @@ Rendered prompt shape:
 
 This block should be appended by the same marker-based essential-context mechanism used for GOALS, done tasks, failed tasks, and output contracts, so custom PM prompts still receive it without requiring a `{pm_experience_summary}` template variable.
 
+Current repo contract for the deterministic Analyzer path:
+
+- Run-local output writes `ANALYZER_SUMMARY.json` plus `EXPERIENCE_UPDATES.jsonl`.
+- Durable lesson storage writes repo-local `.AgentCLI/experience/experience.db`.
+- Each emitted lesson record must include `kind`, `normalized_trigger`, `goal_refs`, `file_globs`, `gate`, `task_status`, evidence pointers, confidence, created/updated timestamps, and `last_applied` metadata.
+- Dedupe uses `kind + normalized_trigger`; equivalent triggers should normalize to the same stable key.
+- Store only sanitized lesson text plus artifact pointers. Never persist raw logs, raw diffs, raw prompts, or backend transcripts.
+
 ## 10B. Lesson Relevance Ranking
 
 Lesson selection is separate from task sampling. The Analyzer may store many lessons, but PM injection uses a relevance score.
