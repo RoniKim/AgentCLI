@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import asyncio
@@ -185,6 +185,7 @@ from .skills import (
     summarize_skills_index_capped,
 )
 from .skills.match import suggest_skills
+from .validation_artifacts import write_task_validation_artifacts
 from .shared import (
     load_json_if_exists as _load_json_if_exists,
     inline_skills_for as _inline_skills_for,
@@ -1252,7 +1253,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             goal_path=str(gate.get("goal_path") or ""),
                         )
                     _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
-                    _pre_pm_tasks = list(existing_tasks)  # recycled ID 비교용 스냅샷
+                    _pre_pm_tasks = list(existing_tasks)  # recycled ID 鍮꾧탳???ㅻ깄??
 
                     merged_tasks = merge_pm_tasks_with_existing_pending(
                         pm_tasks=accepted_tasks,
@@ -1290,7 +1291,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             except Exception as _qa_merge_ex:
                                 eprint(f"[WARN] QA followup merge during PM bootstrap failed: {_qa_merge_ex}")
                             write_backlog_files(run_dir, merged_tasks)
-                            # Recycled ID 감지: PM이 기존 done 태스크 ID를 새 내용으로 재사용했는지 확인
+                            # Recycled ID 媛먯?: PM??湲곗〈 done ?쒖뒪??ID瑜????댁슜?쇰줈 ?ъ궗?⑺뻽?붿? ?뺤씤
                             try:
                                 _new_tasks = load_tasks()
                                 _st = load_state(run_dir / "STATE.json")
@@ -1445,7 +1446,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         merged_tasks = _validate_skill_ids(merged_tasks)
                         if merged_tasks:
                             write_backlog_files(run_dir, merged_tasks)
-                            # Recycled ID 감지
+                            # Recycled ID 媛먯?
                             try:
                                 _new_tasks = load_tasks()
                                 _st = load_state(run_dir / "STATE.json")
@@ -1681,100 +1682,26 @@ async def main_async(args: argparse.Namespace) -> int:
                 detail: str = "",
                 task_status: str = "",
             ) -> Path:
-                """Persist a structured per-attempt validation artifact."""
-                artifact_path = attempt_context.validation_json_path
-                validation_status = str(status or "").strip() or "unknown"
-                validation_reason = str(reason or "").strip()
-                validation_detail = str(detail or "").strip()
-                outcome_status = str(task_status or "").strip()
-                if not outcome_status:
-                    outcome_status = (
-                        TASK_STATUS_COMPLETED
-                        if validation_status in {"passed", TASK_STATUS_COMPLETED}
-                        else classify_task_failure(
-                            validation_reason,
-                            validations=validations,
-                            detail=validation_detail,
-                        )
-                    )
-                fast_validation = next((record for record in validations if str(record.get("gate") or "") == "fast_web_worktree_regression"), {})
-                selected_fast_suite = list(fast_validation.get("suite_files") or fast_validation.get("suiteFiles") or [])
-                trigger_files = list(fast_validation.get("trigger_files") or fast_validation.get("triggerFiles") or [])
-                compile_validation = next((record for record in validations if str(record.get("kind") or "") == "compile"), {})
-                test_validation = next((record for record in validations if str(record.get("kind") or "") == "test"), {})
-                payload = {
-                    "schema_version": 1,
-                    "artifact_path": artifact_path.as_posix(),
-                    "task_id": task.id,
-                    "task_title": task.title,
-                    "task_files": list(task.files or []),
-                    "goal_ref": task_goal_ref,
-                    "goal_text": task_goal_text,
-                    "goal_trace": task_goal_trace,
-                    "cycle": cycle_idx,
-                    "step": step,
-                    "attempt": attempt,
-                    "status": validation_status,
-                    "task_status": outcome_status,
-                    "taskStatus": outcome_status,
-                    "outcome_status": outcome_status,
-                    "outcomeStatus": outcome_status,
-                    "review_required": is_manual_review_required(outcome_status),
-                    "reviewRequired": is_manual_review_required(outcome_status),
-                    "auto_merge_allowed": outcome_status == TASK_STATUS_COMPLETED,
-                    "autoMergeAllowed": outcome_status == TASK_STATUS_COMPLETED,
-                    "reason": validation_reason,
-                    "detail": validation_detail,
-                    "validation_status": validation_status,
-                    "validationStatus": validation_status,
-                    "validation_reason": validation_reason,
-                    "validationReason": validation_reason,
-                    "validation_detail": validation_detail,
-                    "validationDetail": validation_detail,
-                    "compile_validation": compile_validation,
-                    "compileValidation": compile_validation,
-                    "test_validation": test_validation,
-                    "testValidation": test_validation,
-                    "fast_regression_validation": fast_validation,
-                    "fastRegressionValidation": fast_validation,
-                    "selected_fast_regression_suite": selected_fast_suite,
-                    "selectedFastRegressionSuite": selected_fast_suite,
-                    "trigger_files": trigger_files,
-                    "triggerFiles": trigger_files,
-                    "validations": validations,
-                    "failure_summary": validation_detail if validation_status != "passed" else "",
-                    "failureSummary": validation_detail if validation_status != "passed" else "",
-                }
-                try:
-                    safe_write_text(artifact_path, json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n")
-                except Exception:
-                    pass
-
-                summary_lines = [
-                    f"validation_status={validation_status}",
-                    f"task_status={outcome_status}",
-                    f"reason={validation_reason or 'ok'}",
-                ]
-                if selected_fast_suite:
-                    summary_lines.append("fast_suite=" + ", ".join(selected_fast_suite))
-                if trigger_files:
-                    summary_lines.append("trigger_files=" + ", ".join(trigger_files))
-                for record in validations:
-                    record_name = str(record.get("name") or record.get("gate") or record.get("kind") or "validation")
-                    record_rc = record.get("rc")
-                    record_artifact = str(record.get("artifact_path") or record.get("artifactPath") or record.get("log_path") or record.get("logPath") or "")
-                    summary_lines.append(f"{record_name}: rc={record_rc} artifact={record_artifact}")
-                    record_failure = str(record.get("failure_summary") or record.get("failureSummary") or "").strip()
-                    if record_failure and record_failure != validation_detail:
-                        summary_lines.append(f"{record_name}_failure={record_failure}")
-                if validation_detail:
-                    summary_lines.append(f"failure_summary={validation_detail}")
-                try:
-                    safe_write_text(attempt_context.validation_txt_path, "\n".join(summary_lines).rstrip() + "\n")
-                except Exception:
-                    pass
+                records = [record for record in validations if isinstance(record, dict)]
+                artifact_path = write_task_validation_artifacts(
+                    attempt_dir=attempt_context.attempt_dir,
+                    task_id=task.id,
+                    task_title=task.title,
+                    task_files=task.files,
+                    cycle=cycle_idx,
+                    step=step,
+                    attempt=attempt,
+                    validations=records,
+                    status=status,
+                    reason=reason,
+                    detail=detail,
+                    task_status=task_status,
+                    goal_ref=task_goal_ref,
+                    goal_text=task_goal_text,
+                    goal_trace=task_goal_trace,
+                )
                 validation_artifacts: list[str] = [artifact_path.as_posix()]
-                for record in validations:
+                for record in records:
                     for key in ("artifact_path", "artifactPath", "log_path", "logPath"):
                         record_artifact = str(record.get(key) or "").strip()
                         if record_artifact and record_artifact not in validation_artifacts:
@@ -1786,12 +1713,12 @@ async def main_async(args: argparse.Namespace) -> int:
                     task_id=task.id,
                     task_title=task.title,
                     task_ids=[task.id],
-                    validation_status=validation_status,
-                    validation_reason=validation_reason,
-                    validation_detail=validation_detail,
+                    validation_status=str(status or "").strip() or "unknown",
+                    validation_reason=str(reason or "").strip(),
+                    validation_detail=str(detail or "").strip(),
                     validation_artifact_path=artifact_path.as_posix(),
                     validation_artifacts=validation_artifacts,
-                    validation_records=validations,
+                    validation_records=records,
                 )
                 return artifact_path
 
@@ -4012,13 +3939,13 @@ async def main_async(args: argparse.Namespace) -> int:
                         wait_sec = seconds_until_unix_reset(q_reset_unix)
                         if wait_sec <= 0:
                             wait_sec = 30  # minimum wait even if reset time already passed
-                        # Failover 판정: enabled + reason이 failover_on에 포함 + 대체 백엔드 존재
+                        # Failover ?먯젙: enabled + reason??failover_on???ы븿 + ?泥?諛깆뿏??議댁옱
                         _fo_enabled = bool(getattr(args, "failover_enabled", False))
                         _fo_on = set(str(x).strip().lower() for x in (getattr(args, "failover_on", []) or []))
                         _fo_backends = [str(b).strip().lower() for b in (getattr(args, "failover_backends", []) or []) if str(b).strip().lower() != "codex"]
                         _can_failover = _fo_enabled and STOP_REASON_QUOTA_UTILIZATION in _fo_on and len(_fo_backends) > 0
                         if _can_failover:
-                            # Failover 가능 → 즉시 종료하여 runner_entry가 다른 백엔드로 전환
+                            # Failover 媛????利됱떆 醫낅즺?섏뿬 runner_entry媛 ?ㅻⅨ 諛깆뿏?쒕줈 ?꾪솚
                             append_cycle_summary(
                                 f"{now_iso()} cycle={cycle_idx} stop=quota_utilization_5h_failover "
                                 f"5h={_q5h}% 7d={_q7d}% limit={q_limit or 'unknown'}"

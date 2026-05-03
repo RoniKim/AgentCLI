@@ -270,7 +270,7 @@
 - [x] Web history, metrics/progress, worktree, stage, and snapshot payload builders are extracted behind `agent_runner.web` facade functions.
 - [x] Runner context objects define source repo, execution worktree, run directory, task directory, attempt directory, and task branch state.
 - [x] `cycle.py` uses runner/task/attempt context objects for validation artifact paths without changing run artifact filenames.
-- [ ] Validation artifact writing is shared by Codex and Claude backends through a neutral helper module.
+- [x] Validation artifact writing is shared by Codex and Claude backends through a neutral helper module.
 - [ ] Failed-task result recording is shared by Codex and Claude backends through a neutral helper module.
 - [ ] Stop progress recording is shared by shell, Codex backend, Claude backend, and web runner controls.
 - [ ] Task branch preserve, abandon, rollback, and cleanup dispatch are shared by Codex and Claude backends.
