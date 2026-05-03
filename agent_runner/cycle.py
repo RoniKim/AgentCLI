@@ -12,6 +12,7 @@ from typing import Optional, Any
 
 from .analysis_cache import merge_dev_hints_to_global_changelog
 from .docs import resolve_docs_dir, generate_docs_digest
+from .experience import record_completed_task_experience
 from .gates import (
     extract_build_warnings,
     classify_task_validation_status,
@@ -3150,12 +3151,38 @@ async def main_async(args: argparse.Namespace) -> int:
                         task_status=TASK_STATUS_COMPLETED,
                     )
 
+                task_validation_artifacts: list[str] = []
+                task_validation_notes: list[str] = []
+                if task_completed:
+                    task_validation_artifacts.append(str(attempt_dir / "validation.json"))
+                    for record in validation_records:
+                        if not isinstance(record, dict):
+                            continue
+                        artifact_path = str(
+                            record.get("artifact_path")
+                            or record.get("log_path")
+                            or record.get("path")
+                            or ""
+                        ).strip()
+                        if artifact_path and artifact_path not in task_validation_artifacts:
+                            task_validation_artifacts.append(artifact_path)
+                        note = str(record.get("summary") or record.get("detail") or "").strip()
+                        if note and note not in task_validation_notes:
+                            task_validation_notes.append(note)
+
                 if stop_path.exists():
                     _record_task_stop("dev_after_attempt", locals().get("attempt") if "attempt" in locals() else None)
                     return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
 
                 # Merge or preserve task branch
                 preserved_task_branch_has_new_commits = False
+                packet_result: dict[str, object] = {}
+                completed_task_branch_ref = ""
+                completed_task_head_ref = ""
+                completed_task_base_ref = ""
+                completed_task_changed_files = list(next_task.files or [])
+                completed_task_validation_artifacts = list(task_validation_artifacts)
+                completed_task_pr_packet_ids: list[str] = []
                 if task_completed and tb:
                     if worktree_dir is not None:
                         try:
@@ -3175,12 +3202,16 @@ async def main_async(args: argparse.Namespace) -> int:
                             )
                         else:
                             branch_head = git_rev_parse_ref(repo, tb.branch_name) or ""
+                            completed_task_branch_ref = tb.branch_name
+                            completed_task_head_ref = branch_head
+                            completed_task_base_ref = tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit
                             preserved_task_branch_has_new_commits = ref_has_new_commits(
                                 repo,
                                 tb.branch_name,
                                 task_head_before,
                             )
                             source_head_after = git_head(repo)
+                            completed_task_changed_files = git_changed_files(source_repo, tb.base_commit, branch_head)
                             try:
                                 packet_result = queue_review_packet(
                                     source_repo,
@@ -3194,29 +3225,10 @@ async def main_async(args: argparse.Namespace) -> int:
                                     source_head_after=source_head_after,
                                     worktree_dir=worktree_dir.as_posix(),
                                     validation_status=task_validation_status,
-                                    validation_artifacts=[
-                                        str(
-                                            record.get("artifact_path")
-                                            or record.get("log_path")
-                                            or record.get("path")
-                                            or ""
-                                        )
-                                        for record in validation_records
-                                        if isinstance(record, dict)
-                                        and (
-                                            record.get("artifact_path")
-                                            or record.get("log_path")
-                                            or record.get("path")
-                                        )
-                                    ],
-                                    qa_notes=[
-                                        str(record.get("summary") or record.get("detail") or "").strip()
-                                        for record in validation_records
-                                        if isinstance(record, dict)
-                                        and str(record.get("summary") or record.get("detail") or "").strip()
-                                    ],
+                                    validation_artifacts=task_validation_artifacts,
+                                    qa_notes=task_validation_notes,
                                     goal_trace=tb.goal_trace,
-                                    changed_files=git_changed_files(source_repo, tb.base_commit, branch_head),
+                                    changed_files=completed_task_changed_files,
                                     merge_preflight={
                                         "base_ref": tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit,
                                         "head_ref": branch_head,
@@ -3250,6 +3262,22 @@ async def main_async(args: argparse.Namespace) -> int:
                                     goal_text=task_goal_text,
                                 )
                             else:
+                                packet_payload = packet_result.get("packet")
+                                if isinstance(packet_payload, dict):
+                                    completed_task_branch_ref = str(packet_payload.get("branch") or completed_task_branch_ref).strip()
+                                    completed_task_head_ref = str(packet_payload.get("head_ref") or completed_task_head_ref).strip()
+                                    completed_task_base_ref = str(packet_payload.get("base_ref") or completed_task_base_ref).strip()
+                                    packet_changed_files = packet_payload.get("changed_files")
+                                    if isinstance(packet_changed_files, list):
+                                        completed_task_changed_files = [str(item).strip() for item in packet_changed_files if str(item).strip()]
+                                    packet_validation_artifacts = packet_payload.get("validation_artifacts")
+                                    if isinstance(packet_validation_artifacts, list):
+                                        completed_task_validation_artifacts = [
+                                            str(item).strip() for item in packet_validation_artifacts if str(item).strip()
+                                        ]
+                                packet_id_text = str(packet_result.get("packet_id") or "").strip()
+                                if packet_id_text:
+                                    completed_task_pr_packet_ids = [packet_id_text]
                                 metrics.event(
                                     "task_review_packet_queued",
                                     cycle=cycle_idx,
@@ -3271,8 +3299,12 @@ async def main_async(args: argparse.Namespace) -> int:
                                     )
                         tb = None
                     else:
+                        completed_task_branch_ref = tb.branch_name
+                        completed_task_base_ref = tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit
+                        completed_task_head_ref = git_head(repo)
                         merge_ok = merge_task_branch(repo, tb)
                         if merge_ok:
+                            completed_task_changed_files = git_changed_files(repo, task_head_before, git_head(repo))
                             metrics.event(
                                 "task_branch_merged",
                                 cycle=cycle_idx,
@@ -3378,6 +3410,23 @@ async def main_async(args: argparse.Namespace) -> int:
                 save_state(state_path, state)
                 mark_backlog_done(backlog_md, next_task.id)
                 _record_history(next_task.id, next_task.title, "done", files=next_task.files, cycle=cycle_idx, task_status=TASK_STATUS_COMPLETED)
+                record_completed_task_experience(
+                    repo,
+                    run_id=run_dir.name,
+                    task_id=next_task.id,
+                    title=next_task.title,
+                    status="done",
+                    task_status=TASK_STATUS_COMPLETED,
+                    validation_status=task_validation_status,
+                    goal_trace=task_goal_trace,
+                    changed_files=completed_task_changed_files,
+                    branch_ref=completed_task_branch_ref,
+                    head_ref=completed_task_head_ref,
+                    base_ref=completed_task_base_ref,
+                    validation_artifacts=completed_task_validation_artifacts,
+                    validation_records=validation_records,
+                    pr_packet_ids=completed_task_pr_packet_ids,
+                )
                 task_results.append({
                     "id": next_task.id,
                     "title": next_task.title,
