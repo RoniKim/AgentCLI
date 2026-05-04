@@ -4,6 +4,7 @@ import io
 import json
 import shutil
 import sys
+import threading
 import unittest
 import uuid
 from contextlib import redirect_stdout
@@ -18,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+import agent_runner.pr_queue as pr_queue_module
 from agent_runner.gitops import (
     abandon_task_branch,
     create_task_branch,
@@ -825,6 +827,183 @@ class PRQueueTests(unittest.TestCase):
         self.assertEqual("validation_pending", after_entry["validation_status"])
         self.assertEqual(1, len(signal_rows))
         self.assertEqual("source_head_advanced", signal_rows[0]["reason"])
+
+    def test_concurrent_pr_queue_mutations_serialize_packet_and_index_updates(self) -> None:
+        source_head_before = self._init_repo()
+        create_worktree(self.repo, self.worktree, run_dir=self.run_dir)
+
+        def queue_packet(task_id: str, filename: str) -> dict[str, object]:
+            tb = create_task_branch(self.worktree, task_id, task_title=f"Queue {task_id}")
+            (self.worktree / filename).write_text(f"{task_id}\n", encoding="utf-8")
+            self._git("add", filename, cwd=self.worktree)
+            self._git("commit", "-m", f"{task_id.lower()} feature", cwd=self.worktree)
+            branch_head = self._git("rev-parse", "HEAD", cwd=self.worktree).strip()
+            abandon_task_branch(self.worktree, tb)
+            result = queue_review_packet(
+                self.repo,
+                run_id=self.run_dir.name,
+                task_ids=[task_id],
+                base_ref=tb.base_commit,
+                head_ref=branch_head,
+                branch=tb.branch_name,
+                created_at=tb.created_at,
+                source_head_before=source_head_before,
+                source_head_after=git_head(self.repo),
+                worktree_dir=self.worktree.as_posix(),
+                validation_status="validation_pending",
+                validation_artifacts=[],
+                qa_notes=[f"{task_id} ready"],
+                goal_trace=tb.goal_trace,
+                changed_files=[filename],
+                status="pr_queued",
+            )
+            return {
+                "packet_id": str(result["packet_id"]),
+                "packet_path": Path(result["packet_path"]),
+            }
+
+        first = queue_packet("T1", "first.txt")
+        second = queue_packet("T2", "second.txt")
+        remove_worktree(self.repo, self.worktree)
+
+        first_write_started = threading.Event()
+        release_first_write = threading.Event()
+        second_write_seen = threading.Event()
+        block_once = {"value": False}
+        original_atomic_write_json = pr_queue_module.atomic_write_json
+
+        def wrapped_atomic_write_json(path: Path, payload: object) -> None:
+            path_obj = Path(path).resolve()
+            if (
+                not block_once["value"]
+                and path_obj == Path(first["packet_path"]).resolve()
+                and isinstance(payload, dict)
+                and str(payload.get("status") or "") == "discarded"
+                and str(payload.get("branch_index_status") or "") == "pending"
+            ):
+                block_once["value"] = True
+                first_write_started.set()
+                self.assertTrue(release_first_write.wait(timeout=5))
+            if path_obj == Path(second["packet_path"]).resolve():
+                second_write_seen.set()
+            original_atomic_write_json(path, payload)
+
+        results: dict[str, dict[str, object]] = {}
+        errors: list[BaseException] = []
+
+        def run_discard() -> None:
+            try:
+                results["discard"] = discard_review_packet(self.repo, str(first["packet_id"]), reason="duplicate_scope")
+            except BaseException as ex:
+                errors.append(ex)
+
+        def run_rebase() -> None:
+            try:
+                results["rebase"] = rebase_review_packet(self.repo, str(second["packet_id"]), reason="source_head_advanced")
+            except BaseException as ex:
+                errors.append(ex)
+
+        with patch("agent_runner.pr_queue.atomic_write_json", side_effect=wrapped_atomic_write_json):
+            discard_thread = threading.Thread(target=run_discard)
+            rebase_thread = threading.Thread(target=run_rebase)
+            discard_thread.start()
+            self.assertTrue(first_write_started.wait(timeout=5))
+            rebase_thread.start()
+            self.assertFalse(second_write_seen.wait(timeout=0.2))
+            release_first_write.set()
+            discard_thread.join(timeout=5)
+            rebase_thread.join(timeout=5)
+
+        self.assertFalse(errors, errors)
+        self.assertIn("discard", results)
+        self.assertIn("rebase", results)
+        self.assertTrue(second_write_seen.is_set())
+
+        index = load_branch_index(self.repo)
+        entries = {str(entry["id"]): dict(entry) for entry in index["entries"]}
+        first_packet = json.loads(Path(first["packet_path"]).read_text(encoding="utf-8"))
+        second_packet = json.loads(Path(second["packet_path"]).read_text(encoding="utf-8"))
+
+        self.assertEqual("discarded", first_packet["status"])
+        self.assertEqual("written", first_packet["branch_index_status"])
+        self.assertEqual("review_required", second_packet["status"])
+        self.assertEqual("written", second_packet["branch_index_status"])
+        self.assertEqual("discarded", entries[str(first["packet_id"])]["status"])
+        self.assertEqual("review_required", entries[str(second["packet_id"])]["status"])
+        self.assertEqual("requested", entries[str(second["packet_id"])]["rebase_status"])
+
+    def test_packet_write_failure_leaves_prior_branch_index_usable(self) -> None:
+        packet = self._prepare_validation_packet()
+        packet_path = Path(packet["packet_path"])
+        before = load_branch_index(self.repo)
+        original_atomic_write_json = pr_queue_module.atomic_write_json
+        fail_once = {"value": False}
+
+        def wrapped_atomic_write_json(path: Path, payload: object) -> None:
+            if (
+                not fail_once["value"]
+                and Path(path).resolve() == packet_path.resolve()
+                and isinstance(payload, dict)
+                and str(payload.get("status") or "") == "discarded"
+                and str(payload.get("branch_index_status") or "") == "pending"
+            ):
+                fail_once["value"] = True
+                raise OSError("simulated packet write failure")
+            original_atomic_write_json(path, payload)
+
+        with patch("agent_runner.pr_queue.atomic_write_json", side_effect=wrapped_atomic_write_json):
+            with self.assertRaises(OSError):
+                discard_review_packet(self.repo, str(packet["packet_id"]), reason="duplicate_scope")
+
+        after = load_branch_index(self.repo)
+        packet_data = json.loads(packet_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(before, after)
+        self.assertEqual("pr_queued", packet_data["status"])
+        self.assertEqual("written", packet_data["branch_index_status"])
+
+    def test_reconcile_repairs_interrupted_packet_index_update_without_losing_packet_metadata(self) -> None:
+        packet = self._prepare_branch_queue_packet(worktree_dir="", remove_worktree_after=True)
+        packet_path = Path(packet["packet_path"])
+
+        self._update_packet_file(
+            packet_path,
+            status="review_required",
+            approval_status="rebase_requested",
+            approvalStatus="rebase_requested",
+            validation_status="validation_pending",
+            validationStatus="validation_pending",
+            validation_reason="rebase_requested",
+            validationReason="rebase_requested",
+            validation_detail="Rebase requested; rerun validation after updating the branch.",
+            validationDetail="Rebase requested; rerun validation after updating the branch.",
+            rebase_status="requested",
+            rebaseStatus="requested",
+            rebase_reason="source_head_advanced",
+            rebaseReason="source_head_advanced",
+            branch_index_status="pending",
+        )
+
+        dry_run = reconcile_review_queue(self.repo)
+        item = next(item for item in dry_run["items"] if str(item.get("id") or "") == str(packet["packet_id"]))
+
+        self.assertEqual("stale", item["branch_index_state"])
+
+        applied = reconcile_review_queue(self.repo, apply=True)
+        packet_data = json.loads(packet_path.read_text(encoding="utf-8"))
+        index_data = load_branch_index(self.repo)
+        index_entry = next(entry for entry in index_data["entries"] if str(entry["id"]) == str(packet["packet_id"]))
+
+        self.assertEqual(1, applied["summary"]["applied_updates"])
+        self.assertEqual("requested", packet_data["rebase_status"])
+        self.assertEqual("source_head_advanced", packet_data["rebase_reason"])
+        self.assertEqual("written", packet_data["branch_index_status"])
+        self.assertFalse(packet_data["source_main_mutated"])
+        self.assertEqual("review_required", index_entry["status"])
+        self.assertEqual("rebase_requested", index_entry["approval_status"])
+        self.assertEqual("validation_pending", index_entry["validation_status"])
+        self.assertEqual("requested", index_entry["rebase_status"])
+        self.assertEqual("source_head_advanced", index_entry["rebase_reason"])
 
     def test_validate_review_packet_uses_isolated_worktree_and_persists_artifacts(self) -> None:
         packet = self._prepare_validation_packet()

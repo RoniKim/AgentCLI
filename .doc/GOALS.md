@@ -303,10 +303,10 @@
 - [x] Stale task branches and attempt directories are listed by doctor/readiness with age, status, reason, and owning run before any cleanup is offered.
 - [x] Stale branch, stale attempt, and old run cleanup require explicit operator approval and write dry-run plus applied cleanup artifacts.
 - [x] An unattended preset documents or configures `goals_auto_refresh`, quota wait, loop, loop idle exit, iteration limits, diagnostics, and safe cleanup defaults as one operator-facing profile.
-- [ ] Backlog scheduling records task effort, priority, touched file globs, and dependencies before selection.
-- [ ] Backlog selection uses dependency-aware ordering plus remaining-window budget caps so overnight runs prefer small unblocked tasks before large risky tasks.
-- [ ] Overnight runs write a concise post-run operations summary covering completed, queued, review-required, blocked-env, stale-cleanup, handle/process warnings, and next operator actions.
-- [ ] Windows handle/process diagnostic collection is linked to run artifacts and flags process-count or handle-growth anomalies before Explorer/CMD instability recurs.
+- [x] Backlog scheduling records task effort, priority, touched file globs, and dependencies before selection.
+- [x] Backlog selection uses dependency-aware ordering plus remaining-window budget caps so overnight runs prefer small unblocked tasks before large risky tasks.
+- [x] Overnight runs write a concise post-run operations summary covering completed, queued, review-required, blocked-env, stale-cleanup, handle/process warnings, and next operator actions.
+- [x] Windows handle/process diagnostic collection is linked to run artifacts and flags process-count or handle-growth anomalies before Explorer/CMD instability recurs.
 
 ### P0-Y. Failure Disposition, Backend Parity, And State Integrity
 
