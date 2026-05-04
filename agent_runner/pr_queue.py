@@ -813,6 +813,114 @@ def record_review_packet_decision(
     )
 
 
+def _packet_id_key(value: object) -> str:
+    text = str(value or "").strip()
+    if not text or not re.fullmatch(r"[A-Za-z0-9._-]+", text):
+        return ""
+    return text
+
+
+def _path_is_within(root: Path, path: Path) -> bool:
+    try:
+        resolved_root = root.resolve()
+    except Exception:
+        resolved_root = root
+    try:
+        resolved_path = path.resolve()
+    except Exception:
+        resolved_path = path
+    return resolved_path == resolved_root or resolved_root in resolved_path.parents
+
+
+def _find_branch_index_entry(index: dict[str, object], packet_id: str) -> dict[str, Any] | None:
+    packet_id_text = str(packet_id or "").strip()
+    if not packet_id_text:
+        return None
+    for item in index.get("entries", []) if isinstance(index.get("entries"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id") or "").strip() == packet_id_text:
+            return dict(item)
+    return None
+
+
+def _require_review_packet(source_repo: Path, packet_id: str) -> tuple[Path, str, Path, dict[str, Any]]:
+    source_repo_path = Path(source_repo).expanduser().resolve()
+    packet_id_text = _packet_id_key(packet_id)
+    if not packet_id_text:
+        raise ValueError("PR packet id is required.")
+    packet_path = pr_packet_path(source_repo_path, packet_id_text)
+    if not packet_path.exists() or not packet_path.is_file():
+        raise FileNotFoundError(f"PR packet not found: {packet_path}")
+    packet = load_review_packet(source_repo_path, packet_id_text)
+    if not packet:
+        raise RuntimeError(f"PR packet is empty or malformed: {packet_path}")
+    return source_repo_path, packet_id_text, packet_path, packet
+
+
+def _write_packet_index_state(
+    source_repo: Path,
+    packet_path: Path,
+    packet: dict[str, Any],
+    *,
+    packet_id: str,
+    updated_at: str,
+    status: str = "",
+    approval_status: str = "",
+    validation_status: str = "",
+    extra: dict[str, object] | None = None,
+) -> dict[str, Any] | None:
+    source_repo_path = Path(source_repo).expanduser().resolve()
+    index = load_branch_index(source_repo_path)
+    existing = _find_branch_index_entry(index, packet_id)
+    base_ref_text = str(packet.get("base_ref") or packet.get("baseRef") or "").strip()
+    head_ref_text = str(packet.get("head_ref") or packet.get("headRef") or "").strip()
+    branch_text = str(packet.get("branch") or "").strip()
+    if existing is None and not (base_ref_text and head_ref_text and branch_text):
+        return None
+
+    entry: dict[str, object] = {
+        "id": packet_id,
+        "updated_at": updated_at,
+        "packet_path": packet_path.as_posix(),
+    }
+    source_repo_text = str(packet.get("source_repo") or packet.get("sourceRepo") or source_repo_path.as_posix()).strip()
+    run_id_text = str(packet.get("run_id") or packet.get("runId") or "").strip()
+    created_at_text = str(packet.get("created_at") or packet.get("createdAt") or updated_at).strip() or updated_at
+    task_ids = _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds"))
+    if source_repo_text:
+        entry["source_repo"] = source_repo_text
+    if run_id_text:
+        entry["run_id"] = run_id_text
+    if task_ids:
+        entry["task_ids"] = task_ids
+    if created_at_text:
+        entry["created_at"] = created_at_text
+    if base_ref_text:
+        entry["base_ref"] = base_ref_text
+    if head_ref_text:
+        entry["head_ref"] = head_ref_text
+    if branch_text:
+        entry["branch"] = branch_text
+    if status:
+        entry["status"] = status
+    if approval_status:
+        entry["approval_status"] = approval_status
+    if validation_status:
+        entry["validation_status"] = validation_status
+    if isinstance(extra, dict):
+        for key, value in extra.items():
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            entry[key] = value
+
+    updated_index = _upsert_index_entry(index, entry)
+    _write_branch_index(source_repo_path, updated_index)
+    return _find_branch_index_entry(updated_index, packet_id)
+
+
 def _review_packet_paths(source_repo: Path) -> list[Path]:
     queue_root = pr_queue_root(source_repo)
     if not queue_root.exists() or not queue_root.is_dir():
@@ -825,15 +933,57 @@ def _review_packet_paths(source_repo: Path) -> list[Path]:
             stamp = 0.0
         return (stamp, path.name)
 
-    return sorted(
-        [
-            path
-            for path in queue_root.glob("*.json")
-            if path.is_file() and path.name != PR_QUEUE_INDEX_FILENAME
-        ],
-        key=_sort_key,
-        reverse=True,
-    )
+    packet_paths = [
+        path
+        for path in queue_root.glob("*.json")
+        if path.is_file() and path.name != PR_QUEUE_INDEX_FILENAME
+    ]
+    try:
+        index = load_branch_index(source_repo)
+    except Exception:
+        index = {"entries": []}
+
+    ordered: list[Path] = []
+    seen: set[str] = set()
+    for entry in index.get("entries", []) if isinstance(index.get("entries"), list) else []:
+        if not isinstance(entry, dict):
+            continue
+        packet_path_text = str(entry.get("packet_path") or entry.get("packetPath") or "").strip()
+        packet_id = _packet_id_key(entry.get("id"))
+        candidate: Path | None = None
+        if packet_path_text:
+            candidate = Path(packet_path_text).expanduser()
+            try:
+                candidate = candidate.resolve()
+            except Exception:
+                pass
+        elif packet_id:
+            candidate = pr_packet_path(source_repo, packet_id)
+            try:
+                candidate = candidate.resolve()
+            except Exception:
+                pass
+        if candidate is None or not candidate.exists() or not candidate.is_file() or not _path_is_within(queue_root, candidate):
+            continue
+        try:
+            key = candidate.resolve().as_posix()
+        except Exception:
+            key = candidate.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(candidate)
+
+    for path in sorted(packet_paths, key=_sort_key, reverse=True):
+        try:
+            key = path.resolve().as_posix()
+        except Exception:
+            key = path.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path)
+    return ordered
 
 
 def _summary_artifact_name(packet: dict[str, Any]) -> str:
@@ -896,6 +1046,96 @@ def _review_packet_need(packet: dict[str, Any]) -> tuple[str, str]:
         "validation_pending": "validation_pending",
     }
     return "validation", labels.get(validation_status, "validation_pending")
+
+
+def list_review_packets(source_repo: Path) -> dict[str, object]:
+    source_repo_path = Path(source_repo).expanduser().resolve()
+    queue_root = pr_queue_root(source_repo_path)
+    items: list[dict[str, object]] = []
+    for path in _review_packet_paths(source_repo_path):
+        packet = _load_json_dict(path)
+        if not packet:
+            continue
+        packet_id = str(packet.get("id") or path.stem).strip() or path.stem
+        validation_status = _normalize_packet_validation_status(
+            packet.get("validation_status") or packet.get("validationStatus") or packet.get("status")
+        ) or "validation_pending"
+        approval_status = str(packet.get("approval_status") or packet.get("approvalStatus") or "").strip().lower()
+        need, need_label = _review_packet_need(packet)
+        items.append(
+            {
+                "id": packet_id,
+                "status": str(packet.get("status") or "pr_queued").strip().lower() or "pr_queued",
+                "run_id": str(packet.get("run_id") or packet.get("runId") or "").strip(),
+                "task_ids": _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds")),
+                "branch": str(packet.get("branch") or "").strip(),
+                "validation_status": validation_status,
+                "approval_status": approval_status,
+                "need": need,
+                "need_label": need_label,
+                "updated_at": str(packet.get("updated_at") or packet.get("updatedAt") or "").strip(),
+                "changed_file_count": len(_normalize_str_list(packet.get("changed_files") or packet.get("changedFiles"))),
+                "qa_note_count": len(_normalize_str_list(packet.get("qa_notes") or packet.get("qaNotes"))),
+            }
+        )
+    summary = {
+        "total": len(items),
+        "needs_validation": len([item for item in items if item.get("need") == "validation"]),
+        "needs_approval": len([item for item in items if item.get("need") == "approval"]),
+        "validation_passed": len([item for item in items if item.get("validation_status") == "validation_passed"]),
+        "validation_pending": len([item for item in items if item.get("validation_status") == "validation_pending"]),
+        "validation_failed": len([item for item in items if item.get("validation_status") == "validation_failed"]),
+        "blocked_env": len([item for item in items if item.get("validation_status") == "blocked_env"]),
+    }
+    return {
+        "ok": True,
+        "state": "ready" if items else "empty",
+        "queue_root": queue_root.as_posix(),
+        "items": items,
+        "summary": summary,
+        "message": "" if items else "No queued PR packets.",
+    }
+
+
+def describe_review_packet(source_repo: Path, packet_id: str) -> dict[str, object]:
+    source_repo_path, packet_id_text, packet_path, packet = _require_review_packet(source_repo, packet_id)
+    validation_status = _normalize_packet_validation_status(
+        packet.get("validation_status") or packet.get("validationStatus") or packet.get("status")
+    ) or "validation_pending"
+    approval_status = str(packet.get("approval_status") or packet.get("approvalStatus") or "").strip().lower()
+    need, need_label = _review_packet_need(packet)
+    index_entry = _find_branch_index_entry(load_branch_index(source_repo_path), packet_id_text)
+    return {
+        "ok": True,
+        "id": packet_id_text,
+        "packet_path": packet_path.as_posix(),
+        "status": str(packet.get("status") or "pr_queued").strip().lower() or "pr_queued",
+        "run_id": str(packet.get("run_id") or packet.get("runId") or "").strip(),
+        "task_ids": _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds")),
+        "branch": str(packet.get("branch") or "").strip(),
+        "base_ref": str(packet.get("base_ref") or packet.get("baseRef") or "").strip(),
+        "head_ref": str(packet.get("head_ref") or packet.get("headRef") or "").strip(),
+        "created_at": str(packet.get("created_at") or packet.get("createdAt") or "").strip(),
+        "updated_at": str(packet.get("updated_at") or packet.get("updatedAt") or "").strip(),
+        "validation_status": validation_status,
+        "validation_reason": str(packet.get("validation_reason") or packet.get("validationReason") or "").strip(),
+        "validation_detail": str(packet.get("validation_detail") or packet.get("validationDetail") or "").strip(),
+        "validation_artifacts": _normalize_str_list(packet.get("validation_artifacts") or packet.get("validationArtifacts")),
+        "approval_status": approval_status,
+        "need": need,
+        "need_label": need_label,
+        "qa_notes": _normalize_str_list(packet.get("qa_notes") or packet.get("qaNotes")),
+        "goal_trace": _normalize_list_value(packet.get("goal_trace") or packet.get("goalTrace")),
+        "changed_files": _normalize_str_list(packet.get("changed_files") or packet.get("changedFiles")),
+        "commits": _normalize_list_value(packet.get("commits")),
+        "merge_preflight": dict(packet.get("merge_preflight") if isinstance(packet.get("merge_preflight"), dict) else packet.get("mergePreflight") or {}),
+        "rebase_status": str(packet.get("rebase_status") or packet.get("rebaseStatus") or "").strip().lower(),
+        "rebase_reason": str(packet.get("rebase_reason") or packet.get("rebaseReason") or "").strip(),
+        "discard_status": str(packet.get("discard_status") or packet.get("discardStatus") or "").strip().lower(),
+        "discard_reason": str(packet.get("discard_reason") or packet.get("discardReason") or "").strip(),
+        "branch_index_status": str(packet.get("branch_index_status") or ("written" if index_entry else "missing")).strip(),
+        "branch_index_entry": index_entry,
+    }
 
 
 def build_telegram_pr_queue_summary(source_repo: Path, *, limit: int = 3) -> dict[str, object]:
@@ -2060,6 +2300,146 @@ def validate_review_packet(
             stop_path=stop_path,
         )
     )
+
+
+def discard_review_packet(
+    source_repo: Path,
+    packet_id: str,
+    *,
+    reason: str = "operator_discarded",
+) -> dict[str, object]:
+    source_repo_path, packet_id_text, packet_path, packet = _require_review_packet(source_repo, packet_id)
+    packet_status = str(packet.get("status") or "").strip().lower()
+    if packet_status == "merged":
+        raise RuntimeError("PR packet has already been merged.")
+    discard_reason = str(reason or "operator_discarded").strip() or "operator_discarded"
+    now = now_iso()
+    updated_packet = dict(packet)
+    updated_packet["status"] = "discarded"
+    updated_packet["discard_status"] = "discarded"
+    updated_packet["discardStatus"] = "discarded"
+    updated_packet["discard_reason"] = discard_reason
+    updated_packet["discardReason"] = discard_reason
+    updated_packet["discarded_at"] = now
+    updated_packet["discardedAt"] = now
+    updated_packet["updated_at"] = now
+
+    index_entry = _write_packet_index_state(
+        source_repo_path,
+        packet_path,
+        updated_packet,
+        packet_id=packet_id_text,
+        updated_at=now,
+        status="discarded",
+        validation_status=_normalize_packet_validation_status(
+            updated_packet.get("validation_status") or updated_packet.get("validationStatus")
+        ),
+        extra={
+            "discard_status": "discarded",
+            "discard_reason": discard_reason,
+        },
+    )
+    updated_packet["branch_index_status"] = "written" if index_entry is not None else str(packet.get("branch_index_status") or "skipped")
+    atomic_write_json(packet_path, updated_packet)
+    signal_rows = _record_pr_queue_decision_signal(
+        source_repo_path,
+        packet_id=packet_id_text,
+        packet=updated_packet,
+        signal_kind="discard",
+        decision_status="discarded",
+        reason=discard_reason,
+        packet_path=packet_path,
+        artifact_paths=_normalize_str_list(updated_packet.get("validation_artifacts") or updated_packet.get("validationArtifacts")),
+        metadata={
+            "discard_status": "discarded",
+            "discarded_at": now,
+        },
+        recorded_at=now,
+    )
+    return {
+        "ok": True,
+        "action": "discard",
+        "status": "discarded",
+        "packet_id": packet_id_text,
+        "packet_path": packet_path.as_posix(),
+        "packet": updated_packet,
+        "branch_index_entry": index_entry,
+        "signals": signal_rows,
+    }
+
+
+def rebase_review_packet(
+    source_repo: Path,
+    packet_id: str,
+    *,
+    reason: str = "operator_rebase_requested",
+) -> dict[str, object]:
+    source_repo_path, packet_id_text, packet_path, packet = _require_review_packet(source_repo, packet_id)
+    packet_status = str(packet.get("status") or "").strip().lower()
+    if packet_status in {"discarded", "merged"}:
+        raise RuntimeError("PR packet has already been finalized.")
+    rebase_reason = str(reason or "operator_rebase_requested").strip() or "operator_rebase_requested"
+    now = now_iso()
+    updated_packet = dict(packet)
+    updated_packet["status"] = "review_required"
+    updated_packet["approval_status"] = "rebase_requested"
+    updated_packet["approvalStatus"] = "rebase_requested"
+    updated_packet["validation_status"] = "validation_pending"
+    updated_packet["validationStatus"] = "validation_pending"
+    updated_packet["validation_reason"] = "rebase_requested"
+    updated_packet["validationReason"] = "rebase_requested"
+    updated_packet["validation_detail"] = "Rebase requested; rerun validation after updating the branch."
+    updated_packet["validationDetail"] = "Rebase requested; rerun validation after updating the branch."
+    updated_packet["rebase_status"] = "requested"
+    updated_packet["rebaseStatus"] = "requested"
+    updated_packet["rebase_reason"] = rebase_reason
+    updated_packet["rebaseReason"] = rebase_reason
+    updated_packet["rebase_requested_at"] = now
+    updated_packet["rebaseRequestedAt"] = now
+    updated_packet["updated_at"] = now
+
+    index_entry = _write_packet_index_state(
+        source_repo_path,
+        packet_path,
+        updated_packet,
+        packet_id=packet_id_text,
+        updated_at=now,
+        status="review_required",
+        approval_status="rebase_requested",
+        validation_status="validation_pending",
+        extra={
+            "rebase_status": "requested",
+            "rebase_reason": rebase_reason,
+        },
+    )
+    updated_packet["branch_index_status"] = "written" if index_entry is not None else str(packet.get("branch_index_status") or "skipped")
+    atomic_write_json(packet_path, updated_packet)
+    signal_rows = _record_pr_queue_decision_signal(
+        source_repo_path,
+        packet_id=packet_id_text,
+        packet=updated_packet,
+        signal_kind="rebase",
+        decision_status="requested",
+        reason=rebase_reason,
+        packet_path=packet_path,
+        artifact_paths=_normalize_str_list(updated_packet.get("validation_artifacts") or updated_packet.get("validationArtifacts")),
+        metadata={
+            "rebase_status": "requested",
+            "validation_status": "validation_pending",
+            "recorded_at": now,
+        },
+        recorded_at=now,
+    )
+    return {
+        "ok": True,
+        "action": "rebase",
+        "status": "review_required",
+        "packet_id": packet_id_text,
+        "packet_path": packet_path.as_posix(),
+        "packet": updated_packet,
+        "branch_index_entry": index_entry,
+        "signals": signal_rows,
+    }
 
 
 def merge_review_packet(

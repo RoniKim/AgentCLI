@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import sys
 import unittest
 import uuid
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from prompt_toolkit.completion.base import CompleteEvent
+from prompt_toolkit.document import Document
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -26,14 +30,18 @@ from agent_runner.gitops import (
 from agent_runner.experience import query_pr_queue_signals
 from agent_runner.pr_queue import (
     PrQueueMergeError,
+    discard_review_packet,
     load_branch_index,
+    list_review_packets,
     pr_branch_index_path,
     pr_packet_path,
+    rebase_review_packet,
     merge_review_packet,
     pr_queue_merge_confirmation_phrase,
     queue_review_packet,
     validate_review_packet,
 )
+from agent_runner.shell import RunnerShell, _build_completer, _dispatch
 from agent_runner.utils import run_cmd
 
 
@@ -431,6 +439,239 @@ class PRQueueTests(unittest.TestCase):
         ):
             validate_review_packet(self.repo, str(packet["packet_id"]))
         return packet
+
+    def test_shell_help_and_completer_include_pr_queue_commands(self) -> None:
+        shell = RunnerShell()
+        stream = io.StringIO()
+
+        with redirect_stdout(stream):
+            shell.help()
+
+        output = stream.getvalue()
+        self.assertIn("/prs", output)
+        self.assertIn("/pr <id>", output)
+        self.assertIn("/validate-pr <id> [--full]", output)
+        self.assertIn("/merge-pr <id>", output)
+        self.assertIn("/discard-pr <id>", output)
+        self.assertIn("/rebase-pr <id>", output)
+
+        completer = _build_completer()
+        self.assertIsNotNone(completer)
+        completions = list(
+            completer.get_completions(
+                Document("/", cursor_position=1),
+                CompleteEvent(completion_requested=True),
+            )
+        )
+        completion_texts = {completion.text for completion in completions}
+        self.assertIn("/prs", completion_texts)
+        self.assertIn("/pr", completion_texts)
+        self.assertIn("/validate-pr", completion_texts)
+        self.assertIn("/merge-pr", completion_texts)
+        self.assertIn("/discard-pr", completion_texts)
+        self.assertIn("/rebase-pr", completion_texts)
+
+    def test_shell_prs_reports_empty_queue(self) -> None:
+        self.repo.mkdir(parents=True, exist_ok=True)
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        stream = io.StringIO()
+
+        with redirect_stdout(stream):
+            _dispatch(shell, "/prs")
+
+        output = stream.getvalue()
+        self.assertIn("PR Queue", output)
+        self.assertIn("No queued PR packets.", output)
+
+        payload = list_review_packets(self.repo)
+        self.assertEqual("empty", payload["state"])
+        self.assertEqual([], payload["items"])
+
+    def test_shell_prs_reports_populated_queue(self) -> None:
+        packet = self._prepare_validation_packet()
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        stream = io.StringIO()
+
+        with redirect_stdout(stream):
+            _dispatch(shell, "/prs")
+
+        output = stream.getvalue()
+        self.assertIn("PR Queue", output)
+        self.assertIn(str(packet["packet_id"]), output)
+        self.assertIn("validation_pending", output)
+        self.assertIn("T1", output)
+        self.assertIn(str(packet["task_branch"].branch_name), output)
+
+    def test_shell_pr_reports_detail_output(self) -> None:
+        packet = self._prepare_validation_packet()
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        stream = io.StringIO()
+
+        with redirect_stdout(stream):
+            _dispatch(shell, f"/pr {packet['packet_id']}")
+
+        output = stream.getvalue()
+        self.assertIn("PR Packet", output)
+        self.assertIn(str(packet["packet_id"]), output)
+        self.assertIn("feature.txt", output)
+        self.assertIn("ready for validation", output)
+        self.assertIn(str(packet["task_branch"].branch_name), output)
+
+    def test_shell_validate_pr_command_persists_validation_status(self) -> None:
+        packet = self._prepare_validation_packet()
+        self._write_pr_queue_validation_config(build_enabled=True, run_tests=True)
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        stream = io.StringIO()
+
+        async def fake_run_build_validation_async(
+            repo: Path,
+            build_cmd: object,
+            build_timeout_sec: int,
+            legacy_build_target: str,
+            log_path: Path,
+            *,
+            stop_path: Path | None = None,
+            max_output_bytes: int = 10_000_000,
+            command_repo: Path | None = None,
+        ) -> dict[str, object]:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("build ok\n", encoding="utf-8")
+            return {
+                "name": "build",
+                "kind": "compile",
+                "gate": "build",
+                "cmd": ["python", "-B", "-m", "py_compile", "agent_runner/pr_queue.py"],
+                "rc": 0,
+                "ok": True,
+                "status": "passed",
+                "artifact_path": log_path.as_posix(),
+                "artifactPath": log_path.as_posix(),
+                "log_path": log_path.as_posix(),
+                "logPath": log_path.as_posix(),
+                "summary": "build ok",
+                "failure_summary": "",
+                "failureSummary": "",
+            }
+
+        async def fake_run_test_validation_async(
+            repo: Path,
+            test_cmd: object,
+            test_timeout_sec: int,
+            legacy_test_target: str,
+            legacy_test_filter: str,
+            log_path: Path,
+            *,
+            stop_path: Path | None = None,
+            max_output_bytes: int = 10_000_000,
+            command_repo: Path | None = None,
+        ) -> dict[str, object]:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("test ok\n", encoding="utf-8")
+            return {
+                "name": "test",
+                "kind": "test",
+                "gate": "test",
+                "cmd": ["python", "-B", "-m", "unittest", "discover", "-s", "tests"],
+                "rc": 0,
+                "ok": True,
+                "status": "passed",
+                "artifact_path": log_path.as_posix(),
+                "artifactPath": log_path.as_posix(),
+                "log_path": log_path.as_posix(),
+                "logPath": log_path.as_posix(),
+                "summary": "test ok",
+                "failure_summary": "",
+                "failureSummary": "",
+            }
+
+        with (
+            redirect_stdout(stream),
+            patch("agent_runner.pr_queue.run_build_validation_async", new=fake_run_build_validation_async),
+            patch("agent_runner.pr_queue.run_test_validation_async", new=fake_run_test_validation_async),
+        ):
+            _dispatch(shell, f"/validate-pr {packet['packet_id']} --full")
+
+        packet_data = json.loads(Path(packet["packet_path"]).read_text(encoding="utf-8"))
+        output = stream.getvalue()
+        self.assertIn("validation_passed", output)
+        self.assertEqual("validation_passed", packet_data["validation_status"])
+        self.assertTrue(str(packet_data["validation_artifact_path"]).endswith("validation.json"))
+
+    def test_shell_merge_pr_command_rejects_bad_confirmation(self) -> None:
+        packet = self._prepare_validated_packet()
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        stream = io.StringIO()
+
+        with redirect_stdout(stream), patch("builtins.input", return_value="WRONG"):
+            _dispatch(shell, f"/merge-pr {packet['packet_id']}")
+
+        output = stream.getvalue()
+        packet_data = json.loads(Path(packet["packet_path"]).read_text(encoding="utf-8"))
+        self.assertIn("approval_mismatch", output)
+        self.assertEqual("validation_passed", packet_data["validation_status"])
+        self.assertNotEqual("approved", packet_data["status"])
+
+    def test_discard_review_packet_records_decision_without_corrupting_branch_index(self) -> None:
+        packet = self._prepare_validation_packet()
+        before = load_branch_index(self.repo)
+        before_entry = dict(before["entries"][0])
+
+        result = discard_review_packet(self.repo, str(packet["packet_id"]), reason="duplicate_scope")
+        packet_data = json.loads(Path(result["packet_path"]).read_text(encoding="utf-8"))
+        after = load_branch_index(self.repo)
+        after_entry = dict(after["entries"][0])
+        signal_rows = query_pr_queue_signals(
+            self.repo,
+            packet_id=str(packet["packet_id"]),
+            signal_kind="discard",
+            decision_status="discarded",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("discarded", packet_data["status"])
+        self.assertEqual("duplicate_scope", packet_data["discard_reason"])
+        self.assertEqual(before_entry["id"], after_entry["id"])
+        self.assertEqual(before_entry["branch"], after_entry["branch"])
+        self.assertEqual(before_entry["base_ref"], after_entry["base_ref"])
+        self.assertEqual(before_entry["head_ref"], after_entry["head_ref"])
+        self.assertEqual("discarded", after_entry["status"])
+        self.assertEqual(1, len(signal_rows))
+        self.assertEqual("duplicate_scope", signal_rows[0]["reason"])
+
+    def test_rebase_review_packet_records_decision_without_corrupting_branch_index(self) -> None:
+        packet = self._prepare_validation_packet()
+        before = load_branch_index(self.repo)
+        before_entry = dict(before["entries"][0])
+
+        result = rebase_review_packet(self.repo, str(packet["packet_id"]), reason="source_head_advanced")
+        packet_data = json.loads(Path(result["packet_path"]).read_text(encoding="utf-8"))
+        after = load_branch_index(self.repo)
+        after_entry = dict(after["entries"][0])
+        signal_rows = query_pr_queue_signals(
+            self.repo,
+            packet_id=str(packet["packet_id"]),
+            signal_kind="rebase",
+            decision_status="requested",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("review_required", packet_data["status"])
+        self.assertEqual("validation_pending", packet_data["validation_status"])
+        self.assertEqual("requested", packet_data["rebase_status"])
+        self.assertEqual("source_head_advanced", packet_data["rebase_reason"])
+        self.assertEqual(before_entry["id"], after_entry["id"])
+        self.assertEqual(before_entry["branch"], after_entry["branch"])
+        self.assertEqual(before_entry["base_ref"], after_entry["base_ref"])
+        self.assertEqual(before_entry["head_ref"], after_entry["head_ref"])
+        self.assertEqual("review_required", after_entry["status"])
+        self.assertEqual("validation_pending", after_entry["validation_status"])
+        self.assertEqual(1, len(signal_rows))
+        self.assertEqual("source_head_advanced", signal_rows[0]["reason"])
 
     def test_validate_review_packet_uses_isolated_worktree_and_persists_artifacts(self) -> None:
         packet = self._prepare_validation_packet()
