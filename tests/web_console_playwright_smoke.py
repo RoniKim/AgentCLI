@@ -1412,7 +1412,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
                         return
                     route.fulfill(json=fixture)
 
-                context.route("**/api/status", handle_status)
+                context.route("**/api/status**", handle_status)
 
             try:
                 page = self._open_page(playwright, before_goto=before_goto)

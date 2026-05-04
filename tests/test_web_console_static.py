@@ -674,7 +674,10 @@ class WebConsoleStaticTests(unittest.TestCase):
             "__AGENTCLI_ADAPTERS__",
             "SNAPSHOT_POLL_MS",
             "MAX_LOG_ROWS",
-            "fetch('/api/status'",
+            "buildStatusRequestUrl",
+            "snapshotScopeForView",
+            "/api/status?scope=dashboard",
+            "/api/status?scope=full",
             "Fallback data",
             "Loading read-only snapshot",
             "Partial snapshot",
@@ -1012,6 +1015,7 @@ class WebConsoleStaticTests(unittest.TestCase):
         self.assertNotIn("state.snapshotLabel = 'Fallback data';", self.app_js)
         self.assertNotIn("state.snapshotLabel = 'Stale snapshot';", self.app_js)
         self.assertNotIn("state.snapshotLabel = 'API error';", self.app_js)
+        self.assertNotIn("fetch('/api/status'", self.app_js)
 
         lowered = self.app_js.lower()
         self.assertNotIn("reactdom", lowered)

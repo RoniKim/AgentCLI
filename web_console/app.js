@@ -9310,6 +9310,8 @@
     startServerLogTail,
     stopServerLogTail,
     syncLogTailStreaming,
+    snapshotScopeForView,
+    buildStatusRequestUrl,
     refreshSnapshot,
     startSnapshotPolling,
     stopSnapshotPolling,
@@ -15202,6 +15204,8 @@
       stale: false,
       staleReasons: [],
       latestRunDir: '',
+      requestScope: '',
+      pendingScope: '',
       timer: null,
     };
   }
@@ -20809,6 +20813,7 @@
 
   function setView(view) {
     const next = normalizeView(view);
+    const previous = state.activeView;
     state.activeView = next;
     state.paletteOpen = false;
     state.stopOpen = false;
@@ -20821,12 +20826,7 @@
     }
     renderShell({ preserveScroll: false });
     syncLogTailStreaming();
-    if (next === 'prompts') {
-      void loadPromptEditor(currentPrompt());
-    }
-    if (next === 'pr-queue') {
-      requestPrQueueDetailForView();
-    }
+    hydrateRouteView(next, previous);
   }
 
   function applyPaletteSelection(index) {
@@ -20907,6 +20907,64 @@
     if (state.pollTimer) {
       window.clearTimeout(state.pollTimer);
       state.pollTimer = null;
+    }
+  }
+
+  function snapshotScopeForView(view = state.activeView) {
+    return normalizeView(view) === 'dashboard' ? 'dashboard' : 'full';
+  }
+
+  function buildStatusRequestUrl(view = state.activeView, scopeOverride = '') {
+    const scope = toText(scopeOverride || snapshotScopeForView(view), 'full').trim().toLowerCase() || 'full';
+    return scope === 'dashboard' ? '/api/status?scope=dashboard' : '/api/status?scope=full';
+  }
+
+  function routeNeedsSnapshotHydration(view = state.activeView) {
+    const normalizedView = normalizeView(view);
+    if (normalizedView === 'goals') {
+      return !toText(state.goalsSnapshot?.raw_text || state.goalsSnapshot?.rawText, '').trim();
+    }
+    if (normalizedView === 'config') {
+      return !Object.keys(toObject(state.configSchema || state.configContract?.schema || {})).length;
+    }
+    if (normalizedView === 'prompts') {
+      return !toArray(state.prompts).length;
+    }
+    if (normalizedView === 'history') {
+      return !toArray(state.history).length;
+    }
+    return false;
+  }
+
+  function routeNeedsExplicitFullSnapshot(nextView, previousView = state.activeView) {
+    return (
+      snapshotScopeForView(nextView) === 'full' &&
+      snapshotScopeForView(previousView) !== 'full' &&
+      routeNeedsSnapshotHydration(nextView)
+    );
+  }
+
+  function hydrateRouteView(nextView, previousView = state.activeView) {
+    const normalizedNext = normalizeView(nextView);
+    if (routeNeedsExplicitFullSnapshot(normalizedNext, previousView)) {
+      void refreshSnapshot({ silent: true, forceScope: 'full' }).then(() => {
+        if (state.activeView !== normalizedNext) {
+          return;
+        }
+        if (normalizedNext === 'prompts') {
+          void loadPromptEditor(currentPrompt());
+        }
+        if (normalizedNext === 'pr-queue') {
+          requestPrQueueDetailForView();
+        }
+      });
+      return;
+    }
+    if (normalizedNext === 'prompts') {
+      void loadPromptEditor(currentPrompt());
+    }
+    if (normalizedNext === 'pr-queue') {
+      requestPrQueueDetailForView();
     }
   }
 
@@ -20994,9 +21052,13 @@
   }
 
   async function refreshSnapshot(options = {}) {
-    const { allowFallback = false } = options;
+    const { allowFallback = false, forceScope = '' } = options;
     const refresh = ensureSnapshotRefreshState();
+    const requestScope = toText(forceScope || snapshotScopeForView(state.activeView), 'full').trim().toLowerCase() || 'full';
     if (refresh.inFlight) {
+      if (requestScope !== toText(refresh.requestScope, '').trim().toLowerCase()) {
+        refresh.pendingScope = requestScope;
+      }
       return false;
     }
     if (refresh.timer) {
@@ -21010,10 +21072,12 @@
     const requestSeq = refresh.requestSeq + 1;
     refresh.requestSeq = requestSeq;
     refresh.inFlight = true;
+    refresh.requestScope = requestScope;
+    refresh.pendingScope = '';
     const attemptAt = nowMs();
     refresh.lastAttemptAt = attemptAt;
     try {
-      const response = await fetch('/api/status', {
+      const response = await fetch(buildStatusRequestUrl(state.activeView, requestScope), {
         headers: { Accept: 'application/json' },
         cache: 'no-store',
       });
@@ -21108,6 +21172,9 @@
       nextRefresh.stale = Boolean(nextRefresh.stale);
       nextRefresh.staleReasons = toArray(nextRefresh.staleReasons).map((reason) => toText(reason, '')).filter(Boolean);
       nextRefresh.latestRunDir = toText(normalized.latestRunDir || nextRefresh.latestRunDir, nextRefresh.latestRunDir);
+      const pendingScope = toText(nextRefresh.pendingScope, '').trim().toLowerCase();
+      nextRefresh.requestScope = '';
+      nextRefresh.pendingScope = '';
       if (nextRefresh.stale) {
         state.snapshotStatus = 'stale';
         state.snapshotLabel = t('snapshot.stale');
@@ -21116,6 +21183,9 @@
       syncLogTailStreaming({
         reset: previousSourceMode !== state.sourceMode || previousLatestRunDir !== state.latestRunDir,
       });
+      if (pendingScope && pendingScope !== requestScope) {
+        return refreshSnapshot({ silent: true, forceScope: pendingScope });
+      }
       if (nextRefresh.active) {
         scheduleSnapshotRefresh(nextRefresh.retryDelayMs);
       }
@@ -21149,6 +21219,8 @@
         fallbackRefresh.retryCount = 0;
         fallbackRefresh.retryDelayMs = SNAPSHOT_POLL_MS;
         fallbackRefresh.nextRefreshAt = fallbackRefresh.active ? nowMs() + fallbackRefresh.retryDelayMs : 0;
+        fallbackRefresh.requestScope = '';
+        fallbackRefresh.pendingScope = '';
         state.snapshotStatus = 'fallback';
         state.snapshotLabel = t('snapshot.fallback');
         state.sourceMode = 'fallback';
@@ -21190,7 +21262,13 @@
             ? t('snapshot.permissionDenied')
             : t('snapshot.error');
       }
+      const pendingScope = toText(nextRefresh.pendingScope, '').trim().toLowerCase();
+      nextRefresh.requestScope = '';
+      nextRefresh.pendingScope = '';
       renderSnapshotRefreshUI();
+      if (pendingScope && pendingScope !== requestScope) {
+        return refreshSnapshot({ silent: true, forceScope: pendingScope });
+      }
       if (nextRefresh.active) {
         scheduleSnapshotRefresh(nextRefresh.retryDelayMs);
       }
@@ -21658,15 +21736,12 @@
 
   window.addEventListener('hashchange', () => {
     const next = normalizeView(location.hash.replace(/^#/, ''));
+    const previous = state.activeView;
     if (next !== state.activeView) {
       state.activeView = next;
       renderShell({ preserveScroll: false });
-      if (next === 'prompts') {
-        void loadPromptEditor(currentPrompt());
-      }
-      if (next === 'pr-queue') {
-        requestPrQueueDetailForView();
-      }
+      syncLogTailStreaming();
+      hydrateRouteView(next, previous);
     }
   });
 

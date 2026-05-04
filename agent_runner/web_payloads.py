@@ -2245,3 +2245,203 @@ def build_snapshot(
         "run_summary": run_summary,
         "last_run_summary": last_run_summary,
     }
+
+
+_DASHBOARD_STATUS_LOG_ENTRY_LIMIT = 12
+_DASHBOARD_STATUS_NOTIFICATION_LIMIT = 12
+
+
+def _dashboard_goals_payload(goals: Any) -> dict[str, Any]:
+    raw = goals if isinstance(goals, dict) else {}
+    compact = dict(raw)
+    compact.pop("raw_text", None)
+    compact.pop("rawText", None)
+    return compact
+
+
+def _dashboard_logs_payload(logs: Any) -> dict[str, Any]:
+    raw = logs if isinstance(logs, dict) else {}
+    entries = list(raw.get("entries") or [])
+    return {
+        "entries": entries[-_DASHBOARD_STATUS_LOG_ENTRY_LIMIT:],
+        "entries_source_id": raw.get("entries_source_id", ""),
+        "entries_source_label": raw.get("entries_source_label", ""),
+        "entries_source_kind": raw.get("entries_source_kind", "log"),
+        "source": raw.get("source", {}),
+        "source_id": raw.get("source_id", ""),
+        "selected_source_id": raw.get("selected_source_id", ""),
+        "sources": list(raw.get("sources") or []),
+        "eof": bool(raw.get("eof", False)),
+        "last_line": raw.get("last_line"),
+        "lastLine": raw.get("lastLine", raw.get("last_line")),
+        "last_activity_at": raw.get("last_activity_at"),
+        "lastActivityAt": raw.get("lastActivityAt", raw.get("last_activity_at")),
+        "output_stalled": bool(raw.get("output_stalled", False)),
+        "outputStalled": bool(raw.get("outputStalled", raw.get("output_stalled", False))),
+        "no_output_minutes": raw.get("no_output_minutes"),
+        "noOutputMinutes": raw.get("noOutputMinutes", raw.get("no_output_minutes")),
+        "redaction": raw.get("redaction", {}),
+    }
+
+
+def _dashboard_config_payload(config: Any, config_contract: Any) -> dict[str, Any]:
+    raw = config if isinstance(config, dict) else {}
+    contract = config_contract if isinstance(config_contract, dict) else {}
+    contract_meta = contract.get("meta") if isinstance(contract.get("meta"), dict) else {}
+    resolved_prompts_dir = str(
+        raw.get("resolved_prompts_dir")
+        or contract.get("resolved_prompts_dir")
+        or contract_meta.get("resolved_prompts_dir")
+        or ""
+    )
+    return {
+        "path": raw.get("path", ""),
+        "source": raw.get("source", ""),
+        "resolved_prompts_dir": resolved_prompts_dir,
+        "meta": {
+            "path": raw.get("path", ""),
+            "source": raw.get("source", ""),
+            "resolved_prompts_dir": resolved_prompts_dir,
+        },
+    }
+
+
+def _dashboard_config_contract_payload(config_contract: Any) -> dict[str, Any]:
+    raw = config_contract if isinstance(config_contract, dict) else {}
+    redaction = raw.get("redaction") if isinstance(raw.get("redaction"), dict) else {}
+    meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
+    resolved_prompts_dir = str(raw.get("resolved_prompts_dir") or meta.get("resolved_prompts_dir") or "")
+    return {
+        "path": raw.get("path", ""),
+        "source": raw.get("source", ""),
+        "resolved_prompts_dir": resolved_prompts_dir,
+        "values": {},
+        "defaults": {},
+        "schema": {},
+        "groups": [],
+        "restart_required_paths": [],
+        "backups": [],
+        "redaction": {
+            "placeholder": redaction.get("placeholder", "[redacted]"),
+            "paths": list(redaction.get("paths") or []),
+            "tokens": list(redaction.get("tokens") or []),
+        },
+        "meta": {
+            "path": raw.get("path", ""),
+            "source": raw.get("source", ""),
+            "resolved_prompts_dir": resolved_prompts_dir,
+            "save_enabled": bool(meta.get("save_enabled", False)),
+            "save_endpoint": meta.get("save_endpoint", "/api/config/save"),
+            "save_requires_opt_in": bool(meta.get("save_requires_opt_in", True)),
+            "restore_enabled": bool(meta.get("restore_enabled", False)),
+            "restore_endpoint": meta.get("restore_endpoint", "/api/config/restore"),
+            "restore_requires_opt_in": bool(meta.get("restore_requires_opt_in", True)),
+        },
+    }
+
+
+def _dashboard_prompts_payload(prompts: Any) -> dict[str, Any]:
+    raw = prompts if isinstance(prompts, dict) else {}
+    return {
+        "dir": raw.get("dir", ""),
+        "exists": bool(raw.get("exists", False)),
+        "items": [],
+        "redaction": raw.get("redaction", {}),
+    }
+
+
+def _dashboard_history_payload(history: Any) -> dict[str, Any]:
+    raw = history if isinstance(history, dict) else {}
+    compact = dict(raw)
+    compact["items"] = []
+    return compact
+
+
+def _dashboard_live_run_log_payload(log: Any) -> dict[str, Any]:
+    raw = log if isinstance(log, dict) else {}
+    entries = list(raw.get("entries") or [])
+    return {
+        "source": raw.get("source", {}),
+        "cursor": raw.get("cursor", 0),
+        "nextCursor": raw.get("nextCursor", raw.get("next_cursor", raw.get("cursor", 0))),
+        "next_cursor": raw.get("next_cursor", raw.get("nextCursor", raw.get("cursor", 0))),
+        "state": raw.get("state", "empty"),
+        "entries": entries[-_DASHBOARD_STATUS_LOG_ENTRY_LIMIT:],
+        "tail": "",
+        "files": {},
+        "ok": bool(raw.get("ok", False)),
+        "malformedLines": int(raw.get("malformedLines") or 0),
+        "malformed_lines": int(raw.get("malformed_lines") or raw.get("malformedLines") or 0),
+        "eof": bool(raw.get("eof", False)),
+        "lastLine": raw.get("lastLine", raw.get("last_line")),
+        "last_line": raw.get("last_line", raw.get("lastLine")),
+        "outputStalled": bool(raw.get("outputStalled", raw.get("output_stalled", False))),
+        "output_stalled": bool(raw.get("output_stalled", raw.get("outputStalled", False))),
+        "noOutputMinutes": raw.get("noOutputMinutes", raw.get("no_output_minutes")),
+        "no_output_minutes": raw.get("no_output_minutes", raw.get("noOutputMinutes")),
+        "lastActivityAt": raw.get("lastActivityAt", raw.get("last_activity_at")),
+        "last_activity_at": raw.get("last_activity_at", raw.get("lastActivityAt")),
+    }
+
+
+def _dashboard_live_run_notifications_payload(notifications: Any) -> dict[str, Any]:
+    raw = notifications if isinstance(notifications, dict) else {}
+    compact = dict(raw)
+    compact["items"] = list(raw.get("items") or [])[:_DASHBOARD_STATUS_NOTIFICATION_LIMIT]
+    return compact
+
+
+def _dashboard_live_run_payload(live_run: Any) -> dict[str, Any]:
+    raw = live_run if isinstance(live_run, dict) else {}
+    compact = dict(raw)
+    compact["log"] = _dashboard_live_run_log_payload(raw.get("log"))
+    compact["notifications"] = _dashboard_live_run_notifications_payload(raw.get("notifications"))
+    return compact
+
+
+def status_snapshot_for_scope(snapshot: dict[str, Any], *, scope: str = "full") -> dict[str, Any]:
+    normalized_scope = str(scope or "full").strip().lower() or "full"
+    if normalized_scope != "dashboard":
+        return snapshot
+
+    notifications = list(snapshot.get("notifications") or [])
+    pr_queue = snapshot.get("pr_queue", snapshot.get("prQueue", {}))
+    compact_snapshot: dict[str, Any] = {
+        "ok": bool(snapshot.get("ok", False)),
+        "repo": snapshot.get("repo", {}),
+        "latest_run_dir": snapshot.get("latest_run_dir"),
+        "snapshot_refresh": snapshot.get("snapshot_refresh", {}),
+        "snapshotRefresh": snapshot.get("snapshotRefresh", snapshot.get("snapshot_refresh", {})),
+        "active_run": snapshot.get("active_run", {}),
+        "stages": list(snapshot.get("stages") or []),
+        "backlog": snapshot.get("backlog", {}),
+        "goals": _dashboard_goals_payload(snapshot.get("goals")),
+        "logs": _dashboard_logs_payload(snapshot.get("logs")),
+        "config": _dashboard_config_payload(snapshot.get("config"), snapshot.get("config_contract")),
+        "config_contract": _dashboard_config_contract_payload(snapshot.get("config_contract")),
+        "prompts": _dashboard_prompts_payload(snapshot.get("prompts")),
+        "history": _dashboard_history_payload(snapshot.get("history")),
+        "metrics": snapshot.get("metrics", {}),
+        "notifications": notifications[:_DASHBOARD_STATUS_NOTIFICATION_LIMIT],
+        "pr_queue": pr_queue,
+        "prQueue": pr_queue,
+        "worktree": snapshot.get("worktree", {}),
+        "runner_control": snapshot.get("runner_control", {}),
+        "web_instance": snapshot.get("web_instance", {}),
+        "webInstance": snapshot.get("webInstance", snapshot.get("web_instance", {})),
+        "liveRun": _dashboard_live_run_payload(snapshot.get("liveRun")),
+        "redaction": snapshot.get("redaction", {}),
+        "progress": snapshot.get("progress", {}),
+        "execution_status": snapshot.get("execution_status", ""),
+        "executionStatus": snapshot.get("executionStatus", snapshot.get("execution_status", "")),
+        "project_complete": bool(snapshot.get("project_complete", False)),
+        "projectComplete": bool(snapshot.get("projectComplete", snapshot.get("project_complete", False))),
+        "project_status": snapshot.get("project_status", ""),
+        "projectStatus": snapshot.get("projectStatus", snapshot.get("project_status", "")),
+        "goals_complete": bool(snapshot.get("goals_complete", False)),
+        "goalsComplete": bool(snapshot.get("goalsComplete", snapshot.get("goals_complete", False))),
+        "backlog_complete": bool(snapshot.get("backlog_complete", False)),
+        "backlogComplete": bool(snapshot.get("backlogComplete", snapshot.get("backlog_complete", False))),
+        "sectionState": snapshot.get("sectionState", {}),
+    }
+    return compact_snapshot

@@ -5289,6 +5289,10 @@ def build_snapshot(
     )
 
 
+def status_snapshot_for_scope(snapshot: dict[str, Any], *, scope: str = "full") -> dict[str, Any]:
+    return _web_payloads.status_snapshot_for_scope(snapshot, scope=scope)
+
+
 def build_health(repo: Path | str | None = None) -> dict[str, Any]:
     snapshot = build_snapshot(repo)
     progress = snapshot.get("progress", {}) if isinstance(snapshot.get("progress"), dict) else {}
@@ -7236,8 +7240,8 @@ def create_app(
         }
 
     @app.get("/api/status")
-    def api_status() -> dict[str, Any]:
-        return _snapshot()
+    def api_status(scope: str = "full") -> dict[str, Any]:
+        return status_snapshot_for_scope(_snapshot(), scope=scope)
 
     @app.get("/api/progress")
     def api_progress() -> dict[str, Any]:

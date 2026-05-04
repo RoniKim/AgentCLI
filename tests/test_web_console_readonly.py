@@ -2814,6 +2814,26 @@ def _run_log_tail_session_harness(steps, fetch_responses=None):
     return json.loads(completed.stdout)
 
 
+class WebConsoleStatusPollingScopeTests(unittest.TestCase):
+    def test_dashboard_refresh_uses_compact_status_scope(self) -> None:
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "refreshSnapshot", "args": []},
+            ]
+        )
+
+        self.assertEqual(["/api/status?scope=dashboard"], shell["fetchCalls"])
+
+    def test_switching_to_history_requests_explicit_full_status_snapshot(self) -> None:
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "setView", "args": ["history"]},
+            ]
+        )
+
+        self.assertEqual(["/api/status?scope=full"], shell["fetchCalls"])
+
+
 class WebConsoleRedactionHelperTests(unittest.TestCase):
     def test_web_redaction_helpers_are_reexported_from_web(self) -> None:
         import agent_runner.web as web_module

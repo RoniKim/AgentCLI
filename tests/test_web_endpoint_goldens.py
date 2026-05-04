@@ -119,6 +119,116 @@ class WebEndpointGoldenTests(unittest.TestCase):
     def _write_state(self, run_dir: Path, state: dict[str, object]) -> None:
         _write(run_dir / "STATE.json", json.dumps(state, ensure_ascii=False, indent=2) + "\n")
 
+    def test_status_dashboard_scope_excludes_heavy_snapshot_sections(self) -> None:
+        goal_marker = "GOALS-RAW-TEXT-MARKER"
+        history_marker = "HISTORY-RAW-MARKER"
+        old_log_marker = "OLD-LOG-LINE-MARKER"
+
+        _write(
+            self.repo / ".doc" / "GOALS.md",
+            f"""# Project Goals
+
+{goal_marker}
+
+## P0
+- [ ] Compact dashboard polling
+
+## P1
+- [x] Keep full snapshot routes
+""",
+        )
+        _write(self.repo / "prompts" / "agentcli" / "pm_prompt.md", "PM prompt inventory marker\n")
+        _write(self.repo / "prompts" / "agentcli" / "dev_prompt.md", "Dev prompt inventory marker\n")
+
+        run_dir = self._make_run_dir("20260504-120000")
+        self._write_backlog(
+            run_dir,
+            [
+                {
+                    "id": "T16",
+                    "title": "Compact dashboard polling",
+                    "status": "in_progress",
+                    "priority": "P0",
+                    "estimate": "M",
+                }
+            ],
+        )
+        self._write_state(run_dir, {"done": [], "failed": [], "warnings": []})
+        _write(
+            run_dir / "run_summary.json",
+            json.dumps(
+                {
+                    "branch": "main",
+                    "cycles": [{"summary": history_marker}],
+                    "final": {"rc": 0, "reason": ""},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        _write(
+            run_dir / "last_run_summary.json",
+            json.dumps(
+                {
+                    "status": "running",
+                    "total_tasks": 1,
+                    "skipped": 0,
+                    "duration_seconds": 45,
+                    "reason": history_marker,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        log_lines = [f"2026-05-04 12:00:{index:02d} [INFO] line {index}" for index in range(1, 16)]
+        log_lines.insert(0, f"2026-05-04 12:00:00 [INFO] {old_log_marker}")
+        _write(run_dir / "logs" / "run.log", "\n".join(log_lines) + "\n")
+
+        client = self._create_client(
+            controller_status={
+                "run_dir": run_dir.as_posix(),
+                "running": True,
+                "stage": "Dev",
+                "current_task_id": "T16",
+                "current_task_title": "Compact dashboard polling",
+                "runner_mode": "thread",
+            }
+        )
+
+        full_payload = client.get("/api/status").json()
+        dashboard_payload = client.get("/api/status", params={"scope": "dashboard"}).json()
+
+        self.assertIn(goal_marker, json.dumps(full_payload["goals"], ensure_ascii=False))
+        self.assertNotIn("raw_text", dashboard_payload["goals"])
+        self.assertNotIn("rawText", dashboard_payload["goals"])
+        self.assertNotIn(goal_marker, json.dumps(dashboard_payload["goals"], ensure_ascii=False))
+
+        self.assertTrue(full_payload["history"]["items"])
+        self.assertEqual([], dashboard_payload["history"]["items"])
+        self.assertNotIn(history_marker, json.dumps(dashboard_payload["history"], ensure_ascii=False))
+
+        self.assertTrue(full_payload["prompts"]["items"])
+        self.assertEqual([], dashboard_payload["prompts"]["items"])
+        self.assertTrue(full_payload["config_contract"]["schema"])
+        self.assertEqual({}, dashboard_payload["config_contract"]["schema"])
+        self.assertEqual({}, dashboard_payload["config_contract"]["values"])
+        self.assertEqual({}, dashboard_payload["config_contract"]["defaults"])
+
+        self.assertGreater(len(full_payload["logs"]["entries"]), 12)
+        self.assertLessEqual(len(dashboard_payload["logs"]["entries"]), 12)
+        self.assertNotIn(old_log_marker, json.dumps(dashboard_payload["logs"], ensure_ascii=False))
+        self.assertNotIn("tail", dashboard_payload["logs"])
+        self.assertNotIn("files", dashboard_payload["logs"])
+
+        for key in ("active_run", "progress", "runner_control", "liveRun", "sectionState", "snapshotRefresh"):
+            self.assertIn(key, dashboard_payload)
+        self.assertEqual(full_payload["active_run"]["id"], dashboard_payload["active_run"]["id"])
+        self.assertEqual(full_payload["progress"]["run_status"], dashboard_payload["progress"]["run_status"])
+        self.assertEqual(full_payload["runner_control"]["enabled"], dashboard_payload["runner_control"]["enabled"])
+        self.assertEqual(full_payload["snapshotRefresh"]["status"], dashboard_payload["snapshotRefresh"]["status"])
+
     def test_status_no_run_contract_sections_are_normalized(self) -> None:
         client = self._create_client(controller_status={})
 
