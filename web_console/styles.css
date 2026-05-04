@@ -1455,6 +1455,39 @@ a {
   overflow: auto;
 }
 
+.log-feed__section {
+  display: grid;
+  gap: 1px;
+}
+
+.log-feed__section + .log-feed__section {
+  border-top: 1px solid var(--border);
+}
+
+.log-feed__section-head {
+  display: grid;
+  gap: 4px;
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.log-feed__section-title {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.log-feed__section-copy {
+  color: var(--text-sub);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.log-feed__signal {
+  margin: 8px 12px 0;
+}
+
 .log-row {
   display: grid;
   grid-template-columns: 78px 64px 62px minmax(0, 1fr);

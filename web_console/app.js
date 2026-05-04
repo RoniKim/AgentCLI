@@ -863,6 +863,7 @@
         tailFilter: 'Tail filter',
         loadingActiveRunLog: 'Loading active run log',
         activeRunLog: 'active run log',
+        structuredEventsSource: '/api/logs structured events',
         filteredLine: 'filtered line',
         filteredLines: 'filtered lines',
         cursor: 'cursor',
@@ -1515,6 +1516,7 @@
         liveTail: '라이브 tail',
         tailFilter: '라이브 tail 필터',
         loadingActiveRunLog: '활성 실행 로그를 불러오는 중',
+        structuredEventsSource: '/api/logs 구조화 이벤트',
         liveTailActive: '라이브 tail 활성',
         liveTailPaused: '라이브 tail 일시정지',
         logFileMissing: '로그 파일 없음',
@@ -5319,8 +5321,13 @@
   function normalizeLogEntry(entry) {
     const raw = toObject(entry);
     const lineNumber = toMaybeNumber(raw.line_number ?? raw.lineNumber ?? raw.cursor, null);
+    const taskId = toText(raw.taskId || raw.task_id, '');
+    const taskTitle = toText(raw.taskTitle || raw.task_title, '');
+    const event = toText(raw.event || raw.type, '');
+    const reason = toText(raw.reason || raw.detail, '');
     return {
       t: toText(raw.t || raw.ts, fmtClock(nowMs())),
+      ts: toText(raw.ts || raw.timestamp || raw.time, ''),
       lvl: normalizeLogLevel(raw.lvl || raw.level),
       stage: normalizeLogStage(raw.stage || raw.component || raw.scope),
       msg: toText(raw.msg || raw.message || raw.text, ''),
@@ -5328,6 +5335,55 @@
       line_number: lineNumber == null ? null : lineNumber,
       lineNumber: lineNumber == null ? null : lineNumber,
       raw: toText(raw.raw || raw.raw_line || raw.rawLine || '', ''),
+      task_id: taskId,
+      taskId,
+      task_title: taskTitle,
+      taskTitle,
+      event,
+      type: event,
+      reason,
+    };
+  }
+
+  function normalizeOptionalLogEntry(entry) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return null;
+    }
+    if (
+      !toText(entry.msg || entry.message || entry.text, '') &&
+      !toText(entry.raw || entry.raw_line || entry.rawLine, '') &&
+      !toText(entry.t || entry.ts || entry.timestamp || entry.time, '') &&
+      !toText(entry.taskId || entry.task_id, '') &&
+      !toText(entry.taskTitle || entry.task_title, '') &&
+      !toText(entry.event || entry.type, '') &&
+      !toText(entry.reason || entry.detail, '')
+    ) {
+      return null;
+    }
+    return normalizeLogEntry(entry);
+  }
+
+  function inferLogEntriesSourceKind(entries = []) {
+    return toArray(entries).some((entry) => {
+      const item = toObject(entry);
+      return Boolean(
+        toText(item.taskId || item.task_id || item.taskTitle || item.task_title || item.event || item.type, '').trim()
+        || (toText(item.stage, '').trim() && normalizeLogStage(item.stage) !== 'boot')
+      );
+    })
+      ? 'structured'
+      : 'log';
+  }
+
+  function normalizeLogEntriesSource(source = {}, entries = []) {
+    const raw = toObject(source);
+    const kind = toText(raw.kind || raw.type, inferLogEntriesSourceKind(entries)).trim().toLowerCase() || 'log';
+    const id = toText(raw.id || raw.sourceId || raw.source_id, kind === 'structured' ? 'api_logs_structured' : 'run_log').trim();
+    const label = toText(raw.label || raw.sourceLabel || raw.source_label, kind === 'structured' ? t('logs.structuredEventsSource') : t('logs.activeRunLog')).trim();
+    return {
+      id,
+      label,
+      kind,
     };
   }
 
@@ -7133,19 +7189,40 @@
     const sources = normalizeLogTailSources(raw.sources || raw.source_catalog || raw.sourceCatalog || []);
     const source = normalizeLogTailSource(raw.source || {});
     const sourceId = toText(raw.source_id || raw.selected_source_id || raw.sourceId || source.id, '').trim();
+    const entriesSource = normalizeLogEntriesSource(
+      {
+        id: raw.entries_source_id || raw.entriesSourceId,
+        label: raw.entries_source_label || raw.entriesSourceLabel,
+        kind: raw.entries_source_kind || raw.entriesSourceKind,
+      },
+      items
+    );
     const selection = resolveLogTailSourceSelection({
       sources,
       sourceId,
       source,
     });
+    const cursor = toMaybeNumber(raw.cursor ?? raw.nextCursor ?? raw.next_cursor) ?? 0;
+    const tailState = toText(raw.state, items.length ? 'ready' : 'empty');
     return {
       entries: items,
+      entriesSource,
       tail: toText(raw.tail, ''),
       files,
       source: selection.source,
       sourceId: selection.sourceId,
       selectedSourceId: selection.sourceId,
       sources: selection.sources,
+      tailState,
+      cursor,
+      nextCursor: toMaybeNumber(raw.nextCursor ?? raw.next_cursor ?? cursor) ?? cursor,
+      ok: Boolean(raw.ok ?? true),
+      malformedLines: toMaybeNumber(raw.malformedLines ?? raw.malformed_lines) ?? 0,
+      eof: Boolean(raw.eof),
+      lastLine: normalizeOptionalLogEntry(raw.lastLine || raw.last_line),
+      outputStalled: Boolean(raw.outputStalled ?? raw.output_stalled),
+      noOutputMinutes: toMaybeNumber(raw.noOutputMinutes ?? raw.no_output_minutes),
+      lastActivityAt: toMaybeNumber(raw.lastActivityAt ?? raw.last_activity_at) ?? 0,
       state: buildSectionState('logs', items.length ? 'ready' : 'empty', items.length ? '' : fallbackSectionMessage('logs')),
     };
   }
@@ -7521,23 +7598,21 @@
       step: toMaybeNumber(rawCurrentTask.step ?? rawProgress.step),
       cycle: toMaybeNumber(rawCurrentTask.cycle ?? rawProgress.cycle),
     };
-    const logSource = toObject(rawLog.source);
-    const logCursor = toMaybeNumber(rawLog.cursor ?? rawLog.nextCursor ?? rawLog.next_cursor);
-    const logState = toText(rawLog.state, status.run === 'running' ? 'loading' : 'empty');
     const logSummary = {
-      source: {
-        path: toText(logSource.path, ''),
-        name: toText(logSource.name, ''),
-        exists: Boolean(logSource.exists),
-      },
-      cursor: logCursor == null ? 0 : logCursor,
-      nextCursor: toMaybeNumber(rawLog.nextCursor ?? rawLog.next_cursor ?? logCursor) ?? (logCursor == null ? 0 : logCursor),
-      state: logState,
+      source: normalizedLog.source,
+      cursor: normalizedLog.cursor,
+      nextCursor: normalizedLog.nextCursor,
+      state: normalizedLog.tailState || (status.run === 'running' ? 'loading' : 'empty'),
       entries: logEntries,
       tail: normalizedLogTail,
       files: normalizedLogFiles,
-      ok: Boolean(rawLog.ok ?? true),
-      malformedLines: toMaybeNumber(rawLog.malformedLines ?? rawLog.malformed_lines) ?? 0,
+      ok: Boolean(normalizedLog.ok ?? true),
+      malformedLines: toMaybeNumber(normalizedLog.malformedLines) ?? 0,
+      eof: Boolean(normalizedLog.eof),
+      lastLine: normalizeOptionalLogEntry(normalizedLog.lastLine),
+      outputStalled: Boolean(normalizedLog.outputStalled),
+      noOutputMinutes: toMaybeNumber(normalizedLog.noOutputMinutes),
+      lastActivityAt: toNumber(normalizedLog.lastActivityAt, 0),
     };
     const notificationCounts = toObject(rawNotifications.kinds);
     const notificationsSummary = {
@@ -7577,8 +7652,8 @@
     const derivedStale = {
       value: Boolean(rawStale.value ?? (staleReasons.length || logSourceMissing || controlStatusError || processMismatch)),
       reasons: staleReasons,
-      logs: Boolean(rawStale.logs ?? ['missing_file', 'read_error'].includes(logState)),
-      logSourceMissing,
+      logs: Boolean(rawStale.logs ?? ['missing_file', 'read_error'].includes(logSummary.state)),
+      logSourceMissing: logSummary.source.exists === false,
       control: Boolean(rawStale.control ?? controlStatusError),
       controlStatusError,
       process: Boolean(rawStale.process ?? processMismatch),
@@ -7758,6 +7833,7 @@
       goalsPath: goals.path,
       goalsCompletion: goals.completion,
       logs: logs.entries,
+      logStructuredSource: logs.entriesSource,
       logTail: logs.tail,
       logTailSummary: logs.tail,
       logFiles: logs.files,
@@ -8403,6 +8479,7 @@
       goalsDirty: false,
       goalSave: createBlankGoalSaveState(),
       logs: [],
+      logStructuredSource: normalizeLogEntriesSource({ kind: 'log', label: t('logs.activeRunLog') }),
       logTail: createBlankLogTailState(),
       logFiles: {},
       configDefault: clone(configBase),
@@ -9272,6 +9349,7 @@
       removeJSON(STORAGE.goals);
     }
     state.logs = toArray(next.logs).slice(-MAX_LOG_ROWS);
+    state.logStructuredSource = normalizeLogEntriesSource(next.logStructuredSource, state.logs);
     state.logTailSummary = toText(next.logTailSummary || next.logTail, '');
     state.logFiles = toObject(next.logFiles);
     const nextLogTailSources = normalizeLogTailSources(next.logSources);
@@ -14999,6 +15077,11 @@
       cursor: 0,
       nextCursor: 0,
       malformedLines: 0,
+      eof: false,
+      lastLine: null,
+      outputStalled: false,
+      noOutputMinutes: null,
+      lastActivityAt: 0,
       sourceId: '',
       source: {
         id: '',
@@ -15068,6 +15151,11 @@
     if (!state.logTail.source || typeof state.logTail.source !== 'object') {
       state.logTail.source = {};
     }
+    state.logTail.eof = Boolean(state.logTail.eof);
+    state.logTail.lastLine = normalizeOptionalLogEntry(state.logTail.lastLine || state.logTail.last_line);
+    state.logTail.outputStalled = Boolean(state.logTail.outputStalled ?? state.logTail.output_stalled);
+    state.logTail.noOutputMinutes = toMaybeNumber(state.logTail.noOutputMinutes ?? state.logTail.no_output_minutes);
+    state.logTail.lastActivityAt = toNumber(state.logTail.lastActivityAt || state.logTail.last_activity_at || 0, 0);
     const normalizedSelection = resolveLogTailSourceSelection(state.logTail);
     applyLogTailSourceSelection(state.logTail, normalizedSelection);
     return state.logTail;
@@ -15280,6 +15368,54 @@
     return parts.length ? `/api/logs/tail?${parts.join('&')}` : '/api/logs/tail';
   }
 
+  function logTailEntrySearchText(entry) {
+    const item = toObject(entry);
+    return [
+      item.t,
+      item.ts,
+      item.lvl,
+      item.level,
+      item.stage,
+      item.task_id,
+      item.taskId,
+      item.task_title,
+      item.taskTitle,
+      item.event,
+      item.type,
+      item.msg,
+      item.message,
+      item.reason,
+      item.raw,
+    ]
+      .map((value) => toText(value, '').trim().toLowerCase())
+      .filter(Boolean)
+      .join(' ');
+  }
+
+  function logTailEntryMatchesFilters(entry, filters = {}) {
+    const item = normalizeLogEntry(entry);
+    const normalized = normalizeLogTailFilters(filters);
+    if (normalized.level && !['all', 'any', '*'].includes(normalized.level)) {
+      if (normalizeLogLevel(item.lvl) !== normalized.level) {
+        return false;
+      }
+    }
+    if (normalized.stage && !['all', 'any', '*'].includes(normalized.stage.toLowerCase())) {
+      if (normalizeLogStage(item.stage).toLowerCase() !== normalized.stage.toLowerCase()) {
+        return false;
+      }
+    }
+    if (normalized.taskId) {
+      if (toText(item.taskId || item.task_id, '').trim().toLowerCase() !== normalized.taskId.toLowerCase()) {
+        return false;
+      }
+    }
+    if (normalized.search && !logTailEntrySearchText(item).includes(normalized.search.toLowerCase())) {
+      return false;
+    }
+    return true;
+  }
+
   function tailSourceName(path) {
     const value = toText(path, '');
     if (!value) {
@@ -15378,6 +15514,34 @@
     };
   }
 
+  function describeLogTailOutputSignal(primary, fallback = {}) {
+    const model = toObject(primary);
+    const fallbackModel = toObject(fallback);
+    const lastLine =
+      normalizeOptionalLogEntry(model.lastLine || model.last_line)
+      || normalizeOptionalLogEntry(fallbackModel.lastLine || fallbackModel.last_line)
+      || normalizeOptionalLogEntry(toArray(model.entries).slice(-1)[0])
+      || normalizeOptionalLogEntry(toArray(fallbackModel.entries).slice(-1)[0]);
+    const noOutputMinutes = toMaybeNumber(
+      model.noOutputMinutes ?? model.no_output_minutes ?? fallbackModel.noOutputMinutes ?? fallbackModel.no_output_minutes,
+      null
+    );
+    const outputStalled = Boolean(
+      model.outputStalled ?? model.output_stalled ?? fallbackModel.outputStalled ?? fallbackModel.output_stalled
+    );
+    const lastLineText = compactText(
+      redactionAwareText(lastLine?.msg || lastLine?.raw || '', t('pipeline.latestLogLineUnavailable')),
+      180
+    ) || t('pipeline.latestLogLineUnavailable');
+    return {
+      visible: outputStalled && noOutputMinutes != null,
+      noOutputMinutes,
+      warningText: outputStalled && noOutputMinutes != null ? t('pipeline.noOutputWarning', { count: Math.max(1, noOutputMinutes) }) : '',
+      lastLine,
+      lastLineText,
+    };
+  }
+
   function describeLogTailState(tail) {
     const model = toObject(tail);
     const status = toText(model.status, 'loading');
@@ -15432,6 +15596,19 @@
         copy: t('logs.malformedLinesSkipped', { count: malformedLines }),
         badge: 'warn',
         state: 'malformed_line',
+      };
+    }
+    if (status === 'eof' && !entries.length) {
+      const cursor = toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0;
+      const outputSignal = describeLogTailOutputSignal(model);
+      return {
+        tone: outputSignal.visible ? 'warn' : 'info',
+        title: outputSignal.visible ? outputSignal.warningText : t('logs.liveTail'),
+        copy: outputSignal.visible
+          ? `${t('pipeline.latestLogLine')}: ${outputSignal.lastLineText}`
+          : `${sourceName} ${t('logs.cursor')} ${cursor}.${sourceMeta ? ` ${sourceMeta}.` : ''}`,
+        badge: 'eof',
+        state: 'eof',
       };
     }
     if (entries.length) {
@@ -15846,6 +16023,11 @@
     tail.loading = false;
     tail.error = '';
     tail.malformedLines = 0;
+    tail.eof = false;
+    tail.lastLine = null;
+    tail.outputStalled = false;
+    tail.noOutputMinutes = null;
+    tail.lastActivityAt = 0;
     if (!preserveSource) {
       tail.sourceId = '';
       tail.source = {
@@ -15881,6 +16063,11 @@
       tail.selected = [];
       tail.malformedLines = 0;
       tail.error = '';
+      tail.eof = false;
+      tail.lastLine = null;
+      tail.outputStalled = false;
+      tail.noOutputMinutes = null;
+      tail.lastActivityAt = 0;
     }
     tail.loading = true;
     tail.status = 'loading';
@@ -16016,6 +16203,18 @@
     const nextCursor = toMaybeNumber(response.next_cursor, tail.nextCursor || tail.cursor || 0);
     const cursor = toMaybeNumber(response.cursor, tail.cursor || 0);
     const stateValue = toText(response.state, 'loading');
+    const responseLastLine = normalizeOptionalLogEntry(response.lastLine || response.last_line);
+    const nextLastLine = responseLastLine || normalizeOptionalLogEntry(incomingEntries[incomingEntries.length - 1]) || normalizeOptionalLogEntry(tail.lastLine);
+    const hasEof = Object.prototype.hasOwnProperty.call(response, 'eof');
+    const hasOutputStalled =
+      Object.prototype.hasOwnProperty.call(response, 'outputStalled')
+      || Object.prototype.hasOwnProperty.call(response, 'output_stalled');
+    const hasNoOutputMinutes =
+      Object.prototype.hasOwnProperty.call(response, 'noOutputMinutes')
+      || Object.prototype.hasOwnProperty.call(response, 'no_output_minutes');
+    const hasLastActivityAt =
+      Object.prototype.hasOwnProperty.call(response, 'lastActivityAt')
+      || Object.prototype.hasOwnProperty.call(response, 'last_activity_at');
     return {
       ...tail,
       status: response.ok === false ? toText(response.state, 'read_error') || 'read_error' : stateValue,
@@ -16029,6 +16228,11 @@
       source,
       sources: selection.sources,
       selected,
+      eof: hasEof ? Boolean(response.eof) : Boolean(tail.eof),
+      lastLine: nextLastLine,
+      outputStalled: hasOutputStalled ? Boolean(response.outputStalled ?? response.output_stalled) : Boolean(tail.outputStalled),
+      noOutputMinutes: hasNoOutputMinutes ? toMaybeNumber(response.noOutputMinutes ?? response.no_output_minutes, null) : toMaybeNumber(tail.noOutputMinutes, null),
+      lastActivityAt: hasLastActivityAt ? (toMaybeNumber(response.lastActivityAt ?? response.last_activity_at, 0) || 0) : toNumber(tail.lastActivityAt, 0),
       lastUpdatedAt: nowMs(),
     };
   }
@@ -16128,6 +16332,11 @@
       sources: normalizeLogTailSources(tail.sources),
       error: toText(tail.error, ''),
       malformedLines: toNumber(tail.malformedLines, 0),
+      eof: Boolean(tail.eof),
+      lastLine: normalizeOptionalLogEntry(tail.lastLine),
+      outputStalled: Boolean(tail.outputStalled),
+      noOutputMinutes: toMaybeNumber(tail.noOutputMinutes),
+      lastActivityAt: toNumber(tail.lastActivityAt, 0),
       summary: toText(state.logTailSummary, ''),
     };
   }
@@ -16149,6 +16358,11 @@
     tail.paused = Boolean(tail.paused);
     tail.loading = Boolean(tail.loading);
     tail.malformedLines = toNumber(tail.malformedLines, 0);
+    tail.eof = Boolean(tail.eof);
+    tail.lastLine = normalizeOptionalLogEntry(tail.lastLine || tail.last_line);
+    tail.outputStalled = Boolean(tail.outputStalled ?? tail.output_stalled);
+    tail.noOutputMinutes = toMaybeNumber(tail.noOutputMinutes ?? tail.no_output_minutes);
+    tail.lastActivityAt = toNumber(tail.lastActivityAt || tail.last_activity_at || 0, 0);
     tail.requestSeq = toNumber(tail.requestSeq, 0);
     tail.timer = tail.timer || null;
     tail.runDir = toText(tail.runDir, '');
@@ -16174,6 +16388,9 @@
     }
     if (overrides.logTailSummary != null) {
       state.logTailSummary = toText(overrides.logTailSummary, '');
+    }
+    if (overrides.logStructuredSource != null) {
+      state.logStructuredSource = normalizeLogEntriesSource(overrides.logStructuredSource, state.logs);
     }
     return inspectLogTailState();
   }
@@ -16332,19 +16549,61 @@
       const tail = ensureLogTailState();
       const control = describeLogTailControl(tail);
       const entries = toArray(tail.entries);
+      const structuredSource = normalizeLogEntriesSource(state.logStructuredSource, state.logs);
+      const filters = normalizeLogTailFilters(tail.filters);
+      const structuredEntries = structuredSource.kind === 'structured'
+        ? toArray(state.logs).map(normalizeLogEntry).filter((entry) => logTailEntryMatchesFilters(entry, filters))
+        : [];
       const selected = new Set(toArray(tail.selected).map((value) => String(toMaybeNumber(value, null))).filter(Boolean));
       const banner = describeLogTailState(tail);
       const liveLogSource = toObject(liveLog.source);
+      const outputSignal = describeLogTailOutputSignal(tail, liveLog);
       const liveLogCursor = toMaybeNumber(tail.nextCursor ?? tail.cursor ?? liveLog.nextCursor ?? liveLog.cursor, 0) ?? 0;
       const sourceName = redactionAwareText(
         logTailSourceDisplayName(tail.source?.id ? tail.source : liveLogSource),
         t('logs.activeRunLog'),
       ) || t('logs.activeRunLog');
+      const totalVisible = structuredEntries.length + entries.length;
+      const liveSectionLabel = `${t('logs.liveTail')} / ${sourceName}`;
+      const structuredSection = structuredEntries.length
+        ? `
+          <div class="log-feed__section log-feed__section--structured">
+            <div class="log-feed__section-head">
+              <span class="badge badge--info">${escapeHTML(t('common.source'))}</span>
+              <div class="log-feed__section-title">${escapeHTML(redactionAwareText(structuredSource.label, t('logs.structuredEventsSource')) || t('logs.structuredEventsSource'))}</div>
+              <div class="log-feed__section-copy">${escapeHTML(t('logs.linesShown', { count: structuredEntries.length }))}</div>
+            </div>
+            ${structuredEntries.map((line) => renderLogRow(line)).join('')}
+          </div>
+        `
+        : '';
+      const liveSection = `
+        <div class="log-feed__section log-feed__section--live">
+          <div class="log-feed__section-head">
+            <span class="badge badge--accent">${escapeHTML(t('common.source'))}</span>
+            <div class="log-feed__section-title">${escapeHTML(liveSectionLabel)}</div>
+            <div class="log-feed__section-copy">${escapeHTML(t('logs.linesShown', { count: entries.length }))}</div>
+          </div>
+          ${outputSignal.visible ? `
+            <div class="section-banner section-banner--warn log-feed__signal">
+              <span class="dot"></span>
+              <div>
+                <div class="section-banner__title">${escapeHTML(outputSignal.warningText)}</div>
+                <div class="section-banner__copy">${escapeHTML(`${t('pipeline.latestLogLine')}: ${outputSignal.lastLineText}`)}</div>
+              </div>
+            </div>
+          ` : ''}
+          ${entries.length ? entries.map((line) => renderLogRow(line, {
+            selectable: true,
+            selected: selected.has(String(toMaybeNumber(line.line_number ?? line.cursor, null))),
+          })).join('') : `<div class="summary-note">${escapeHTML(banner.copy)}</div>`}
+        </div>
+      `;
       const body = `
         <div class="view-grid">
           ${panel(
             t('logs.liveTail'),
-          `${escapeHTML(t('logs.linesShown', { count: entries.length }))} | ${escapeHTML(t('logs.cursor'))} ${escapeHTML(String(liveLogCursor))}`,
+          `${escapeHTML(t('logs.linesShown', { count: totalVisible }))} | ${escapeHTML(t('logs.cursor'))} ${escapeHTML(String(liveLogCursor))}`,
           `
               ${renderLogTailBanner(tail)}
               ${redactionNote}
@@ -16354,14 +16613,12 @@
 
           ${panel(
             `${escapeHTML(sourceName)}`,
-            escapeHTML(entries.length === 1 ? t('logs.filteredLine') : t('logs.filteredLines')),
+            escapeHTML(totalVisible === 1 ? t('logs.filteredLine') : t('logs.filteredLines')),
             `
               <div class="log-feed">
                 <div class="log-feed__scroll" data-log-scroll>
-                  ${entries.length ? entries.map((line) => renderLogRow(line, {
-                    selectable: true,
-                    selected: selected.has(String(toMaybeNumber(line.line_number ?? line.cursor, null))),
-                  })).join('') : `<div class="summary-note">${escapeHTML(banner.copy)}</div>`}
+                  ${structuredSection}
+                  ${liveSection}
                 </div>
               </div>
             `
@@ -19275,6 +19532,7 @@
     experience: clone(defaults.experience),
     metrics: clone(defaults.metrics),
     logs: clone(defaults.logs),
+    logStructuredSource: clone(defaults.logStructuredSource),
     logTail: clone(defaults.logTail),
     logFiles: clone(defaults.logFiles),
     notifications: clone(defaults.notifications),

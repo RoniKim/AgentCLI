@@ -126,6 +126,11 @@ class WebConsoleStaticTests(unittest.TestCase):
             ".log-row__select",
             ".log-row__select--selected",
             ".log-row__select-mark",
+            ".log-feed__section",
+            ".log-feed__section-head",
+            ".log-feed__section-title",
+            ".log-feed__section-copy",
+            ".log-feed__signal",
             ".modal-actions",
             ".board-grid--four",
             ".kpi-grid--four",
@@ -980,6 +985,7 @@ class WebConsoleStaticTests(unittest.TestCase):
             "No matching log lines",
             "Log file missing",
             "Log read error",
+            "/api/logs structured events",
         ]
 
         for token in required_views + required_function_names + required_keyboard_tokens + required_shell_tokens:
@@ -1307,6 +1313,7 @@ class WebConsoleStaticTests(unittest.TestCase):
                 "No matching log lines",
                 "Log file missing",
                 "Log read error",
+                "/api/logs structured events",
                 "Copy selected lines",
                 "Download filtered logs",
                 "Clear selection",

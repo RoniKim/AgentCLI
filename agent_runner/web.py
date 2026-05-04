@@ -7358,6 +7358,15 @@ def create_app(
                     "selected_source_id": "",
                     "sources": source_catalog,
                     "malformed_lines": 0,
+                    "eof": False,
+                    "last_line": None,
+                    "lastLine": None,
+                    "last_activity_at": None,
+                    "lastActivityAt": None,
+                    "output_stalled": False,
+                    "outputStalled": False,
+                    "no_output_minutes": None,
+                    "noOutputMinutes": None,
                 }
                 return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_log_payload)
             live = bool(controller_status.get("running"))
@@ -7372,6 +7381,7 @@ def create_app(
                 task_id=task_id,
                 search=search,
                 live=live,
+                stalled_threshold_seconds=_stage_output_stall_threshold_seconds(cfg),
             )
             return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_log_payload)
         except Exception as ex:
@@ -7411,6 +7421,15 @@ def create_app(
                 "sources": source_catalog,
                 "error": str(ex).strip() or ex.__class__.__name__,
                 "malformed_lines": 0,
+                "eof": False,
+                "last_line": None,
+                "lastLine": None,
+                "last_activity_at": None,
+                "lastActivityAt": None,
+                "output_stalled": False,
+                "outputStalled": False,
+                "no_output_minutes": None,
+                "noOutputMinutes": None,
             }
             return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_log_payload)
 

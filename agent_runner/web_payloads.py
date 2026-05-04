@@ -1465,6 +1465,7 @@ def build_snapshot(
     _build_pr_queue_payload = web._build_pr_queue_payload
     _build_experience_payload = web._build_experience_payload
     scan_worktree_diagnostics = web.scan_worktree_diagnostics
+    _stage_output_stall_threshold_seconds = web._stage_output_stall_threshold_seconds
     _tail_text = web._tail_text
     _log_tail_source_catalog = web._log_tail_source_catalog
     _build_live_state_payload = web._build_live_state_payload
@@ -1641,6 +1642,11 @@ def build_snapshot(
     worktree_diagnostics = scan_worktree_diagnostics(repo_root)
     log_tail = _tail_text((latest_run_dir / "cycle_summary.log") if latest_run_dir else Path(""), 80)
     log_source_catalog = _log_tail_source_catalog(latest_run_dir)
+    log_entries_source = {
+        "id": "api_logs_structured" if logs_events else "run_log",
+        "label": "/api/logs structured events" if logs_events else "run.log",
+        "kind": "structured" if logs_events else "log",
+    }
     log_files = {
         str(source.get("id") or "").strip(): str(source.get("path") or "")
         for source in log_source_catalog
@@ -1744,6 +1750,14 @@ def build_snapshot(
         "state": "empty",
         "ok": False,
         "malformedLines": 0,
+        "eof": False,
+        "lastLine": None,
+        "last_activity_at": None,
+        "lastActivityAt": None,
+        "output_stalled": False,
+        "outputStalled": False,
+        "no_output_minutes": None,
+        "noOutputMinutes": None,
     }
     log_source_record = _resolve_log_tail_source_record(latest_run_dir)
     log_source_path = (
@@ -1760,6 +1774,7 @@ def build_snapshot(
                 cursor=None,
                 max_lines=1,
                 live=str(progress.get("run_status") or "idle").strip().lower() == "running",
+                stalled_threshold_seconds=_stage_output_stall_threshold_seconds(cfg),
             )
             log_summary_payload = {
                 "source": log_tail_source_payload.get("source", {}),
@@ -1771,6 +1786,15 @@ def build_snapshot(
                 "state": str(log_tail_source_payload.get("state") or "empty"),
                 "ok": bool(log_tail_source_payload.get("ok", False)),
                 "malformedLines": int(log_tail_source_payload.get("malformed_lines") or 0),
+                "eof": bool(log_tail_source_payload.get("eof", False)),
+                "last_line": log_tail_source_payload.get("last_line"),
+                "lastLine": log_tail_source_payload.get("lastLine") or log_tail_source_payload.get("last_line"),
+                "last_activity_at": log_tail_source_payload.get("last_activity_at"),
+                "lastActivityAt": log_tail_source_payload.get("lastActivityAt", log_tail_source_payload.get("last_activity_at")),
+                "output_stalled": bool(log_tail_source_payload.get("output_stalled", False)),
+                "outputStalled": bool(log_tail_source_payload.get("outputStalled", log_tail_source_payload.get("output_stalled", False))),
+                "no_output_minutes": log_tail_source_payload.get("no_output_minutes"),
+                "noOutputMinutes": log_tail_source_payload.get("noOutputMinutes", log_tail_source_payload.get("no_output_minutes")),
             }
         except Exception:
             log_summary_payload = {
@@ -1793,6 +1817,14 @@ def build_snapshot(
                 "state": "read_error",
                 "ok": False,
                 "malformedLines": 0,
+                "eof": False,
+                "lastLine": None,
+                "last_activity_at": None,
+                "lastActivityAt": None,
+                "output_stalled": False,
+                "outputStalled": False,
+                "no_output_minutes": None,
+                "noOutputMinutes": None,
             }
     log_summary_payload = _web_apply_redaction(log_summary_payload, active=redaction_active, redactor=_redact_web_log_payload)
     if redaction_active:
@@ -1968,6 +2000,15 @@ def build_snapshot(
             "state": log_summary_payload.get("state", "empty"),
             "ok": log_summary_payload.get("ok", False),
             "malformedLines": log_summary_payload.get("malformedLines", 0),
+            "eof": bool(log_summary_payload.get("eof", False)),
+            "last_line": log_summary_payload.get("last_line"),
+            "lastLine": log_summary_payload.get("lastLine"),
+            "last_activity_at": log_summary_payload.get("last_activity_at"),
+            "lastActivityAt": log_summary_payload.get("lastActivityAt"),
+            "output_stalled": bool(log_summary_payload.get("output_stalled", False)),
+            "outputStalled": bool(log_summary_payload.get("outputStalled", False)),
+            "no_output_minutes": log_summary_payload.get("no_output_minutes"),
+            "noOutputMinutes": log_summary_payload.get("noOutputMinutes"),
         },
         notifications=notifications,
         runner_control=runner_control,
@@ -2025,10 +2066,22 @@ def build_snapshot(
             "entries": log_entries,
             "tail": log_tail,
             "files": log_files,
+            "entries_source_id": log_entries_source.get("id", ""),
+            "entries_source_label": log_entries_source.get("label", ""),
+            "entries_source_kind": log_entries_source.get("kind", "log"),
             "source": log_summary_payload.get("source", {}),
             "source_id": log_summary_payload.get("source_id", ""),
             "selected_source_id": log_summary_payload.get("selected_source_id", ""),
             "sources": log_summary_payload.get("sources", []),
+            "eof": bool(log_summary_payload.get("eof", False)),
+            "last_line": log_summary_payload.get("last_line"),
+            "lastLine": log_summary_payload.get("lastLine"),
+            "last_activity_at": log_summary_payload.get("last_activity_at"),
+            "lastActivityAt": log_summary_payload.get("lastActivityAt"),
+            "output_stalled": bool(log_summary_payload.get("output_stalled", False)),
+            "outputStalled": bool(log_summary_payload.get("outputStalled", False)),
+            "no_output_minutes": log_summary_payload.get("no_output_minutes"),
+            "noOutputMinutes": log_summary_payload.get("noOutputMinutes"),
             "redaction": logs_redaction,
         },
         "config": config_payload,

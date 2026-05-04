@@ -283,9 +283,9 @@
 
 ### P0-W. Web Operational UX Follow-Up
 
-- [ ] Dashboard stale snapshot badge only appears when the newest `/api/status` payload or selected run artifact is older than the configured freshness threshold.
-- [ ] Dashboard active task id, title, attempt, and branch are populated from live runner state, backlog state, task history, or latest task artifact instead of showing `task title unavailable`.
-- [ ] Runner liveness copy clearly separates shell runner process, task backend, tracked children, and artifact writer states without contradictory `running`/`stopped` wording.
+- [x] Dashboard stale snapshot badge only appears when the newest `/api/status` payload or selected run artifact is older than the configured freshness threshold.
+- [x] Dashboard active task id, title, attempt, and branch are populated from live runner state, backlog state, task history, or latest task artifact instead of showing `task title unavailable`.
+- [x] Runner liveness copy clearly separates shell runner process, task backend, tracked children, and artifact writer states without contradictory `running`/`stopped` wording.
 - [ ] Logs view renders structured `/api/logs` events immediately when `run.log` is sparse and labels structured events separately from live tail sources.
 - [ ] Log tail state leaves `loading` at EOF and shows last log line plus no-output warning when no new `run.log` lines arrive.
 - [ ] Worktree Review defaults to the active run's current pending/no-pending state and does not surface old applied/discarded artifacts unless the user opens historical context.

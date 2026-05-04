@@ -59,6 +59,25 @@ def _fmt_clock(value: Any) -> str:
     return dt.strftime("%H:%M:%S")
 
 
+def _path_mtime_ms(path: Path | None) -> int | None:
+    if path is None:
+        return None
+    try:
+        return int(path.stat().st_mtime * 1000)
+    except Exception:
+        return None
+
+
+def _entry_timestamp_ms(entry: dict[str, Any] | None) -> int | None:
+    if not isinstance(entry, dict):
+        return None
+    raw = _pick_text(entry.get("ts"), entry.get("timestamp"), entry.get("time"))
+    if not raw:
+        return None
+    ms = _epoch_ms(raw) or _iso_to_ms(raw)
+    return ms or None
+
+
 def _event_stage(event: dict[str, Any]) -> str:
     stage = str(event.get("stage") or "").strip()
     if stage:
@@ -336,11 +355,14 @@ def _build_log_tail_payload(
     task_id: str = "",
     search: str = "",
     live: bool = False,
+    stalled_threshold_seconds: int | None = None,
+    now_ms: int | None = None,
 ) -> dict[str, Any]:
     max_lines = max(1, int(max_lines))
     source_file = source_path.expanduser().resolve()
     entries: list[dict[str, Any]] = []
     malformed_count = 0
+    last_entry: dict[str, Any] | None = None
     total_lines = 0
     next_cursor = 0
     cursor_mode = cursor is not None
@@ -377,13 +399,17 @@ def _build_log_tail_payload(
             if cursor_mode:
                 for line_number, raw_line in enumerate(handle, start=1):
                     total_lines = line_number
+                    entry, malformed = _parse_log_tail_entry(raw_line, line_number=line_number, source_path=source_file)
                     if line_number <= start_cursor:
+                        if entry is not None and not malformed:
+                            last_entry = entry
                         continue
                     next_cursor = line_number
-                    entry, malformed = _parse_log_tail_entry(raw_line, line_number=line_number, source_path=source_file)
                     if malformed:
                         malformed_count += 1
                         continue
+                    if entry is not None:
+                        last_entry = entry
                     if entry is None or not _log_tail_entry_matches(entry, level=level, stage=stage, task_id=task_id, search=search):
                         continue
                     entries.append(entry)
@@ -398,6 +424,8 @@ def _build_log_tail_payload(
                     if malformed:
                         malformed_count += 1
                         continue
+                    if entry is not None:
+                        last_entry = entry
                     if entry is None or not _log_tail_entry_matches(entry, level=level, stage=stage, task_id=task_id, search=search):
                         continue
                     matched.append(entry)
@@ -415,6 +443,15 @@ def _build_log_tail_payload(
             "selected_source_id": str(source_payload.get("id") or ""),
             "sources": source_catalog,
             "malformed_lines": 0,
+            "eof": False,
+            "last_line": None,
+            "lastLine": None,
+            "last_activity_at": None,
+            "lastActivityAt": None,
+            "output_stalled": False,
+            "outputStalled": False,
+            "no_output_minutes": None,
+            "noOutputMinutes": None,
         }
     except Exception as ex:
         return {
@@ -430,12 +467,42 @@ def _build_log_tail_payload(
             "sources": source_catalog,
             "error": str(ex).strip() or ex.__class__.__name__,
             "malformed_lines": malformed_count,
+            "eof": False,
+            "last_line": None,
+            "lastLine": None,
+            "last_activity_at": None,
+            "lastActivityAt": None,
+            "output_stalled": False,
+            "outputStalled": False,
+            "no_output_minutes": None,
+            "noOutputMinutes": None,
         }
 
     if cursor_mode and next_cursor == 0:
         next_cursor = total_lines
 
+    eof = bool(cursor_mode and total_lines <= start_cursor)
+    last_entry_ts = _entry_timestamp_ms(last_entry)
+    last_activity_at = last_entry_ts if last_entry_ts is not None else _path_mtime_ms(source_file)
+    output_stalled = False
+    no_output_minutes: int | None = None
+    source_id = str(source_payload.get("id") or "").strip()
+    if (
+        live
+        and source_id == "run_log"
+        and stalled_threshold_seconds is not None
+        and stalled_threshold_seconds > 0
+        and last_activity_at is not None
+    ):
+        current_now_ms = int(now_ms) if now_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
+        age_ms = max(0, current_now_ms - last_activity_at)
+        if age_ms >= int(stalled_threshold_seconds) * 1000:
+            output_stalled = True
+            no_output_minutes = max(1, int(age_ms // 60000))
+
     state = "loading" if (entries or live or (cursor_mode and total_lines > start_cursor)) else "empty"
+    if eof:
+        state = "eof"
     if malformed_count:
         state = "malformed_line"
 
@@ -453,6 +520,15 @@ def _build_log_tail_payload(
         "cursor": start_cursor if cursor_mode else None,
         "max_lines": max_lines,
         "malformed_lines": malformed_count,
+        "eof": eof,
+        "last_line": deepcopy(last_entry) if isinstance(last_entry, dict) else None,
+        "lastLine": deepcopy(last_entry) if isinstance(last_entry, dict) else None,
+        "last_activity_at": last_activity_at,
+        "lastActivityAt": last_activity_at,
+        "output_stalled": output_stalled,
+        "outputStalled": output_stalled,
+        "no_output_minutes": no_output_minutes,
+        "noOutputMinutes": no_output_minutes,
     }
 
 

@@ -2841,6 +2841,10 @@ class WebConsoleRedactionHelperTests(unittest.TestCase):
                     "raw": "Task build output with secret token=abc123",
                 }
             ],
+            "last_line": {
+                "msg": "Last line with secret token=abc123",
+                "raw": "Last line with secret token=abc123",
+            },
             "tail": "cycle summary token=abc123",
             "files": {
                 "cycle_summary": "D:/runs/latest/cycle_summary.log",
@@ -2871,6 +2875,8 @@ class WebConsoleRedactionHelperTests(unittest.TestCase):
         redacted = _redact_web_log_payload(payload)
         self.assertEqual("[redacted]", redacted["entries"][0]["msg"])
         self.assertEqual("[redacted]", redacted["entries"][0]["raw"])
+        self.assertEqual("[redacted]", redacted["last_line"]["msg"])
+        self.assertEqual("[redacted]", redacted["last_line"]["raw"])
         self.assertEqual("[redacted]", redacted["tail"])
         self.assertEqual("[redacted]", redacted["files"]["cycle_summary"])
         self.assertEqual("[redacted]", redacted["files"]["run_log"])
@@ -6959,6 +6965,31 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("error_log", payload["source_id"])
         self.assertTrue(payload["source"]["available"])
 
+    def test_api_logs_tail_reports_eof_last_line_and_no_output_for_stalled_run_log(self) -> None:
+        from agent_runner import web as web_module
+        from fastapi.testclient import TestClient
+
+        stale_at = datetime.now(timezone.utc) - timedelta(minutes=20)
+        _write(
+            self.run_dir / "logs" / "run.log",
+            f"{stale_at.strftime('%Y-%m-%d %H:%M:%S')} [INFO] stalled but visible line\n",
+        )
+        controller_status = self._controller_status(self.run_dir, running=True, stage="Dev")
+        with patch.object(web_module, "_build_runner_controller", return_value=FakeRunnerController(controller_status)):
+            client = TestClient(self._create_app(self.repo))
+
+        payload = client.get("/api/logs/tail", params={"source": "run_log", "cursor": 1, "max_lines": 5}).json()
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual("eof", payload["state"])
+        self.assertTrue(payload["eof"])
+        self.assertEqual([], payload["entries"])
+        self.assertEqual(1, payload["next_cursor"])
+        self.assertEqual("stalled but visible line", payload["last_line"]["msg"])
+        self.assertTrue(payload["output_stalled"])
+        self.assertIsInstance(payload["no_output_minutes"], int)
+        self.assertGreaterEqual(payload["no_output_minutes"], 19)
+
     def test_api_logs_tail_reports_read_errors(self) -> None:
         with patch.object(Path, "open", side_effect=OSError("simulated read failure")):
             payload = self._api_log_tail(source="events_jsonl", max_lines=1)
@@ -7607,6 +7638,101 @@ Another unsupported line.
         self.assertIn("# Filters: level=warn | stage=Dev | task_id=T-020 | search=error path", download["text"])
         self.assertIn("fresh warning line", download["text"])
 
+    def test_log_tail_refresh_clears_loading_at_eof_and_preserves_last_line(self) -> None:
+        source_payload = {
+            "id": "run_log",
+            "label": "run.log",
+            "path": "C:/runs/run.log",
+            "name": "run.log",
+            "exists": True,
+            "available": True,
+            "selected": True,
+            "kind": "log",
+            "unavailableReason": "",
+        }
+        session = _run_log_tail_session_harness(
+            [
+                {
+                    "kind": "call",
+                    "name": "seedLogTailState",
+                    "args": [
+                        {
+                            "activeView": "logs",
+                            "sourceMode": "api",
+                            "logTail": {
+                                "status": "loading",
+                                "loading": False,
+                                "paused": False,
+                                "entries": [
+                                    {
+                                        "cursor": 1,
+                                        "line_number": 1,
+                                        "t": "12:00:00",
+                                        "stage": "boot",
+                                        "lvl": "info",
+                                        "msg": "stalled but visible line",
+                                    }
+                                ],
+                                "cursor": 1,
+                                "nextCursor": 1,
+                                "sourceId": "run_log",
+                                "source": source_payload,
+                                "sources": [source_payload],
+                            },
+                        }
+                    ],
+                },
+                {
+                    "kind": "call",
+                    "name": "refreshServerLogTail",
+                    "args": [{"silent": True}],
+                },
+                {
+                    "kind": "call",
+                    "name": "inspectLogTailState",
+                    "args": [],
+                },
+            ],
+            fetch_responses=[
+                {
+                    "ok": True,
+                    "body": {
+                        "ok": True,
+                        "state": "eof",
+                        "eof": True,
+                        "entries": [],
+                        "next_cursor": 1,
+                        "cursor": 1,
+                        "last_line": {
+                            "cursor": 1,
+                            "line_number": 1,
+                            "t": "12:00:00",
+                            "stage": "boot",
+                            "lvl": "info",
+                            "msg": "stalled but visible line",
+                        },
+                        "output_stalled": True,
+                        "no_output_minutes": 12,
+                        "source_id": "run_log",
+                        "selected_source_id": "run_log",
+                        "source": source_payload,
+                        "sources": [source_payload],
+                    },
+                }
+            ],
+        )
+
+        state = session["results"][2]
+        self.assertEqual("/api/logs/tail?max_lines=120&cursor=1&source=run_log", session["fetchCalls"][0])
+        self.assertFalse(state["loading"])
+        self.assertEqual("eof", state["status"])
+        self.assertTrue(state["eof"])
+        self.assertEqual(1, len(state["entries"]))
+        self.assertEqual("stalled but visible line", state["entries"][0]["msg"])
+        self.assertEqual("stalled but visible line", state["lastLine"]["msg"])
+        self.assertTrue(state["outputStalled"])
+        self.assertEqual(12, state["noOutputMinutes"])
+
     def test_log_tail_live_polling_advances_cursor_and_stops_when_paused(self) -> None:
         session = _run_log_tail_session_harness(
             [
@@ -8180,6 +8306,148 @@ Another unsupported line.
         self.assertIn("status-chip--running", live_banner["filters"])
         self.assertIn("button--quiet", live_banner["filters"])
         self.assertIn('aria-pressed="false"', live_banner["filters"])
+
+    def test_logs_view_renders_structured_entries_before_live_tail_for_sparse_run_log(self) -> None:
+        _write(
+            self.run_dir / "logs" / "run.log",
+            "2026-04-26 12:02:00 [INFO] sparse live tail line\n",
+        )
+        status_payload = self.client.get("/api/status").json()
+        self.assertEqual("structured", status_payload["logs"]["entries_source_kind"])
+        normalized = _run_adapter_harness([{"kind": "call", "name": "normalizeSnapshot", "args": [status_payload]}])[0]
+
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+                {
+                    "kind": "call",
+                    "name": "seedLogTailState",
+                    "args": [
+                        {
+                            "activeView": "logs",
+                            "sourceMode": "api",
+                            "logTail": {
+                                "status": "loading",
+                                "paused": False,
+                                "entries": [
+                                    {
+                                        "cursor": 1,
+                                        "line_number": 1,
+                                        "t": "12:02:00",
+                                        "stage": "boot",
+                                        "lvl": "info",
+                                        "msg": "sparse live tail line",
+                                    }
+                                ],
+                                "cursor": 1,
+                                "nextCursor": 1,
+                                "sourceId": "run_log",
+                                "source": {
+                                    "id": "run_log",
+                                    "label": "run.log",
+                                    "path": "C:/runs/run.log",
+                                    "name": "run.log",
+                                    "exists": True,
+                                    "available": True,
+                                    "selected": True,
+                                    "kind": "log",
+                                    "unavailableReason": "",
+                                },
+                                "sources": [
+                                    {
+                                        "id": "run_log",
+                                        "label": "run.log",
+                                        "path": "C:/runs/run.log",
+                                        "name": "run.log",
+                                        "exists": True,
+                                        "available": True,
+                                        "selected": True,
+                                        "kind": "log",
+                                        "unavailableReason": "",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+                {"kind": "call", "name": "renderShell", "args": [{"force": True, "preserveScroll": True}]},
+            ]
+        )
+
+        main_html = shell["roots"]["main"]
+        self.assertEqual("logs", shell["roots"]["view"])
+        self.assertIn("/api/logs structured events", main_html)
+        self.assertIn("Live tail / run.log", main_html)
+        self.assertLess(main_html.index("retry after build failure"), main_html.index("sparse live tail line"))
+
+    def test_logs_view_shows_no_output_warning_and_last_line_without_loading_state(self) -> None:
+        shell = _run_shell_harness(
+            [
+                {
+                    "kind": "call",
+                    "name": "seedLogTailState",
+                    "args": [
+                        {
+                            "activeView": "logs",
+                            "sourceMode": "api",
+                            "logTail": {
+                                "status": "eof",
+                                "loading": False,
+                                "paused": False,
+                                "entries": [],
+                                "cursor": 1,
+                                "nextCursor": 1,
+                                "eof": True,
+                                "lastLine": {
+                                    "cursor": 1,
+                                    "line_number": 1,
+                                    "t": "12:00:00",
+                                    "stage": "boot",
+                                    "lvl": "info",
+                                    "msg": "stalled but visible line",
+                                },
+                                "outputStalled": True,
+                                "noOutputMinutes": 12,
+                                "sourceId": "run_log",
+                                "source": {
+                                    "id": "run_log",
+                                    "label": "run.log",
+                                    "path": "C:/runs/run.log",
+                                    "name": "run.log",
+                                    "exists": True,
+                                    "available": True,
+                                    "selected": True,
+                                    "kind": "log",
+                                    "unavailableReason": "",
+                                },
+                                "sources": [
+                                    {
+                                        "id": "run_log",
+                                        "label": "run.log",
+                                        "path": "C:/runs/run.log",
+                                        "name": "run.log",
+                                        "exists": True,
+                                        "available": True,
+                                        "selected": True,
+                                        "kind": "log",
+                                        "unavailableReason": "",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+                {"kind": "call", "name": "renderShell", "args": [{"force": True, "preserveScroll": True}]},
+            ]
+        )
+
+        main_html = shell["roots"]["main"]
+        self.assertEqual("logs", shell["roots"]["view"])
+        self.assertIn("No output for 12 minutes.", main_html)
+        self.assertIn("Latest log line: stalled but visible line", main_html)
+        self.assertIn("Live tail / run.log", main_html)
+        self.assertNotIn("button--loading", main_html)
+        self.assertNotIn("Loading active run log", main_html)
 
     def test_adapter_normalizes_history_and_notification_contracts(self) -> None:
         populated_snapshot = self.client.get("/api/status").json()
