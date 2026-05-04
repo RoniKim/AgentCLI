@@ -3,9 +3,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import shutil
 import sys
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from agent_runner.backends.base import BackendQuotaStatus
 from agent_runner.backends.claudecode import (
@@ -16,7 +20,19 @@ from agent_runner.backends.codex_runner import CodexBackendAdapter
 from agent_runner.codex_exec import CodexExecResult
 
 
-def test_codex_adapter_passes_invocation_options(tmp_path: Path) -> None:
+@contextmanager
+def _temp_path() -> Path:
+    root = Path(__file__).resolve().parents[1] / ".tmp_backend_adapter_tests"
+    root.mkdir(parents=True, exist_ok=True)
+    temp_path = root / f"case_{uuid.uuid4().hex}"
+    temp_path.mkdir(parents=True, exist_ok=True)
+    try:
+        yield temp_path
+    finally:
+        shutil.rmtree(temp_path, ignore_errors=True)
+
+
+def test_codex_adapter_passes_invocation_options() -> None:
     captured: dict[str, object] = {}
 
     async def fake_executor(prompt: str, **kwargs: object) -> CodexExecResult:
@@ -29,32 +45,33 @@ def test_codex_adapter_passes_invocation_options(tmp_path: Path) -> None:
 
     adapter = CodexBackendAdapter(executor=fake_executor)
 
-    result = asyncio.run(
-        adapter.invoke_model(
-            "prompt text",
-            instructions="stage rules",
-            model="gpt-test",
-            reasoning_effort="high",
-            full_auto=True,
-            cwd=tmp_path,
-            timeout_seconds=17,
-            heartbeat_callback=heartbeat,
-            heartbeat_interval_seconds=9,
+    with _temp_path() as tmp_path:
+        result = asyncio.run(
+            adapter.invoke_model(
+                "prompt text",
+                instructions="stage rules",
+                model="gpt-test",
+                reasoning_effort="high",
+                full_auto=True,
+                cwd=tmp_path,
+                timeout_seconds=17,
+                heartbeat_callback=heartbeat,
+                heartbeat_interval_seconds=9,
+            )
         )
-    )
 
-    assert result.final_output == "ok"
-    assert captured["prompt"] == "prompt text"
-    assert captured["kwargs"] == {
-        "instructions": "stage rules",
-        "model": "gpt-test",
-        "reasoning_effort": "high",
-        "full_auto": True,
-        "cwd": tmp_path,
-        "timeout_seconds": 17,
-        "heartbeat_callback": heartbeat,
-        "heartbeat_interval_seconds": 9,
-    }
+        assert result.final_output == "ok"
+        assert captured["prompt"] == "prompt text"
+        assert captured["kwargs"] == {
+            "instructions": "stage rules",
+            "model": "gpt-test",
+            "reasoning_effort": "high",
+            "full_auto": True,
+            "cwd": tmp_path,
+            "timeout_seconds": 17,
+            "heartbeat_callback": heartbeat,
+            "heartbeat_interval_seconds": 9,
+        }
 
 
 def test_codex_adapter_normalizes_jsonl_stream_messages() -> None:
@@ -74,14 +91,65 @@ def test_codex_adapter_normalizes_jsonl_stream_messages() -> None:
     text, structured = asyncio.run(adapter.collect_messages(raw_lines))
 
     assert text == "final response"
-    assert structured is not None
-    assert structured["thread_id"] == "thread-1"
-    assert structured["input_tokens"] == 7
-    assert structured["output_tokens"] == 11
-    assert structured["is_quota_exhausted"] is False
+    assert structured == {
+        "events": [
+            {"type": "thread.started", "thread_id": "thread-1"},
+            {"type": "turn.completed", "usage": {"input_tokens": 3, "output_tokens": 5}},
+            {
+                "type": "thread.completed",
+                "final_output": "final response",
+                "usage": {"input_tokens": 7, "output_tokens": 11},
+            },
+        ],
+        "thread_id": "thread-1",
+        "input_tokens": 7,
+        "output_tokens": 11,
+        "is_quota_exhausted": False,
+    }
 
 
-def test_claude_adapter_builds_options_and_invokes_client(tmp_path: Path, monkeypatch) -> None:
+def test_claude_adapter_collect_messages_preserves_public_text_and_structured_values() -> None:
+    class TextBlock:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class AssistantMessage:
+        def __init__(self, content: list[object]) -> None:
+            self.content = content
+
+    class ResultMessage:
+        def __init__(self, *, result: dict[str, object], content: list[object]) -> None:
+            self.result = result
+            self.content = content
+
+    class FakeStream:
+        def __aiter__(self):
+            async def _iterate():
+                yield AssistantMessage([TextBlock("draft reply")])
+                yield ResultMessage(
+                    result={"session_id": "claude-session-1", "stop_reason": "end_turn"},
+                    content=[TextBlock("final reply")],
+                )
+
+            return _iterate()
+
+    cfg = _load_claudecode_cfg(argparse.Namespace())
+    adapter = ClaudeCodeBackendAdapter(cfg)
+
+    with _temp_path() as tmp_path:
+        text, structured = asyncio.run(
+            adapter.collect_messages(
+                FakeStream(),
+                stop_path=tmp_path / "STOP",
+                debug=False,
+            )
+        )
+
+        assert text == "draft reply\nfinal reply"
+        assert structured == {"session_id": "claude-session-1", "stop_reason": "end_turn"}
+
+
+def test_claude_adapter_builds_options_and_invokes_client() -> None:
     class FakeOptions:
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
@@ -110,38 +178,38 @@ def test_claude_adapter_builds_options_and_invokes_client(tmp_path: Path, monkey
         def receive_response(self) -> FakeStream:
             return FakeStream()
 
-    monkeypatch.setitem(
+    with patch.dict(
         sys.modules,
-        "claude_agent_sdk",
-        SimpleNamespace(ClaudeAgentOptions=FakeOptions),
-    )
-    cfg = _load_claudecode_cfg(argparse.Namespace())
-    adapter = ClaudeCodeBackendAdapter(cfg, client_cls=FakeClient)
+        {"claude_agent_sdk": SimpleNamespace(ClaudeAgentOptions=FakeOptions)},
+    ):
+        cfg = _load_claudecode_cfg(argparse.Namespace())
+        adapter = ClaudeCodeBackendAdapter(cfg, client_cls=FakeClient)
 
-    text, structured = asyncio.run(
-        adapter.invoke_model(
-            "hello claude",
-            repo=tmp_path,
-            stage="PM",
-            stop_path=tmp_path / "STOP",
-            debug=False,
-            model_override="claude-test",
-            stage_instructions="stage instructions",
-            max_turns_override=4,
-            timeout_seconds=5,
-            max_retries=0,
-        )
-    )
+        with _temp_path() as tmp_path:
+            text, structured = asyncio.run(
+                adapter.invoke_model(
+                    "hello claude",
+                    repo=tmp_path,
+                    stage="PM",
+                    stop_path=tmp_path / "STOP",
+                    debug=False,
+                    model_override="claude-test",
+                    stage_instructions="stage instructions",
+                    max_turns_override=4,
+                    timeout_seconds=5,
+                    max_retries=0,
+                )
+            )
 
-    assert text == "delegated output"
-    assert structured is None
-    assert len(clients) == 1
-    client = clients[0]
-    assert client.prompt == "hello claude"
-    assert client.options.kwargs["model"] == "claude-test"
-    assert client.options.kwargs["cwd"] == str(tmp_path)
-    assert client.options.kwargs["max_turns"] == 4
-    assert "stage instructions" in client.options.kwargs["system_prompt"]
+            assert text == "delegated output"
+            assert structured is None
+            assert len(clients) == 1
+            client = clients[0]
+            assert client.prompt == "hello claude"
+            assert client.options.kwargs["model"] == "claude-test"
+            assert client.options.kwargs["cwd"] == str(tmp_path)
+            assert client.options.kwargs["max_turns"] == 4
+            assert "stage instructions" in client.options.kwargs["system_prompt"]
 
 
 def test_quota_probe_maps_availability() -> None:
@@ -158,4 +226,6 @@ def test_quota_probe_maps_availability() -> None:
         cfg,
         quota_probe_fn=lambda **_: ("skip", {}, None),
     )
-    assert claude_adapter.probe_quota().available is False
+    claude_status = claude_adapter.probe_quota()
+    assert claude_status.available is False
+    assert claude_status.as_tuple() == ("skip", {}, None)

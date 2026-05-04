@@ -651,6 +651,345 @@ class WebEndpointGoldenTests(unittest.TestCase):
             projection,
         )
 
+    def test_existing_status_progress_worktree_and_runner_contracts_stay_stable_for_failed_run(self) -> None:
+        self._write_goals()
+        run_dir = self._make_run_dir("20260503-030405")
+        self._write_backlog(
+            run_dir,
+            [
+                {
+                    "id": "T1",
+                    "title": "Done task",
+                    "prompt": "done",
+                    "files": ["done.py"],
+                    "done_when": "done",
+                    "skills": ["observability"],
+                    "skills_rationale": "Keep extracted payload builders stable.",
+                    "depends_on": [],
+                },
+                {
+                    "id": "T2",
+                    "title": "Failed task",
+                    "prompt": "failed",
+                    "files": ["failed.py"],
+                    "done_when": "failed",
+                    "skills": ["observability"],
+                    "skills_rationale": "Keep extracted payload builders stable.",
+                    "depends_on": ["T1"],
+                },
+                {
+                    "id": "T3",
+                    "title": "Pending task",
+                    "prompt": "pending",
+                    "files": ["pending.py"],
+                    "done_when": "pending",
+                    "skills": ["observability"],
+                    "skills_rationale": "Keep extracted payload builders stable.",
+                    "depends_on": ["T2"],
+                },
+            ],
+        )
+        self._write_state(
+            run_dir,
+            {
+                "done": ["T1"],
+                "failed": [
+                    {
+                        "task": "T2",
+                        "reason": "build_failed",
+                        "detail": "Failed build.",
+                        "attempt": 2,
+                        "cycle": 1,
+                        "step": 0,
+                        "rc": 1,
+                    }
+                ],
+                "warnings": [],
+            },
+        )
+
+        client = self._create_client(
+            controller_status={
+                "run_dir": run_dir.as_posix(),
+                "running": False,
+                "exit_code": 1,
+                "reason": "build_failed",
+                "stage": "Dev",
+                "done": 1,
+                "failed": 1,
+                "warnings": 0,
+                "runner_mode": "thread",
+            }
+        )
+
+        status_payload = client.get("/api/status").json()
+        progress_payload = client.get("/api/progress").json()
+        worktree_payload = client.get("/api/worktree").json()
+        runner_payload = client.get("/api/runner/status").json()
+        projection = {
+            "status": {
+                "active_run": {
+                    key: status_payload["active_run"][key]
+                    for key in (
+                        "id",
+                        "stage",
+                        "stageIndex",
+                        "runDir",
+                        "progressAvailable",
+                        "progress",
+                        "executionStatus",
+                        "completionStatus",
+                        "completionReason",
+                        "goalsComplete",
+                        "backlogComplete",
+                        "projectComplete",
+                        "projectStatus",
+                        "status",
+                        "task",
+                        "taskTitle",
+                        "finalReason",
+                    )
+                },
+                "progress": {
+                    key: status_payload["progress"][key]
+                    for key in (
+                        "run_status",
+                        "tasks_done",
+                        "tasks_total",
+                        "tasks_failed",
+                        "progress",
+                        "progress_available",
+                        "current_task_id",
+                        "current_task_title",
+                        "executionStatus",
+                        "completionStatus",
+                        "completionReason",
+                        "projectComplete",
+                        "projectStatus",
+                        "goalsComplete",
+                        "backlogComplete",
+                        "final_reason",
+                        "final_rc",
+                    )
+                },
+                "worktree": {
+                    key: status_payload["worktree"][key]
+                    for key in ("status", "summary", "risk", "runDir", "runnerRc", "lastRc")
+                },
+                "runner_control": {
+                    key: status_payload["runner_control"][key]
+                    for key in (
+                        "enabled",
+                        "controller_available",
+                        "busy",
+                        "run_status",
+                        "execution_status",
+                        "project_complete",
+                        "project_status",
+                        "goals_complete",
+                        "backlog_complete",
+                        "message",
+                    )
+                },
+            },
+            "progress": {
+                "top": {
+                    key: progress_payload[key]
+                    for key in (
+                        "run_status",
+                        "tasks_done",
+                        "tasks_total",
+                        "tasks_failed",
+                        "current_task_id",
+                        "current_task_title",
+                        "executionStatus",
+                        "completionStatus",
+                        "completionReason",
+                        "projectComplete",
+                        "projectStatus",
+                        "goalsComplete",
+                        "backlogComplete",
+                        "final_reason",
+                    )
+                },
+                "nested": {
+                    key: progress_payload["progress"][key]
+                    for key in (
+                        "run_status",
+                        "tasks_done",
+                        "tasks_total",
+                        "tasks_failed",
+                        "progress",
+                        "progress_available",
+                        "current_task_id",
+                        "current_task_title",
+                        "executionStatus",
+                        "completionStatus",
+                        "completionReason",
+                        "projectComplete",
+                        "projectStatus",
+                        "goalsComplete",
+                        "backlogComplete",
+                        "final_reason",
+                        "final_rc",
+                    )
+                },
+            },
+            "worktree": {
+                key: worktree_payload[key]
+                for key in ("status", "summary", "risk", "runDir", "runnerRc", "lastRc")
+            },
+            "runner": {
+                "top": {
+                    key: runner_payload[key]
+                    for key in (
+                        "enabled",
+                        "controller_available",
+                        "busy",
+                        "run_status",
+                        "executionStatus",
+                        "projectComplete",
+                        "projectStatus",
+                        "goalsComplete",
+                        "backlogComplete",
+                        "message",
+                    )
+                },
+                "status": {
+                    key: runner_payload["status"][key]
+                    for key in (
+                        "running",
+                        "runner_mode",
+                        "run_dir",
+                        "exit_code",
+                        "done",
+                        "failed",
+                        "warnings",
+                        "state_counts",
+                        "reason",
+                        "last_event",
+                        "event_count",
+                    )
+                },
+            },
+        }
+
+        expected_progress = {
+            "run_status": "failed",
+            "tasks_done": 1,
+            "tasks_total": 3,
+            "tasks_failed": 1,
+            "progress": None,
+            "progress_available": False,
+            "current_task_id": "",
+            "current_task_title": "",
+            "executionStatus": "failed",
+            "completionStatus": "",
+            "completionReason": "",
+            "projectComplete": False,
+            "projectStatus": "incomplete",
+            "goalsComplete": False,
+            "backlogComplete": False,
+            "final_reason": "build_failed",
+            "final_rc": 1,
+        }
+        expected_worktree = {
+            "status": "none",
+            "summary": "No pending worktree merge.",
+            "risk": "No isolated worktree patch is pending review.",
+            "runDir": run_dir.as_posix(),
+            "runnerRc": 0,
+            "lastRc": 0,
+        }
+
+        self.assertEqual(
+            {
+                "status": {
+                    "active_run": {
+                        "id": "20260503-030405",
+                        "stage": "Dev",
+                        "stageIndex": 3,
+                        "runDir": run_dir.as_posix(),
+                        "progressAvailable": False,
+                        "progress": None,
+                        "executionStatus": "failed",
+                        "completionStatus": "",
+                        "completionReason": "",
+                        "goalsComplete": False,
+                        "backlogComplete": False,
+                        "projectComplete": False,
+                        "projectStatus": "incomplete",
+                        "status": "failed",
+                        "task": "",
+                        "taskTitle": "",
+                        "finalReason": "build_failed",
+                    },
+                    "progress": expected_progress,
+                    "worktree": expected_worktree,
+                    "runner_control": {
+                        "enabled": False,
+                        "controller_available": True,
+                        "busy": False,
+                        "run_status": "failed",
+                        "execution_status": "failed",
+                        "project_complete": False,
+                        "project_status": "incomplete",
+                        "goals_complete": False,
+                        "backlog_complete": False,
+                        "message": "Runner controls are disabled until the server is started with AGENTCLI_WEB_RUNNER_CONTROLS=1 or --enable-runner-controls.",
+                },
+            },
+            "progress": {
+                "top": {
+                    "run_status": "failed",
+                    "tasks_done": 1,
+                    "tasks_total": 3,
+                    "tasks_failed": 1,
+                    "current_task_id": "",
+                    "current_task_title": "",
+                    "executionStatus": "failed",
+                    "completionStatus": "",
+                    "completionReason": "",
+                    "projectComplete": False,
+                    "projectStatus": "incomplete",
+                    "goalsComplete": False,
+                    "backlogComplete": False,
+                    "final_reason": "build_failed",
+                },
+                "nested": expected_progress,
+            },
+            "worktree": expected_worktree,
+            "runner": {
+                "top": {
+                    "enabled": False,
+                        "controller_available": True,
+                        "busy": False,
+                        "run_status": "failed",
+                        "executionStatus": "failed",
+                        "projectComplete": False,
+                        "projectStatus": "incomplete",
+                        "goalsComplete": False,
+                        "backlogComplete": False,
+                        "message": "Runner controls are disabled until the server is started with AGENTCLI_WEB_RUNNER_CONTROLS=1 or --enable-runner-controls.",
+                    },
+                    "status": {
+                        "running": False,
+                        "runner_mode": "thread",
+                        "run_dir": run_dir.as_posix(),
+                        "exit_code": 1,
+                        "done": 1,
+                        "failed": 1,
+                        "warnings": 0,
+                        "state_counts": {"done": 1, "failed": 1, "warnings": 0},
+                        "reason": "build_failed",
+                        "last_event": "",
+                        "event_count": 0,
+                    },
+                },
+            },
+            projection,
+        )
+
     def test_worktree_no_pending_contract_uses_diagnostics_safe_fields(self) -> None:
         client = self._create_client(controller_status={})
 

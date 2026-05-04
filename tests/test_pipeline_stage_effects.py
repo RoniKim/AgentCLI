@@ -312,6 +312,45 @@ class PipelineStageEffectsTests(unittest.TestCase):
         self.assertEqual([], sorted(session.pending_stage_effects()))
         self.assertEqual(["T02"], [task.id for task in session.tasks])
 
+    def test_backlog_mutation_keeps_existing_run_artifact_filenames(self) -> None:
+        run_dir = self._make_temp_run_dir()
+        write_backlog_files(run_dir, [_task("T1", "Prepare queue data"), _oversized_task()])
+        state_payload = {"done": ["T0"], "failed": [], "warnings": []}
+        (run_dir / "STATE.json").write_text(json.dumps(state_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        session = self._make_real_session(run_dir)
+
+        outcome = asyncio.run(BacklogRefinerStage().run(session, 0))
+
+        self.assertEqual("backlog_refined", outcome.reason)
+        audit_path = run_dir / "stage_artifacts" / "PL" / "backlog_write_cycle_000.json"
+        self.assertTrue((run_dir / "BACKLOG.json").exists())
+        self.assertTrue((run_dir / "BACKLOG.md").exists())
+        self.assertTrue((run_dir / "PL_OUTPUT_cycle_000.json").exists())
+        self.assertTrue((run_dir / "BACKLOG_REFINEMENT_cycle_000.json").exists())
+        self.assertTrue((run_dir / "NOTES_PL.md").exists())
+        self.assertTrue(audit_path.exists())
+        self.assertEqual(state_payload, json.loads((run_dir / "STATE.json").read_text(encoding="utf-8")))
+
+        audit_payload = json.loads(audit_path.read_text(encoding="utf-8"))
+        self.assertEqual("BACKLOG.json", Path(audit_payload["backlog_json"]).name)
+        self.assertEqual("BACKLOG.md", Path(audit_payload["backlog_md"]).name)
+
+        pl_output_payload = json.loads((run_dir / "PL_OUTPUT_cycle_000.json").read_text(encoding="utf-8"))
+        refinement_payload = json.loads((run_dir / "BACKLOG_REFINEMENT_cycle_000.json").read_text(encoding="utf-8"))
+        self.assertEqual("backlog_write_cycle_000.json", pl_output_payload["backlog_write_artifact"])
+        self.assertEqual("backlog_write_cycle_000.json", refinement_payload["backlog_write_artifact"])
+
+        root_names = {path.name for path in run_dir.iterdir()}
+        stage_artifact_names = {path.name for path in (run_dir / "stage_artifacts" / "PL").iterdir()}
+        self.assertNotIn("backlog.json", root_names)
+        self.assertNotIn("backlog.md", root_names)
+        self.assertNotIn("state.json", root_names)
+        self.assertNotIn("pl_output_cycle_000.json", root_names)
+        self.assertNotIn("backlog_refinement_cycle_000.json", root_names)
+        self.assertNotIn("notes_pl.md", root_names)
+        self.assertNotIn("backlog_write_cycle_000.json", root_names)
+        self.assertNotIn("backlog_write_cycle_000.JSON", stage_artifact_names)
+
     def test_backlog_refiner_noops_for_already_sized_backlog(self) -> None:
         run_dir = self._make_temp_run_dir()
         original = [_task("T1", "Small backend task"), _task("T2", "Small UI task")]
