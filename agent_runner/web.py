@@ -212,6 +212,8 @@ RUN_DIR_ARTIFACT_NAMES = {
     "metrics.jsonl",
     "FINAL_RUN_REPORT.json",
     "FINAL_RUN_REPORT.md",
+    "OPERATIONS_SUMMARY.json",
+    "OPERATIONS_SUMMARY.md",
     "QA_VALIDATION_REPORT.json",
     "QA_VALIDATION_REPORT.md",
     "failed_tasks.json",

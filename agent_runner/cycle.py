@@ -632,6 +632,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 if report_artifacts:
                     ctx_obj["qa_validation_report"] = report_artifacts.get("qa_validation_report", {})
                     ctx_obj["final_run_report"] = report_artifacts.get("final_run_report", {})
+                    ctx_obj["operations_summary"] = report_artifacts.get("operations_summary", {})
                     ctx_obj["report_artifacts"] = report_artifacts.get("artifacts", {})
                 ctx_path.write_text(
                     json.dumps(ctx_obj, ensure_ascii=False, indent=2) + "\n",

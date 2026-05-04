@@ -792,9 +792,11 @@ def build_history_item(
     qa_validation_report = _safe_json(run_dir / "QA_VALIDATION_REPORT.json", {})
     final_run_report = _safe_json(run_dir / "FINAL_RUN_REPORT.json", {})
     cycle_change_summary = _safe_json(run_dir / "cycle_change_summary.json", {})
+    operations_summary = _safe_json(run_dir / "OPERATIONS_SUMMARY.json", {})
     qa_validation_report = qa_validation_report if isinstance(qa_validation_report, dict) else {}
     final_run_report = final_run_report if isinstance(final_run_report, dict) else {}
     cycle_change_summary = cycle_change_summary if isinstance(cycle_change_summary, dict) else {}
+    operations_summary = operations_summary if isinstance(operations_summary, dict) else {}
     report_summary = _pick_text(final_run_report.get("summary"), "")
     report_status = _pick_text(final_run_report.get("status"), "")
     qa_report_status = _pick_text(qa_validation_report.get("status"), "")
@@ -852,6 +854,8 @@ def build_history_item(
         "final_run_report": final_run_report,
         "cycleChangeSummary": cycle_change_summary,
         "cycle_change_summary": cycle_change_summary,
+        "operationsSummary": operations_summary,
+        "operations_summary": operations_summary,
         "failedTasks": failed_tasks,
         "failed_tasks": failed_tasks,
         "reportSummary": report_summary,
@@ -865,6 +869,8 @@ def build_history_item(
             "finalRunMarkdown": (run_dir / "FINAL_RUN_REPORT.md").as_posix(),
             "cycleChangeSummaryJson": (run_dir / "cycle_change_summary.json").as_posix(),
             "cycleChangeSummaryMarkdown": (run_dir / "cycle_change_summary.md").as_posix(),
+            "operationsSummaryJson": (run_dir / "OPERATIONS_SUMMARY.json").as_posix(),
+            "operationsSummaryMarkdown": (run_dir / "OPERATIONS_SUMMARY.md").as_posix(),
             "failedTasksJson": (run_dir / "failed_tasks.json").as_posix(),
             "failedTasksMarkdown": (run_dir / "failed_tasks.md").as_posix(),
             "shutdownReport": (run_dir / "SHUTDOWN_REPORT.md").as_posix(),

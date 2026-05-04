@@ -333,7 +333,7 @@ def _redact_web_history_item(item: dict[str, Any]) -> dict[str, Any]:
         if redacted.get(key) not in (None, "", False):
             redacted[key] = REDACTED_VALUE
             redaction_fields.append(key)
-    for key in ("runSummary", "run_summary", "lastRunSummary", "last_run_summary", "cycleChangeSummary", "cycle_change_summary", "failedTasks", "failed_tasks"):
+    for key in ("runSummary", "run_summary", "lastRunSummary", "last_run_summary", "cycleChangeSummary", "cycle_change_summary", "operationsSummary", "operations_summary", "failedTasks", "failed_tasks"):
         summary = redacted.get(key)
         if isinstance(summary, dict):
             redacted[key] = _redact_web_history_summary(summary)
