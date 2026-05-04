@@ -7263,6 +7263,119 @@ Another unsupported line.
             self.assertEqual("empty", fallback["sectionState"]["stages"]["status"])
             self.assertEqual("empty", fallback["sectionState"]["backlog"]["status"])
 
+    def test_dashboard_active_task_prefers_live_runner_state(self) -> None:
+        run_dir, controller_status = self._write_long_running_stage_bundle(
+            run_name="20260428-dashboard-live-preferred",
+            active_stage="Dev",
+            elapsed_minutes=18,
+            log_minutes_ago=2,
+            backend_minutes_ago=1,
+        )
+        controller_status["current_task_id"] = "T-LIVE-77"
+        controller_status["current_task_title"] = "Live runner task"
+        controller_status["attempt"] = 7
+        controller_status["branch"] = "live/branch"
+
+        payload = self._api_status(self.repo, controller_status)
+
+        self.assertEqual("T-LIVE-77", payload["active_run"]["task"])
+        self.assertEqual("Live runner task", payload["active_run"]["taskTitle"])
+        self.assertEqual(7, payload["active_run"]["attempt"])
+        self.assertEqual("live/branch", payload["active_run"]["branch"])
+        self.assertEqual("T-LIVE-77", payload["progress"]["current_task_id"])
+        self.assertEqual("Live runner task", payload["progress"]["current_task_title"])
+        self.assertEqual(7, payload["progress"]["attempt"])
+        self.assertEqual("live/branch", payload["progress"]["branch"])
+        self.assertEqual("T-LIVE-77", payload["liveRun"]["currentTask"]["id"])
+        self.assertEqual("Live runner task", payload["liveRun"]["currentTask"]["title"])
+        self.assertEqual(7, payload["liveRun"]["currentTask"]["attempt"])
+        self.assertEqual("live/branch", payload["liveRun"]["identity"]["branch"])
+
+        _normalized, dashboard_html, _pipeline_html = self._render_snapshot_views(payload)
+        self.assertIn("Live runner task", dashboard_html)
+        self.assertIn("T-LIVE-77", dashboard_html)
+        self.assertNotIn("task title unavailable", dashboard_html)
+
+    def test_dashboard_active_task_falls_back_to_backlog_state(self) -> None:
+        _run_dir, controller_status = self._write_long_running_stage_bundle(
+            run_name="20260428-dashboard-backlog-fallback",
+            active_stage="Dev",
+            elapsed_minutes=18,
+            log_minutes_ago=2,
+            backend_minutes_ago=1,
+        )
+        controller_status["current_task_id"] = ""
+        controller_status["current_task_title"] = ""
+        controller_status["attempt"] = None
+        controller_status["branch"] = ""
+
+        payload = self._api_status(self.repo, controller_status)
+
+        self.assertEqual("T-020", payload["active_run"]["task"])
+        self.assertEqual("API-backed observation path", payload["active_run"]["taskTitle"])
+        self.assertEqual(2, payload["active_run"]["attempt"])
+        self.assertEqual("main", payload["active_run"]["branch"])
+        self.assertEqual("T-020", payload["progress"]["current_task_id"])
+        self.assertEqual("API-backed observation path", payload["progress"]["current_task_title"])
+        self.assertEqual(2, payload["progress"]["attempt"])
+        self.assertEqual("main", payload["progress"]["branch"])
+        self.assertEqual("T-020", payload["liveRun"]["currentTask"]["id"])
+        self.assertEqual("API-backed observation path", payload["liveRun"]["currentTask"]["title"])
+        self.assertEqual(2, payload["liveRun"]["currentTask"]["attempt"])
+
+        _normalized, dashboard_html, _pipeline_html = self._render_snapshot_views(payload)
+        self.assertIn("API-backed observation path", dashboard_html)
+        self.assertIn("T-020", dashboard_html)
+        self.assertNotIn("task title unavailable", dashboard_html)
+
+    def test_dashboard_active_task_falls_back_to_latest_task_artifact(self) -> None:
+        run_dir = self._make_live_run_dir("20260428-dashboard-artifact-fallback")
+        _write_run_bundle(
+            run_dir,
+            task_id="T-ART-12",
+            task_title="Artifact fallback task",
+            branch="release/artifact",
+            status="success",
+            final_reason="ok",
+        )
+        (run_dir / "BACKLOG.json").unlink()
+        (run_dir / "STATE.json").unlink()
+
+        payload = self._api_status(self.repo, None)
+
+        self.assertEqual(run_dir.resolve().as_posix(), payload["latest_run_dir"])
+        self.assertEqual("T-ART-12", payload["active_run"]["task"])
+        self.assertEqual("Artifact fallback task", payload["active_run"]["taskTitle"])
+        self.assertEqual(2, payload["active_run"]["attempt"])
+        self.assertEqual("release/artifact", payload["active_run"]["branch"])
+        self.assertEqual("T-ART-12", payload["progress"]["current_task_id"])
+        self.assertEqual("Artifact fallback task", payload["progress"]["current_task_title"])
+        self.assertEqual(2, payload["progress"]["attempt"])
+        self.assertEqual("release/artifact", payload["progress"]["branch"])
+        self.assertEqual("T-ART-12", payload["liveRun"]["currentTask"]["id"])
+        self.assertEqual("Artifact fallback task", payload["liveRun"]["currentTask"]["title"])
+        self.assertEqual(2, payload["liveRun"]["currentTask"]["attempt"])
+        self.assertEqual("release/artifact", payload["liveRun"]["identity"]["branch"])
+
+        _normalized, dashboard_html, _pipeline_html = self._render_snapshot_views(payload)
+        self.assertIn("Artifact fallback task", dashboard_html)
+        self.assertIn("T-ART-12", dashboard_html)
+        self.assertNotIn("task title unavailable", dashboard_html)
+
+    def test_dashboard_active_task_keeps_explicit_unavailable_state_when_sources_are_empty(self) -> None:
+        payload = self._api_status(self.empty_repo, None)
+
+        self.assertEqual("", payload["active_run"]["task"])
+        self.assertEqual("", payload["active_run"]["taskTitle"])
+        self.assertEqual("", payload["progress"]["current_task_id"])
+        self.assertEqual("", payload["progress"]["current_task_title"])
+        self.assertEqual("", payload["liveRun"]["currentTask"]["id"])
+        self.assertEqual("", payload["liveRun"]["currentTask"]["title"])
+
+        _normalized, dashboard_html, _pipeline_html = self._render_snapshot_views(payload)
+        self.assertIn("Unavailable", dashboard_html)
+        self.assertNotIn("task title unavailable", dashboard_html)
+
     def test_log_tail_helpers_build_queries_and_cursor_updates(self) -> None:
         blank = _run_log_tail_harness([{"kind": "state"}])[0]
         query_result = _run_log_tail_harness(

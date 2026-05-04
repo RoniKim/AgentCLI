@@ -14483,6 +14483,146 @@
     );
   }
 
+  function compareTuple(left, right) {
+    const a = Array.isArray(left) ? left : [];
+    const b = Array.isArray(right) ? right : [];
+    const limit = Math.max(a.length, b.length);
+    for (let index = 0; index < limit; index += 1) {
+      const av = toMaybeNumber(a[index]) ?? -1;
+      const bv = toMaybeNumber(b[index]) ?? -1;
+      if (av > bv) return 1;
+      if (av < bv) return -1;
+    }
+    return 0;
+  }
+
+  function dashboardBacklogTaskFallback(currentTaskId = '') {
+    const items = toArray(state.backlog);
+    const selectedId = toText(currentTaskId || state.backlogSelectedId || '', '');
+    if (selectedId) {
+      const selected = items.find((item) => toText(item.id, '') === selectedId);
+      if (selected) {
+        return {
+          id: toText(selected.id, ''),
+          title: toText(selected.title || selected.taskTitle, ''),
+          attempt: toMaybeNumber(selected.attempt),
+        };
+      }
+    }
+
+    let best = null;
+    let bestScore = [-1, -1, -1, -1, -1];
+    items.forEach((item, index) => {
+      const task = toObject(item);
+      const id = toText(task.id, '');
+      const title = toText(task.title || task.taskTitle, '');
+      const attempt = toMaybeNumber(task.attempt);
+      const startedAt = toMaybeNumber(task.startedAt);
+      const endedAt = toMaybeNumber(task.endedAt);
+      const cycle = toMaybeNumber(task.cycle);
+      const status = normalizeBacklogStatus(task.status || task.taskStatus, 'pending');
+      const statusRank =
+        status === 'in_progress'
+          ? 2
+          : ['failed', 'review_required', 'blocked_env', 'test_contract_changed', 'regression_failed', 'done'].includes(status)
+            ? 1
+            : 0;
+      if (!id && !title && attempt == null && statusRank === 0) return;
+      const score = [
+        statusRank,
+        startedAt ?? endedAt ?? -1,
+        cycle ?? -1,
+        attempt ?? -1,
+        -index,
+      ];
+      if (!best || compareTuple(score, bestScore) > 0) {
+        best = { id, title, attempt };
+        bestScore = score;
+      }
+    });
+
+    return best || { id: '', title: '', attempt: null };
+  }
+
+  function dashboardArtifactTaskFallback() {
+    const runs = toArray(state.runs || state.history);
+    const liveRun = currentLiveRun();
+    const activeRun = currentLiveRunActiveRun(liveRun);
+    const runDirHint = toText(activeRun.runDir || liveRun.runDir || state.latestRunDir || '', '');
+    const run = (runDirHint && runs.find((item) => toText(item.runDir, '') === runDirHint)) || runs[0] || null;
+    if (!run) {
+      return { id: '', title: '', attempt: null, branch: '' };
+    }
+
+    const runSummary = toObject(run.runSummary || run.run_summary);
+    const lastRunSummary = toObject(run.lastRunSummary || run.last_run_summary);
+    let best = null;
+    let bestScore = [-1, -1, -1, -1, -1];
+    for (const cycleEntry of toArray(runSummary.cycles)) {
+      const cycle = toMaybeNumber(toObject(cycleEntry).cycle);
+      for (const [stageIndex, stage] of toArray(toObject(cycleEntry).stages).entries()) {
+        const raw = toObject(stage);
+        const id = toText(raw.taskId || raw.task_id, '');
+        const title = toText(raw.taskTitle || raw.task_title || raw.title, '');
+        const attempt = toMaybeNumber(raw.attempt);
+        if (!id && !title && attempt == null) continue;
+        const endedAt = toMaybeNumber(raw.endedAt || raw.ended_at);
+        const startedAt = toMaybeNumber(raw.startedAt || raw.started_at);
+        const stageName = toText(raw.name || raw.id || raw.label, '');
+        const stageRank = STAGE_INDEX[stageName.toLowerCase()] ?? -1;
+        const score = [
+          cycle ?? -1,
+          endedAt ?? startedAt ?? -1,
+          stageRank,
+          attempt ?? -1,
+          stageIndex,
+        ];
+        if (!best || compareTuple(score, bestScore) > 0) {
+          best = { id, title, attempt };
+          bestScore = score;
+        }
+      }
+    }
+
+    return {
+      id: toText(best?.id, ''),
+      title: toText(best?.title, ''),
+      attempt: toMaybeNumber(best?.attempt),
+      branch: toText(run.branch || runSummary.branch || lastRunSummary.branch, ''),
+    };
+  }
+
+  function resolveDashboardActiveTask() {
+    const liveRun = currentLiveRun();
+    const run = currentLiveRunActiveRun(liveRun);
+    const progress = currentLiveRunProgress(liveRun);
+    const liveStatus = currentLiveRunStatus(liveRun);
+    const liveIdentity = toObject(liveRun.identity);
+    const liveCurrentTask = toObject(liveRun.currentTask);
+    const live = {
+      id: toText(liveCurrentTask.id || liveStatus.currentTaskId || progress.current_task_id || run.task || '', ''),
+      title: toText(liveCurrentTask.title || liveStatus.currentTaskTitle || progress.current_task_title || run.taskTitle || '', ''),
+      attempt: toMaybeNumber(liveCurrentTask.attempt ?? run.attempt ?? progress.attempt),
+      branch: toText(liveIdentity.branch || progress.branch || run.branch || '', ''),
+    };
+    const backlog = dashboardBacklogTaskFallback(live.id);
+    const artifact = dashboardArtifactTaskFallback();
+    const taskId = live.id || backlog.id || artifact.id || '';
+    const taskTitle =
+      live.title ||
+      ((taskId && backlog.id === taskId) ? backlog.title : '') ||
+      ((taskId && artifact.id === taskId) ? artifact.title : '') ||
+      backlog.title ||
+      artifact.title ||
+      '';
+    const attempt =
+      live.attempt ??
+      (((!taskId || backlog.id === taskId) ? backlog.attempt : null)) ??
+      (((!taskId || artifact.id === taskId) ? artifact.attempt : null));
+    const branch = live.branch || artifact.branch || toText(state.repo.branch || 'HEAD', 'HEAD');
+    return { taskId, taskTitle, attempt, branch };
+  }
+
   function renderDashboard() {
     const liveRun = currentLiveRun();
     const run = currentLiveRunActiveRun(liveRun);
@@ -14495,11 +14635,12 @@
     const liveLog = currentLiveRunLog(liveRun);
     const liveNotifications = currentLiveRunNotifications(liveRun);
     const budgetCap = toMaybeNumber(state.config?.budget?.max_usd);
-    const taskId = liveCurrentTask.id || liveStatus.currentTaskId || progress.current_task_id || run.task || '';
-    const taskTitle = liveCurrentTask.title || liveStatus.currentTaskTitle || progress.current_task_title || run.taskTitle || '';
-    const attempt = liveCurrentTask.attempt ?? run.attempt ?? progress.attempt;
+    const activeTask = resolveDashboardActiveTask();
+    const taskId = activeTask.taskId;
+    const taskTitle = activeTask.taskTitle;
+    const attempt = activeTask.attempt;
     const attemptText = attempt == null ? t('common.unavailable') : String(attempt);
-    const branchText = liveIdentity.branch || progress.branch || run.branch || state.repo.branch || 'HEAD';
+    const branchText = activeTask.branch || state.repo.branch || 'HEAD';
     const worktreeModeText = liveCurrentTask.worktreeMode || progress.worktree_mode || run.worktreeMode || '';
     const runDirText = liveIdentity.runDir || run.runDir || progress.latest_run_dir || state.latestRunDir || '';
     const finalReason = liveStatus.finalReason || progress.final_reason || run.finalReason || '';
@@ -14509,13 +14650,13 @@
     const runTone = runStatusTone(runStatus, finalReason);
     const runLabel = runStatusLabel(runStatus, finalReason);
     const runSummary = [
-      `${t('dashboard.currentTaskId')} ${taskId || t('common.unavailable')}`,
-      `${t('dashboard.currentTaskTitle')} ${taskTitle || t('common.unavailable')}`,
-      `${t('dashboard.attempt')} ${attemptText}`,
-      `${t('dashboard.branch')} ${branchText}`,
-      `${t('dashboard.worktreeMode')} ${worktreeModeText || t('common.unavailable')}`,
-      runDirText ? `${t('dashboard.runDirectory')} ${runDirText}` : `${t('dashboard.runDirectory')} ${t('common.unavailable')}`,
-      finalReason ? `${t('dashboard.finalReason')} ${finalReason}` : null,
+      `${t('dashboard.currentTaskId')}: ${taskId || t('common.unavailable')}`,
+      `${t('dashboard.currentTaskTitle')}: ${taskTitle || t('common.unavailable')}`,
+      `${t('dashboard.attempt')}: ${attemptText}`,
+      `${t('dashboard.branch')}: ${branchText}`,
+      `${t('dashboard.worktreeMode')}: ${worktreeModeText || t('common.unavailable')}`,
+      runDirText ? `${t('dashboard.runDirectory')}: ${runDirText}` : `${t('dashboard.runDirectory')}: ${t('common.unavailable')}`,
+      finalReason ? `${t('dashboard.finalReason')}: ${finalReason}` : null,
     ]
       .filter(Boolean)
       .join(' | ');
@@ -14683,7 +14824,7 @@
     return viewShell(
       'dashboard',
       t('dashboard.title'),
-      `${escapeHTML(taskId || 'unavailable')} | ${escapeHTML(taskTitle || 'task title unavailable')} | ${escapeHTML(branchText)} | ${escapeHTML(run.id)}`,
+      `${escapeHTML(taskId || t('common.unavailable'))} | ${escapeHTML(taskTitle || t('common.unavailable'))} | ${escapeHTML(branchText)} | ${escapeHTML(run.id)}`,
       `
         ${button(t('common.openPipeline'), 'nav-pipeline', 'button--quiet')}
         ${button(t('common.openLogs'), 'nav-logs', 'button--quiet')}

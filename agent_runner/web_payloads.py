@@ -1452,6 +1452,7 @@ def build_snapshot(
     _resolve_log_tail_source_record = web._resolve_log_tail_source_record
     _build_log_tail_payload = web._build_log_tail_payload
     _web_redaction_meta = web._web_redaction_meta
+    _resolve_dashboard_active_task = web._resolve_dashboard_active_task
     buildSectionState = web.buildSectionState
     fallbackSectionMessage = web.fallbackSectionMessage
     _live_run_payload = web._live_run_payload
@@ -1766,6 +1767,39 @@ def build_snapshot(
     else:
         logs_redaction = {}
         prompts_redaction = {}
+    resolved_active_task = _resolve_dashboard_active_task(
+        repo_root,
+        run_dir=latest_run_dir,
+        backlog=backlog,
+        controller_status=controller_status,
+        run_summary=run_summary,
+        last_run_summary=last_run_summary,
+        events=logs_events,
+        repo_branch=branch,
+    )
+    if isinstance(resolved_active_task, dict):
+        resolved_task_id = str(resolved_active_task.get("task_id") or "").strip()
+        resolved_task_title = str(resolved_active_task.get("task_title") or "").strip()
+        resolved_attempt = resolved_active_task.get("attempt")
+        resolved_branch = str(resolved_active_task.get("branch") or "").strip()
+        resolved_cycle = resolved_active_task.get("cycle")
+        resolved_step = resolved_active_task.get("step")
+        if resolved_task_id:
+            active_run["task"] = resolved_task_id
+            progress["current_task_id"] = resolved_task_id
+        if resolved_task_title:
+            active_run["taskTitle"] = resolved_task_title
+            progress["current_task_title"] = resolved_task_title
+        if resolved_attempt is not None:
+            active_run["attempt"] = resolved_attempt
+            progress["attempt"] = resolved_attempt
+        if resolved_branch:
+            active_run["branch"] = resolved_branch
+            progress["branch"] = resolved_branch
+        if resolved_cycle is not None and progress.get("cycle") is None:
+            progress["cycle"] = resolved_cycle
+        if resolved_step is not None and progress.get("step") is None:
+            progress["step"] = resolved_step
     active_run_empty = active_run["status"] == "idle" and not active_run.get("task") and not active_run.get("startedAt")
     runner_control_status = runner_control.get("status") if isinstance(runner_control.get("status"), dict) else {}
     runner_control_status_reason = str(runner_control_status.get("reason") or "").strip()
@@ -2002,6 +2036,7 @@ def build_snapshot(
             "current_task_id": progress.get("current_task_id", ""),
             "current_task_title": progress.get("current_task_title", ""),
             "attempt": progress.get("attempt"),
+            "branch": progress.get("branch", active_run.get("branch", "")),
             "worktree_mode": progress.get("worktree_mode", ""),
             "execution_status": progress.get("execution_status", ""),
             "executionStatus": progress.get("executionStatus", progress.get("execution_status", "")),
