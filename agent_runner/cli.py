@@ -293,6 +293,9 @@ DEFAULTS: Dict[str, Any] = {
     # Misc / debug
     "debug": False,
     "stop_file": "STOP",
+    "stale_stop_reconcile_stop_age_seconds": 15 * 60,
+    "stale_stop_reconcile_heartbeat_age_seconds": 15 * 60,
+    "stale_stop_reconcile_allow_missing_heartbeat": False,
     "allow_no_diff": False,
     "stop_if_no_diff": False,
 
@@ -562,6 +565,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Misc
     p.add_argument("--stop-file", default=None)
+    p.add_argument("--stale-stop-reconcile-stop-age-seconds", type=int, default=None)
+    p.add_argument("--stale-stop-reconcile-heartbeat-age-seconds", type=int, default=None)
+    p.add_argument("--stale-stop-reconcile-allow-missing-heartbeat", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--allow-no-diff", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--stop-if-no-diff", action=argparse.BooleanOptionalAction, default=None)  # compat only
     p.add_argument("--test-timeout-seconds", type=int, default=None)

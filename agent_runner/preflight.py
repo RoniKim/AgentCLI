@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .gitops import scan_worktree_diagnostics
-from .stop_progress import FINAL_STOP_PHASES, read_stop_progress
+from .stop_progress import FINAL_STOP_PHASES, STOP_RECONCILIATION_FILE, read_stop_progress
 from .utils import now_iso, run_cmd
 
 
@@ -177,6 +177,7 @@ def _stop_artifact_details(run_dir: Path, stop_file: str) -> dict[str, Any]:
     stop_path = (run_dir / stop_file).resolve()
     stop_progress = read_stop_progress(run_dir)
     runner_control = _read_runner_control_event_file(run_dir)
+    stop_reconciliation_path = (run_dir / STOP_RECONCILIATION_FILE).resolve()
     current_phase = str(stop_progress.get("phase") or "").strip().lower()
     control_phase = str(
         runner_control.get("phase")
@@ -190,6 +191,8 @@ def _stop_artifact_details(run_dir: Path, stop_file: str) -> dict[str, Any]:
         "stop_progress_path": (run_dir / "STOP_PROGRESS.json").resolve().as_posix(),
         "stop_progress_phase": current_phase,
         "stop_progress_active": bool(current_phase and current_phase not in FINAL_STOP_PHASES),
+        "stop_reconciliation_path": stop_reconciliation_path.as_posix(),
+        "stop_reconciliation": _read_json_file(stop_reconciliation_path),
         "runner_control_path": (run_dir / RUNNER_CONTROL_EVENT_FILE).resolve().as_posix(),
         "runner_control_phase": control_phase,
         "runner_control_event": runner_control,
@@ -256,7 +259,7 @@ def check_runner_start_readiness(repo: Path | str, run_dir: Path | str, *, stop_
         blockers.append(
             _readiness_issue(
                 "stale_stop_artifact",
-                "Target run dir still contains a STOP file from a previous run.",
+                "Target run dir contains a STOP file; remove it or wait for stale STOP reconciliation before launching.",
                 severity="blocker",
                 path=str(stop_artifacts.get("stop_file") or ""),
                 details=stop_artifacts,

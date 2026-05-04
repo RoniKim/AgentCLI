@@ -16,10 +16,13 @@ from agent_runner.shell import RunnerShell
 from agent_runner.stop_progress import (
     STOP_PROGRESS_FILE,
     STOP_PROGRESS_LOG_FILE,
+    STOP_RECONCILIATION_FILE,
+    STOP_RECONCILIATION_LOG_FILE,
     STOP_SNAPSHOT_FILE,
     STOP_SNAPSHOT_LOG_FILE,
     read_stop_snapshot,
     read_stop_progress,
+    reconcile_stale_stop_files,
     record_stop_progress,
     stop_progress_is_active,
     write_stop_progress,
@@ -60,6 +63,11 @@ def _prepare_start_ready_repo(repo: Path) -> None:
     python_path = repo / ".venv" / python_rel
     python_path.parent.mkdir(parents=True, exist_ok=True)
     python_path.write_text("", encoding="utf-8")
+
+
+def _set_file_age(path: Path, age_seconds: int) -> None:
+    old = time.time() - max(0, int(age_seconds))
+    os.utime(path, (old, old))
 
 
 class StopProgressTests(unittest.TestCase):
@@ -241,6 +249,116 @@ class StopProgressTests(unittest.TestCase):
         self.assertTrue((run_dir / STOP_SNAPSHOT_LOG_FILE).exists())
         self.assertEqual(snapshot, read_stop_snapshot(run_dir))
 
+    def test_reconcile_stale_stop_with_old_heartbeat_deletes_and_audits(self) -> None:
+        run_dir = _scratch_dir("stale_stop_reconcile")
+        stop_path = run_dir / "STOP"
+        heartbeat_path = run_dir / "HEARTBEAT"
+        stop_path.write_text("stop_file\n", encoding="utf-8")
+        heartbeat_path.write_text("2026-05-04T00:00:00\n", encoding="utf-8")
+        write_stop_progress(
+            run_dir,
+            phase="runner_wait",
+            message="Waiting for runner shutdown and final artifacts.",
+            requested_at_monotonic=0.0,
+            running=True,
+            runner_alive=True,
+        )
+        _set_file_age(stop_path, 3600)
+        _set_file_age(heartbeat_path, 3600)
+
+        result = reconcile_stale_stop_files(
+            run_dir,
+            stop_stale_age_seconds=60,
+            heartbeat_stale_age_seconds=60,
+            source="test",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("reconcile_stale_stop", result["decision"])
+        self.assertEqual("deleted_stop_files", result["action_taken"])
+        self.assertFalse(stop_path.exists())
+        self.assertFalse((run_dir / STOP_PROGRESS_FILE).exists())
+        audit = json.loads((run_dir / STOP_RECONCILIATION_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(stop_path.resolve().as_posix(), audit["stop_path"])
+        self.assertEqual(heartbeat_path.resolve().as_posix(), audit["heartbeat_path"])
+        self.assertEqual("stale", audit["heartbeat_state"])
+        self.assertEqual("reconcile_stale_stop", audit["decision"])
+        self.assertTrue((run_dir / STOP_RECONCILIATION_LOG_FILE).exists())
+
+    def test_reconcile_fresh_stop_preserves_and_blocks_start(self) -> None:
+        from agent_runner import runner_entry
+
+        repo = _scratch_dir("fresh_stop_direct") / "repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        run_dir = repo / ".AgentCLI" / "agent_runs" / "run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        stop_path = run_dir / "STOP"
+        heartbeat_path = run_dir / "HEARTBEAT"
+        stop_path.write_text("stop_file\n", encoding="utf-8")
+        heartbeat_path.write_text("2026-05-04T00:00:00\n", encoding="utf-8")
+        _set_file_age(heartbeat_path, 3600)
+
+        helper_result = reconcile_stale_stop_files(
+            run_dir,
+            stop_stale_age_seconds=60,
+            heartbeat_stale_age_seconds=60,
+            source="test",
+        )
+
+        self.assertFalse(helper_result["ok"])
+        self.assertEqual("block_fresh_stop", helper_result["decision"])
+        self.assertEqual("preserved_stop_files", helper_result["action_taken"])
+        self.assertTrue(stop_path.exists())
+
+        args = argparse.Namespace(
+            repo=repo.as_posix(),
+            run_dir=run_dir.as_posix(),
+            resume_latest=False,
+            stop_file="STOP",
+            execution_backend="codex",
+            failover_enabled=False,
+            stale_stop_reconcile_stop_age_seconds=60,
+            stale_stop_reconcile_heartbeat_age_seconds=60,
+            stale_stop_reconcile_allow_missing_heartbeat=False,
+        )
+        with patch.object(runner_entry, "_main_async_dispatch", side_effect=AssertionError("runner should not start")):
+            rc = runner_entry.run(args)
+
+        self.assertEqual(130, rc)
+        self.assertTrue(stop_path.exists())
+        audit = json.loads((run_dir / STOP_RECONCILIATION_FILE).read_text(encoding="utf-8"))
+        self.assertEqual("block_fresh_stop", audit["decision"])
+
+    def test_reconcile_missing_heartbeat_preserves_unless_explicit(self) -> None:
+        run_dir = _scratch_dir("missing_heartbeat_reconcile")
+        stop_path = run_dir / "STOP"
+        stop_path.write_text("stop_file\n", encoding="utf-8")
+        _set_file_age(stop_path, 3600)
+
+        preserved = reconcile_stale_stop_files(
+            run_dir,
+            stop_stale_age_seconds=60,
+            heartbeat_stale_age_seconds=60,
+            source="test",
+        )
+
+        self.assertFalse(preserved["ok"])
+        self.assertEqual("block_missing_heartbeat", preserved["decision"])
+        self.assertEqual("preserved_stop_files", preserved["action_taken"])
+        self.assertTrue(stop_path.exists())
+
+        explicit = reconcile_stale_stop_files(
+            run_dir,
+            stop_stale_age_seconds=60,
+            heartbeat_stale_age_seconds=60,
+            allow_missing_heartbeat=True,
+            source="test",
+        )
+
+        self.assertTrue(explicit["ok"])
+        self.assertEqual("reconcile_missing_heartbeat_explicit", explicit["decision"])
+        self.assertFalse(stop_path.exists())
+
     def test_controller_stop_emits_progress_payloads(self) -> None:
         repo = _scratch_dir("controller_stop") / "repo"
         run_dir = repo / ".AgentCLI" / "agent_runs" / "run"
@@ -310,6 +428,42 @@ class StopProgressTests(unittest.TestCase):
         self.assertIn("runner_wait", [entry["phase"] for entry in progress["history"]])
         self.assertTrue(progress["runner_alive"])
         self.assertTrue(progress["timeout_guidance"]["recoverable"])
+
+    def test_controller_resume_reconciles_stale_stop_before_start(self) -> None:
+        repo = _scratch_dir("controller_resume_stale_stop") / "repo"
+        _prepare_start_ready_repo(repo)
+        run_dir = repo / ".AgentCLI" / "agent_runs" / "20260504-000000"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        stop_path = run_dir / "STOP"
+        heartbeat_path = run_dir / "HEARTBEAT"
+        stop_path.write_text("stop_file\n", encoding="utf-8")
+        heartbeat_path.write_text("2026-05-04T00:00:00\n", encoding="utf-8")
+        _set_file_age(stop_path, 3600)
+        _set_file_age(heartbeat_path, 3600)
+        controller = RunnerController(
+            repo=repo,
+            base_args=argparse.Namespace(
+                stop_file="STOP",
+                config_path="",
+                run_dir="",
+                resume_latest=False,
+                stale_stop_reconcile_stop_age_seconds=60,
+                stale_stop_reconcile_heartbeat_age_seconds=60,
+                stale_stop_reconcile_allow_missing_heartbeat=False,
+            ),
+            runner_mode="thread",
+        )
+
+        with patch("agent_runner.remote.controller.run_runner", return_value=0):
+            result = controller.start({"resume_latest": True})
+            if controller._runner_thread is not None:
+                controller._runner_thread.join(timeout=2)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(run_dir.resolve(), Path(str(result.get("run_dir") or "")).resolve())
+        self.assertFalse(stop_path.exists())
+        audit = json.loads((run_dir / STOP_RECONCILIATION_FILE).read_text(encoding="utf-8"))
+        self.assertEqual("reconcile_stale_stop", audit["decision"])
 
     def test_controller_start_creates_fresh_run_dir_by_default_and_reuses_only_when_explicit(self) -> None:
         repo = _scratch_dir("controller_start") / "repo"

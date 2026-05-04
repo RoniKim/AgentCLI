@@ -29,7 +29,13 @@ from .logger import close_all_loggers, register_structured_logger_cleanup
 from .todo import ensure_todo_file, read_current_todo, set_current_todo, open_path
 from .preflight import check_runner_start_readiness, format_runner_start_readiness, run_preflight
 from .process_guard import init_process_guard, terminate_all_children
-from .stop_progress import build_stop_file_paths, clear_stop_progress, read_stop_progress, record_stop_progress
+from .stop_progress import (
+    build_stop_file_paths,
+    clear_stop_progress,
+    read_stop_progress,
+    reconcile_stale_stop_files,
+    record_stop_progress,
+)
 from .utils import STOP_REASON_STOP_FILE
 from .remote.controller import (
     RUNNER_CONTROL_EVENT_FILE,
@@ -551,7 +557,23 @@ class RunnerShell:
         run_dir = self._ensure_run_dir()
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        stop_file = str(self.effective().get("stop_file") or "STOP")
+        eff = self.effective()
+        stop_file = str(eff.get("stop_file") or "STOP")
+        stop_reconciliation = reconcile_stale_stop_files(
+            run_dir,
+            stop_file=stop_file,
+            stop_stale_age_seconds=eff.get("stale_stop_reconcile_stop_age_seconds")
+            or DEFAULTS.get("stale_stop_reconcile_stop_age_seconds")
+            or 900,
+            heartbeat_stale_age_seconds=eff.get("stale_stop_reconcile_heartbeat_age_seconds")
+            or DEFAULTS.get("stale_stop_reconcile_heartbeat_age_seconds")
+            or 900,
+            allow_missing_heartbeat=bool(eff.get("stale_stop_reconcile_allow_missing_heartbeat", False)),
+            source="shell",
+        )
+        if str(stop_reconciliation.get("action_taken") or "") == "deleted_stop_files":
+            audit_path = str(stop_reconciliation.get("audit_path") or "").strip()
+            print(f"[STOP] Reconciled stale STOP file before runner start. audit={audit_path}".rstrip(), flush=True)
         readiness = check_runner_start_readiness(self.repo, run_dir, stop_file=stop_file)
         for line in format_runner_start_readiness(readiness):
             print(line)
@@ -566,8 +588,8 @@ class RunnerShell:
                 ok=False,
                 running=False,
                 phase="readiness",
-                details={"readiness": readiness},
-                result={"ok": False, "message": message, "readiness": readiness},
+                details={"readiness": readiness, "stop_reconciliation": stop_reconciliation},
+                result={"ok": False, "message": message, "readiness": readiness, "stop_reconciliation": stop_reconciliation},
             )
             return
 
@@ -594,7 +616,6 @@ class RunnerShell:
             phase="request",
         )
 
-        eff = self.effective()
         # NOTE: DEFAULTS includes "repo" so passing repo twice will crash.
         args_dict = {k: eff.get(k) for k in DEFAULTS.keys()}
         args_dict["repo"] = str(self.repo)

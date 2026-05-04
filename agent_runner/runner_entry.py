@@ -13,6 +13,7 @@ from .preflight import run_preflight
 from .process_guard import init_process_guard, install_signal_handlers, terminate_all_children
 from .reporting import write_emergency_shutdown_report
 from .run_dir import find_latest_run_dir, make_run_dir
+from .stop_progress import reconcile_stale_stop_files_for_args
 from .utils import detect_stop_reason, eprint
 
 
@@ -186,6 +187,25 @@ def run(args: argparse.Namespace) -> int:
     if not getattr(args, "run_dir", ""):
         repo = Path(str(getattr(args, "repo", "") or ".")).resolve()
         args.run_dir = str(_ensure_run_dir(repo, args))
+
+    run_dir_text = str(getattr(args, "run_dir", "") or "").strip()
+    if run_dir_text:
+        stop_reconciliation = reconcile_stale_stop_files_for_args(
+            Path(run_dir_text),
+            args,
+            source="runner_entry",
+        )
+        if not bool(stop_reconciliation.get("ok", True)):
+            message = str(stop_reconciliation.get("message") or "Runner start blocked by STOP file.")
+            eprint(f"[STOP] {message}")
+            audit_path = str(stop_reconciliation.get("audit_path") or "").strip()
+            if audit_path:
+                eprint(f"[STOP] Reconciliation audit: {audit_path}")
+            return 130
+        if str(stop_reconciliation.get("action_taken") or "") == "deleted_stop_files":
+            audit_path = str(stop_reconciliation.get("audit_path") or "").strip()
+            suffix = f" audit={audit_path}" if audit_path else ""
+            eprint(f"[STOP] Reconciled stale STOP file before runner start.{suffix}")
 
     try:
         _install_signal_handlers(args)
