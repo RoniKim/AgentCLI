@@ -203,6 +203,12 @@ class WebConsoleSafetyTests(unittest.TestCase):
         except Exception as exc:
             raise unittest.SkipTest(f"FastAPI is unavailable: {exc}") from exc
 
+    def test_lan_safety_helper_is_reexported_from_web(self) -> None:
+        import agent_runner.web as web_module
+        import agent_runner.web_redaction as web_redaction
+
+        self.assertIs(web_module._lan_safety_blocks_mutations, web_redaction._lan_safety_blocks_mutations)
+
     def setUp(self) -> None:
         self._tmp_root = ROOT / ".test-scratch"
         self._tmp_root.mkdir(parents=True, exist_ok=True)
@@ -1007,13 +1013,16 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("[redacted]", logs_payload["files"]["cycle_summary"])
         self.assertEqual("[redacted]", logs_payload["files"]["run_log"])
         self.assertEqual("[redacted]", logs_payload["files"]["metrics"])
+        self.assertEqual("[redacted]", logs_payload["source"]["path"])
         self.assertGreater(len(logs_payload["entries"]), 0)
         self.assertEqual("[redacted]", _entry_text(logs_payload["entries"][0]))
+        self.assertEqual("[redacted]", next(item["path"] for item in logs_payload["sources"] if item["id"] == "backend_transcript"))
         logs_tail = client.get("/api/logs/tail").json()
         self.assertNotIn("tail", logs_tail)
         self.assertEqual("[redacted]", logs_tail["source"]["path"])
         self.assertGreater(len(logs_tail["entries"]), 0)
         self.assertEqual("[redacted]", _entry_text(logs_tail["entries"][0]))
+        self.assertEqual("[redacted]", next(item["name"] for item in logs_tail["sources"] if item["id"] == "backend_transcript"))
 
         goals_payload = client.get("/api/goals").json()
         self.assertEqual("[redacted]", goals_payload["raw_text"])
@@ -2446,20 +2455,23 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual([], backups)
 
     def test_config_save_creates_backup_and_updates_file(self) -> None:
+        from agent_runner.utils import atomic_write_json as real_atomic_write_json
+
         _write_config(self.config_path, self.repo, iterations=2, prompts_dir="prompts/agentcli")
         client, app = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
 
         original = self.config_path.read_text(encoding="utf-8")
-        response = client.post(
-            "/api/config/save",
-            json={
-                "changes": [
-                    {"path": "iterations", "value": 4},
-                    {"path": "prompts_dir", "value": "prompts/agentcli-updated"},
-                    {"path": "telegram.runner_mode", "value": "subprocess"},
-                ]
-            },
-        )
+        with patch("agent_runner.web_config.atomic_write_json", wraps=real_atomic_write_json) as atomic_write:
+            response = client.post(
+                "/api/config/save",
+                json={
+                    "changes": [
+                        {"path": "iterations", "value": 4},
+                        {"path": "prompts_dir", "value": "prompts/agentcli-updated"},
+                        {"path": "telegram.runner_mode", "value": "subprocess"},
+                    ]
+                },
+            )
         self.assertEqual(200, response.status_code)
         payload = response.json()
         self.assertTrue(payload["ok"])
@@ -2472,6 +2484,10 @@ class WebConsoleSafetyTests(unittest.TestCase):
         backup_path = Path(payload["backup_path"])
         self.assertTrue(backup_path.exists())
         self.assertEqual(original, backup_path.read_text(encoding="utf-8"))
+        self.assertIn(
+            self.config_path.resolve(),
+            [Path(call.args[0]).resolve() for call in atomic_write.call_args_list],
+        )
 
         saved = json.loads(self.config_path.read_text(encoding="utf-8"))
         self.assertEqual(4, saved["iterations"])
@@ -2481,6 +2497,37 @@ class WebConsoleSafetyTests(unittest.TestCase):
         controller = app.state.runner_controller
         self.assertEqual("subprocess", controller.runner_mode)
         self.assertEqual("subprocess", controller.base_args.telegram["runner_mode"])
+
+    def test_config_save_normalizes_string_and_array_list_payloads_consistently(self) -> None:
+        def _save_and_read(changes: list[dict[str, object]]) -> dict[str, object]:
+            _write_config(
+                self.config_path,
+                self.repo,
+                telegram={"allowed_chat_ids": [], "notify_events": []},
+            )
+            client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+            response = client.post("/api/config/save", json={"changes": changes})
+            self.assertEqual(200, response.status_code)
+            self.assertTrue(response.json()["ok"])
+            return json.loads(self.config_path.read_text(encoding="utf-8"))
+
+        saved_from_string = _save_and_read(
+            [
+                {"path": "telegram.allowed_chat_ids", "value": "101, 202"},
+                {"path": "telegram.notify_events", "value": "run_start, task_done"},
+            ]
+        )
+        saved_from_array = _save_and_read(
+            [
+                {"path": "telegram.allowed_chat_ids", "value": ["101", 202]},
+                {"path": "telegram.notify_events", "value": ["run_start", "task_done"]},
+            ]
+        )
+
+        self.assertEqual([101, 202], saved_from_string["telegram"]["allowed_chat_ids"])
+        self.assertEqual(saved_from_string["telegram"]["allowed_chat_ids"], saved_from_array["telegram"]["allowed_chat_ids"])
+        self.assertEqual(["run_start", "task_done"], saved_from_string["telegram"]["notify_events"])
+        self.assertEqual(saved_from_string["telegram"]["notify_events"], saved_from_array["telegram"]["notify_events"])
 
     def test_config_save_preserves_plugin_roles_when_unrelated_fields_change(self) -> None:
         _write_config(
@@ -2823,6 +2870,7 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual([], backups)
 
     def test_goals_save_creates_backup_and_updates_file(self) -> None:
+        from agent_runner import web_goals
         from agent_runner.web import _goal_save_serialize_draft
 
         _write_config(self.config_path, self.repo)
@@ -2839,7 +2887,12 @@ class WebConsoleSafetyTests(unittest.TestCase):
             ],
         }
 
-        response = client.post("/api/goals/save", json={"draft": draft})
+        expected_text = _goal_save_serialize_draft(draft)
+        with patch("agent_runner.web_goals.atomic_write_text", wraps=web_goals.atomic_write_text) as atomic_write_mock:
+            with patch("agent_runner.web_goals.shutil.copy2", wraps=web_goals.shutil.copy2) as copy2_mock:
+                response = client.post("/api/goals/save", json={"draft": draft})
+        atomic_write_calls = [(Path(call.args[0]), call.args[1]) for call in atomic_write_mock.call_args_list]
+        backup_copy_calls = [(Path(call.args[0]), Path(call.args[1])) for call in copy2_mock.call_args_list]
         self.assertEqual(200, response.status_code)
         payload = response.json()
         self.assertTrue(payload["ok"])
@@ -2851,9 +2904,14 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual(self.goals_path.as_posix(), payload["saved_path"])
         backup_path = Path(payload["backup_path"])
         self.assertTrue(backup_path.exists())
+        self.assertEqual(self.goals_path.parent, backup_path.parent)
+        self.assertTrue(backup_path.name.startswith(f"{self.goals_path.stem}."))
+        self.assertTrue(backup_path.name.endswith(f".bak{self.goals_path.suffix}"))
         self.assertEqual(original, backup_path.read_text(encoding="utf-8"))
         self.assertEqual(self.goals_path.read_text(encoding="utf-8"), payload["snapshot"]["goals"]["raw_text"])
-        self.assertEqual(_goal_save_serialize_draft(draft), self.goals_path.read_text(encoding="utf-8"))
+        self.assertEqual(expected_text, self.goals_path.read_text(encoding="utf-8"))
+        self.assertEqual([(self.goals_path, expected_text)], atomic_write_calls)
+        self.assertEqual([(self.goals_path, backup_path)], backup_copy_calls)
         backups = list(self.goals_path.parent.glob(f"{self.goals_path.stem}.*.bak{self.goals_path.suffix}"))
         self.assertEqual(1, len(backups))
 
@@ -3136,6 +3194,7 @@ class WebConsoleSafetyTests(unittest.TestCase):
         prompt_body = payload["prompt"]
         self.assertTrue(prompt_body["validation"]["ok"])
         self.assertEqual(updated, prompt_body["content"])
+        self.assertEqual(backup_path.as_posix(), prompt_body["backups"][0]["path"])
         self.assertEqual(1, len(list(prompts_dir.glob("pm_bootstrap_prompt.*.bak.md"))))
 
     def test_prompt_restore_rejects_traversal_and_restores_selected_backup(self) -> None:

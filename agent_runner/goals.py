@@ -378,6 +378,73 @@ def _goal_gate_task_text(task: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+def _goal_gate_preserved_traces(
+    task: Dict[str, Any],
+    goal_items: list[Dict[str, Any]],
+    *,
+    goal_path: Optional[Path],
+) -> list[Dict[str, Any]]:
+    goal_items_by_ref: dict[str, Dict[str, Any]] = {}
+    goal_items_by_text: dict[str, Dict[str, Any]] = {}
+    for item in goal_items:
+        goal_ref = str(item.get("goal_ref") or item.get("goal_id") or "").strip()
+        goal_text = str(item.get("goal_text") or item.get("text") or "").strip()
+        goal_text_norm = _normalize_goal_match_text(goal_text)
+        if goal_ref:
+            goal_items_by_ref[goal_ref] = item
+        if goal_text_norm and goal_text_norm not in goal_items_by_text:
+            goal_items_by_text[goal_text_norm] = item
+
+    existing = task.get("goal_trace")
+    if isinstance(existing, dict):
+        existing = [existing]
+    if not isinstance(existing, list):
+        return []
+
+    preserved: list[Dict[str, Any]] = []
+    seen_refs: set[str] = set()
+    for raw_trace in existing:
+        if not isinstance(raw_trace, dict):
+            continue
+        goal_ref = str(raw_trace.get("goal_ref") or raw_trace.get("goal_id") or "").strip()
+        goal_text = str(raw_trace.get("goal_text") or raw_trace.get("text") or "").strip()
+        goal_text_norm = _normalize_goal_match_text(goal_text)
+        item = goal_items_by_ref.get(goal_ref) if goal_ref else None
+        if item is None and goal_text_norm:
+            item = goal_items_by_text.get(goal_text_norm)
+        if not isinstance(item, dict):
+            continue
+
+        resolved_ref = str(item.get("goal_ref") or item.get("goal_id") or "").strip()
+        if not resolved_ref or resolved_ref in seen_refs:
+            continue
+
+        matched_fields_val = raw_trace.get("matched_fields")
+        matched_fields = (
+            [str(field).strip() for field in matched_fields_val if str(field).strip()]
+            if isinstance(matched_fields_val, list)
+            else []
+        )
+        preserved.append(
+            {
+                "goal_path": goal_path.as_posix() if goal_path else "",
+                "goal_ref": resolved_ref,
+                "goal_id": str(item.get("goal_id") or resolved_ref),
+                "goal_section": str(item.get("goal_section") or ""),
+                "goal_section_label": str(item.get("goal_section_label") or item.get("goal_section") or "").strip().upper(),
+                "goal_line_number": int(item.get("goal_line_number") or item.get("line_number") or 0),
+                "goal_index": int(item.get("goal_index") or item.get("index") or 0),
+                "goal_text": str(item.get("goal_text") or item.get("text") or "").strip(),
+                "goal_checked": bool(item.get("checked") if "checked" in item else item.get("goal_checked")),
+                "matched_fields": matched_fields,
+                "match_mode": "preserved_goal_trace",
+            }
+        )
+        seen_refs.add(resolved_ref)
+
+    return preserved
+
+
 def _goal_gate_trace_for_task(
     task: Dict[str, Any],
     goal_items: list[Dict[str, Any]],
@@ -389,8 +456,14 @@ def _goal_gate_trace_for_task(
         return []
 
     task_text = _goal_gate_task_text(task)
-    traces: list[Dict[str, Any]] = []
-    seen_refs: set[str] = set()
+    traces = _goal_gate_preserved_traces(task, goal_items, goal_path=goal_path)
+    if traces:
+        return traces
+    seen_refs = {
+        str(trace.get("goal_ref") or trace.get("goal_id") or "").strip()
+        for trace in traces
+        if isinstance(trace, dict)
+    }
 
     for item in goal_items:
         goal_ref = str(item.get("goal_ref") or item.get("goal_id") or "").strip()
@@ -538,6 +611,7 @@ def gate_pm_tasks_against_goals(
     accepted_tasks: list[Dict[str, Any]] = []
     rejected_tasks: list[Dict[str, Any]] = []
     split_tasks: list[Dict[str, Any]] = []
+    emitted_ids_by_source: dict[str, list[str]] = {}
     goal_path_str = goal_path.as_posix() if goal_path else ""
 
     for raw_task in tasks:
@@ -564,6 +638,14 @@ def gate_pm_tasks_against_goals(
         else:
             emitted = _split_oversized_goal_task(task, all_matches) if all_matches else [task]
 
+        original_id = str(task.get("id") or "").strip()
+        if original_id:
+            emitted_ids_by_source[original_id] = [
+                str(emitted_task.get("id") or "").strip()
+                for emitted_task in emitted
+                if isinstance(emitted_task, dict) and str(emitted_task.get("id") or "").strip()
+            ]
+
         if len(emitted) > 1:
             split_tasks.append(
                 {
@@ -576,6 +658,29 @@ def gate_pm_tasks_against_goals(
                 }
             )
         accepted_tasks.extend(emitted)
+
+    if accepted_tasks and emitted_ids_by_source:
+        remapped_accepted: list[Dict[str, Any]] = []
+        for accepted_task in accepted_tasks:
+            depends_on_val = accepted_task.get("depends_on")
+            if not isinstance(depends_on_val, list) or not depends_on_val:
+                remapped_accepted.append(accepted_task)
+                continue
+
+            expanded: list[str] = []
+            for dep in depends_on_val:
+                dep_id = str(dep or "").strip()
+                if not dep_id:
+                    continue
+                remapped = emitted_ids_by_source.get(dep_id)
+                if remapped:
+                    expanded.extend(remapped)
+                else:
+                    expanded.append(dep_id)
+            next_task = dict(accepted_task)
+            next_task["depends_on"] = list(dict.fromkeys(expanded))
+            remapped_accepted.append(next_task)
+        accepted_tasks = remapped_accepted
 
     if gate_required:
         if rejected_tasks and not accepted_tasks:

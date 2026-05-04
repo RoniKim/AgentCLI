@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any, Dict, Optional
 
 
@@ -141,6 +142,7 @@ def append_pm_essential_context(
     failed_tasks_block: str = "",
     goals_block: str = "",
     goals_instruction: str = "",
+    experience_summary_block: str = "",
     build_warnings_block: str = "",
 ) -> str:
     """Programmatically append essential runtime context to a PM prompt.
@@ -172,6 +174,10 @@ def append_pm_essential_context(
         section += "</pm_goals>"
         s += section
 
+    # --- Experience summary (advisory only) ---
+    if experience_summary_block and "<pm_experience_summary" not in s:
+        s += "\n\n" + experience_summary_block.strip()
+
     # --- Done tasks (CRITICAL: prevents duplicate task creation) ---
     if done_tasks_block and "<pm_done_tasks>" not in s:
         s += (
@@ -201,6 +207,10 @@ def append_pm_essential_context(
             f"{failed_tasks_block}\n"
             "</pm_failed_tasks>"
         )
+
+    # --- Experience summary (advisory, sanitized) ---
+    if experience_summary_block and experience_summary_block.strip() not in {"(none)", "(disabled)"} and "<pm_experience_summary" not in s:
+        s += "\n\n" + experience_summary_block.strip()
 
     return s.strip() + "\n"
 
@@ -351,8 +361,7 @@ Git:
 Current backlog (from run_dir; [x]=done, [ ]=pending):
 {current_backlog_block}
 
-Dev change-hints (optional, run-local; use as clues):
-{hint_block}
+Recent experience is injected separately as a sanitized advisory `<pm_experience_summary>` block when available.
 
 SKILLS_INDEX summary (select skill_id per task; do NOT inline full skill text):
 {skills_index_summary}
@@ -515,6 +524,76 @@ def _read_text_robust(p: Path) -> str:
         return p.read_text(encoding="latin-1", errors="replace")
     except Exception:
         return ""
+
+
+PROMPT_SPECS: list[dict[str, str]] = [
+    {
+        "id": "pm_instructions",
+        "file": "pm_instructions.md",
+        "scope": "PM",
+        "default": PM_INSTRUCTIONS_DEFAULT,
+    },
+    {
+        "id": "dev_instructions",
+        "file": "dev_instructions.md",
+        "scope": "Dev",
+        "default": DEV_INSTRUCTIONS_DEFAULT,
+    },
+    {
+        "id": "qa_instructions",
+        "file": "qa_instructions.md",
+        "scope": "QA",
+        "default": QA_INSTRUCTIONS_DEFAULT,
+    },
+    {
+        "id": "pm_bootstrap",
+        "file": "pm_bootstrap_prompt.md",
+        "scope": "PM",
+        "default": PM_BOOTSTRAP_TEMPLATE_DEFAULT,
+    },
+    {
+        "id": "pm_incremental",
+        "file": "pm_incremental_prompt.md",
+        "scope": "PM",
+        "default": PM_INCREMENTAL_TEMPLATE_DEFAULT,
+    },
+    {
+        "id": "dev_task",
+        "file": "dev_task_prompt.md",
+        "scope": "Dev",
+        "default": DEV_TASK_TEMPLATE_DEFAULT,
+    },
+    {
+        "id": "qa_prompt",
+        "file": "qa_prompt.md",
+        "scope": "QA",
+        "default": QA_TEMPLATE_DEFAULT,
+    },
+    {
+        "id": "reporter_instructions",
+        "file": "reporter_instructions.md",
+        "scope": "Reporter",
+        "default": REPORTER_INSTRUCTIONS_DEFAULT,
+    },
+    {
+        "id": "pm_shutdown_report",
+        "file": "pm_shutdown_report_prompt.md",
+        "scope": "Reporter",
+        "default": PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT,
+    },
+]
+
+
+def prompt_variables(text: str) -> list[str]:
+    seen: set[str] = set()
+    variables: list[str] = []
+    for match in re.finditer(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_.-]*)\}(?!\})", text or ""):
+        name = match.group(1)
+        if name in seen:
+            continue
+        seen.add(name)
+        variables.append(name)
+    return variables
 
 @dataclass(frozen=True)
 class PromptStore:

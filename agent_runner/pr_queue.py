@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
+from .experience import record_pr_queue_signal, record_validation_experiences
 from .gates import (
     classify_pr_queue_validation_status,
     repo_has_web_worktree_markers,
@@ -679,6 +680,268 @@ def pr_queue_merge_confirmation_phrase(packet_id: str) -> str:
     return f"{PR_QUEUE_MERGE_CONFIRMATION_PREFIX} {packet_id_text}".strip()
 
 
+def _pr_queue_signal_evidence(
+    packet_path: Path,
+    *,
+    primary_path: str = "",
+    artifact_paths: Sequence[object] | object | None = None,
+    extra: Sequence[object] | object | None = None,
+) -> list[object]:
+    evidence: list[object] = [
+        {
+            "kind": "pr_packet",
+            "path": packet_path.as_posix(),
+        }
+    ]
+    primary_text = str(primary_path or "").strip()
+    if primary_text:
+        evidence.append(
+            {
+                "kind": "primary_artifact",
+                "path": primary_text,
+            }
+        )
+    for item in _normalize_list_value(artifact_paths):
+        path_text = str(item or "").strip()
+        if path_text:
+            evidence.append(
+                {
+                    "kind": "artifact",
+                    "path": path_text,
+                }
+            )
+    for item in _normalize_list_value(extra):
+        if isinstance(item, dict):
+            evidence.append(dict(item))
+            continue
+        path_text = str(item or "").strip()
+        if path_text:
+            evidence.append(
+                {
+                    "kind": "artifact",
+                    "path": path_text,
+                }
+            )
+    deduped: list[object] = []
+    seen: set[str] = set()
+    for item in evidence:
+        key = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _record_pr_queue_decision_signal(
+    source_repo: Path,
+    *,
+    packet_id: str,
+    packet: dict[str, Any],
+    signal_kind: str,
+    decision_status: str,
+    reason: str,
+    packet_path: Path,
+    primary_path: str = "",
+    artifact_paths: Sequence[object] | object | None = None,
+    extra_evidence: Sequence[object] | object | None = None,
+    metadata: dict[str, object] | None = None,
+    recorded_at: str | None = None,
+) -> list[dict[str, Any]]:
+    evidence = _pr_queue_signal_evidence(
+        packet_path,
+        primary_path=primary_path,
+        artifact_paths=artifact_paths,
+        extra=extra_evidence,
+    )
+    return record_pr_queue_signal(
+        source_repo,
+        packet_id=packet_id,
+        packet=packet,
+        signal_kind=signal_kind,
+        decision_status=decision_status,
+        reason=reason,
+        evidence=evidence,
+        metadata=metadata,
+        recorded_at=recorded_at,
+    )
+
+
+def record_review_packet_decision(
+    source_repo: Path,
+    packet_id: str,
+    *,
+    action: str,
+    decision_status: str,
+    reason: str = "",
+    evidence: Sequence[object] | object | None = None,
+    metadata: dict[str, object] | None = None,
+    recorded_at: str | None = None,
+) -> list[dict[str, Any]]:
+    """Record PR queue decision experience without mutating the packet.
+
+    This is the integration point for later discard/rebase queue operations.
+    It only records structured experience state and does not claim the queue
+    action itself succeeded.
+    """
+
+    source_repo_path = Path(source_repo).expanduser().resolve()
+    packet_id_text = str(packet_id or "").strip()
+    if not packet_id_text:
+        raise ValueError("PR packet id is required.")
+
+    action_text = str(action or "").strip().lower()
+    if action_text not in {"validate", "merge", "discard", "rebase"}:
+        raise ValueError(f"Unsupported PR queue decision action: {action_text or action}")
+
+    packet_path = pr_packet_path(source_repo_path, packet_id_text)
+    packet = load_review_packet(source_repo_path, packet_id_text)
+    if not packet:
+        raise FileNotFoundError(f"PR packet not found: {packet_path}")
+
+    return _record_pr_queue_decision_signal(
+        source_repo_path,
+        packet_id=packet_id_text,
+        packet=packet,
+        signal_kind=action_text,
+        decision_status=str(decision_status or "").strip().lower(),
+        reason=str(reason or "").strip(),
+        packet_path=packet_path,
+        extra_evidence=evidence,
+        metadata=metadata,
+        recorded_at=recorded_at,
+    )
+
+
+def _review_packet_paths(source_repo: Path) -> list[Path]:
+    queue_root = pr_queue_root(source_repo)
+    if not queue_root.exists() or not queue_root.is_dir():
+        return []
+
+    def _sort_key(path: Path) -> tuple[float, str]:
+        try:
+            stamp = float(path.stat().st_mtime)
+        except Exception:
+            stamp = 0.0
+        return (stamp, path.name)
+
+    return sorted(
+        [
+            path
+            for path in queue_root.glob("*.json")
+            if path.is_file() and path.name != PR_QUEUE_INDEX_FILENAME
+        ],
+        key=_sort_key,
+        reverse=True,
+    )
+
+
+def _summary_artifact_name(packet: dict[str, Any]) -> str:
+    candidates = [
+        packet.get("validation_artifact_path"),
+        packet.get("validationArtifactPath"),
+    ]
+    artifacts = packet.get("validation_artifacts")
+    if not isinstance(artifacts, list):
+        artifacts = packet.get("validationArtifacts")
+    if isinstance(artifacts, list):
+        candidates.extend(artifacts)
+    for raw in candidates:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        name = Path(text).name.strip()
+        if name:
+            return name
+    return ""
+
+
+def _append_summary_ref(values: list[str], value: str) -> None:
+    text = str(value or "").strip()
+    if not text or text in values:
+        return
+    values.append(text)
+
+
+def _review_packet_evidence_refs(packet: dict[str, Any], packet_id: str) -> list[str]:
+    refs: list[str] = []
+    run_id = str(packet.get("run_id") or packet.get("runId") or "").strip()
+    if run_id:
+        _append_summary_ref(refs, f"run:{run_id}")
+    for task_id in _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds"))[:2]:
+        _append_summary_ref(refs, f"task:{task_id}")
+    artifact_name = _summary_artifact_name(packet)
+    if artifact_name:
+        _append_summary_ref(refs, f"artifact:{artifact_name}")
+    if packet_id:
+        _append_summary_ref(refs, f"pr:{packet_id}")
+    return refs
+
+
+def _review_packet_need(packet: dict[str, Any]) -> tuple[str, str]:
+    packet_status = str(packet.get("status") or "pr_queued").strip().lower()
+    approval_status = str(packet.get("approval_status") or packet.get("approvalStatus") or "").strip().lower()
+    validation_status = _normalize_packet_validation_status(
+        packet.get("validation_status") or packet.get("validationStatus") or packet.get("status")
+    )
+    if validation_status == "validation_passed" and approval_status != "approved":
+        return "approval", "approval_required"
+    if packet_status == "branch_metadata_missing":
+        return "validation", "metadata_blocked"
+    labels = {
+        "validation_failed": "validation_failed",
+        "blocked_env": "validation_blocked_env",
+        "tests_skipped": "validation_skipped",
+        "no_tests_found": "validation_no_tests",
+        "validation_pending": "validation_pending",
+    }
+    return "validation", labels.get(validation_status, "validation_pending")
+
+
+def build_telegram_pr_queue_summary(source_repo: Path, *, limit: int = 3) -> dict[str, object]:
+    source_repo_path = Path(source_repo).expanduser().resolve()
+    attention_items: list[dict[str, object]] = []
+    for path in _review_packet_paths(source_repo_path):
+        packet = _load_json_dict(path)
+        if not packet:
+            continue
+        packet_status = str(packet.get("status") or "pr_queued").strip().lower()
+        if packet_status in {"approved", "discarded", "merged", "closed"}:
+            continue
+        packet_id = str(packet.get("id") or path.stem).strip() or path.stem
+        validation_status = _normalize_packet_validation_status(
+            packet.get("validation_status") or packet.get("validationStatus") or packet.get("status")
+        )
+        approval_status = str(packet.get("approval_status") or packet.get("approvalStatus") or "").strip().lower()
+        need, label = _review_packet_need(packet)
+        if validation_status == "validation_passed" and approval_status == "approved":
+            continue
+        attention_items.append(
+            {
+                "id": packet_id,
+                "status": packet_status or "pr_queued",
+                "need": need,
+                "label": label,
+                "run_id": str(packet.get("run_id") or packet.get("runId") or "").strip(),
+                "task_ids": _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds")),
+                "branch": str(packet.get("branch") or "").strip(),
+                "validation_status": validation_status or "validation_pending",
+                "approval_status": approval_status,
+                "updated_at": str(packet.get("updated_at") or packet.get("updatedAt") or "").strip(),
+                "evidence_refs": _review_packet_evidence_refs(packet, packet_id),
+            }
+        )
+    needs_validation = len([item for item in attention_items if item.get("need") == "validation"])
+    needs_approval = len([item for item in attention_items if item.get("need") == "approval"])
+    max_items = max(1, int(limit))
+    return {
+        "total": len(attention_items),
+        "needs_validation": needs_validation,
+        "needs_approval": needs_approval,
+        "items": attention_items[:max_items],
+    }
+
+
 def _pr_queue_validation_artifact_candidates(source_repo: Path, packet: dict[str, Any], packet_id: str) -> list[Path]:
     packet_id_text = str(packet_id or "").strip()
     candidates: list[Path] = []
@@ -977,6 +1240,59 @@ def _pr_queue_merge_validation_error(
         "PR packet validation evidence is missing or stale.",
         details=details,
         status_code=409,
+    )
+
+
+def _record_pr_queue_merge_rejection(
+    source_repo: Path,
+    *,
+    packet_id: str,
+    packet_path: Path,
+    packet: dict[str, Any],
+    reason: str,
+    message: str,
+    details: dict[str, object] | None = None,
+    validation_evidence: dict[str, object] | None = None,
+    expected_phrase: str = "",
+    provided_phrase: str = "",
+) -> list[dict[str, Any]]:
+    validation_evidence = dict(validation_evidence or {})
+    validation_artifact_path = str(validation_evidence.get("artifact_path") or "").strip()
+    validation_artifacts = _normalize_str_list(
+        packet.get("validation_artifacts") or packet.get("validationArtifacts")
+    )
+    if validation_artifact_path and validation_artifact_path not in validation_artifacts:
+        validation_artifacts.append(validation_artifact_path)
+    extra_evidence = [
+        {
+            "kind": "validation_candidate",
+            "path": str(candidate or "").strip(),
+        }
+        for candidate in list(validation_evidence.get("candidates") or [])
+        if str(candidate or "").strip()
+    ]
+    metadata: dict[str, object] = {
+        "message": str(message or "").strip(),
+        "details": dict(details or {}),
+    }
+    if expected_phrase:
+        metadata["expected_phrase"] = expected_phrase
+    if provided_phrase:
+        metadata["provided_phrase"] = provided_phrase
+    if validation_evidence:
+        metadata["validation_evidence"] = validation_evidence
+    return _record_pr_queue_decision_signal(
+        source_repo,
+        packet_id=packet_id,
+        packet=packet,
+        signal_kind="merge",
+        decision_status="rejected",
+        reason=reason,
+        packet_path=packet_path,
+        primary_path=validation_artifact_path,
+        artifact_paths=validation_artifacts,
+        extra_evidence=extra_evidence,
+        metadata=metadata,
     )
 
 
@@ -1635,6 +1951,22 @@ async def validate_review_packet_async(
     }
     atomic_write_json(summary_path, summary_payload)
 
+    task_ids_value = _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds"))
+    record_validation_experiences(
+        source_repo_path,
+        source_kind="pr_queue_validation",
+        run_id=run_id_text,
+        task_id=task_ids_value[0] if task_ids_value else "",
+        task_ids=task_ids_value,
+        packet_id=packet_id_text,
+        validation_status=validation_status,
+        validation_reason=validation_reason,
+        validation_detail=validation_detail,
+        validation_artifact_path=summary_path.as_posix(),
+        validation_artifacts=validation_artifacts,
+        validation_records=validation_records,
+    )
+
     updated_packet = _update_packet_validation_metadata(
         packet,
         status=validation_status,
@@ -1661,6 +1993,33 @@ async def validate_review_packet_async(
     }
     updated_index = _upsert_index_entry(index, index_entry)
     _write_branch_index(source_repo_path, updated_index)
+
+    _record_pr_queue_decision_signal(
+        source_repo_path,
+        packet_id=packet_id_text,
+        packet=updated_packet,
+        signal_kind="validate",
+        decision_status=validation_status,
+        reason=validation_reason,
+        packet_path=packet_path,
+        primary_path=summary_path.as_posix(),
+        artifact_paths=validation_artifacts,
+        metadata={
+            "validation_summary": validation_summary,
+            "validation_plan": validation_plan,
+            "summary_path": summary_path.as_posix(),
+            "source_head_before": source_head_before,
+            "source_head_after": source_head_after,
+            "source_repo_state_before": source_repo_state_before,
+            "source_repo_state_after": source_repo_state_after,
+            "source_main_mutated": source_main_mutated,
+            "worktree_dir": worktree_dir.as_posix(),
+            "worktree_created": worktree_created,
+            "worktree_removed": worktree_removed,
+            "cleanup_error": cleanup_error,
+        },
+        recorded_at=ended_at,
+    )
 
     return {
         "ok": validation_status == "validation_passed",
@@ -1747,6 +2106,20 @@ def merge_review_packet(
     expected_phrase = pr_queue_merge_confirmation_phrase(packet_id_text)
     provided_phrase = str(approval_phrase or "").strip()
     if not provided_phrase:
+        _record_pr_queue_merge_rejection(
+            source_repo_path,
+            packet_id=packet_id_text,
+            packet_path=packet_path,
+            packet=packet,
+            reason="approval_required",
+            message="A merge approval phrase is required.",
+            details={
+                "packet_id": packet_id_text,
+                "packet_path": packet_path.as_posix(),
+                "expected_phrase": expected_phrase,
+            },
+            expected_phrase=expected_phrase,
+        )
         raise PrQueueMergeError(
             "approval_required",
             "A merge approval phrase is required.",
@@ -1759,6 +2132,22 @@ def merge_review_packet(
             status="invalid_request",
         )
     if provided_phrase != expected_phrase:
+        _record_pr_queue_merge_rejection(
+            source_repo_path,
+            packet_id=packet_id_text,
+            packet_path=packet_path,
+            packet=packet,
+            reason="approval_mismatch",
+            message="The merge approval phrase did not match.",
+            details={
+                "packet_id": packet_id_text,
+                "packet_path": packet_path.as_posix(),
+                "expected_phrase": expected_phrase,
+                "provided_phrase": provided_phrase,
+            },
+            expected_phrase=expected_phrase,
+            provided_phrase=provided_phrase,
+        )
         raise PrQueueMergeError(
             "approval_mismatch",
             "The merge approval phrase did not match.",
@@ -1773,22 +2162,35 @@ def merge_review_packet(
         )
 
     validation_evidence = _load_pr_queue_validation_evidence(source_repo_path, packet, packet_id_text)
-    _pr_queue_merge_validation_error(packet_id_text, packet_path, validation_evidence)
+    try:
+        _pr_queue_merge_validation_error(packet_id_text, packet_path, validation_evidence)
 
-    (
-        merge_preflight,
-        resolved_base_ref,
-        resolved_head_ref,
-        current_source_head,
-        source_repo_state,
-        current_changed_files,
-        recorded_changed_files,
-    ) = _pr_queue_merge_preflight(
-        source_repo_path,
-        packet,
-        packet_id=packet_id_text,
-        validation_evidence=validation_evidence,
-    )
+        (
+            merge_preflight,
+            resolved_base_ref,
+            resolved_head_ref,
+            current_source_head,
+            source_repo_state,
+            current_changed_files,
+            recorded_changed_files,
+        ) = _pr_queue_merge_preflight(
+            source_repo_path,
+            packet,
+            packet_id=packet_id_text,
+            validation_evidence=validation_evidence,
+        )
+    except PrQueueMergeError as ex:
+        _record_pr_queue_merge_rejection(
+            source_repo_path,
+            packet_id=packet_id_text,
+            packet_path=packet_path,
+            packet=packet,
+            reason=ex.code,
+            message=str(ex),
+            details=ex.details,
+            validation_evidence=validation_evidence,
+        )
+        raise
 
     now = now_iso()
     validation_artifact_path = str(validation_evidence.get("artifact_path") or "").strip()
@@ -1904,6 +2306,26 @@ def merge_review_packet(
     }
     updated_index = _upsert_index_entry(index, index_entry)
     _write_branch_index(source_repo_path, updated_index)
+
+    _record_pr_queue_decision_signal(
+        source_repo_path,
+        packet_id=packet_id_text,
+        packet=updated_packet,
+        signal_kind="merge",
+        decision_status="approved",
+        reason="approval_confirmed",
+        packet_path=packet_path,
+        primary_path=validation_artifact_path,
+        artifact_paths=validation_artifacts_value,
+        metadata={
+            "approval": approval_record,
+            "merge_outcome": merge_outcome,
+            "merge_preflight": merge_preflight,
+            "source_head": current_source_head,
+            "source_repo_state": source_repo_state,
+        },
+        recorded_at=now,
+    )
 
     return {
         "ok": True,

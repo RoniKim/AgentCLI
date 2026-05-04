@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import socket
+import sqlite3
 import threading
 import time
 import sys
@@ -33,7 +34,7 @@ from .config import (
     validate_roles_value,
 )
 from .cli import DEFAULTS as CLI_DEFAULTS
-from .goals import GOALS_INCOMPLETE_STATUS, goals_path, parse_goals_completion, read_goals, resolve_goals_completion_level
+from .goals import GOALS_INCOMPLETE_STATUS, goals_path, resolve_goals_completion_level
 from .gitops import (
     apply_pending_worktree_merge,
     discard_pending_worktree_merge,
@@ -60,12 +61,12 @@ from .prompts import (
     QA_INSTRUCTIONS_DEFAULT,
     QA_TEMPLATE_DEFAULT,
     REPORTER_INSTRUCTIONS_DEFAULT,
-    _read_text_robust,
 )
 from .pr_queue import load_branch_index, pr_packet_path, pr_queue_root
 from .process_guard import _pid_alive, _pid_create_time_ticks, _pid_executable_path, init_process_guard, terminate_all_children
 from .run_dir import find_latest_run_dir
 from .shared import coerce_roles_arg
+from . import web_config as _web_config
 from .remote.controller import (
     RUNNER_CONTROL_EVENT_FILE,
     RunnerController,
@@ -84,6 +85,95 @@ from .failure_policy import (
     count_task_status_groups,
 )
 from .utils import atomic_write_json, atomic_write_text, now_iso, run_cmd, STOP_REASON_PROJECT_COMPLETE
+from . import web_payloads as _web_payloads
+from .web_redaction import (
+    _lan_safety_blocks_mutations,
+    _redact_config,
+    _redact_web_backlog_item,
+    _redact_web_backlog_payload,
+    _redact_web_config_contract,
+    _redact_web_config_payload,
+    _redact_web_goal_warning,
+    _redact_web_goals_payload,
+    _redact_web_history_item,
+    _redact_web_history_payload,
+    _redact_web_history_summary,
+    _redact_web_log_entry,
+    _redact_web_log_payload,
+    _redact_web_notification_item,
+    _redact_web_notifications_payload,
+    _redact_web_pr_queue_payload,
+    _redact_web_prompt_item,
+    _redact_web_prompts_payload,
+    _redact_web_runner_control,
+    _redact_web_runner_result,
+    _redact_web_runner_start_options,
+    _redact_web_runner_status_payload,
+    _redact_web_stage,
+    _redact_web_stages_payload,
+    _redact_web_text,
+    _web_apply_redaction,
+    _web_redaction_active,
+    _web_redaction_meta,
+)
+from .web_goals import (
+    GOALS_SAVE_CONFIRMATION_PHRASE,
+    GoalSaveFailure,
+    GoalSavePlan,
+    _build_goals_payload,
+    _goal_items,
+    _goal_save_backup_path,
+    _goal_save_body,
+    _goal_save_commit,
+    _goal_save_has_required_sections,
+    _goal_save_item_identity,
+    _goal_save_item_lines,
+    _goal_save_item_signature,
+    _goal_save_normalize_draft,
+    _goal_save_normalize_item,
+    _goal_save_note_comment_line,
+    _goal_save_risk_report,
+    _goal_save_section_lines,
+    _goal_save_serialize_draft,
+    _goal_save_validate_request,
+    _parse_goal_items_and_warnings,
+)
+from .web_prompts import (
+    PROMPT_RESTORE_CONFIRMATION_PHRASE,
+    PROMPT_SPECS,
+    _load_prompt_items,
+    _prompt_backup_candidates,
+    _prompt_backup_path,
+    _prompt_default_text,
+    _prompt_file_name_is_bare,
+    _prompt_inventory_item,
+    _prompt_preview,
+    _prompt_profile,
+    _prompt_read_payload,
+    _prompt_resolved_path,
+    _prompt_spec_map,
+    _prompt_summary,
+    _prompt_template_dir,
+    _prompt_template_resolved_path,
+    _prompt_validation_payload,
+    _prompt_variables,
+    _read_prompt_text,
+    resolve_prompt_target,
+    restore_prompt,
+    save_prompt,
+)
+from .web_logs import (
+    _build_log_tail_payload,
+    _log_tail_entry_matches,
+    _log_tail_entry_search_text,
+    _log_tail_source_catalog,
+    _normalize_log_tail_level,
+    _normalize_plain_log_tail_entry,
+    _normalize_structured_log_tail_entry,
+    _parse_log_tail_entry,
+    _resolve_log_tail_source,
+    _resolve_log_tail_source_record,
+)
 
 try:  # Optional dependency: the app must still import when FastAPI is absent.
     from fastapi import Body, FastAPI, HTTPException, Request
@@ -101,63 +191,6 @@ except Exception:  # pragma: no cover - exercised in dependency-missing environm
     uvicorn = None  # type: ignore[assignment]
 
 
-PROMPT_SPECS: list[dict[str, str]] = [
-    {
-        "id": "pm_instructions",
-        "file": "pm_instructions.md",
-        "scope": "PM",
-        "default": PM_INSTRUCTIONS_DEFAULT,
-    },
-    {
-        "id": "dev_instructions",
-        "file": "dev_instructions.md",
-        "scope": "Dev",
-        "default": DEV_INSTRUCTIONS_DEFAULT,
-    },
-    {
-        "id": "qa_instructions",
-        "file": "qa_instructions.md",
-        "scope": "QA",
-        "default": QA_INSTRUCTIONS_DEFAULT,
-    },
-    {
-        "id": "pm_bootstrap",
-        "file": "pm_bootstrap_prompt.md",
-        "scope": "PM",
-        "default": PM_BOOTSTRAP_TEMPLATE_DEFAULT,
-    },
-    {
-        "id": "pm_incremental",
-        "file": "pm_incremental_prompt.md",
-        "scope": "PM",
-        "default": PM_INCREMENTAL_TEMPLATE_DEFAULT,
-    },
-    {
-        "id": "dev_task",
-        "file": "dev_task_prompt.md",
-        "scope": "Dev",
-        "default": DEV_TASK_TEMPLATE_DEFAULT,
-    },
-    {
-        "id": "qa_prompt",
-        "file": "qa_prompt.md",
-        "scope": "QA",
-        "default": QA_TEMPLATE_DEFAULT,
-    },
-    {
-        "id": "reporter_instructions",
-        "file": "reporter_instructions.md",
-        "scope": "Reporter",
-        "default": REPORTER_INSTRUCTIONS_DEFAULT,
-    },
-    {
-        "id": "pm_shutdown_report",
-        "file": "pm_shutdown_report_prompt.md",
-        "scope": "Reporter",
-        "default": PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT,
-    },
-]
-
 STAGE_ORDER = {stage.lower(): index for index, stage in enumerate(PIPELINE_STAGE_ORDER)}
 RUNNER_CONTROL_CONFIRMATIONS = {
     "start": "START RUNNER",
@@ -165,7 +198,6 @@ RUNNER_CONTROL_CONFIRMATIONS = {
     "reload": "RELOAD RUNNER",
     "restart": "RESTART RUNNER",
 }
-GOALS_SAVE_CONFIRMATION_PHRASE = "DELETE OR DOWNGRADE UNMET P0 GOALS"
 CONFIG_RESTORE_CONFIRMATION_PHRASE = "RESTORE CONFIG BACKUP"
 RUN_DIR_ARTIFACT_NAMES = {
     "BACKLOG.json",
@@ -197,24 +229,8 @@ RUN_DIR_ARTIFACT_NAMES = {
 }
 RUNNER_CONTROL_TRUTHY = {"1", "true", "yes", "on", "enabled"}
 RUNNER_CONTROL_FALSY = {"0", "false", "no", "off", "disabled"}
-SENSITIVE_CONFIG_TOKENS = {
-    "api",
-    "apikey",
-    "api_key",
-    "auth",
-    "bearer",
-    "bot",
-    "chat",
-    "client_secret",
-    "credential",
-    "key",
-    "password",
-    "secret",
-    "session",
-    "token",
-    "webhook",
-}
-REDACTED_VALUE = "[redacted]"
+SENSITIVE_CONFIG_TOKENS = _web_config.SENSITIVE_CONFIG_TOKENS
+REDACTED_VALUE = _web_config.REDACTED_VALUE
 LAN_SAFETY_MUTATION_DISABLED_MESSAGE = (
     "LAN safety blocks mutating web actions until authentication or a stronger trusted-operator gate is implemented."
 )
@@ -232,6 +248,29 @@ PR_QUEUE_MAX_CHANGED_FILES = 80
 PR_QUEUE_MAX_VALIDATION_ARTIFACTS = 16
 PR_QUEUE_ARTIFACT_PREVIEW_LINES = 80
 PR_QUEUE_ARTIFACT_PREVIEW_CHARS = 8000
+EXPERIENCE_MAX_ITEMS = 6
+EXPERIENCE_MAX_EVIDENCE_ITEMS = 3
+EXPERIENCE_UNAVAILABLE_MESSAGE = "Experience DB is unavailable. No read-only Experience data was found."
+EXPERIENCE_EMPTY_MESSAGE = "Experience DB is available, but no recent lessons or blockers were recorded yet."
+EXPERIENCE_SUMMARY_FALLBACK_MESSAGE = "Experience DB is unavailable. Showing cached analyzer summary data only."
+
+CONFIG_CONTRACT_GROUPS = _web_config.CONFIG_CONTRACT_GROUPS
+CONFIG_CONTRACT_FIELDS = _web_config.CONFIG_CONTRACT_FIELDS
+ConfigMutationError = _web_config.ConfigMutationError
+_is_sensitive_config_key = _web_config._is_sensitive_config_key
+_config_path_get = _web_config._config_path_get
+_config_path_set = _web_config._config_path_set
+_merge_config_tree = _web_config._merge_config_tree
+_normalize_config_list = _web_config._normalize_config_list
+_normalize_config_contract_value = _web_config._normalize_config_contract_value
+_normalize_config_for_launch = _web_config._normalize_config_for_launch
+_build_config_contract = _web_config._build_config_contract
+_config_save_backup_path = _web_config._config_save_backup_path
+_config_backup_candidates = _web_config._config_backup_candidates
+_config_resolve_backup_selection = _web_config._config_resolve_backup_selection
+_config_save_validate_change = _web_config._config_save_validate_change
+_config_save_changes = _web_config._config_save_changes
+_config_restore_backup = _web_config._config_restore_backup
 
 
 def _repo_root(repo: Path | str | None) -> Path:
@@ -273,6 +312,7 @@ def fallbackSectionMessage(kind: str) -> str:
         "notifications": "No notifications have been recorded yet.",
         "metrics": "No metrics snapshot is available yet.",
         "history": "Run history is empty.",
+        "experience": EXPERIENCE_UNAVAILABLE_MESSAGE,
         "worktree": "No pending worktree merge is available.",
         "prQueue": "No PR queue packets are available.",
         "runnerControl": "Runner controls are unavailable in fallback mode.",
@@ -811,6 +851,631 @@ def _safe_jsonl(path: Path, *, max_items: int = 400) -> list[dict[str, Any]]:
     except Exception:
         return []
     return list(rows)
+
+
+def _experience_root_candidates(repo: Path) -> list[Path]:
+    roots: list[Path] = []
+    for candidate in (repo / AGENT_WORK_DIR / "experience", app_home() / "experience"):
+        resolved = candidate.expanduser().resolve()
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def _experience_db_candidates(repo: Path) -> list[Path]:
+    return [root / "experience.db" for root in _experience_root_candidates(repo)]
+
+
+def _experience_summary_candidates(repo: Path, run_dir: Path | None) -> list[Path]:
+    candidates: list[Path] = []
+    for root in _experience_root_candidates(repo):
+        candidates.append(root / "latest_summary.json")
+    if run_dir is not None:
+        candidates.append(run_dir / "ANALYZER_SUMMARY.json")
+    return candidates
+
+
+def _experience_text(value: Any, *, max_chars: int = 0) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    if max_chars and len(text) > max_chars:
+        return text[: max(0, max_chars - 3)].rstrip() + "..."
+    return text
+
+
+def _experience_json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return [raw]
+        if isinstance(parsed, list):
+            return list(parsed)
+        if isinstance(parsed, tuple):
+            return list(parsed)
+        if parsed is None:
+            return []
+        return [parsed]
+    if value is None:
+        return []
+    return [value]
+
+
+def _experience_artifact_kind(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "artifact reference"
+    if "prompt" in text:
+        return "prompt artifact"
+    if "patch" in text or text.endswith(".diff") or text.endswith(".patch") or "diff --git" in text:
+        return "diff artifact"
+    if "log" in text or "trace" in text or text.endswith(".log") or text.endswith(".txt") or text.endswith(".jsonl"):
+        return "log artifact"
+    if "report" in text or text.endswith(".json") or text.endswith(".md"):
+        return "report artifact"
+    return "artifact reference"
+
+
+def _experience_evidence_pointer(
+    raw: Any,
+    *,
+    run_id: str = "",
+    task_id: str = "",
+    gate: str = "",
+    pr_id: str = "",
+) -> str:
+    parts: list[str] = []
+    if run_id:
+        parts.append(f"run {run_id}")
+    if task_id:
+        parts.append(f"task {task_id}")
+    if pr_id:
+        parts.append(f"pr {pr_id}")
+    if gate:
+        parts.append(f"gate {gate}")
+    parts.append(_experience_artifact_kind(raw))
+    return " | ".join(parts)
+
+
+def _experience_evidence_pointers(
+    value: Any,
+    *,
+    run_id: str = "",
+    task_id: str = "",
+    gate: str = "",
+    pr_id: str = "",
+    limit: int = EXPERIENCE_MAX_EVIDENCE_ITEMS,
+) -> list[str]:
+    pointers: list[str] = []
+    seen: set[str] = set()
+    for item in _experience_json_list(value):
+        item_run_id = run_id
+        item_task_id = task_id
+        item_gate = gate
+        item_pr_id = pr_id
+        item_raw = item
+        if isinstance(item, dict):
+            item_run_id = _pick_text(item.get("run_id"), item.get("runId"), run_id)
+            item_task_id = _pick_text(item.get("task_id"), item.get("taskId"), task_id)
+            item_gate = _pick_text(item.get("gate"), gate)
+            item_pr_id = _pick_text(item.get("pr_id"), item.get("prId"), pr_id)
+            item_raw = _pick_text(
+                item.get("artifact_path"),
+                item.get("artifactPath"),
+                item.get("path"),
+                item.get("file"),
+                item.get("ref"),
+                item.get("pointer"),
+                item.get("evidence"),
+            )
+        pointer = _experience_evidence_pointer(
+            item_raw,
+            run_id=item_run_id,
+            task_id=item_task_id,
+            gate=item_gate,
+            pr_id=item_pr_id,
+        )
+        if not pointer or pointer in seen:
+            continue
+        seen.add(pointer)
+        pointers.append(pointer)
+        if len(pointers) >= max(1, int(limit)):
+            break
+    if pointers:
+        return pointers
+    if run_id or task_id or gate or pr_id:
+        return [_experience_evidence_pointer("", run_id=run_id, task_id=task_id, gate=gate, pr_id=pr_id)]
+    return []
+
+
+def _experience_table_rows(db_path: Path, table: str) -> list[dict[str, Any]]:
+    if not db_path.exists() or not db_path.is_file():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=2)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(f"SELECT * FROM {table}").fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return []
+    return [dict(row) for row in rows]
+
+
+def _experience_sort_key(*values: Any) -> tuple[str, int]:
+    timestamp = ""
+    for value in values:
+        text = _experience_text(value)
+        if text:
+            timestamp = text
+            break
+    return timestamp, len(timestamp)
+
+
+def _experience_lesson_items(lesson_rows: list[dict[str, Any]], task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    source_rows = lesson_rows
+    if not source_rows:
+        source_rows = [row for row in task_rows if _experience_text(row.get("lesson"))]
+    for row in source_rows:
+        lesson = _experience_text(row.get("lesson"), max_chars=240)
+        if not lesson:
+            continue
+        run_id = _experience_text(row.get("run_id"), max_chars=32)
+        task_id = _experience_text(row.get("task_id"), max_chars=32)
+        trigger = _experience_text(row.get("trigger"), max_chars=140)
+        evidence = _experience_evidence_pointers(
+            row.get("evidence"),
+            run_id=run_id,
+            task_id=task_id,
+            pr_id=_experience_text(row.get("pr_id"), max_chars=32),
+        )
+        items.append(
+            {
+                "kind": _experience_text(row.get("kind"), max_chars=32) or "general",
+                "severity": _experience_text(row.get("severity"), max_chars=16) or "medium",
+                "confidence": _coerce_optional_float(row.get("confidence")) or 0.0,
+                "trigger": trigger,
+                "lesson": lesson,
+                "evidenceCount": max(len(_experience_json_list(row.get("evidence"))), len(evidence)),
+                "evidencePointers": evidence,
+                "lastSeenAt": _experience_text(row.get("last_seen_at"), max_chars=64) or _experience_text(row.get("created_at"), max_chars=64),
+                "createdAt": _experience_text(row.get("created_at"), max_chars=64),
+                "seenCount": _coerce_optional_int(row.get("seen_count")) or 0,
+                "runId": run_id,
+                "taskId": task_id,
+            }
+        )
+    items.sort(
+        key=lambda item: (
+            _experience_sort_key(item.get("lastSeenAt"), item.get("createdAt")),
+            float(item.get("confidence") or 0.0),
+            int(item.get("seenCount") or 0),
+        ),
+        reverse=True,
+    )
+    return items[:EXPERIENCE_MAX_ITEMS]
+
+
+def _experience_failure_pattern_label(classification: str, gate: str, status: str) -> str:
+    label_map = {
+        "blocked_env": "Environment blocker repeated",
+        "regression_failed": "Regression failure repeated",
+        "test_contract_changed": "Contract drift repeated",
+        "no_tests_found": "No-tests finding repeated",
+        "failed": "Validation failure repeated",
+        "timeout": "Validation timeout repeated",
+        "stopped": "Validation stop repeated",
+    }
+    key = classification or status
+    if key in label_map:
+        return label_map[key]
+    if gate and key:
+        return f"{gate} {key} repeated"
+    if gate:
+        return f"{gate} repeated"
+    if key:
+        return f"{key} repeated"
+    return "Validation failure repeated"
+
+
+def _experience_failure_patterns(validation_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in validation_rows:
+        status = _experience_text(row.get("status"), max_chars=32).lower()
+        classification = _experience_text(row.get("classification"), max_chars=48).lower()
+        gate = _experience_text(row.get("gate"), max_chars=48).lower()
+        if not (classification or status):
+            continue
+        key = (classification or status, gate, status)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "classification": classification or status,
+                "gate": gate,
+                "status": status,
+                "occurrences": 0,
+                "lastSeenAt": "",
+                "evidencePointers": [],
+                "evidenceSeen": set(),
+            },
+        )
+        bucket["occurrences"] += 1
+        bucket["lastSeenAt"] = max(bucket["lastSeenAt"], _experience_text(row.get("recorded_at"), max_chars=64))
+        for pointer in _experience_evidence_pointers(
+            row.get("artifact_path"),
+            run_id=_experience_text(row.get("run_id"), max_chars=32),
+            task_id=_experience_text(row.get("task_id"), max_chars=32),
+            gate=gate,
+        ):
+            if pointer in bucket["evidenceSeen"]:
+                continue
+            bucket["evidenceSeen"].add(pointer)
+            if len(bucket["evidencePointers"]) < EXPERIENCE_MAX_EVIDENCE_ITEMS:
+                bucket["evidencePointers"].append(pointer)
+    items: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        if int(bucket.get("occurrences") or 0) < 2:
+            continue
+        items.append(
+            {
+                "classification": bucket["classification"],
+                "gate": bucket["gate"],
+                "status": bucket["status"],
+                "occurrences": int(bucket.get("occurrences") or 0),
+                "summary": _experience_failure_pattern_label(
+                    str(bucket.get("classification") or ""),
+                    str(bucket.get("gate") or ""),
+                    str(bucket.get("status") or ""),
+                ),
+                "evidenceCount": len(bucket["evidenceSeen"]),
+                "evidencePointers": list(bucket.get("evidencePointers") or []),
+                "lastSeenAt": bucket.get("lastSeenAt") or "",
+            }
+        )
+    items.sort(key=lambda item: (_experience_sort_key(item.get("lastSeenAt")), int(item.get("occurrences") or 0)), reverse=True)
+    return items[:EXPERIENCE_MAX_ITEMS]
+
+
+def _experience_validation_gap_label(validation_status: str, gate: str, classification: str) -> str:
+    if validation_status == "validation_pending":
+        return "Validation is pending before merge"
+    if validation_status == "no_tests_found" or classification == "no_tests_found":
+        return "No tests were found for the affected change"
+    if validation_status == "skipped":
+        return f"{gate or 'Validation'} was skipped"
+    if classification == "blocked_env":
+        return "Validation was blocked by the environment"
+    return "Validation coverage gap detected"
+
+
+def _experience_validation_gaps(task_rows: list[dict[str, Any]], validation_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    def _add_gap(*, validation_status: str, gate: str, classification: str, run_id: str, task_id: str, pr_id: str = "") -> None:
+        key = (validation_status or classification or "gap", gate, classification)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "validationStatus": validation_status,
+                "gate": gate,
+                "classification": classification,
+                "occurrences": 0,
+                "lastSeenAt": "",
+                "evidencePointers": [],
+                "evidenceSeen": set(),
+            },
+        )
+        bucket["occurrences"] += 1
+        bucket["lastSeenAt"] = max(bucket["lastSeenAt"], run_id)
+        for pointer in _experience_evidence_pointers(
+            [],
+            run_id=run_id,
+            task_id=task_id,
+            gate=gate,
+            pr_id=pr_id,
+        ):
+            if pointer in bucket["evidenceSeen"]:
+                continue
+            bucket["evidenceSeen"].add(pointer)
+            if len(bucket["evidencePointers"]) < EXPERIENCE_MAX_EVIDENCE_ITEMS:
+                bucket["evidencePointers"].append(pointer)
+
+    for row in task_rows:
+        validation_status = _experience_text(row.get("validation_status"), max_chars=32).lower()
+        if validation_status not in {"validation_pending", "skipped", "no_tests_found"}:
+            continue
+        _add_gap(
+            validation_status=validation_status,
+            gate="",
+            classification="",
+            run_id=_experience_text(row.get("run_id"), max_chars=32),
+            task_id=_experience_text(row.get("task_id"), max_chars=32),
+            pr_id=_experience_text(row.get("pr_id"), max_chars=32),
+        )
+    for row in validation_rows:
+        validation_status = _experience_text(row.get("status"), max_chars=32).lower()
+        classification = _experience_text(row.get("classification"), max_chars=48).lower()
+        if validation_status not in {"skipped"} and classification not in {"no_tests_found", "blocked_env"}:
+            continue
+        _add_gap(
+            validation_status=validation_status,
+            gate=_experience_text(row.get("gate"), max_chars=48).lower(),
+            classification=classification,
+            run_id=_experience_text(row.get("run_id"), max_chars=32),
+            task_id=_experience_text(row.get("task_id"), max_chars=32),
+        )
+    items: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        items.append(
+            {
+                "validationStatus": bucket["validationStatus"],
+                "gate": bucket["gate"],
+                "classification": bucket["classification"],
+                "occurrences": int(bucket.get("occurrences") or 0),
+                "summary": _experience_validation_gap_label(
+                    str(bucket.get("validationStatus") or ""),
+                    str(bucket.get("gate") or ""),
+                    str(bucket.get("classification") or ""),
+                ),
+                "evidenceCount": len(bucket["evidenceSeen"]),
+                "evidencePointers": list(bucket.get("evidencePointers") or []),
+                "lastSeenAt": bucket.get("lastSeenAt") or "",
+            }
+        )
+    items.sort(key=lambda item: (_experience_sort_key(item.get("lastSeenAt")), int(item.get("occurrences") or 0)), reverse=True)
+    return items[:EXPERIENCE_MAX_ITEMS]
+
+
+def _experience_merge_blocker_label(status: str, task_status: str, validation_status: str) -> str:
+    blocker = task_status or status or validation_status
+    if blocker == "review_required":
+        return "Manual review is still required before merge"
+    if blocker == "blocked_env":
+        return "Environment blocker still prevents merge"
+    if blocker == "test_contract_changed":
+        return "Contract update review still blocks merge"
+    if blocker == "regression_failed":
+        return "Regression failure still blocks merge"
+    if validation_status in {"validation_pending", "skipped", "no_tests_found"}:
+        return "Merge is blocked on incomplete validation"
+    return "Merge remains blocked"
+
+
+def _experience_merge_blockers(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in task_rows:
+        status = _experience_text(row.get("status"), max_chars=32).lower()
+        task_status = _experience_text(row.get("task_status"), max_chars=32).lower()
+        validation_status = _experience_text(row.get("validation_status"), max_chars=32).lower()
+        blocker_key = task_status or status or validation_status
+        if blocker_key not in {
+            "review_required",
+            "blocked_env",
+            "test_contract_changed",
+            "regression_failed",
+            "validation_pending",
+            "skipped",
+            "no_tests_found",
+        }:
+            continue
+        run_id = _experience_text(row.get("run_id"), max_chars=32)
+        task_id = _experience_text(row.get("task_id"), max_chars=32)
+        pr_id = _experience_text(row.get("pr_id"), max_chars=32)
+        key = (pr_id or task_id or run_id or blocker_key, status, task_status, validation_status)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "status": status,
+                "taskStatus": task_status,
+                "validationStatus": validation_status,
+                "taskId": task_id,
+                "prId": pr_id,
+                "occurrences": 0,
+                "lastSeenAt": "",
+                "evidencePointers": [],
+                "evidenceSeen": set(),
+            },
+        )
+        bucket["occurrences"] += 1
+        bucket["lastSeenAt"] = max(bucket["lastSeenAt"], run_id)
+        for pointer in _experience_evidence_pointers([], run_id=run_id, task_id=task_id, pr_id=pr_id):
+            if pointer in bucket["evidenceSeen"]:
+                continue
+            bucket["evidenceSeen"].add(pointer)
+            if len(bucket["evidencePointers"]) < EXPERIENCE_MAX_EVIDENCE_ITEMS:
+                bucket["evidencePointers"].append(pointer)
+    items: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        items.append(
+            {
+                "status": bucket["status"],
+                "taskStatus": bucket["taskStatus"],
+                "validationStatus": bucket["validationStatus"],
+                "taskId": bucket["taskId"],
+                "prId": bucket["prId"],
+                "occurrences": int(bucket.get("occurrences") or 0),
+                "summary": _experience_merge_blocker_label(
+                    str(bucket.get("status") or ""),
+                    str(bucket.get("taskStatus") or ""),
+                    str(bucket.get("validationStatus") or ""),
+                ),
+                "evidenceCount": len(bucket["evidenceSeen"]),
+                "evidencePointers": list(bucket.get("evidencePointers") or []),
+                "lastSeenAt": bucket.get("lastSeenAt") or "",
+            }
+        )
+    items.sort(key=lambda item: (_experience_sort_key(item.get("lastSeenAt")), int(item.get("occurrences") or 0)), reverse=True)
+    return items[:EXPERIENCE_MAX_ITEMS]
+
+
+def _experience_from_summary_payload(summary_payload: dict[str, Any]) -> dict[str, Any]:
+    run_id = _experience_text(summary_payload.get("run_id"), max_chars=32)
+    recent_lessons: list[dict[str, Any]] = []
+    for item in list(_experience_json_list(summary_payload.get("task_lessons"))) + list(_experience_json_list(summary_payload.get("validation_lessons"))):
+        if not isinstance(item, dict):
+            continue
+        lesson = _experience_text(item.get("lesson"), max_chars=240)
+        if not lesson:
+            continue
+        task_id = _experience_text(item.get("task_id"), max_chars=32)
+        evidence = _experience_evidence_pointers(item.get("evidence"), run_id=run_id, task_id=task_id)
+        recent_lessons.append(
+            {
+                "kind": _experience_text(item.get("kind"), max_chars=32) or "general",
+                "severity": _experience_text(item.get("severity"), max_chars=16) or "medium",
+                "confidence": _coerce_optional_float(item.get("confidence")) or 0.0,
+                "trigger": "",
+                "lesson": lesson,
+                "evidenceCount": max(len(_experience_json_list(item.get("evidence"))), len(evidence)),
+                "evidencePointers": evidence,
+                "lastSeenAt": run_id,
+                "createdAt": run_id,
+                "seenCount": 1,
+                "runId": run_id,
+                "taskId": task_id,
+            }
+        )
+    merge_blockers: list[dict[str, Any]] = []
+    for hint in _experience_json_list(summary_payload.get("merge_hints")):
+        text = _experience_text(hint, max_chars=180)
+        if not text:
+            continue
+        merge_blockers.append(
+            {
+                "status": "review_required",
+                "taskStatus": "review_required",
+                "validationStatus": "",
+                "taskId": "",
+                "prId": "",
+                "occurrences": 1,
+                "summary": text,
+                "evidenceCount": 1 if run_id else 0,
+                "evidencePointers": _experience_evidence_pointers([], run_id=run_id),
+                "lastSeenAt": run_id,
+            }
+        )
+    validation_gaps: list[dict[str, Any]] = []
+    for hint in _experience_json_list(summary_payload.get("pm_hints")):
+        text = _experience_text(hint, max_chars=180)
+        lowered = text.lower()
+        if not text or not any(token in lowered for token in ("validation", "test", "no_tests", "no tests", "skipped")):
+            continue
+        validation_gaps.append(
+            {
+                "validationStatus": "validation_pending",
+                "gate": "",
+                "classification": "",
+                "occurrences": 1,
+                "summary": text,
+                "evidenceCount": 1 if run_id else 0,
+                "evidencePointers": _experience_evidence_pointers([], run_id=run_id),
+                "lastSeenAt": run_id,
+            }
+        )
+    return {
+        "recentLessons": recent_lessons[:EXPERIENCE_MAX_ITEMS],
+        "failurePatterns": [],
+        "validationGaps": validation_gaps[:EXPERIENCE_MAX_ITEMS],
+        "mergeBlockers": merge_blockers[:EXPERIENCE_MAX_ITEMS],
+        "summaryText": _experience_text(summary_payload.get("summary"), max_chars=240),
+    }
+
+
+def _build_experience_payload(repo: Path, run_dir: Path | None) -> dict[str, Any]:
+    db_path = next((path for path in _experience_db_candidates(repo) if path.exists() and path.is_file()), None)
+    summary_payload: dict[str, Any] = {}
+    summary_source = ""
+    for candidate in _experience_summary_candidates(repo, run_dir):
+        payload = _safe_json(candidate, {})
+        if isinstance(payload, dict) and payload:
+            summary_payload = payload
+            summary_source = candidate.name
+            break
+
+    recent_lessons: list[dict[str, Any]] = []
+    failure_patterns: list[dict[str, Any]] = []
+    validation_gaps: list[dict[str, Any]] = []
+    merge_blockers: list[dict[str, Any]] = []
+    source = "unavailable"
+    available = False
+    message = EXPERIENCE_UNAVAILABLE_MESSAGE
+    summary_text = _experience_text(summary_payload.get("summary"), max_chars=240)
+
+    if db_path is not None:
+        lesson_rows = _experience_table_rows(db_path, "lessons")
+        task_rows = _experience_table_rows(db_path, "task_experiences")
+        validation_rows = _experience_table_rows(db_path, "validation_experiences")
+        recent_lessons = _experience_lesson_items(lesson_rows, task_rows)
+        failure_patterns = _experience_failure_patterns(validation_rows)
+        validation_gaps = _experience_validation_gaps(task_rows, validation_rows)
+        merge_blockers = _experience_merge_blockers(task_rows)
+        available = True
+        source = "experience_db"
+        message = summary_text or EXPERIENCE_EMPTY_MESSAGE
+        if recent_lessons or failure_patterns or validation_gaps or merge_blockers:
+            message = summary_text or "Read-only Experience insights were loaded from the Experience DB."
+    elif summary_payload:
+        summary_data = _experience_from_summary_payload(summary_payload)
+        recent_lessons = list(summary_data.get("recentLessons") or [])
+        failure_patterns = list(summary_data.get("failurePatterns") or [])
+        validation_gaps = list(summary_data.get("validationGaps") or [])
+        merge_blockers = list(summary_data.get("mergeBlockers") or [])
+        summary_text = _experience_text(summary_data.get("summaryText"), max_chars=240)
+        available = True
+        source = "summary"
+        message = summary_text or EXPERIENCE_SUMMARY_FALLBACK_MESSAGE
+
+    total_items = len(recent_lessons) + len(failure_patterns) + len(validation_gaps) + len(merge_blockers)
+    state = "ready" if total_items else ("partial" if source == "summary" else ("empty" if available else "unavailable"))
+    if state == "empty":
+        message = summary_text or EXPERIENCE_EMPTY_MESSAGE
+    elif state == "unavailable":
+        message = EXPERIENCE_UNAVAILABLE_MESSAGE
+
+    payload = {
+        "available": available,
+        "state": state,
+        "source": source,
+        "message": message,
+        "summaryText": summary_text,
+        "summary_text": summary_text,
+        "recentLessons": recent_lessons,
+        "recent_lessons": recent_lessons,
+        "failurePatterns": failure_patterns,
+        "failure_patterns": failure_patterns,
+        "validationGaps": validation_gaps,
+        "validation_gaps": validation_gaps,
+        "mergeBlockers": merge_blockers,
+        "merge_blockers": merge_blockers,
+        "summary": {
+            "source": source,
+            "dbAvailable": db_path is not None,
+            "db_available": db_path is not None,
+            "summaryAvailable": bool(summary_payload),
+            "summary_available": bool(summary_payload),
+            "summarySource": summary_source,
+            "summary_source": summary_source,
+            "lessons": len(recent_lessons),
+            "failurePatterns": len(failure_patterns),
+            "failure_patterns": len(failure_patterns),
+            "validationGaps": len(validation_gaps),
+            "validation_gaps": len(validation_gaps),
+            "mergeBlockers": len(merge_blockers),
+            "merge_blockers": len(merge_blockers),
+            "total": total_items,
+        },
+    }
+    return payload
 
 
 def _pr_queue_string_list(value: Any, *, limit: int = 100) -> list[str]:
@@ -1621,1010 +2286,6 @@ def _completion_status_payload(run_dir: Path | None, *, final_reason: str = "") 
     }
 
 
-def _is_sensitive_config_key(key: Any) -> bool:
-    normalized = re.sub(r"[^a-z0-9]+", "_", str(key or "").strip().lower()).strip("_")
-    if not normalized:
-        return False
-    parts = {part for part in normalized.split("_") if part}
-    if "pairing" in parts and "code" in parts:
-        return True
-    return normalized in SENSITIVE_CONFIG_TOKENS or bool(parts & SENSITIVE_CONFIG_TOKENS)
-
-
-def _redact_config(value: Any, *, key: str = "") -> Any:
-    if _is_sensitive_config_key(key):
-        if isinstance(value, bool) or value in (None, ""):
-            return value
-        return REDACTED_VALUE
-    if isinstance(value, dict):
-        return {str(item_key): _redact_config(item_value, key=str(item_key)) for item_key, item_value in value.items()}
-    if isinstance(value, list):
-        return [_redact_config(item) for item in value]
-    return value
-
-
-def _web_redaction_active(bind_host: str) -> bool:
-    return not _host_is_loopback(bind_host)
-
-
-def _redact_web_text(value: Any) -> Any:
-    if value in (None, "", False):
-        return value
-    return REDACTED_VALUE
-
-
-def _web_redaction_meta(*fields: str) -> dict[str, Any]:
-    cleaned = [str(field).strip() for field in fields if str(field).strip()]
-    return {
-        "active": True,
-        "placeholder": REDACTED_VALUE,
-        "fields": list(dict.fromkeys(cleaned)),
-        "scope": "lan",
-    }
-
-
-def _web_apply_redaction(payload: Any, *, active: bool, redactor: Any | None = None) -> Any:
-    if not active or redactor is None:
-        return payload
-    try:
-        return redactor(payload)
-    except Exception:
-        return payload
-
-
-def _redact_web_log_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(entry)
-    for key in ("msg", "message", "raw", "text", "reason", "detail", "excerpt", "output", "content", "preview", "path", "trace", "stack"):
-        if redacted.get(key) not in (None, "", False):
-            redacted[key] = REDACTED_VALUE
-    return redacted
-
-
-def _redact_web_log_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(payload)
-    entries = redacted.get("entries")
-    if isinstance(entries, list):
-        redacted["entries"] = [_redact_web_log_entry(entry) if isinstance(entry, dict) else entry for entry in entries]
-    tail = redacted.get("tail")
-    if tail not in (None, "", False):
-        redacted["tail"] = REDACTED_VALUE
-    files = redacted.get("files")
-    if isinstance(files, dict):
-        files_copy = deepcopy(files)
-        redaction_fields: list[str] = []
-        for key, value in list(files_copy.items()):
-            if value not in (None, "", False):
-                files_copy[key] = REDACTED_VALUE
-                redaction_fields.append(f"files.{str(key).strip()}")
-        redacted["files"] = files_copy
-    else:
-        redaction_fields = []
-    for key in ("source_file", "source_path", "error"):
-        if redacted.get(key) not in (None, "", False):
-            redacted[key] = REDACTED_VALUE
-    source = redacted.get("source")
-    if isinstance(source, dict):
-        source_copy = deepcopy(source)
-        if source_copy.get("path") not in (None, "", False):
-            source_copy["path"] = REDACTED_VALUE
-        if source_copy.get("name") not in (None, "", False):
-            source_copy["name"] = REDACTED_VALUE
-        redacted["source"] = source_copy
-    sources = redacted.get("sources")
-    if isinstance(sources, list):
-        redacted_sources: list[dict[str, Any] | Any] = []
-        for item in sources:
-            if not isinstance(item, dict):
-                redacted_sources.append(item)
-                continue
-            item_copy = deepcopy(item)
-            if item_copy.get("path") not in (None, "", False):
-                item_copy["path"] = REDACTED_VALUE
-            if item_copy.get("name") not in (None, "", False):
-                item_copy["name"] = REDACTED_VALUE
-            redacted_sources.append(item_copy)
-        redacted["sources"] = redacted_sources
-    redacted["redaction"] = _web_redaction_meta(
-        "entries.msg",
-        "entries.message",
-        "entries.raw",
-        "entries.text",
-        "entries.reason",
-        "entries.detail",
-        "entries.excerpt",
-        "entries.output",
-        "entries.content",
-        "entries.preview",
-        "entries.path",
-        "entries.trace",
-        "entries.stack",
-        "tail",
-        *redaction_fields,
-        "source.path",
-        "source.name",
-        "sources.path",
-        "sources.name",
-        "source_file",
-        "source_path",
-        "error",
-    )
-    return redacted
-
-
-def _redact_web_goal_warning(warning: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(warning)
-    for key in ("line", "raw", "text", "excerpt", "message", "detail"):
-        if redacted.get(key) not in (None, "", False):
-            redacted[key] = REDACTED_VALUE
-    return redacted
-
-
-def _redact_web_goals_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(payload)
-    if redacted.get("raw_text") not in (None, "", False):
-        redacted["raw_text"] = REDACTED_VALUE
-    if redacted.get("rawText") not in (None, "", False):
-        redacted["rawText"] = REDACTED_VALUE
-    warnings = redacted.get("warnings")
-    if isinstance(warnings, list):
-        redacted["warnings"] = [_redact_web_goal_warning(warning) if isinstance(warning, dict) else warning for warning in warnings]
-    redacted["redaction"] = _web_redaction_meta("raw_text", "rawText", "warnings.raw", "warnings.text", "warnings.excerpt")
-    return redacted
-
-
-def _redact_web_backlog_item(item: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(item)
-    for key in (
-        "prompt",
-        "description",
-        "skills_rationale",
-        "skillsRationale",
-        "recent_output",
-        "recentOutput",
-        "failure_detail",
-        "failureDetail",
-        "output",
-        "output_excerpt",
-        "outputExcerpt",
-        "excerpt",
-        "detail",
-        "trace",
-        "stack",
-    ):
-        if redacted.get(key) not in (None, "", False):
-            redacted[key] = REDACTED_VALUE
-    failure = redacted.get("failure")
-    if isinstance(failure, dict):
-        failure_copy = deepcopy(failure)
-        for key in ("detail", "message", "output", "excerpt", "trace", "stack"):
-            if failure_copy.get(key) not in (None, "", False):
-                failure_copy[key] = REDACTED_VALUE
-        redacted["failure"] = failure_copy
-    return redacted
-
-
-def _redact_web_backlog_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(payload)
-    items = redacted.get("items")
-    if isinstance(items, list):
-        redacted["items"] = [_redact_web_backlog_item(item) if isinstance(item, dict) else item for item in items]
-    redacted["redaction"] = _web_redaction_meta(
-        "items.recent_output",
-        "items.recentOutput",
-        "items.output",
-        "items.outputExcerpt",
-        "items.excerpt",
-        "items.detail",
-        "items.trace",
-        "items.stack",
-        "items.failure.detail",
-        "items.failure.message",
-        "items.failure.output",
-        "items.failure.excerpt",
-        "items.failure.trace",
-        "items.failure.stack",
-        "items.failureDetail",
-    )
-    return redacted
-
-
-def _redact_web_stage(stage: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(stage)
-    changed = False
-    for key in ("latestLogLine", "latest_log_line", "latestBackendEvent", "latest_backend_event", "recentOutput", "recent_output"):
-        if redacted.get(key) not in (None, "", False):
-            redacted[key] = REDACTED_VALUE
-            changed = True
-    if changed:
-        redacted["redaction"] = _web_redaction_meta("latestLogLine", "latest_log_line", "latestBackendEvent", "latest_backend_event", "recentOutput", "recent_output")
-    return redacted
-
-
-def _redact_web_stages_payload(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [_redact_web_stage(stage) if isinstance(stage, dict) else stage for stage in stages]
-
-
-def _redact_web_prompt_item(item: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(item)
-    for key in ("preview", "content"):
-        if redacted.get(key) not in (None, "", False):
-            redacted[key] = REDACTED_VALUE
-    return redacted
-
-
-def _redact_web_prompts_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(payload)
-    if redacted.get("dir") not in (None, "", False):
-        redacted["dir"] = REDACTED_VALUE
-    items = redacted.get("items")
-    if isinstance(items, list):
-        redacted["items"] = [_redact_web_prompt_item(item) if isinstance(item, dict) else item for item in items]
-    redacted["redaction"] = _web_redaction_meta("dir", "items.preview", "items.content")
-    return redacted
-
-
-def _redact_web_notification_item(item: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(item)
-    for key in ("text", "message", "detail"):
-        if redacted.get(key) not in (None, "", False):
-            redacted[key] = REDACTED_VALUE
-    redacted["redaction"] = _web_redaction_meta("text", "message", "detail")
-    return redacted
-
-
-def _redact_web_notifications_payload(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [_redact_web_notification_item(item) if isinstance(item, dict) else item for item in items]
-
-
-def _redact_web_history_item(item: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(item)
-    redaction_fields: list[str] = []
-    for key in ("lastCycle", "last_cycle"):
-        if redacted.get(key) not in (None, "", False):
-            redacted[key] = REDACTED_VALUE
-            redaction_fields.append(key)
-    for key in ("runSummary", "run_summary", "lastRunSummary", "last_run_summary", "cycleChangeSummary", "cycle_change_summary", "failedTasks", "failed_tasks"):
-        summary = redacted.get(key)
-        if isinstance(summary, dict):
-            redacted[key] = _redact_web_history_summary(summary)
-            redaction_fields.append(key)
-    for key in ("qaValidationReport", "qa_validation_report", "finalRunReport", "final_run_report"):
-        report = redacted.get(key)
-        if isinstance(report, dict):
-            redacted[key] = _redact_web_history_summary(report)
-            redaction_fields.append(key)
-    if redaction_fields:
-        redacted["redaction"] = _web_redaction_meta(*redaction_fields)
-    return redacted
-
-
-def _redact_web_history_summary(summary: Any) -> Any:
-    def _walk(value: Any) -> Any:
-        if isinstance(value, dict):
-            redacted_value: dict[str, Any] = {}
-            for key, item in value.items():
-                key_text = str(key)
-                if key_text in {
-                    "path",
-                    "config_path",
-                    "configPath",
-                    "defaults_path",
-                    "defaultsPath",
-                    "recentOutput",
-                    "recent_output",
-                    "output",
-                    "outputExcerpt",
-                    "output_excerpt",
-                    "excerpt",
-                    "raw_text",
-                    "rawText",
-                    "content",
-                    "text",
-                }:
-                    redacted_value[key] = REDACTED_VALUE if item not in (None, "", False) else item
-                elif key_text in {"start_options", "startOptions"} and isinstance(item, dict):
-                    redacted_value[key] = _redact_web_runner_start_options(item)
-                else:
-                    redacted_value[key] = _walk(item)
-            return redacted_value
-        if isinstance(value, list):
-            return [_walk(item) for item in value]
-        return value
-
-    return _walk(deepcopy(summary))
-
-
-def _redact_web_history_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(payload)
-    items = redacted.get("items")
-    if isinstance(items, list):
-        redacted["items"] = [_redact_web_history_item(item) if isinstance(item, dict) else item for item in items]
-    redacted["redaction"] = _web_redaction_meta(
-        "items.lastCycle",
-        "items.last_cycle",
-        "items.runSummary",
-        "items.run_summary",
-        "items.lastRunSummary",
-        "items.last_run_summary",
-        "items.cycleChangeSummary",
-        "items.cycle_change_summary",
-    )
-    return redacted
-
-
-def _redact_web_pr_queue_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    def _walk(value: Any) -> Any:
-        if isinstance(value, dict):
-            redacted_value: dict[str, Any] = {}
-            for key, item in value.items():
-                key_text = str(key)
-                if key_text in {
-                    "sourceRepo",
-                    "source_repo",
-                    "worktreeDir",
-                    "worktree_dir",
-                    "packetPath",
-                    "packet_path",
-                    "queueRoot",
-                    "queue_root",
-                    "path",
-                    "artifactPath",
-                    "artifact_path",
-                    "preview",
-                    "detail",
-                    "reason",
-                    "summary",
-                    "goal_text",
-                    "goalText",
-                    "validationDetail",
-                    "validation_detail",
-                    "output",
-                    "message",
-                    "qaNotes",
-                    "qa_notes",
-                }:
-                    if key_text in {"qaNotes", "qa_notes"} and isinstance(item, list):
-                        redacted_value[key] = [REDACTED_VALUE for entry in item if entry not in (None, "", False)]
-                    elif isinstance(item, (dict, list)):
-                        redacted_value[key] = _walk(item)
-                    else:
-                        redacted_value[key] = REDACTED_VALUE if item not in (None, "", False, []) else item
-                elif key_text == "lines" and isinstance(item, list):
-                    redacted_value[key] = [REDACTED_VALUE for line in item if line not in (None, "")]
-                elif key_text in {"artifacts", "validation_artifacts", "diffArtifacts", "diff_artifacts"} and isinstance(item, list):
-                    redacted_value[key] = [_walk(entry) for entry in item]
-                elif key_text in {"changedFiles", "changed_files", "diffFiles", "diff_files"} and isinstance(item, list):
-                    redacted_value[key] = [_walk(entry) for entry in item]
-                elif key_text in {"blockingReasons", "blocking_reasons"} and isinstance(item, list):
-                    redacted_value[key] = [_walk(entry) for entry in item]
-                else:
-                    redacted_value[key] = _walk(item)
-            return redacted_value
-        if isinstance(value, list):
-            return [_walk(item) for item in value]
-        return value
-
-    redacted = _walk(deepcopy(payload))
-    if isinstance(redacted, dict):
-        redacted["redaction"] = _web_redaction_meta(
-            "queueRoot",
-            "queue_root",
-            "items.sourceRepo",
-            "items.source_repo",
-            "items.worktreeDir",
-            "items.worktree_dir",
-            "items.packetPath",
-            "items.packet_path",
-            "items.qaNotes",
-            "items.qa_notes",
-            "items.goalTrace.goal_text",
-            "items.goalTrace.goalText",
-            "items.blockingReasons.message",
-            "items.blockingReasons.detail",
-            "items.blockingReasons.reason",
-            "items.blockingReasons.summary",
-            "items.changedFiles.path",
-            "items.changedFiles.summary",
-            "items.changedFiles.hunks.lines",
-            "items.diffArtifacts.path",
-            "items.diffArtifacts.preview",
-            "items.validation.reason",
-            "items.validation.detail",
-            "items.validation.summary",
-            "items.validation.records.message",
-            "items.validation.records.detail",
-            "items.validation.records.reason",
-            "items.validation.records.summary",
-            "items.validation.artifacts.path",
-            "items.validation.artifacts.preview",
-            "detail.sourceRepo",
-            "detail.source_repo",
-            "detail.worktreeDir",
-            "detail.worktree_dir",
-            "detail.packetPath",
-            "detail.packet_path",
-            "detail.qaNotes",
-            "detail.qa_notes",
-            "detail.goalTrace.goal_text",
-            "detail.goalTrace.goalText",
-            "detail.blockingReasons.message",
-            "detail.blockingReasons.detail",
-            "detail.blockingReasons.reason",
-            "detail.blockingReasons.summary",
-            "detail.changedFiles.path",
-            "detail.changedFiles.summary",
-            "detail.changedFiles.hunks.lines",
-            "detail.diffArtifacts.path",
-            "detail.diffArtifacts.preview",
-            "detail.validation.reason",
-            "detail.validation.detail",
-            "detail.validation.summary",
-            "detail.validation.records.message",
-            "detail.validation.records.detail",
-            "detail.validation.records.reason",
-            "detail.validation.records.summary",
-            "detail.validation.artifacts.path",
-            "detail.validation.artifacts.preview",
-        )
-    return redacted
-
-
-def _redact_web_runner_start_options(start_options: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(start_options)
-    redaction = dict(redacted.get("redaction") or {})
-    redaction["active"] = True
-    redaction["placeholder"] = REDACTED_VALUE
-    paths_value = redaction.get("paths")
-    redaction_paths = []
-    if isinstance(paths_value, list):
-        redaction_paths = list(dict.fromkeys([str(path) for path in paths_value if str(path).strip()]))
-    for path in ("repo", "path", "defaults_path", "values.config_path", "defaults.config_path", "values.run_dir", "defaults.run_dir"):
-        if path not in redaction_paths:
-            redaction_paths.append(path)
-    redaction["paths"] = redaction_paths
-    redacted["redaction"] = redaction
-    redacted["redacted"] = True
-    for key in ("repo", "path", "defaults_path"):
-        if redacted.get(key) not in (None, "", False):
-            redacted[key] = REDACTED_VALUE
-    for key in ("values", "defaults"):
-        section = redacted.get(key)
-        if isinstance(section, dict):
-            section_copy = deepcopy(section)
-            if section_copy.get("config_path") not in (None, "", False):
-                section_copy["config_path"] = REDACTED_VALUE
-            if section_copy.get("run_dir") not in (None, "", False):
-                section_copy["run_dir"] = REDACTED_VALUE
-            redacted[key] = section_copy
-    argv_preview = redacted.get("argv_preview")
-    if isinstance(argv_preview, list):
-        preview = list(argv_preview)
-        for idx, token in enumerate(preview):
-            if token in {"--repo", "--config", "--run-dir"} and idx + 1 < len(preview):
-                preview[idx + 1] = REDACTED_VALUE
-        redacted["argv_preview"] = preview
-    return redacted
-
-
-def _redact_web_runner_status_payload(status: dict[str, Any], *, redact_start_options: bool = False) -> dict[str, Any]:
-    redacted = deepcopy(status)
-    redaction_fields: list[str] = []
-    for key in ("config_path", "configPath"):
-        if redacted.get(key) not in (None, "", False):
-            redacted[key] = REDACTED_VALUE
-            redaction_fields.append(key)
-    start_options = redacted.get("start_options")
-    if redact_start_options and isinstance(start_options, dict):
-        redacted_start_options = _redact_web_runner_start_options(start_options)
-        redacted["start_options"] = redacted_start_options
-        redacted["startOptions"] = redacted_start_options
-        redaction_fields.extend(
-            [
-                "start_options.repo",
-                "start_options.path",
-                "start_options.defaults_path",
-                "start_options.values.config_path",
-                "start_options.defaults.config_path",
-                "start_options.values.run_dir",
-                "start_options.defaults.run_dir",
-                "start_options.argv_preview",
-            ]
-        )
-    current_event = redacted.get("current_event")
-    if isinstance(current_event, dict):
-        redacted_current_event = _redact_web_runner_result(current_event)
-        redacted["current_event"] = redacted_current_event
-        redacted["currentEvent"] = redacted_current_event
-        redaction_fields.append("current_event")
-    history = redacted.get("history")
-    if isinstance(history, list):
-        redacted_history = [_redact_web_runner_result(item) if isinstance(item, dict) else item for item in history]
-        redacted["history"] = redacted_history
-        redacted["event_history"] = redacted_history
-        redacted["eventHistory"] = redacted_history
-        redaction_fields.append("history")
-    if redaction_fields:
-        redacted["redaction"] = _web_redaction_meta(*redaction_fields)
-    return redacted
-
-
-def _redact_web_runner_control(control: dict[str, Any], *, redact_start_options: bool = False) -> dict[str, Any]:
-    redacted = deepcopy(control)
-    redaction_fields: list[str] = []
-    status = redacted.get("status")
-    if isinstance(status, dict):
-        status_copy = _redact_web_runner_status_payload(status, redact_start_options=redact_start_options)
-        redacted["status"] = status_copy
-        for key in ("config_path", "configPath"):
-            if status.get(key) not in (None, "", False):
-                redaction_fields.append(f"status.{key}")
-            if redact_start_options and isinstance(status.get("start_options"), dict):
-                redaction_fields.extend(
-                    [
-                        "status.start_options.repo",
-                        "status.start_options.path",
-                        "status.start_options.defaults_path",
-                        "status.start_options.values.config_path",
-                        "status.start_options.defaults.config_path",
-                        "status.start_options.values.run_dir",
-                        "status.start_options.defaults.run_dir",
-                        "status.start_options.argv_preview",
-                    ]
-                )
-    current_event = redacted.get("current_event")
-    if isinstance(current_event, dict):
-        redacted_current_event = _redact_web_runner_result(current_event)
-        redacted["current_event"] = redacted_current_event
-        redacted["currentEvent"] = redacted_current_event
-        redaction_fields.append("current_event")
-    history = redacted.get("history")
-    if isinstance(history, list):
-        redacted_history = [_redact_web_runner_result(item) if isinstance(item, dict) else item for item in history]
-        redacted["history"] = redacted_history
-        redacted["event_history"] = redacted_history
-        redacted["eventHistory"] = redacted_history
-        redaction_fields.append("history")
-    start_options = redacted.get("start_options")
-    if redact_start_options and isinstance(start_options, dict):
-        redacted_start_options = _redact_web_runner_start_options(start_options)
-        redacted["start_options"] = redacted_start_options
-        redacted["startOptions"] = redacted_start_options
-        redaction_fields.extend(
-            [
-                "start_options.repo",
-                "start_options.path",
-                "start_options.defaults_path",
-                "start_options.values.config_path",
-                "start_options.defaults.config_path",
-                "start_options.values.run_dir",
-                "start_options.defaults.run_dir",
-                "start_options.argv_preview",
-            ]
-        )
-    if redaction_fields:
-        redacted["redaction"] = _web_redaction_meta(*redaction_fields)
-    return redacted
-
-
-def _redact_web_runner_result(result: dict[str, Any]) -> dict[str, Any]:
-    def _walk(value: Any) -> Any:
-        if isinstance(value, dict):
-            redacted_value: dict[str, Any] = {}
-            for key, item in value.items():
-                key_text = str(key)
-                if key_text in {"config_path", "configPath"}:
-                    redacted_value[key] = REDACTED_VALUE if item not in (None, "", False) else item
-                elif key_text in {"repo", "repoPath", "run_dir", "runDir", "worktree_dir", "worktreeDir"}:
-                    redacted_value[key] = _path_text(item)
-                elif key_text in {"start_options", "startOptions"} and isinstance(item, dict):
-                    redacted_value[key] = _redact_web_runner_start_options(item)
-                else:
-                    redacted_value[key] = _walk(item)
-            return redacted_value
-        if isinstance(value, list):
-            return [_walk(item) for item in value]
-        return value
-
-    return _walk(deepcopy(result))
-
-
-def _redact_web_config_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(payload)
-    redaction_fields: list[str] = []
-    for key in ("path", "resolved_prompts_dir"):
-        if redacted.get(key) not in (None, "", False):
-            redacted[key] = REDACTED_VALUE
-            redaction_fields.append(key)
-    meta = redacted.get("meta")
-    if isinstance(meta, dict):
-        meta_copy = deepcopy(meta)
-        for key in ("path", "resolved_prompts_dir"):
-            if meta_copy.get(key) not in (None, "", False):
-                meta_copy[key] = REDACTED_VALUE
-                redaction_fields.append(f"meta.{key}")
-        redacted["meta"] = meta_copy
-    if redaction_fields:
-        redacted["redaction"] = _web_redaction_meta(*redaction_fields)
-    return redacted
-
-
-def _redact_web_config_contract(payload: dict[str, Any]) -> dict[str, Any]:
-    redacted = deepcopy(payload)
-    redaction_fields: list[str] = []
-    for key in ("path", "resolved_prompts_dir"):
-        if redacted.get(key) not in (None, "", False):
-            redacted[key] = REDACTED_VALUE
-            redaction_fields.append(key)
-    meta = redacted.get("meta")
-    if isinstance(meta, dict):
-        meta_copy = deepcopy(meta)
-        for key in ("path", "resolved_prompts_dir"):
-            if meta_copy.get(key) not in (None, "", False):
-                meta_copy[key] = REDACTED_VALUE
-                redaction_fields.append(f"meta.{key}")
-        redacted["meta"] = meta_copy
-    if redaction_fields:
-        redaction = dict(redacted.get("redaction") or {})
-        redaction["active"] = True
-        redaction["placeholder"] = REDACTED_VALUE
-        redaction["scope"] = "lan"
-        redaction_fields_existing: list[str] = []
-        for field in list(redaction.get("fields") or []):
-            field_text = str(field).strip()
-            if field_text:
-                redaction_fields_existing.append(field_text)
-        redaction["fields"] = list(dict.fromkeys(redaction_fields_existing + redaction_fields))
-        redacted["redaction"] = redaction
-    return redacted
-
-
-CONFIG_CONTRACT_GROUPS: list[dict[str, Any]] = [
-    {
-        "id": "project",
-        "title": "Project",
-        "paths": ["repo", "profile", "execution_backend", "roles", "security.enabled"],
-    },
-    {
-        "id": "runner",
-        "title": "Runner",
-        "paths": [
-            "autopilot",
-            "continuous",
-            "iterations",
-            "max_turns_per_task",
-            "loop",
-            "loop_sleep_seconds",
-            "loop_max_cycles",
-            "loop_idle_exit_after",
-            "idle_exit_cycles",
-            "max_consecutive_failed_cycles",
-            "run_tests",
-            "budget_reset_per_cycle",
-        ],
-    },
-    {
-        "id": "quota",
-        "title": "Quota",
-        "paths": [
-            "quota_check_enabled",
-            "quota_five_hour_max_utilization",
-            "quota_seven_day_max_utilization",
-            "quota_wait_for_reset",
-        ],
-    },
-    {
-        "id": "worktree",
-        "title": "Worktree",
-        "paths": [
-            "worktree_isolation",
-            "isolate_task",
-            "gitops.worktree_merge_mode",
-            "gitops.untracked_exclude_globs",
-        ],
-    },
-    {
-        "id": "prompts",
-        "title": "Prompt Paths",
-        "paths": ["prompts_dir"],
-    },
-    {
-        "id": "codex_models",
-        "title": "Codex Models",
-        "paths": [
-            "pm_model",
-            "dev_model",
-            "dev_model_tier1",
-            "dev_model_tier2",
-            "qa_model",
-            "reporter_model",
-        ],
-    },
-    {
-        "id": "pm_refresh",
-        "title": "PM Refresh",
-        "paths": ["pm_refresh_backlog", "pm_refresh_every_cycles", "pm_include_working_tree"],
-    },
-    {
-        "id": "budget",
-        "title": "Budget",
-        "paths": [
-            "budgets.max_pm_structured_retries",
-            "budgets.max_dev_escalations_per_task",
-            "budgets.max_dev_continuations_per_task",
-            "budgets.max_total_escalations_per_run",
-            "budgets.max_total_continuations_per_run",
-            "budgets.max_total_repair_attempts_per_run",
-        ],
-    },
-    {
-        "id": "telegram",
-        "title": "Telegram",
-        "paths": [
-            "telegram.enabled",
-            "telegram.runner_mode",
-            "telegram.poll_timeout_seconds",
-            "telegram.allowed_chat_ids",
-            "telegram.bot_token",
-            "telegram.pairing_code",
-            "telegram.instance_name",
-            "telegram.notify_events",
-            "telegram.send_cycle_summary",
-            "telegram.notify_poll_interval_seconds",
-            "telegram.stalled_seconds",
-            "telegram.tail_lines_default",
-        ],
-    },
-    {
-        "id": "goals",
-        "title": "Goals",
-        "paths": [
-            "goals_enabled",
-            "goals_auto_generate",
-            "goals_auto_check",
-            "goals_auto_refresh",
-            "goals_refresh_max_per_run",
-            "goals_completion_level",
-        ],
-    },
-]
-
-CONFIG_CONTRACT_FIELDS: list[dict[str, Any]] = [
-    {"path": "repo", "group": "project", "kind": "text", "label": "Repository", "restart": True, "allow_empty": False, "desc": "Repository root the runner targets.", "hint": "Set automatically from the repo the server serves."},
-    {"path": "profile", "group": "project", "kind": "enum", "label": "Profile", "restart": True, "options": ["personal", "enterprise"], "allow_empty": False, "desc": "Default safety profile used to derive runner limits.", "hint": "Enterprise raises several guardrails."},
-    {"path": "execution_backend", "group": "project", "kind": "enum", "label": "Execution backend", "restart": True, "options": ["codex", "claudecode"], "allow_empty": False, "desc": "Backend used for Dev and QA stages.", "hint": "codex = OpenAI Codex CLI, claudecode = Claude Code."},
-    PIPELINE_ROLE_FIELD_SPEC,
-    {"path": "security.enabled", "group": "project", "kind": "bool", "label": "Security enabled", "allow_empty": True, "desc": "Enable the Security stage in the pipeline.", "hint": "Security stage requires Security in roles."},
-    {"path": "autopilot", "group": "runner", "kind": "bool", "label": "Autopilot", "allow_empty": True, "desc": "Skip interactive confirmation prompts.", "hint": "When off, the runner pauses between stages."},
-    {"path": "continuous", "group": "runner", "kind": "bool", "label": "Continuous", "allow_empty": True, "desc": "Keep chaining cycles without manual stopping.", "hint": "Best paired with autopilot for unattended runs."},
-    {"path": "iterations", "group": "runner", "kind": "number", "label": "Iterations", "min": 1, "allow_empty": False, "desc": "Maximum run iterations.", "hint": "One iteration equals one PM -> Dev -> QA cycle."},
-    {"path": "max_turns_per_task", "group": "runner", "kind": "number", "label": "Max turns per task", "min": 1, "allow_empty": False, "desc": "Upper bound for per-task model turns.", "hint": "Keeps a single task from spinning forever."},
-    {"path": "stop_wait_timeout_seconds", "group": "runner", "kind": "number", "label": "Stop wait timeout seconds", "min": 1, "allow_empty": False, "desc": "How long /stop --wait and web stop wait for runner finalization before reporting timeout.", "hint": "The runner still honors STOP; this only controls the operator wait window."},
-    {"path": "loop", "group": "runner", "kind": "bool", "label": "Loop", "allow_empty": True, "desc": "Keep the runner cycling after a run completes.", "hint": "Pair with loop_sleep_seconds to avoid busy looping."},
-    {"path": "loop_sleep_seconds", "group": "runner", "kind": "number", "label": "Loop sleep seconds", "min": 1, "allow_empty": False, "desc": "Delay between looped runs.", "hint": "Longer sleeps reduce churn when no work is queued."},
-    {"path": "loop_max_cycles", "group": "runner", "kind": "number", "label": "Loop max cycles", "min": 0, "allow_empty": False, "desc": "Hard cap on loop cycles.", "hint": "Zero means no extra cap beyond the rest of the runner."},
-    {"path": "loop_idle_exit_after", "group": "runner", "kind": "number", "label": "Loop idle exit after", "min": 0, "allow_empty": False, "desc": "Exit after this many idle loop passes.", "hint": "Zero keeps the loop running until a different stop condition fires."},
-    {"path": "idle_exit_cycles", "group": "runner", "kind": "number", "label": "Idle exit cycles", "min": 0, "allow_empty": False, "desc": "How many idle cycles trigger shutdown.", "hint": "Zero keeps idle loop mode alive until a different stop condition fires."},
-    {"path": "max_consecutive_failed_cycles", "group": "runner", "kind": "number", "label": "Max consecutive failed cycles", "min": 0, "allow_empty": False, "desc": "Stop after this many failed cycles in a row.", "hint": "Prevents the runner from grinding through repeated failures."},
-    {"path": "run_tests", "group": "runner", "kind": "bool", "label": "Run tests", "allow_empty": True, "desc": "Run the test suite during QA.", "hint": "Keeps verification inside the task loop."},
-    {"path": "budget_reset_per_cycle", "group": "runner", "kind": "bool", "label": "Budget reset per cycle", "allow_empty": True, "desc": "Reset cycle-level budget tracking every cycle.", "hint": "Useful when cycle-level guardrails matter more than the full run."},
-    {"path": "quota_check_enabled", "group": "quota", "kind": "bool", "label": "Quota checks", "allow_empty": True, "desc": "Enable quota utilization checks.", "hint": "Disabling this removes the quota guardrails from the runner."},
-    {"path": "quota_five_hour_max_utilization", "group": "quota", "kind": "number", "label": "5h max utilization", "min": 0, "max": 100, "allow_empty": False, "desc": "Five-hour quota utilization ceiling.", "hint": "Percent used before the runner stops or pauses."},
-    {"path": "quota_seven_day_max_utilization", "group": "quota", "kind": "number", "label": "7d max utilization", "min": 0, "max": 100, "allow_empty": False, "desc": "Seven-day quota utilization ceiling.", "hint": "Percent used before the runner stops or pauses."},
-    {"path": "quota_wait_for_reset", "group": "quota", "kind": "bool", "label": "Wait for reset", "allow_empty": True, "desc": "Pause until quota resets instead of failing fast.", "hint": "Keeps the runner from hammering an exhausted quota window."},
-    {"path": "worktree_isolation", "group": "worktree", "kind": "bool", "label": "Worktree isolation", "restart": True, "allow_empty": True, "desc": "Run tasks in an isolated git worktree.", "hint": "Recommended for shared machines and safety-sensitive changes."},
-    {"path": "isolate_task", "group": "worktree", "kind": "bool", "label": "Isolate task", "allow_empty": True, "desc": "Give each task an isolated workspace.", "hint": "Helps keep per-task edits clean when the runner fans out."},
-    {"path": "gitops.worktree_merge_mode", "group": "worktree", "kind": "enum", "label": "Merge mode", "restart": True, "options": ["manual", "auto"], "allow_empty": False, "desc": "How worktree patches are merged.", "hint": "Manual mode keeps review in the loop."},
-    {"path": "gitops.untracked_exclude_globs", "group": "worktree", "kind": "list", "label": "Untracked exclude globs", "item_kind": "text", "allow_empty": True, "desc": "Comma-separated globs ignored by worktree review.", "hint": "Keep generated files out of merge noise."},
-    {"path": "prompts_dir", "group": "prompts", "kind": "text", "label": "Prompts directory", "restart": True, "allow_empty": True, "desc": "Directory that stores repo-specific prompt templates.", "hint": "Empty means the repo-specific default prompts directory."},
-    *CODEX_MODEL_FIELD_SPECS,
-    {"path": "pm_refresh_backlog", "group": "pm_refresh", "kind": "bool", "label": "Refresh backlog", "allow_empty": True, "desc": "Let PM refresh the backlog from live context.", "hint": "Useful when the backlog should absorb new work after a run."},
-    {"path": "pm_refresh_every_cycles", "group": "pm_refresh", "kind": "number", "label": "Refresh every cycles", "min": 0, "allow_empty": False, "desc": "Refresh cadence for PM backlog updates.", "hint": "Zero disables periodic refreshes."},
-    {"path": "pm_include_working_tree", "group": "pm_refresh", "kind": "bool", "label": "Include working tree", "allow_empty": True, "desc": "Let PM inspect the working tree during refresh.", "hint": "Helps PM pick up local edits while refreshing the backlog."},
-    {"path": "budgets.max_pm_structured_retries", "group": "budget", "kind": "number", "label": "PM structured retries", "min": 0, "allow_empty": False, "desc": "Retry cap for structured PM output.", "hint": "Prevents retry loops when PM output keeps failing schema checks."},
-    {"path": "budgets.max_dev_escalations_per_task", "group": "budget", "kind": "number", "label": "Dev escalations per task", "min": 0, "allow_empty": False, "desc": "Escalation budget for a single Dev task.", "hint": "Used to cap repeated model escalations."},
-    {"path": "budgets.max_dev_continuations_per_task", "group": "budget", "kind": "number", "label": "Dev continuations per task", "min": 0, "allow_empty": False, "desc": "Continuation budget for a single Dev task.", "hint": "Keeps partial response continuations bounded."},
-    {"path": "budgets.max_total_escalations_per_run", "group": "budget", "kind": "number", "label": "Total escalations per run", "min": 0, "allow_empty": False, "desc": "Escalation budget for the full run.", "hint": "Set to zero to disable the cap."},
-    {"path": "budgets.max_total_continuations_per_run", "group": "budget", "kind": "number", "label": "Total continuations per run", "min": 0, "allow_empty": False, "desc": "Continuation budget for the full run.", "hint": "Set to zero to disable the cap."},
-    {"path": "budgets.max_total_repair_attempts_per_run", "group": "budget", "kind": "number", "label": "Total repair attempts", "min": 0, "allow_empty": False, "desc": "Repair budget for the full run.", "hint": "Limits repeated repair loops across stages."},
-    {"path": "telegram.enabled", "group": "telegram", "kind": "bool", "label": "Enabled", "restart": True, "allow_empty": True, "desc": "Mirror run events to Telegram.", "hint": "Local notification bridge only."},
-    {"path": "telegram.runner_mode", "group": "telegram", "kind": "enum", "label": "Runner mode", "restart": True, "options": ["thread", "subprocess"], "allow_empty": False, "desc": "How the Telegram runner is hosted.", "hint": "Thread mode stays in-process. Subprocess mode isolates the service."},
-    {"path": "telegram.poll_timeout_seconds", "group": "telegram", "kind": "number", "label": "Poll timeout seconds", "min": 1, "allow_empty": False, "desc": "Long-poll timeout for Telegram control-plane requests.", "hint": "Longer timeouts reduce polling chatter."},
-    {"path": "telegram.allowed_chat_ids", "group": "telegram", "kind": "list", "label": "Allowed chat IDs", "item_kind": "int", "allow_empty": True, "desc": "Comma-separated allowlisted Telegram chat IDs.", "hint": "Empty means any chat id is currently allowed by policy."},
-    {"path": "telegram.bot_token", "group": "telegram", "kind": "text", "label": "Bot token", "restart": True, "redacted": True, "allow_empty": True, "desc": "Telegram bot token used for remote control.", "hint": "Shown as redacted in the browser."},
-    {"path": "telegram.pairing_code", "group": "telegram", "kind": "text", "label": "Pairing code", "restart": True, "redacted": True, "allow_empty": True, "desc": "One-time pairing code for Telegram control.", "hint": "Shown as redacted in the browser."},
-    {"path": "telegram.instance_name", "group": "telegram", "kind": "text", "label": "Instance name", "allow_empty": True, "desc": "Friendly label surfaced in Telegram messages.", "hint": "Useful when multiple runners share one chat."},
-    {"path": "telegram.notify_events", "group": "telegram", "kind": "list", "label": "Notify events", "item_kind": "text", "allow_empty": True, "desc": "Comma-separated push events for Telegram notifications.", "hint": "Examples: run_start, task_done, quota."},
-    {"path": "telegram.send_cycle_summary", "group": "telegram", "kind": "bool", "label": "Send cycle summary", "allow_empty": True, "desc": "Push new cycle summary lines to Telegram.", "hint": "Helpful when the runner is unattended."},
-    {"path": "telegram.notify_poll_interval_seconds", "group": "telegram", "kind": "number", "label": "Notify poll interval", "min": 2, "allow_empty": False, "desc": "Polling interval used by Telegram notification refresh.", "hint": "Longer intervals reduce background polling."},
-    {"path": "telegram.stalled_seconds", "group": "telegram", "kind": "number", "label": "Stalled seconds", "min": 60, "allow_empty": False, "desc": "Threshold before a run is considered stalled.", "hint": "Helps identify slow or hung runs."},
-    {"path": "telegram.tail_lines_default", "group": "telegram", "kind": "number", "label": "Tail lines default", "min": 1, "allow_empty": False, "desc": "Default number of log lines included in Telegram pushes.", "hint": "Keeps notifications compact."},
-    {"path": "goals_enabled", "group": "goals", "kind": "bool", "label": "Goals enabled", "allow_empty": True, "desc": "Enable GOALS.md tracking.", "hint": "Disabling this turns off the goals completion gate."},
-    {"path": "goals_auto_generate", "group": "goals", "kind": "bool", "label": "Auto-generate goals", "allow_empty": True, "desc": "Auto-generate goals content from PM context.", "hint": "Useful when goals are derived from the current task set."},
-    {"path": "goals_auto_check", "group": "goals", "kind": "bool", "label": "Auto-check goals", "allow_empty": True, "desc": "Re-check goals completion automatically.", "hint": "Keeps completion status in sync with the latest snapshot."},
-    {"path": "goals_auto_refresh", "group": "goals", "kind": "bool", "label": "Auto-refresh goals", "allow_empty": True, "desc": "Refresh GOALS.md after project completion.", "hint": "Useful for the next run once the current project is complete."},
-    {"path": "goals_refresh_max_per_run", "group": "goals", "kind": "number", "label": "Goals refresh max per run", "min": 0, "allow_empty": False, "desc": "Hard cap on goals refresh attempts per run.", "hint": "Zero disables refresh retries."},
-    {"path": "goals_completion_level", "group": "goals", "kind": "enum", "label": "Goals completion level", "options": ["p0", "p1", "all"], "allow_empty": False, "desc": "Which goals must be satisfied to treat the project as complete.", "hint": "p0 is legacy, p1 includes P1, all requires every checkbox."},
-]
-
-
-def _config_path_get(tree: Any, path: str) -> Any:
-    current = tree
-    for part in path.split("."):
-        if not isinstance(current, dict):
-            return None
-        if part not in current:
-            return None
-        current = current[part]
-    return current
-
-
-def _config_path_set(tree: dict[str, Any], path: str, value: Any) -> None:
-    current = tree
-    parts = path.split(".")
-    for part in parts[:-1]:
-        next_value = current.get(part)
-        if not isinstance(next_value, dict):
-            next_value = {}
-            current[part] = next_value
-        current = next_value
-    current[parts[-1]] = value
-
-
-def _merge_config_tree(base: Any, overlay: Any) -> Any:
-    if not isinstance(base, dict):
-        return deepcopy(overlay)
-    result = deepcopy(base)
-    if not isinstance(overlay, dict):
-        return result
-    for key, value in overlay.items():
-        if isinstance(result.get(key), dict) and isinstance(value, dict):
-            result[key] = _merge_config_tree(result[key], value)
-        else:
-            result[key] = deepcopy(value)
-    return result
-
-
-def _normalize_config_list(value: Any, *, item_kind: str = "text") -> list[Any]:
-    return normalize_config_list_value(value, item_kind=item_kind)
-
-
-def _normalize_config_contract_value(value: Any, spec: dict[str, Any]) -> Any:
-    return normalize_config_value(value, spec, str(spec.get("path") or ""))
-
-
-def _normalize_config_for_launch(cfg: dict[str, Any]) -> dict[str, Any]:
-    normalized = _merge_config_tree(CLI_DEFAULTS, cfg)
-    if not isinstance(normalized, dict):
-        normalized = {}
-    for spec in CONFIG_CONTRACT_FIELDS:
-        path = str(spec.get("path") or "")
-        if not path:
-            continue
-        _config_path_set(normalized, path, normalize_config_value(_config_path_get(normalized, path), spec, path))
-    for path in (
-        "gitops.untracked_exclude_globs",
-        "plugins_allowlist",
-        "policy.ignore_paths",
-        "policy.allow_patterns",
-        "scan_ignore_globs",
-        "scan_ignore_paths",
-        "failover_backends",
-        "failover_on",
-        "dev_escalate_on",
-    ):
-        current = _config_path_get(normalized, path)
-        if current is None:
-            continue
-        _config_path_set(normalized, path, normalize_config_list_value(current, item_kind="text"))
-    normalized["roles"] = coerce_roles_arg(normalized.get("roles"))
-    return normalized
-
-
-def _build_config_contract(
-    repo_root: Path,
-    cfg: dict[str, Any],
-    cfg_path: Path,
-    cfg_source: str,
-    prompts_dir: Path,
-    *,
-    save_enabled: bool = False,
-    save_endpoint: str = "/api/config/save",
-    save_requires_opt_in: bool = True,
-    restore_enabled: bool | None = None,
-    restore_endpoint: str = "/api/config/restore",
-    restore_requires_opt_in: bool = True,
-) -> dict[str, Any]:
-    effective_cfg = _merge_config_tree(CLI_DEFAULTS, cfg)
-    effective_cfg["repo"] = repo_root.as_posix()
-    default_cfg = _merge_config_tree(CLI_DEFAULTS, {})
-    default_cfg["repo"] = ""
-
-    values: dict[str, Any] = {}
-    defaults: dict[str, Any] = {}
-    schema: dict[str, Any] = {}
-    restart_required_paths: list[str] = []
-    redacted_paths: list[str] = []
-
-    for spec in CONFIG_CONTRACT_FIELDS:
-        path = str(spec["path"])
-        field_schema = {
-            "path": path,
-            "kind": spec.get("kind", "text"),
-            "label": spec.get("label", path.rsplit(".", 1)[-1].replace("_", " ").title()),
-            "group": spec.get("group", ""),
-            "desc": spec.get("desc", ""),
-            "hint": spec.get("hint", ""),
-            "restart": bool(spec.get("restart", False)),
-            "editable": bool(spec.get("editable", True)),
-            "redacted": bool(spec.get("redacted", False)),
-            "allow_empty": bool(spec.get("allow_empty", False)),
-        }
-        if spec.get("options") is not None:
-            field_schema["options"] = list(spec["options"])
-        if spec.get("min") is not None:
-            field_schema["min"] = spec["min"]
-        if spec.get("max") is not None:
-            field_schema["max"] = spec["max"]
-        if spec.get("step") is not None:
-            field_schema["step"] = spec["step"]
-        if spec.get("item_kind") is not None:
-            field_schema["item_kind"] = spec["item_kind"]
-
-        raw_value = _config_path_get(effective_cfg, path)
-        raw_default = _config_path_get(default_cfg, path)
-        normalized_value = _normalize_config_contract_value(raw_value, spec)
-        normalized_default = _normalize_config_contract_value(raw_default, spec)
-        _config_path_set(values, path, normalized_value)
-        _config_path_set(defaults, path, normalized_default)
-        schema[path] = field_schema
-        if field_schema["restart"]:
-            restart_required_paths.append(path)
-        if field_schema["redacted"] or _is_sensitive_config_key(path):
-            redacted_paths.append(path)
-
-    redaction = {
-        "placeholder": REDACTED_VALUE,
-        "paths": list(dict.fromkeys(redacted_paths)),
-        "tokens": sorted(SENSITIVE_CONFIG_TOKENS),
-    }
-    restart_required_paths = list(dict.fromkeys(restart_required_paths))
-    redacted_values = _redact_config(values)
-    redacted_defaults = _redact_config(defaults)
-    backups = _config_backup_candidates(cfg_path)
-    for path in redaction["paths"]:
-        if _config_path_get(redacted_values, path) not in (None, "", False):
-            _config_path_set(redacted_values, path, REDACTED_VALUE)
-        if _config_path_get(redacted_defaults, path) not in (None, "", False):
-            _config_path_set(redacted_defaults, path, REDACTED_VALUE)
-
-    return {
-        "path": cfg_path.as_posix(),
-        "source": cfg_source,
-        "resolved_prompts_dir": prompts_dir.as_posix(),
-        "values": redacted_values,
-        "defaults": redacted_defaults,
-        "schema": schema,
-        "groups": CONFIG_CONTRACT_GROUPS,
-        "redaction": redaction,
-        "restart_required_paths": restart_required_paths,
-        "backups": backups,
-        "meta": {
-            "path": cfg_path.as_posix(),
-            "source": cfg_source,
-            "resolved_prompts_dir": prompts_dir.as_posix(),
-            "save_enabled": bool(save_enabled),
-            "save_endpoint": str(save_endpoint or "/api/config/save"),
-            "save_requires_opt_in": bool(save_requires_opt_in),
-            "restore_enabled": bool(save_enabled if restore_enabled is None else restore_enabled),
-            "restore_endpoint": str(restore_endpoint or "/api/config/restore"),
-            "restore_requires_opt_in": bool(restore_requires_opt_in),
-        },
-    }
-
-
-def _config_save_backup_path(cfg_path: Path) -> Path:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%fZ")
-    return cfg_path.with_name(f"{cfg_path.stem}.{stamp}.bak{cfg_path.suffix}")
 
 
 def _config_restore_error(status_code: int, code: str, message: str, **details: Any) -> JSONResponse:
@@ -2641,242 +2302,6 @@ def _config_restore_error(status_code: int, code: str, message: str, **details: 
     if details:
         payload["error"]["details"] = details
     return JSONResponse(status_code=status_code, content=payload)
-
-
-def _config_backup_candidates(cfg_path: Path, *, limit: int = 20) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    pattern = f"{cfg_path.stem}.*.bak{cfg_path.suffix}"
-    try:
-        parent = cfg_path.parent
-        if parent.exists() and parent.is_dir():
-            for candidate in sorted(
-                [path for path in parent.glob(pattern) if path.is_file()],
-                key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
-                reverse=True,
-            )[: max(0, int(limit)) or 0]:
-                try:
-                    stats = candidate.stat()
-                except Exception:
-                    continue
-                candidates.append(
-                    {
-                        "path": candidate.as_posix(),
-                        "name": candidate.name,
-                        "updated": _fmt_mtime(stats.st_mtime),
-                        "size": stats.st_size,
-                        "summary": f"{_fmt_mtime(stats.st_mtime)} | {stats.st_size} bytes",
-                    }
-                )
-    except Exception:
-        return []
-    return candidates
-
-
-def _config_resolve_backup_selection(
-    cfg_path: Path,
-    requested_backup_path: Any,
-    *,
-    backups: list[dict[str, Any]] | None = None,
-) -> tuple[Path | None, JSONResponse | None]:
-    requested = str(requested_backup_path or "").strip()
-    if not requested:
-        return None, _config_restore_error(400, "config_backup_path_required", "A backup path is required.", field="backup_path")
-
-    candidate = Path(requested.replace("\\", "/")).expanduser()
-    resolved = candidate.resolve() if candidate.is_absolute() else (cfg_path.parent / candidate).resolve()
-
-    try:
-        resolved.relative_to(cfg_path.parent)
-    except Exception:
-        return (
-            None,
-            _config_restore_error(
-                400,
-                "config_backup_path_outside_config_dir",
-                "Config backup must stay within the config directory.",
-                path=resolved.as_posix(),
-                config_path=cfg_path.as_posix(),
-            ),
-        )
-
-    expected_pattern = f"{cfg_path.stem}.*.bak{cfg_path.suffix}"
-    if not resolved.name.startswith(f"{cfg_path.stem}.") or not resolved.name.endswith(f".bak{cfg_path.suffix}"):
-        return (
-            None,
-            _config_restore_error(
-                400,
-                "config_backup_not_found",
-                "The selected backup file is not available for this config path.",
-                path=resolved.as_posix(),
-                config_path=cfg_path.as_posix(),
-                expected_pattern=expected_pattern,
-            ),
-        )
-
-    discovered = backups if backups is not None else _config_backup_candidates(cfg_path)
-    discovered_paths = {str(item.get("path") or "") for item in discovered if isinstance(item, dict)}
-    if resolved.as_posix() not in discovered_paths:
-        return (
-            None,
-            _config_restore_error(
-                404,
-                "config_backup_not_found",
-                "The selected backup file is not available for this config path.",
-                path=resolved.as_posix(),
-                config_path=cfg_path.as_posix(),
-                expected_pattern=expected_pattern,
-            ),
-        )
-
-    if not resolved.is_file():
-        return (
-            None,
-            _config_restore_error(
-                404,
-                "config_backup_not_found",
-                "The selected backup file was not found.",
-                path=resolved.as_posix(),
-                config_path=cfg_path.as_posix(),
-            ),
-        )
-
-    return resolved, None
-
-
-def _config_save_validate_change(path: str, raw_value: Any, schema: dict[str, Any], current_value: Any) -> tuple[Any, str, dict[str, Any]]:
-    kind = str(schema.get("kind") or "text")
-    allow_empty = bool(schema.get("allow_empty", False))
-
-    if path == "repo" and raw_value != current_value:
-        return raw_value, "config_path_unsafe", {"path": path, "reason": "Repository root is managed by the server."}
-
-    if bool(schema.get("redacted")) and raw_value == REDACTED_VALUE and raw_value != current_value:
-        return raw_value, "config_redacted_placeholder", {"path": path, "placeholder": REDACTED_VALUE}
-
-    if kind == "bool":
-        if isinstance(raw_value, bool):
-            return raw_value, "", {}
-        return raw_value, "config_value_type_mismatch", {"path": path, "kind": kind, "expected": "boolean"}
-
-    if kind == "number":
-        if raw_value in (None, ""):
-            if allow_empty:
-                return "", "", {}
-            return raw_value, "config_value_required", {"path": path, "kind": kind}
-        if isinstance(raw_value, bool):
-            return raw_value, "config_value_type_mismatch", {"path": path, "kind": kind, "expected": "number"}
-        if isinstance(raw_value, (int, float)):
-            number: int | float = raw_value
-        elif isinstance(raw_value, str):
-            text = raw_value.strip()
-            if not text:
-                return raw_value, "config_value_required", {"path": path, "kind": kind}
-            try:
-                number = int(text)
-            except Exception:
-                try:
-                    number = float(text)
-                except Exception:
-                    return raw_value, "config_value_type_mismatch", {"path": path, "kind": kind, "expected": "number"}
-        else:
-            return raw_value, "config_value_type_mismatch", {"path": path, "kind": kind, "expected": "number"}
-        if isinstance(number, float) and number.is_integer():
-            number = int(number)
-        min_value = schema.get("min")
-        max_value = schema.get("max")
-        if min_value is not None and number < min_value:
-            return number, "config_value_out_of_range", {"path": path, "kind": kind, "min": min_value}
-        if max_value is not None and number > max_value:
-            return number, "config_value_out_of_range", {"path": path, "kind": kind, "max": max_value}
-        return number, "", {}
-
-    if kind == "text":
-        if raw_value in (None, ""):
-            if allow_empty:
-                return "", "", {}
-            return raw_value, "config_value_required", {"path": path, "kind": kind}
-        if not isinstance(raw_value, str):
-            raw_value = str(raw_value)
-        if not raw_value.strip() and not allow_empty:
-            return raw_value, "config_value_required", {"path": path, "kind": kind}
-        return raw_value, "", {}
-
-    if kind == "enum":
-        options = [str(option) for option in schema.get("options") or []]
-        if raw_value in (None, ""):
-            if allow_empty:
-                return "", "", {}
-            return raw_value, "config_value_required", {"path": path, "kind": kind}
-        if not isinstance(raw_value, str):
-            raw_value = str(raw_value)
-        if raw_value not in options:
-            return raw_value, "config_value_invalid_choice", {"path": path, "kind": kind, "options": options}
-        return raw_value, "", {}
-
-    if kind == "multienum":
-        if path == "roles":
-            items, invalid = validate_roles_value(raw_value)
-            if not items:
-                if allow_empty:
-                    return [], "", {}
-                return raw_value, "config_value_required", {"path": path, "kind": kind}
-            if invalid:
-                return items, "config_value_invalid_choice", {
-                    "path": path,
-                    "kind": kind,
-                    "invalid": invalid,
-                    "options": builtin_roles(),
-                }
-            return items, "", {}
-        options = [str(option) for option in schema.get("options") or []]
-        items = raw_value if isinstance(raw_value, list) else _normalize_config_list(raw_value, item_kind="text")
-        items = [str(item) for item in items if str(item).strip()]
-        if not items:
-            if allow_empty:
-                return [], "", {}
-            return raw_value, "config_value_required", {"path": path, "kind": kind}
-        invalid = [item for item in items if item not in options]
-        if invalid:
-            return items, "config_value_invalid_choice", {"path": path, "kind": kind, "invalid": invalid, "options": options}
-        return items, "", {}
-
-    if kind == "list":
-        item_kind = str(schema.get("item_kind") or "text")
-        items = raw_value if isinstance(raw_value, list) else _normalize_config_list(raw_value, item_kind=item_kind)
-        if not items:
-            if allow_empty:
-                return [], "", {}
-            return raw_value, "config_value_required", {"path": path, "kind": kind}
-        normalized_items: list[Any] = []
-        if item_kind in {"int", "number"}:
-            for item in items:
-                if isinstance(item, bool):
-                    return items, "config_value_type_mismatch", {"path": path, "kind": kind, "expected": item_kind}
-                if isinstance(item, (int, float)):
-                    number = int(item) if float(item).is_integer() else item
-                elif isinstance(item, str):
-                    text = item.strip()
-                    if not text:
-                        return items, "config_value_required", {"path": path, "kind": kind}
-                    try:
-                        number = int(text)
-                    except Exception:
-                        try:
-                            number = float(text)
-                        except Exception:
-                            return items, "config_value_type_mismatch", {"path": path, "kind": kind, "expected": item_kind}
-                else:
-                    return items, "config_value_type_mismatch", {"path": path, "kind": kind, "expected": item_kind}
-                if isinstance(number, float) and number.is_integer():
-                    number = int(number)
-                normalized_items.append(number)
-            return normalized_items, "", {}
-        normalized_items = [str(item) for item in items]
-        return normalized_items, "", {}
-
-    return raw_value, "", {}
-
-
 def _epoch_ms(value: Any) -> int:
     try:
         return int(float(value) * 1000)
@@ -2964,11 +2389,6 @@ def _resolve_trusted_network_enabled(explicit: bool | None = None) -> tuple[bool
 def _resolve_trusted_operator_gate_enabled() -> tuple[bool, str]:
     # Placeholder for a future authenticated or otherwise stronger operator gate.
     return False, "not-implemented"
-
-
-def _lan_safety_blocks_mutations(bind_host: str) -> bool:
-    gate_enabled, _ = _resolve_trusted_operator_gate_enabled()
-    return bool(_web_redaction_active(bind_host) and not gate_enabled)
 
 
 def _lan_safety_details(bind_host: str, *, trusted_network: bool | None = None) -> dict[str, Any]:
@@ -3298,95 +2718,13 @@ def _build_live_state_payload(
     active_run: dict[str, Any] | None = None,
     controller_available: bool = False,
 ) -> dict[str, Any]:
-    status = controller_status if isinstance(controller_status, dict) else {}
-    progress_data = progress if isinstance(progress, dict) else {}
-    active = active_run if isinstance(active_run, dict) else {}
-    status_reason = str(status.get("reason") or "").strip()
-    controller_live_available = bool(controller_available and status and not status_reason.startswith("status_error:"))
-    controller_running = bool(status.get("running")) if controller_live_available else False
-
-    stop_progress = status.get("stop_progress")
-    if not isinstance(stop_progress, dict):
-        stop_progress = {}
-    else:
-        stop_progress = normalize_stop_progress_payload(stop_progress)
-    stop_progress_liveness = summarize_stop_progress_liveness(stop_progress)
-
-    run_status = _pick_text(
-        progress_data.get("run_status"),
-        progress_data.get("runStatus"),
-        active.get("status"),
-        active.get("runStatus"),
-        active.get("executionStatus"),
-        active.get("execution_status"),
-    ).strip().lower()
-    backend_available = controller_live_available and bool(run_status or active.get("status") or active.get("executionStatus") or active.get("execution_status"))
-    backend_alive = backend_available and run_status == "running"
-    backend_status = "unavailable" if not backend_available else ("alive" if backend_alive else "idle")
-
-    tracked_child_processes = stop_progress_liveness["tracked_child_processes"]
-    tracked_child_pids = stop_progress_liveness["tracked_child_pids"]
-    tracked_available = controller_live_available and bool(stop_progress)
-    tracked_alive_count = int(stop_progress_liveness["tracked_alive_count"])
-    tracked_count = int(stop_progress_liveness["tracked_count"])
-    tracked_alive = tracked_available and tracked_alive_count > 0
-    tracked_status = "unavailable" if not tracked_available else ("alive" if tracked_alive else "stopped")
-
-    artifact_phase = stop_progress_liveness["artifact_phase"]
-    artifact_available = controller_live_available and bool(stop_progress)
-    artifact_flushing = artifact_available and bool(stop_progress_liveness["artifact_flushing"])
-    artifact_status = "unavailable" if not artifact_available else ("flushing" if artifact_flushing else "idle")
-
-    runner_process = _live_state_entry(
-        "runner_process",
-        available=controller_live_available,
-        status="alive" if controller_running else "stopped",
-        source="controller.status.running" if controller_live_available else "unavailable",
-        alive=controller_running if controller_live_available else None,
+    return _web_payloads.build_live_state_payload(
+        sys.modules[__name__],
+        controller_status,
+        progress=progress,
+        active_run=active_run,
+        controller_available=controller_available,
     )
-    task_backend = _live_state_entry(
-        "task_backend",
-        available=backend_available,
-        status=backend_status,
-        source="progress.run_status" if run_status else "active_run.status" if backend_available else "unavailable",
-        alive=backend_alive if backend_available else None,
-    )
-    tracked_children = _live_state_entry(
-        "tracked_children",
-        available=tracked_available,
-        status=tracked_status,
-        source="stop_progress.tracked_child_processes" if tracked_child_processes else "stop_progress.tracked_child_pids" if tracked_child_pids else "stop_progress",
-        alive=tracked_alive if tracked_available else None,
-        count=tracked_count if tracked_available else None,
-        alive_count=tracked_alive_count if tracked_available else None,
-    )
-    artifact_writer = _live_state_entry(
-        "artifact_writer",
-        available=artifact_available,
-        status=artifact_status,
-        source="stop_progress.current_phase.phase" if artifact_phase else "stop_progress.last_artifact_signal" if artifact_available else "unavailable",
-        flushing=artifact_flushing if artifact_available else None,
-        phase=artifact_phase if artifact_available else "",
-    )
-    live_state = {
-        "available": bool(controller_live_available or backend_available or tracked_available or artifact_available),
-        "source": "controller.status + progress + stop_progress" if controller_live_available else "unavailable",
-        "runner_process": runner_process,
-        "runnerProcess": runner_process,
-        "task_backend": task_backend,
-        "taskBackend": task_backend,
-        "tracked_children": tracked_children,
-        "trackedChildren": tracked_children,
-        "artifact_writer": artifact_writer,
-        "artifactWriter": artifact_writer,
-    }
-    live_state["items"] = [
-        live_state["runner_process"],
-        live_state["task_backend"],
-        live_state["tracked_children"],
-        live_state["artifact_writer"],
-    ]
-    return live_state
 
 
 def _runner_control_actions(
@@ -4099,6 +3437,8 @@ def _text_excerpt(text: str, *, max_lines: int = 8, max_chars: int = 280) -> str
 
 
 def _branch_name(repo: Path) -> str:
+    if not (repo / ".git").exists():
+        return ""
     rc, out = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, timeout_sec=10)
     if rc != 0:
         return ""
@@ -4110,6 +3450,8 @@ def _branch_name(repo: Path) -> str:
 
 
 def _git_head_short(repo: Path) -> str:
+    if not (repo / ".git").exists():
+        return ""
     try:
         head = git_head(repo).strip()
         return head[:8] if head else ""
@@ -4191,355 +3533,6 @@ def _task_tags(task: TaskItem) -> list[str]:
     return tags[:4]
 
 
-def _parse_goal_items_and_warnings(goals_text: str | None) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
-    items: dict[str, list[dict[str, Any]]] = {"p0": [], "p1": []}
-    warnings: list[dict[str, Any]] = []
-    if not goals_text or not goals_text.strip():
-        return items, warnings
-
-    checkbox_re = re.compile(r"^\s*-\s*\[(x| )\]\s*(.*)$", re.IGNORECASE)
-    list_re = re.compile(r"^\s*[-*+]\s+")
-    current_bucket: str | None = None
-    ignore_outside_list_items = False
-    last_item: dict[str, Any] | None = None
-
-    def _parse_goal_note_comment(comment_text: str) -> str:
-        payload = comment_text.strip()
-        if not payload:
-            return ""
-        try:
-            parsed = json.loads(payload)
-        except Exception:
-            return payload.strip().strip('"').strip("'")
-        if parsed is None:
-            return ""
-        if isinstance(parsed, str):
-            return parsed
-        return str(parsed)
-
-    for line_number, line in enumerate(goals_text.splitlines(), start=1):
-        stripped = line.strip()
-        lower = stripped.lower()
-        if not stripped:
-            continue
-        heading = re.match(r"^(#+)\s+(.+)$", stripped)
-        if heading:
-            last_item = None
-            level = len(heading.group(1))
-            title = heading.group(2).strip().lower()
-            if level == 2 and re.match(r"p0\b", title):
-                current_bucket = "p0"
-                ignore_outside_list_items = False
-                continue
-            if level == 2 and re.match(r"p1\b", title):
-                current_bucket = "p1"
-                ignore_outside_list_items = False
-                continue
-            if level == 2 and re.match(r"p[\s_-]*[01]\b", title):
-                warnings.append(
-                    {
-                        "line_number": line_number,
-                        "line": line,
-                        "reason": "malformed_priority_section_heading",
-                        "message": "Priority section headings must use ## P0 or ## P1.",
-                    }
-                )
-            if level == 2:
-                current_bucket = None
-                ignore_outside_list_items = title.startswith("completion criteria")
-                last_item = None
-                continue
-            continue
-        if stripped.startswith("<!--") and stripped.endswith("-->"):
-            comment_body = stripped[4:-3].strip()
-            if current_bucket in ("p0", "p1") and last_item is not None and comment_body.lower().startswith("goal-note:"):
-                note_text = _parse_goal_note_comment(comment_body[len("goal-note:"):].strip())
-                if note_text:
-                    existing_note = str(last_item.get("note") or "")
-                    last_item["note"] = f"{existing_note}\n{note_text}".strip() if existing_note else note_text
-                continue
-            continue
-
-        match = checkbox_re.match(line)
-        if match:
-            done = match.group(1).strip().lower() == "x"
-            if current_bucket in ("p0", "p1"):
-                item_text = match.group(2).strip()
-                item = {
-                    "done": done,
-                    "checked": done,
-                    "checkbox": "[x]" if done else "[ ]",
-                    "text": item_text,
-                    "note": "",
-                    "line_number": line_number,
-                    "line": line_number,
-                }
-                items[current_bucket].append(item)
-                last_item = item
-            else:
-                warnings.append(
-                    {
-                        "line_number": line_number,
-                        "line": line,
-                        "reason": "checkbox_outside_goal_section",
-                        "message": "Checkbox item outside P0/P1 was ignored.",
-                    }
-                )
-            continue
-
-        if current_bucket in ("p0", "p1"):
-            last_item = None
-            warnings.append(
-                {
-                    "line_number": line_number,
-                    "line": line,
-                    "reason": "unsupported_goal_line",
-                    "message": "Non-checkbox content inside a GOALS section was ignored.",
-                }
-            )
-            continue
-
-        if list_re.match(line) and not ignore_outside_list_items:
-            warnings.append(
-                {
-                    "line_number": line_number,
-                    "line": line,
-                    "reason": "unsupported_list_item",
-                    "message": "List item outside P0/P1 was ignored.",
-                }
-            )
-            last_item = None
-
-    return items, warnings
-
-
-def _build_goals_payload(repo: Path, *, completion_level: str = "all") -> dict[str, Any]:
-    completion_level = resolve_goals_completion_level(completion_level)
-    goal_path = goals_path(repo)
-    exists = False
-    mtime = None
-    size = None
-    try:
-        exists = goal_path.exists() and goal_path.is_file()
-    except OSError:
-        exists = False
-    if exists:
-        try:
-            stat = goal_path.stat()
-            mtime = stat.st_mtime
-            size = stat.st_size
-        except OSError:
-            mtime = None
-            size = None
-
-    _path, raw_text = read_goals(repo)
-    raw_text = raw_text or ""
-    items, warnings = _parse_goal_items_and_warnings(raw_text)
-    completion = parse_goals_completion(raw_text, completion_level=completion_level)
-    p0_total = len(items["p0"])
-    p1_total = len(items["p1"])
-    p0_done = len([item for item in items["p0"] if item.get("done")])
-    p1_done = len([item for item in items["p1"] if item.get("done")])
-    total = p0_total + p1_total
-    done = p0_done + p1_done
-    missing_sections = list(completion.get("missing_sections") or [])
-    summary = {
-        "has_goals": bool(completion.get("has_goals")),
-        "project_complete": bool(completion.get("project_complete")),
-        "valid": bool(completion.get("valid", False)),
-        "missing_sections": missing_sections,
-        "p0_total": p0_total,
-        "p0_done": p0_done,
-        "p1_total": p1_total,
-        "p1_done": p1_done,
-        "all_total": int(completion.get("all_total") or total),
-        "all_done": int(completion.get("all_done") or done),
-        "total": total,
-        "done": done,
-        "unchecked": max(0, total - done),
-        "warnings": len(warnings),
-    }
-    return {
-        "path": goal_path.as_posix(),
-        "exists": bool(exists),
-        "mtime": mtime,
-        "size": size,
-        "raw_text": raw_text,
-        "items": items,
-        "completion": completion,
-        "summary": summary,
-        "warnings": warnings,
-        "completion_level": completion_level,
-    }
-
-
-def _goal_items(goals_text: str | None) -> dict[str, list[dict[str, Any]]]:
-    return _parse_goal_items_and_warnings(goals_text)[0]
-
-
-def _goal_save_backup_path(goal_path: Path) -> Path:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%fZ")
-    return goal_path.with_name(f"{goal_path.stem}.{stamp}.bak{goal_path.suffix}")
-
-
-def _goal_save_item_identity(item: dict[str, Any], *, use_line_number: bool = True) -> str:
-    line_number = int(item.get("line_number") or item.get("lineNumber") or item.get("line") or 0)
-    if use_line_number and line_number > 0:
-        return f"line:{line_number}"
-    return f"sig:{_goal_save_item_signature(item)}"
-
-
-def _goal_save_item_signature(item: dict[str, Any]) -> str:
-    return json.dumps(
-        {
-            "done": bool(item.get("done")),
-            "checked": bool(item.get("checked", item.get("done"))),
-            "checkbox": "[x]" if bool(item.get("done") or item.get("checked")) else "[ ]",
-            "text": str(item.get("text") or "").strip(),
-            "note": str(item.get("note") or ""),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-
-
-def _goal_save_normalize_item(raw_item: Any) -> dict[str, Any]:
-    item = raw_item if isinstance(raw_item, dict) else {}
-    done = bool(item.get("done") if "done" in item else item.get("checked"))
-    checked = bool(item.get("checked") if "checked" in item else done)
-    line_number = int(item.get("line_number") or item.get("lineNumber") or item.get("line") or 0)
-    return {
-        "done": done,
-        "checked": checked,
-        "checkbox": "[x]" if done else "[ ]",
-        "text": str(item.get("text") or "").strip(),
-        "note": str(item.get("note") or ""),
-        "line_number": line_number,
-        "lineNumber": line_number,
-        "line": line_number,
-    }
-
-
-def _goal_save_normalize_draft(raw_draft: Any) -> dict[str, list[dict[str, Any]]]:
-    raw = raw_draft if isinstance(raw_draft, dict) else {}
-    items = raw.get("items") if isinstance(raw.get("items"), dict) else raw
-    normalized: dict[str, list[dict[str, Any]]] = {"p0": [], "p1": []}
-    for bucket in ("p0", "p1"):
-        raw_bucket = items.get(bucket) if isinstance(items, dict) else []
-        if not isinstance(raw_bucket, list):
-            raw_bucket = []
-        normalized[bucket] = [_goal_save_normalize_item(item) for item in raw_bucket]
-    return normalized
-
-
-def _goal_save_note_comment_line(note_line: str) -> str:
-    return f"<!-- goal-note: {json.dumps(note_line, ensure_ascii=False)} -->"
-
-
-def _goal_save_item_lines(item: dict[str, Any]) -> list[str]:
-    text = str(item.get("text") or "").strip()
-    if not text:
-        raise ValueError("Goal text cannot be empty.")
-    done = bool(item.get("done") or item.get("checked"))
-    lines = [f"- [{'x' if done else ' '}] {text}"]
-    note = str(item.get("note") or "")
-    if note:
-        for note_line in note.splitlines():
-            lines.append(_goal_save_note_comment_line(note_line))
-    return lines
-
-
-def _goal_save_section_lines(items: list[dict[str, Any]]) -> list[str]:
-    lines: list[str] = [""]
-    for item in items:
-        lines.extend(_goal_save_item_lines(item))
-        lines.append("")
-    return lines
-
-
-def _goal_save_serialize_draft(draft: dict[str, list[dict[str, Any]]]) -> str:
-    lines: list[str] = ["# Project Goals", ""]
-    lines.append("## P0")
-    lines.extend(_goal_save_section_lines(list(draft.get("p0") or [])))
-    lines.append("## P1")
-    lines.extend(_goal_save_section_lines(list(draft.get("p1") or [])))
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _goal_save_has_required_sections(raw_text: str) -> bool:
-    return bool(
-        re.search(r"^##\s+p0\b", raw_text or "", re.IGNORECASE | re.MULTILINE)
-        and re.search(r"^##\s+p1\b", raw_text or "", re.IGNORECASE | re.MULTILINE)
-    )
-
-
-def _goal_save_risk_report(
-    current_items: dict[str, list[dict[str, Any]]],
-    next_items: dict[str, list[dict[str, Any]]],
-    *,
-    use_line_numbers: bool,
-) -> dict[str, Any]:
-    next_line_index: dict[str, dict[str, int]] = {"p0": {}, "p1": {}}
-    next_signature_index: dict[str, dict[str, int]] = {"p0": {}, "p1": {}}
-    for bucket in ("p0", "p1"):
-        for item in next_items.get(bucket, []):
-            signature = _goal_save_item_signature(item)
-            next_signature_index[bucket][signature] = next_signature_index[bucket].get(signature, 0) + 1
-            if use_line_numbers:
-                line_number = int(item.get("line_number") or item.get("lineNumber") or item.get("line") or 0)
-                if line_number > 0:
-                    line_identity = f"line:{line_number}"
-                    next_line_index[bucket][line_identity] = next_line_index[bucket].get(line_identity, 0) + 1
-
-    deleted: list[dict[str, Any]] = []
-    downgraded: list[dict[str, Any]] = []
-
-    def _consume(index: dict[str, dict[str, int]], bucket: str, identity: str) -> bool:
-        if not identity:
-            return False
-        current_count = index[bucket].get(identity, 0)
-        if current_count <= 0:
-            return False
-        index[bucket][identity] = current_count - 1
-        return True
-
-    for item in current_items.get("p0", []):
-        if bool(item.get("done") or item.get("checked")):
-            continue
-        signature = _goal_save_item_signature(item)
-        line_number = int(item.get("line_number") or item.get("lineNumber") or item.get("line") or 0)
-        line_identity = f"line:{line_number}" if use_line_numbers and line_number > 0 else ""
-        if _consume(next_line_index, "p0", line_identity) or _consume(next_signature_index, "p0", signature):
-            continue
-        if _consume(next_line_index, "p1", line_identity) or _consume(next_signature_index, "p1", signature):
-            downgraded.append(item)
-        else:
-            deleted.append(item)
-
-    return {
-        "requires_confirmation": bool(deleted or downgraded),
-        "requiresConfirmation": bool(deleted or downgraded),
-        "confirmation_phrase": GOALS_SAVE_CONFIRMATION_PHRASE,
-        "confirmationPhrase": GOALS_SAVE_CONFIRMATION_PHRASE,
-        "deleted_unchecked_p0": deleted,
-        "deletedUncheckedP0": deleted,
-        "downgraded_unchecked_p0": downgraded,
-        "downgradedUncheckedP0": downgraded,
-        "risk_count": len(deleted) + len(downgraded),
-        "riskCount": len(deleted) + len(downgraded),
-    }
-
-
-async def _goal_save_body(request: Request) -> dict[str, Any] | None:
-    try:
-        payload = await request.json()
-    except Exception:
-        return None
-    if isinstance(payload, dict):
-        return payload
-    return None
-
-
 def _goal_save_error(status_code: int, code: str, message: str, **details: Any) -> JSONResponse:
     payload: dict[str, Any] = {
         "ok": False,
@@ -4560,278 +3553,6 @@ def _goal_save_error(status_code: int, code: str, message: str, **details: Any) 
         if "confirmation_phrase" in details:
             payload["confirmation_phrase"] = details["confirmation_phrase"]
     return JSONResponse(status_code=status_code, content=payload)
-
-
-def _prompt_preview(text: str) -> str:
-    preview = _text_excerpt(text, max_lines=6, max_chars=420)
-    return preview or "(empty)"
-
-
-def _prompt_summary(text: str) -> str:
-    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
-    if not lines:
-        return "(empty)"
-    for line in lines:
-        if not line.startswith("#"):
-            return line[:180]
-    return lines[0][:180]
-
-
-def _prompt_variables(text: str) -> list[str]:
-    seen: set[str] = set()
-    variables: list[str] = []
-    for match in re.finditer(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_.-]*)\}(?!\})", text or ""):
-        name = match.group(1)
-        if name in seen:
-            continue
-        seen.add(name)
-        variables.append(name)
-    return variables
-
-
-def _prompt_profile(cfg: dict[str, Any]) -> str:
-    return _pick_text(cfg.get("profile"), CLI_DEFAULTS.get("profile"), "personal") or "personal"
-
-
-def _prompt_spec_map() -> dict[str, dict[str, str]]:
-    return {str(spec["id"]): spec for spec in PROMPT_SPECS}
-
-
-def _prompt_template_dir(repo_root: Path) -> Path:
-    return (repo_root / "templates" / "agent_prompts").resolve()
-
-
-def _prompt_template_resolved_path(repo_root: Path, spec: dict[str, str]) -> Path | None:
-    template_dir = _prompt_template_dir(repo_root)
-    candidate = (template_dir / str(spec.get("file") or "")).expanduser()
-    resolved = candidate.resolve()
-    try:
-        resolved.relative_to(template_dir)
-    except Exception:
-        return None
-    return resolved
-
-
-def _prompt_default_text(repo_root: Path, spec: dict[str, str]) -> str:
-    template_path = _prompt_template_resolved_path(repo_root, spec)
-    if template_path is None:
-        return spec["default"]
-    if template_path.exists() and template_path.is_file():
-        try:
-            return _read_text_robust(template_path)
-        except Exception:
-            pass
-    return spec["default"]
-
-
-def _read_prompt_text(prompt_path: Path, default_text: str) -> tuple[str, bool]:
-    if prompt_path.exists() and prompt_path.is_file():
-        try:
-            return _read_text_robust(prompt_path), True
-        except Exception:
-            return "", True
-    return default_text, False
-
-
-def _prompt_resolved_path(prompts_dir: Path, file_name: str) -> Path:
-    return (prompts_dir / file_name).resolve()
-
-
-def _prompt_file_name_is_bare(file_name: str) -> bool:
-    candidate = str(file_name or "").strip().replace("\\", "/")
-    if not candidate:
-        return False
-    if candidate in {".", ".."}:
-        return False
-    if "/" in candidate or ":" in candidate:
-        return False
-    return Path(candidate).name == candidate
-
-
-def _prompt_backup_path(prompt_path: Path) -> Path:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%fZ")
-    return prompt_path.with_name(f"{prompt_path.stem}.{stamp}.bak{prompt_path.suffix}")
-
-
-def _prompt_backup_candidates(prompt_path: Path, *, limit: int = 20) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    pattern = f"{prompt_path.stem}.*.bak{prompt_path.suffix}"
-    try:
-        parent = prompt_path.parent
-        if parent.exists() and parent.is_dir():
-            for candidate in sorted(
-                [path for path in parent.glob(pattern) if path.is_file()],
-                key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
-                reverse=True,
-            )[: max(0, int(limit)) or 0]:
-                try:
-                    stats = candidate.stat()
-                except Exception:
-                    continue
-                candidates.append(
-                    {
-                        "path": candidate.as_posix(),
-                        "name": candidate.name,
-                        "updated": _fmt_mtime(stats.st_mtime),
-                        "size": stats.st_size,
-                        "summary": f"{_fmt_mtime(stats.st_mtime)} | {stats.st_size} bytes",
-                    }
-                )
-    except Exception:
-        return []
-    return candidates
-
-
-def _prompt_validation_payload(
-    *,
-    file_name: str,
-    expected_file: str,
-    content: str,
-    required_variables: list[str],
-) -> dict[str, Any]:
-    draft_file = str(file_name or "").strip()
-    required = [str(name) for name in required_variables if str(name).strip()]
-    draft_variables = _prompt_variables(content)
-    missing_variables = [name for name in required if name not in draft_variables]
-    file_error = ""
-    file_error_code = ""
-    if not draft_file:
-        file_error = "Filename cannot be empty."
-        file_error_code = "prompt_file_required"
-    elif not _prompt_file_name_is_bare(draft_file):
-        file_error = "Filename must be a bare filename within the resolved prompts directory."
-        file_error_code = "prompt_file_invalid"
-    elif expected_file and draft_file != expected_file:
-        file_error = f"Filename must stay {expected_file}."
-        file_error_code = "prompt_file_mismatch"
-    content_error = "" if str(content or "").strip() else "Prompt content cannot be empty."
-    content_error_code = "prompt_content_required" if content_error else ""
-    template_error = ""
-    if missing_variables:
-        template_error = f"Missing template variables: {', '.join(f'{{{name}}}' for name in missing_variables)}"
-    template_error_code = "prompt_template_variables_missing" if template_error else ""
-    errors: list[dict[str, str]] = []
-    if file_error:
-        errors.append(
-            {
-                "field": "file",
-                "code": file_error_code or "prompt_file_required",
-                "message": file_error,
-            }
-        )
-    if content_error:
-        errors.append(
-            {
-                "field": "content",
-                "code": "prompt_content_required",
-                "message": content_error,
-            }
-        )
-    if template_error:
-        errors.append(
-            {
-                "field": "content",
-                "code": "prompt_template_variables_missing",
-                "message": template_error,
-            }
-        )
-    return {
-        "ok": not errors,
-        "file_error": file_error,
-        "file_error_code": file_error_code,
-        "content_error": content_error,
-        "content_error_code": content_error_code,
-        "template_error": template_error,
-        "template_error_code": template_error_code,
-        "required_variables": required,
-        "draft_variables": draft_variables,
-        "missing_variables": missing_variables,
-        "errors": errors,
-    }
-
-
-def _prompt_inventory_item(
-    spec: dict[str, str],
-    prompts_dir: Path,
-    repo_root: Path,
-    *,
-    profile: str,
-) -> dict[str, Any]:
-    prompt_path = _prompt_resolved_path(prompts_dir, spec["file"])
-    default_text = _prompt_default_text(repo_root, spec)
-    content, exists = _read_prompt_text(prompt_path, default_text)
-    mode = "override" if exists else "template"
-    source = prompts_dir.as_posix() if exists else "templates/agent_prompts"
-    updated = _fmt_mtime(prompt_path.stat().st_mtime) if exists else "template"
-    variables = _prompt_variables(content)
-    required_variables = _prompt_variables(default_text)
-    content_length = len(content or "")
-    return {
-        "id": spec["id"],
-        "file": spec["file"],
-        "path": prompt_path.as_posix(),
-        "scope": spec["scope"],
-        "profile": profile,
-        "source": source,
-        "mode": mode,
-        "updated": updated,
-        "summary": f"{profile} profile | {mode.title()} prompt available ({content_length} characters).",
-        "preview": REDACTED_VALUE,
-        "content_length": content_length,
-        "template_variables": variables,
-        "required_template_variables": required_variables,
-    }
-
-
-def _prompt_read_payload(
-    spec: dict[str, str],
-    prompts_dir: Path,
-    repo_root: Path,
-    *,
-    profile: str,
-) -> dict[str, Any]:
-    prompt_path = _prompt_resolved_path(prompts_dir, spec["file"])
-    default_text = _prompt_default_text(repo_root, spec)
-    content, exists = _read_prompt_text(prompt_path, default_text)
-    mode = "override" if exists else "template"
-    source = prompts_dir.as_posix() if exists else "templates/agent_prompts"
-    updated = _fmt_mtime(prompt_path.stat().st_mtime) if exists else "template"
-    variables = _prompt_variables(content)
-    required_variables = _prompt_variables(default_text)
-    validation = _prompt_validation_payload(
-        file_name=spec["file"],
-        expected_file=spec["file"],
-        content=content,
-        required_variables=required_variables,
-    )
-    return {
-        "ok": True,
-        "id": spec["id"],
-        "file": spec["file"],
-        "path": prompt_path.as_posix(),
-        "scope": spec["scope"],
-        "profile": profile,
-        "source": source,
-        "mode": mode,
-        "updated": updated,
-        "exists": exists,
-        "content": content,
-        "content_length": len(content or ""),
-        "preview": _prompt_preview(content),
-        "summary": _prompt_summary(content),
-        "template_variables": variables,
-        "required_template_variables": required_variables,
-        "validation": validation,
-        "backups": _prompt_backup_candidates(prompt_path),
-    }
-
-
-def _load_prompt_items(repo: Path, prompts_dir: Path, *, profile: str) -> list[dict[str, Any]]:
-    _ = repo
-    items: list[dict[str, Any]] = []
-    for spec in PROMPT_SPECS:
-        items.append(_prompt_inventory_item(spec, prompts_dir, repo, profile=profile))
-    return items
 
 
 def _load_backlog_payload(
@@ -5453,363 +4174,6 @@ def _load_log_entries(run_dir: Path | None) -> list[dict[str, Any]]:
     return rows
 
 
-def _normalize_log_tail_level(value: Any) -> str:
-    level = str(value or "").strip().lower()
-    if level == "warning":
-        return "warn"
-    if level == "error":
-        return "err"
-    return level
-
-
-def _log_tail_source_catalog(run_dir: Path | None) -> list[dict[str, Any]]:
-    if run_dir is None:
-        return []
-    sources: list[dict[str, Any]] = []
-
-    def add(source_id: str, relative_path: str, label: str, *, kind: str = "log") -> None:
-        source_path = run_dir / relative_path
-        exists = False
-        try:
-            exists = source_path.exists() and source_path.is_file()
-        except OSError:
-            exists = False
-        sources.append(
-            {
-                "id": source_id,
-                "label": label,
-                "name": source_path.name,
-                "path": source_path.as_posix(),
-                "exists": exists,
-                "available": exists,
-                "kind": kind,
-                "selected": False,
-                "unavailable_reason": "" if exists else "missing",
-            }
-        )
-
-    add("run_log", "logs/run.log", "run.log")
-    add("error_log", "logs/error.log", "error.log")
-    add("events_jsonl", "logs/events.jsonl", "events.jsonl")
-    add("cycle_summary", "cycle_summary.log", "cycle_summary.log")
-    add("backend_transcript", "telegram_runner_subprocess.log", "backend transcript", kind="transcript")
-    return sources
-
-
-def _resolve_log_tail_source_record(run_dir: Path | None, source_id: str = "") -> dict[str, Any] | None:
-    catalog = _log_tail_source_catalog(run_dir)
-    if not catalog:
-        return None
-    normalized_source_id = str(source_id or "").strip()
-    if normalized_source_id:
-        for source in catalog:
-            if str(source.get("id") or "").strip() == normalized_source_id:
-                return source
-    for source in catalog:
-        if bool(source.get("available")):
-            return source
-    return catalog[0]
-
-
-def _resolve_log_tail_source(run_dir: Path | None, source_id: str = "") -> Path | None:
-    source = _resolve_log_tail_source_record(run_dir, source_id)
-    if not source:
-        return None
-    source_path = str(source.get("path") or "").strip()
-    return Path(source_path) if source_path else None
-
-
-def _log_tail_entry_search_text(entry: dict[str, Any]) -> str:
-    parts = [
-        entry.get("t"),
-        entry.get("ts"),
-        entry.get("lvl"),
-        entry.get("level"),
-        entry.get("stage"),
-        entry.get("task_id"),
-        entry.get("taskId"),
-        entry.get("task_title"),
-        entry.get("taskTitle"),
-        entry.get("event"),
-        entry.get("type"),
-        entry.get("msg"),
-        entry.get("message"),
-        entry.get("text"),
-        entry.get("reason"),
-        entry.get("raw"),
-    ]
-    return " ".join(str(part).lower() for part in parts if part is not None and str(part).strip())
-
-
-def _normalize_structured_log_tail_entry(payload: dict[str, Any], *, raw_line: str, line_number: int) -> dict[str, Any]:
-    ts = _pick_text(payload.get("ts"), payload.get("timestamp"), payload.get("time"))
-    level = _normalize_log_tail_level(_pick_text(payload.get("lvl"), payload.get("level"), _event_level(payload)))
-    stage = _pick_text(payload.get("stage"), payload.get("component"), payload.get("scope")) or _event_stage(payload)
-    message = _pick_text(payload.get("msg"), payload.get("message"), payload.get("text"), _event_message(payload), raw_line)
-    task_id = _pick_text(payload.get("task_id"), payload.get("taskId"))
-    task_title = _pick_text(payload.get("task_title"), payload.get("taskTitle"))
-    event = _pick_text(payload.get("event"), payload.get("type"))
-    return {
-        "cursor": line_number,
-        "line_number": line_number,
-        "raw": raw_line,
-        "ts": ts,
-        "t": _fmt_clock(ts) if ts else "",
-        "lvl": level or "info",
-        "level": level or "info",
-        "stage": stage or "boot",
-        "msg": message,
-        "message": message,
-        "task_id": task_id,
-        "taskId": task_id,
-        "task_title": task_title,
-        "taskTitle": task_title,
-        "event": event,
-        "type": event,
-        "cycle": _coerce_optional_int(payload.get("cycle")),
-        "step": _coerce_optional_int(payload.get("step")),
-        "attempt": _coerce_optional_int(payload.get("attempt")),
-        "reason": _pick_text(payload.get("reason")),
-        "rc": _coerce_optional_int(payload.get("rc")),
-    }
-
-
-def _normalize_plain_log_tail_entry(raw_line: str, *, line_number: int) -> dict[str, Any]:
-    pattern = re.compile(r"^(?:(?P<date>\d{4}-\d{2}-\d{2})\s+)?(?P<time>\d{2}:\d{2}:\d{2})\s+\[(?P<level>[A-Z]+)\]\s*(?P<msg>.*)$")
-    match = pattern.match(raw_line)
-    if match:
-        level = _normalize_log_tail_level(match.group("level"))
-        msg = match.group("msg").strip()
-        ts = " ".join(part for part in (match.group("date"), match.group("time")) if part).strip()
-        return {
-            "cursor": line_number,
-            "line_number": line_number,
-            "raw": raw_line,
-            "ts": ts,
-            "t": match.group("time"),
-            "lvl": level or "info",
-            "level": level or "info",
-            "stage": "boot",
-            "msg": msg,
-            "message": msg,
-            "task_id": "",
-            "taskId": "",
-            "task_title": "",
-            "taskTitle": "",
-            "event": "",
-            "type": "",
-            "cycle": None,
-            "step": None,
-            "attempt": None,
-            "reason": "",
-            "rc": None,
-        }
-    msg = raw_line.strip()
-    return {
-        "cursor": line_number,
-        "line_number": line_number,
-        "raw": raw_line,
-        "ts": "",
-        "t": "",
-        "lvl": "info",
-        "level": "info",
-        "stage": "boot",
-        "msg": msg,
-        "message": msg,
-        "task_id": "",
-        "taskId": "",
-        "task_title": "",
-        "taskTitle": "",
-        "event": "",
-        "type": "",
-        "cycle": None,
-        "step": None,
-        "attempt": None,
-        "reason": "",
-        "rc": None,
-    }
-
-
-def _parse_log_tail_entry(raw_line: str, *, line_number: int, source_path: Path) -> tuple[dict[str, Any] | None, bool]:
-    raw = raw_line.rstrip("\n")
-    if not raw.strip():
-        return None, False
-    if source_path.suffix.lower() == ".jsonl":
-        try:
-            payload = json.loads(raw)
-        except Exception:
-            return None, True
-        if not isinstance(payload, dict):
-            return None, True
-        return _normalize_structured_log_tail_entry(payload, raw_line=raw, line_number=line_number), False
-    return _normalize_plain_log_tail_entry(raw, line_number=line_number), False
-
-
-def _log_tail_entry_matches(
-    entry: dict[str, Any],
-    *,
-    level: str = "",
-    stage: str = "",
-    task_id: str = "",
-    search: str = "",
-) -> bool:
-    level_filter = _normalize_log_tail_level(level)
-    if level_filter and level_filter not in {"all", "any", "*"}:
-        entry_level = _normalize_log_tail_level(entry.get("lvl") or entry.get("level"))
-        if entry_level != level_filter:
-            return False
-
-    stage_filter = _pick_text(stage).lower()
-    if stage_filter and stage_filter not in {"all", "any", "*"}:
-        entry_stage = _pick_text(entry.get("stage")).lower()
-        if entry_stage != stage_filter:
-            return False
-
-    task_filter = _pick_text(task_id).lower()
-    if task_filter:
-        entry_task = _pick_text(entry.get("task_id"), entry.get("taskId")).lower()
-        if entry_task != task_filter:
-            return False
-
-    search_filter = _pick_text(search).lower()
-    if search_filter and search_filter not in _log_tail_entry_search_text(entry):
-        return False
-
-    return True
-
-
-def _build_log_tail_payload(
-    source_path: Path,
-    *,
-    source: dict[str, Any] | None = None,
-    sources: list[dict[str, Any]] | None = None,
-    cursor: int | None,
-    max_lines: int,
-    level: str = "",
-    stage: str = "",
-    task_id: str = "",
-    search: str = "",
-    live: bool = False,
-) -> dict[str, Any]:
-    max_lines = max(1, int(max_lines))
-    source_file = source_path.expanduser().resolve()
-    entries: list[dict[str, Any]] = []
-    malformed_count = 0
-    total_lines = 0
-    next_cursor = 0
-    cursor_mode = cursor is not None
-    start_cursor = max(0, int(cursor or 0))
-
-    source_payload = deepcopy(source) if isinstance(source, dict) else {}
-    source_payload["path"] = source_file.as_posix()
-    source_payload["name"] = source_file.name
-    source_payload["exists"] = False
-    source_payload["available"] = False
-    source_payload["selected"] = True
-    if not source_payload.get("label"):
-        source_payload["label"] = source_file.name
-    if source_payload.get("kind") is None:
-        source_payload["kind"] = "log"
-
-    source_catalog: list[dict[str, Any]] = []
-    if isinstance(sources, list):
-        for item in sources:
-            if not isinstance(item, dict):
-                continue
-            item_copy = deepcopy(item)
-            item_copy["selected"] = bool(str(item_copy.get("id") or "").strip() == str(source_payload.get("id") or "").strip())
-            source_catalog.append(item_copy)
-    if not source_catalog and source_payload.get("id"):
-        source_catalog.append(deepcopy(source_payload))
-
-    try:
-        source_exists = source_file.exists() and source_file.is_file()
-        source_payload["exists"] = source_exists
-        source_payload["available"] = source_exists
-        source_payload["unavailable_reason"] = "" if source_exists else str(source_payload.get("unavailable_reason") or "missing").strip() or "missing"
-        with source_file.open("r", encoding="utf-8", errors="replace") as handle:
-            if cursor_mode:
-                for line_number, raw_line in enumerate(handle, start=1):
-                    total_lines = line_number
-                    if line_number <= start_cursor:
-                        continue
-                    next_cursor = line_number
-                    entry, malformed = _parse_log_tail_entry(raw_line, line_number=line_number, source_path=source_file)
-                    if malformed:
-                        malformed_count += 1
-                        continue
-                    if entry is None or not _log_tail_entry_matches(entry, level=level, stage=stage, task_id=task_id, search=search):
-                        continue
-                    entries.append(entry)
-                    if len(entries) >= max_lines:
-                        break
-            else:
-                matched: deque[dict[str, Any]] = deque(maxlen=max_lines)
-                for line_number, raw_line in enumerate(handle, start=1):
-                    total_lines = line_number
-                    next_cursor = line_number
-                    entry, malformed = _parse_log_tail_entry(raw_line, line_number=line_number, source_path=source_file)
-                    if malformed:
-                        malformed_count += 1
-                        continue
-                    if entry is None or not _log_tail_entry_matches(entry, level=level, stage=stage, task_id=task_id, search=search):
-                        continue
-                    matched.append(entry)
-                entries = list(matched)
-    except FileNotFoundError:
-        return {
-            "ok": False,
-            "state": "missing_file",
-            "entries": [],
-            "next_cursor": 0,
-            "source_file": source_file.as_posix(),
-            "source_path": source_file.as_posix(),
-            "source": source_payload,
-            "source_id": str(source_payload.get("id") or ""),
-            "selected_source_id": str(source_payload.get("id") or ""),
-            "sources": source_catalog,
-            "malformed_lines": 0,
-        }
-    except Exception as ex:
-        return {
-            "ok": False,
-            "state": "read_error",
-            "entries": [],
-            "next_cursor": start_cursor,
-            "source_file": source_file.as_posix(),
-            "source_path": source_file.as_posix(),
-            "source": source_payload,
-            "source_id": str(source_payload.get("id") or ""),
-            "selected_source_id": str(source_payload.get("id") or ""),
-            "sources": source_catalog,
-            "error": str(ex).strip() or ex.__class__.__name__,
-            "malformed_lines": malformed_count,
-        }
-
-    if cursor_mode and next_cursor == 0:
-        next_cursor = total_lines
-
-    state = "loading" if (entries or live or (cursor_mode and total_lines > start_cursor)) else "empty"
-    if malformed_count:
-        state = "malformed_line"
-
-    return {
-        "ok": True,
-        "state": state,
-        "entries": entries,
-        "next_cursor": next_cursor if cursor_mode else total_lines,
-        "source_file": source_file.as_posix(),
-        "source_path": source_file.as_posix(),
-        "source": source_payload,
-        "source_id": str(source_payload.get("id") or ""),
-        "selected_source_id": str(source_payload.get("id") or ""),
-        "sources": source_catalog,
-        "cursor": start_cursor if cursor_mode else None,
-        "max_lines": max_lines,
-        "malformed_lines": malformed_count,
-    }
-
-
 def _build_notifications(
     *,
     run_id: str,
@@ -6147,400 +4511,18 @@ def _stage_payload(
     controller_status: dict[str, Any] | None = None,
     events: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    controller_data = controller_status if isinstance(controller_status, dict) else {}
-    run_summary = run_summary if isinstance(run_summary, dict) else {}
-    last_run_summary = last_run_summary if isinstance(last_run_summary, dict) else {}
-    events = list(events) if isinstance(events, list) else (_cycle_events(run_dir) if run_dir is not None else [])
-    task_runtime = _task_runtime_index(events)
-    snapshot_now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-
-    stage_titles = {
-        "PM": "Backlog planning",
-        "Dev": "Implementation",
-        "QA": "Verification",
-    }
-    stage_model_defaults = {
-        "PM": str(config.get("pm_model") or "gpt-5.5"),
-        "Dev": str(config.get("dev_model") or "gpt-5.4-mini"),
-        "QA": str(config.get("qa_model") or "gpt-5.5"),
-    }
-
-    active_status = str(active_run.get("status") or progress.get("run_status") or "idle").strip().lower()
-    current_stage = _normalize_stage_name(
-        _pick_text(controller_data.get("stage"), controller_data.get("current_stage"), active_run.get("stage"), progress.get("current_stage"))
+    return _web_payloads.build_stage_payload(
+        sys.modules[__name__],
+        repo,
+        active_run,
+        progress,
+        config,
+        run_dir=run_dir,
+        run_summary=run_summary,
+        last_run_summary=last_run_summary,
+        controller_status=controller_status,
+        events=events,
     )
-    if not current_stage and active_status == "running" and _pick_text(
-        controller_data.get("current_task_id"),
-        controller_data.get("task_id"),
-        controller_data.get("task"),
-        active_run.get("task"),
-        progress.get("current_task_id"),
-        progress.get("selected_task_id"),
-        progress.get("task"),
-    ):
-        current_stage = "Dev"
-    current_task_id = _pick_text(
-        controller_data.get("current_task_id"),
-        controller_data.get("task_id"),
-        controller_data.get("task"),
-        active_run.get("task"),
-        progress.get("current_task_id"),
-        progress.get("selected_task_id"),
-        progress.get("task"),
-    )
-    current_task_title = _pick_text(
-        controller_data.get("current_task_title"),
-        controller_data.get("task_title"),
-        controller_data.get("taskTitle"),
-        active_run.get("taskTitle"),
-        progress.get("current_task_title"),
-    )
-    current_attempt = _coerce_optional_int(
-        _pick_value(
-            controller_data.get("attempt"),
-            controller_data.get("current_attempt"),
-            controller_data.get("attempt_index"),
-            active_run.get("attempt"),
-            progress.get("attempt"),
-            progress.get("current_attempt"),
-            last_run_summary.get("attempt"),
-            run_summary.get("attempt"),
-        )
-    )
-    cycles = run_summary.get("cycles") if isinstance(run_summary.get("cycles"), list) else []
-    cycle_entries = [entry for entry in cycles if isinstance(entry, dict)]
-    latest_summary_cycle: int | None = None
-    for entry in cycle_entries:
-        cycle_value = _coerce_optional_int(entry.get("cycle"))
-        if cycle_value is not None and (latest_summary_cycle is None or cycle_value > latest_summary_cycle):
-            latest_summary_cycle = cycle_value
-
-    current_cycle = _coerce_optional_int(
-        _pick_value(
-            controller_data.get("cycle"),
-            controller_data.get("current_cycle"),
-            active_run.get("iteration"),
-            progress.get("iterations"),
-            last_run_summary.get("cycle"),
-            latest_summary_cycle,
-        )
-    )
-    event_cycles = [cycle_value for cycle_value in (_coerce_optional_int(event.get("cycle")) for event in events) if cycle_value is not None]
-    latest_event_cycle = max(event_cycles) if event_cycles else None
-    if active_status == "running":
-        target_cycle = current_cycle or latest_event_cycle or latest_summary_cycle
-    else:
-        target_cycle = latest_summary_cycle or latest_event_cycle or current_cycle
-    target_cycle = _coerce_optional_int(target_cycle)
-
-    target_cycle_entry: dict[str, Any] = {}
-    if target_cycle is not None:
-        for entry in reversed(cycle_entries):
-            if _coerce_optional_int(entry.get("cycle")) == target_cycle:
-                target_cycle_entry = entry
-                break
-
-    stage_summary_map: dict[str, dict[str, Any]] = {}
-    for raw_stage in target_cycle_entry.get("stages") if isinstance(target_cycle_entry.get("stages"), list) else []:
-        if not isinstance(raw_stage, dict):
-            continue
-        stage_name = _normalize_stage_name(raw_stage.get("name"))
-        if stage_name in stage_titles:
-            stage_summary_map[stage_name] = raw_stage
-
-    running_stage_name = current_stage if active_status == "running" else ""
-    relevant_events = [event for event in events if target_cycle is None or _coerce_optional_int(event.get("cycle")) in {None, target_cycle}]
-
-    stage_event_map: dict[str, dict[str, Any]] = {}
-    for event in relevant_events:
-        event_type = str(event.get("event") or event.get("type") or "").strip().lower()
-        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-        stage_name = _normalize_stage_name(_pick_value(event.get("stage"), payload.get("stage")))
-        if not stage_name and (event_type.startswith("pm_") or event_type.startswith("pm_stage_")):
-            stage_name = "PM"
-        elif not stage_name and (event_type.startswith("qa_") or event_type.startswith("qa_stage_")):
-            stage_name = "QA"
-        if stage_name not in {"PM", "QA"}:
-            continue
-        if event_type not in {"pm_start", "pm_end", "pm_stage_start", "pm_stage_end", "qa_start", "qa_end", "qa_stage_start", "qa_stage_end", "stage_event"}:
-            continue
-        entry = stage_event_map.setdefault(
-            stage_name,
-            {
-                "cycle": None,
-                "status": "",
-                "startedAt": None,
-                "endedAt": None,
-                "rc": None,
-                "reason": "",
-                "model": "",
-                "taskId": "",
-                "taskTitle": "",
-                "attempt": None,
-                "step": None,
-                "lastMessage": "",
-                "lastEvent": "",
-                "lastEventAt": None,
-            },
-        )
-        ts = _iso_to_ms(event.get("ts"))
-        if ts is not None:
-            started_at = _coerce_optional_int(entry.get("startedAt"))
-            ended_at = _coerce_optional_int(entry.get("endedAt"))
-            if event_type.endswith("start") and (started_at is None or ts < started_at):
-                entry["startedAt"] = ts
-            if event_type.endswith("end") and (ended_at is None or ts > ended_at):
-                entry["endedAt"] = ts
-            current_last_event_at = _coerce_optional_int(entry.get("lastEventAt"))
-            entry["lastEventAt"] = ts if current_last_event_at is None else max(current_last_event_at, ts)
-        cycle_value = _coerce_optional_int(_pick_value(event.get("cycle"), payload.get("cycle")))
-        if cycle_value is not None and entry["cycle"] is None:
-            entry["cycle"] = cycle_value
-        reason = _pick_text(event.get("reason"), payload.get("reason"), payload.get("detail"))
-        inner_event = _pick_text(payload.get("event")) if event_type == "stage_event" else ""
-        if event_type == "stage_event":
-            reason = _pick_text(reason, inner_event)
-        if reason:
-            entry["reason"] = reason
-        model = _pick_text(event.get("model"), payload.get("model"))
-        if model and not entry["model"]:
-            entry["model"] = model
-        task_id = _pick_text(event.get("task_id"), event.get("task"), payload.get("task_id"), payload.get("task"))
-        if task_id and not entry["taskId"]:
-            entry["taskId"] = task_id
-        task_title = _pick_text(event.get("task_title"), event.get("taskTitle"), event.get("title"), payload.get("task_title"), payload.get("taskTitle"), payload.get("title"))
-        if task_title and not entry["taskTitle"]:
-            entry["taskTitle"] = task_title
-        attempt = _coerce_optional_int(_pick_value(event.get("attempt"), payload.get("attempt")))
-        if attempt is not None:
-            entry["attempt"] = attempt
-        step = _coerce_optional_int(_pick_value(event.get("step"), payload.get("step")))
-        if step is not None and entry["step"] is None:
-            entry["step"] = step
-        if event_type.endswith("start"):
-            entry["status"] = "running"
-        elif event_type.endswith("end"):
-            rc = _coerce_optional_int(_pick_value(event.get("rc"), payload.get("rc")))
-            if rc is not None:
-                entry["rc"] = rc
-                entry["status"] = "done" if rc == 0 else "failed"
-            elif reason:
-                entry["status"] = _normalize_lifecycle_status(reason, reason=reason, default="done")
-            elif not entry["status"]:
-                entry["status"] = "done"
-        elif event_type == "stage_event":
-            if inner_event in {"error", "quota_exhausted"} or reason in {"error", "quota_exhausted"}:
-                entry["status"] = "failed"
-            elif not entry["status"]:
-                entry["status"] = "running"
-        message = _pick_text(payload.get("detail"), payload.get("reason"), reason, inner_event, _event_message(event))
-        if message:
-            entry["lastMessage"] = message
-        event_label = inner_event or _event_message(event)
-        if event_label:
-            entry["lastEvent"] = event_label
-
-    def _runtime_key(entry: dict[str, Any]) -> tuple[int, int, int, int, int]:
-        return (
-            _coerce_optional_int(entry.get("cycle")) or -1,
-            _coerce_optional_int(entry.get("attempt")) or -1,
-            _coerce_optional_int(entry.get("step")) or -1,
-            _coerce_optional_int(entry.get("startedAt")) or -1,
-            _coerce_optional_int(entry.get("endedAt")) or -1,
-        )
-
-    cycle_task_runtimes = [entry for entry in task_runtime.values() if target_cycle is None or _coerce_optional_int(entry.get("cycle")) in {None, target_cycle}]
-    latest_task_runtime: dict[str, Any] = {}
-    if cycle_task_runtimes:
-        if current_task_id and current_task_id in task_runtime and (target_cycle is None or _coerce_optional_int(task_runtime[current_task_id].get("cycle")) in {None, target_cycle}):
-            latest_task_runtime = task_runtime[current_task_id]
-        else:
-            latest_task_runtime = max(cycle_task_runtimes, key=_runtime_key)
-
-    records: list[dict[str, Any]] = []
-    for stage_name in ("PM", "Dev", "QA"):
-        summary = stage_summary_map.get(stage_name, {})
-        stage_runtime = latest_task_runtime if stage_name == "Dev" else stage_event_map.get(stage_name, {})
-
-        summary_status = _pick_text(summary.get("status"))
-        summary_reason = _pick_text(summary.get("reason"), summary.get("message"))
-        summary_cycle = _coerce_optional_int(summary.get("cycle"))
-        summary_step = _coerce_optional_int(summary.get("step"))
-        runtime_cycle = _coerce_optional_int(stage_runtime.get("cycle"))
-        cycle_value = summary_cycle if summary_cycle is not None else runtime_cycle
-        if cycle_value is None:
-            cycle_value = current_cycle if stage_name == running_stage_name and active_status == "running" else target_cycle
-
-        started_at = _coerce_optional_ms(
-            _pick_value(
-                summary.get("startedAt"),
-                summary.get("started_at"),
-                stage_runtime.get("startedAt"),
-                stage_runtime.get("started_at"),
-            )
-        )
-        ended_at = _coerce_optional_ms(
-            _pick_value(
-                summary.get("endedAt"),
-                summary.get("ended_at"),
-                stage_runtime.get("endedAt"),
-                stage_runtime.get("ended_at"),
-            )
-        )
-        rc = _coerce_optional_int(_pick_value(summary.get("rc"), stage_runtime.get("rc")))
-        reason = _pick_text(summary_reason, stage_runtime.get("reason"))
-        task_id = _pick_text(summary.get("taskId"), summary.get("task_id"), stage_runtime.get("taskId"))
-        task_title = _pick_text(summary.get("taskTitle"), summary.get("task_title"), stage_runtime.get("taskTitle"))
-        step = _coerce_optional_int(_pick_value(summary_step, stage_runtime.get("step")))
-        attempt = _coerce_optional_int(
-            _pick_value(
-                summary.get("attempt"),
-                summary.get("currentAttempt"),
-                stage_runtime.get("attempt"),
-                current_attempt if stage_name in {"Dev", "PM", "QA"} else None,
-            )
-        )
-        model = _pick_text(
-            summary.get("model"),
-            stage_runtime.get("model"),
-            stage_model_defaults.get(stage_name, ""),
-        )
-
-        if stage_name == "Dev":
-            if not task_id:
-                task_id = current_task_id or _pick_text(stage_runtime.get("taskId"))
-            if not task_title:
-                task_title = current_task_title or _pick_text(stage_runtime.get("taskTitle"))
-        elif stage_name == running_stage_name and active_status == "running":
-            if not task_id:
-                task_id = current_task_id
-            if not task_title:
-                task_title = current_task_title
-
-        running = stage_name == running_stage_name and active_status == "running"
-        if running:
-            started_at = started_at or _coerce_optional_int(active_run.get("startedAt")) or _coerce_optional_int(controller_data.get("startedAt"))
-            ended_at = None
-            if attempt is None:
-                attempt = current_attempt
-            if not task_id:
-                task_id = current_task_id or _pick_text(active_run.get("task"))
-            if not task_title:
-                task_title = current_task_title or _pick_text(active_run.get("taskTitle"))
-
-        duration_sec = _coerce_optional_float(
-            _pick_value(
-                summary.get("durationSec"),
-                summary.get("duration_seconds"),
-                stage_runtime.get("durationSec"),
-                stage_runtime.get("duration_seconds"),
-            )
-        )
-        if duration_sec is None and started_at is not None and ended_at is not None and ended_at >= started_at:
-            duration_sec = round((ended_at - started_at) / 1000.0, 3)
-        if duration_sec is None and running:
-            duration_sec = _coerce_optional_float(_pick_value(active_run.get("elapsedSec"), controller_data.get("elapsedSec"), controller_data.get("elapsed_seconds")))
-
-        output_reason = reason or summary_reason or _pick_text(stage_runtime.get("reason"))
-        latest_log_signal = _task_output_signal(
-            run_dir,
-            stage_name=stage_name,
-            cycle=cycle_value,
-            step=step,
-            task_id=task_id or current_task_id,
-            attempt=attempt,
-            reason=output_reason,
-            include_summary_artifacts=False,
-        )
-        latest_log_line = _pick_text(latest_log_signal.get("text"))
-        latest_log_line_mtime = _coerce_optional_int(latest_log_signal.get("mtimeMs"))
-        latest_backend_event = _pick_text(
-            stage_runtime.get("lastEvent"),
-            stage_runtime.get("lastMessage"),
-            stage_runtime.get("reason"),
-            output_reason,
-            summary_reason,
-        )
-        latest_backend_event_at = _coerce_optional_int(stage_runtime.get("lastEventAt"))
-        elapsed_sec = duration_sec
-        if running:
-            if started_at is not None:
-                elapsed_sec = round(max(0, snapshot_now_ms - started_at) / 1000.0, 3)
-            elif elapsed_sec is None:
-                elapsed_sec = _coerce_optional_float(
-                    _pick_value(
-                        stage_runtime.get("elapsedSec"),
-                        active_run.get("elapsedSec"),
-                        controller_data.get("elapsedSec"),
-                        controller_data.get("elapsed_seconds"),
-                    )
-                )
-        elif elapsed_sec is None and started_at is not None and ended_at is not None and ended_at >= started_at:
-            elapsed_sec = round((ended_at - started_at) / 1000.0, 3)
-        latest_signal_ms = max([value for value in [latest_log_line_mtime, latest_backend_event_at, started_at if running else None] if value is not None], default=None)
-        output_stalled = False
-        no_output_minutes = None
-        if running and latest_signal_ms is not None:
-            stalled_threshold_ms = _stage_output_stall_threshold_seconds(config) * 1000
-            age_ms = max(0, snapshot_now_ms - latest_signal_ms)
-            if age_ms >= stalled_threshold_ms:
-                output_stalled = True
-                no_output_minutes = max(1, int(age_ms // 60000))
-        recent_output = _pick_text(summary.get("recentOutput"), summary.get("recent_output"))
-        if not recent_output:
-            recent_output = _task_output_excerpt(
-                run_dir,
-                stage_name=stage_name,
-                cycle=cycle_value,
-                step=step,
-                task_id=task_id or current_task_id,
-                attempt=attempt,
-                reason=output_reason,
-                fallback_text=_pick_text(stage_runtime.get("lastMessage"), stage_runtime.get("lastEvent"), output_reason),
-            )
-
-        status = _normalize_lifecycle_status(
-            summary_status or stage_runtime.get("status"),
-            rc=rc,
-            reason=reason,
-            running=running,
-            has_activity=bool(summary or stage_runtime or task_id or task_title or recent_output),
-            default="pending",
-        )
-
-        if not summary and not stage_runtime and not running and not recent_output and not task_id and not task_title and not reason and status == "pending":
-            continue
-
-        if running:
-            status = "running"
-
-        records.append(
-            {
-                "id": stage_name,
-                "label": stage_name,
-                "title": task_title or stage_titles.get(stage_name, stage_name),
-                "status": status,
-                "cycle": cycle_value,
-                "startedAt": started_at,
-                "endedAt": ended_at,
-                "durationSec": duration_sec,
-                "model": model,
-                "taskId": task_id,
-                "taskTitle": task_title,
-                "attempt": attempt,
-                "step": step,
-                "recentOutput": recent_output,
-                "elapsedSec": elapsed_sec,
-                "latestLogLine": latest_log_line,
-                "latestBackendEvent": latest_backend_event,
-                "outputStalled": output_stalled,
-                "noOutputMinutes": no_output_minutes,
-                "reason": reason,
-                "rc": rc,
-            }
-        )
-
-    return records
 
 
 def _history_item(
@@ -6550,162 +4532,13 @@ def _history_item(
     branch: str,
     completion_level: str = "all",
 ) -> dict[str, Any]:
-    state = load_state(run_dir / "STATE.json")
-    backlog = _load_tasks(run_dir)
-    backlog_task_ids = load_backlog_task_ids(run_dir / "BACKLOG.json")
-    state_counts = count_state_task_ids(state, backlog_task_ids)
-    goals = _build_goals_payload(repo, completion_level=completion_level)
-    run_summary = _safe_json(run_dir / "run_summary.json", {})
-    last_summary = _safe_json(run_dir / "last_run_summary.json", {})
-
-    final = run_summary.get("final") if isinstance(run_summary.get("final"), dict) else {}
-    final_reason = _pick_text(final.get("reason"), last_summary.get("reason"), last_summary.get("stop_reason"))
-    shutdown_reason = _pick_text(last_summary.get("stop_reason"), final_reason)
-    if not final_reason:
-        final_reason = shutdown_reason
-    completion = _completion_status_payload(run_dir, final_reason=final_reason)
-    final_reason = completion["final_reason"]
-
-    tasks_done = state_counts["done"]
-
-    tasks_total = _coerce_optional_int(_pick_value(last_summary.get("total_tasks"), last_summary.get("tasks_total")))
-    if tasks_total is None:
-        tasks_total = len(backlog)
-
-    tasks_failed = state_counts["failed"]
-
-    tasks_skipped = _coerce_optional_int(_pick_value(last_summary.get("skipped"), last_summary.get("tasks_skipped")))
-    if tasks_skipped is None:
-        tasks_skipped = 0
-
-    cycle_count = len(run_summary.get("cycles") or [])
-    project_completion = _project_completion_status(
-        goals,
-        tasks_total=tasks_total,
-        tasks_done=tasks_done,
-        tasks_failed=tasks_failed,
+    return _web_payloads.build_history_item(
+        sys.modules[__name__],
+        repo,
+        run_dir,
+        branch=branch,
+        completion_level=completion_level,
     )
-
-    rc = _coerce_optional_int(final.get("rc"))
-    if rc is None:
-        rc = _coerce_optional_int(last_summary.get("rc"))
-    stop_exists = (run_dir / "STOP").exists()
-    if not shutdown_reason and stop_exists:
-        shutdown_reason = "stop_file"
-    if not final_reason and stop_exists:
-        final_reason = shutdown_reason
-    execution_status = _normalize_execution_status(
-        "",
-        running=False,
-        exit_code=rc,
-        final_reason=shutdown_reason,
-        stop_file_exists=stop_exists,
-        has_run_dir=True,
-    )
-    status = _normalize_run_status(
-        "",
-        running=False,
-        exit_code=rc,
-        final_reason=shutdown_reason,
-        stop_file_exists=stop_exists,
-        has_run_dir=True,
-        project_complete=project_completion["project_complete"],
-    )
-
-    started_at = _epoch_ms(run_dir.stat().st_ctime)
-    ended_at = _epoch_ms(run_dir.stat().st_mtime)
-    duration_sec = _coerce_optional_int(
-        _pick_value(
-            last_summary.get("duration_seconds"),
-            last_summary.get("durationSec"),
-            run_summary.get("duration_seconds"),
-            run_summary.get("durationSec"),
-        )
-    )
-    if duration_sec is None:
-        duration_sec = max(0, int((ended_at - started_at) / 1000)) if started_at and ended_at else 0
-    if duration_sec == 0:
-        duration_sec = max(0, cycle_count * 60)
-
-    branch_value = _pick_text(run_summary.get("branch"), last_summary.get("branch"), branch, "HEAD")
-    worktree_outcome = _history_worktree_outcome(run_dir)
-    qa_validation_report = _safe_json(run_dir / "QA_VALIDATION_REPORT.json", {})
-    final_run_report = _safe_json(run_dir / "FINAL_RUN_REPORT.json", {})
-    cycle_change_summary = _safe_json(run_dir / "cycle_change_summary.json", {})
-    qa_validation_report = qa_validation_report if isinstance(qa_validation_report, dict) else {}
-    final_run_report = final_run_report if isinstance(final_run_report, dict) else {}
-    cycle_change_summary = cycle_change_summary if isinstance(cycle_change_summary, dict) else {}
-    report_summary = _pick_text(final_run_report.get("summary"), "")
-    report_status = _pick_text(final_run_report.get("status"), "")
-    qa_report_status = _pick_text(qa_validation_report.get("status"), "")
-    failed_tasks = cycle_change_summary.get("failed_tasks") if isinstance(cycle_change_summary.get("failed_tasks"), dict) else {}
-
-    last_cycle = _tail_text(run_dir / "cycle_summary.log", 1).strip()
-    return {
-        "id": run_dir.name,
-        "startedAt": started_at,
-        "endedAt": ended_at,
-        "status": status,
-        "executionStatus": execution_status,
-        "execution_status": execution_status,
-        "projectComplete": project_completion["project_complete"],
-        "project_complete": project_completion["project_complete"],
-        "projectStatus": project_completion["project_status"],
-        "project_status": project_completion["project_status"],
-        "completionStatus": completion["completionStatus"],
-        "completion_status": completion["completion_status"],
-        "completionReason": completion["completionReason"],
-        "completion_reason": completion["completion_reason"],
-        "goalsComplete": project_completion["goals_complete"],
-        "goals_complete": project_completion["goals_complete"],
-        "backlogComplete": project_completion["backlog_complete"],
-        "backlog_complete": project_completion["backlog_complete"],
-        "tasksDone": tasks_done,
-        "tasksTotal": tasks_total,
-        "tasksFailed": tasks_failed,
-        "tasksSkipped": tasks_skipped,
-        "state_counts": state_counts,
-        "taskCounts": {
-            "done": tasks_done,
-            "failed": tasks_failed,
-            "skipped": tasks_skipped,
-            "total": tasks_total,
-            "cycles": cycle_count,
-        },
-        "branch": branch_value,
-        "durationSec": duration_sec,
-        "finalReason": final_reason,
-        "shutdownReason": shutdown_reason,
-        "stopReason": shutdown_reason,
-        "runDir": run_dir.as_posix(),
-        "lastCycle": last_cycle,
-        "runSummary": run_summary,
-        "lastRunSummary": last_summary,
-        "worktreeOutcome": worktree_outcome,
-        "qaValidationReport": qa_validation_report,
-        "qa_validation_report": qa_validation_report,
-        "finalRunReport": final_run_report,
-        "final_run_report": final_run_report,
-        "cycleChangeSummary": cycle_change_summary,
-        "cycle_change_summary": cycle_change_summary,
-        "failedTasks": failed_tasks,
-        "failed_tasks": failed_tasks,
-        "reportSummary": report_summary,
-        "reportStatus": report_status,
-        "qaValidationReportStatus": qa_report_status,
-        "qa_validation_report_status": qa_report_status,
-        "reportArtifacts": {
-            "qaValidationJson": (run_dir / "QA_VALIDATION_REPORT.json").as_posix(),
-            "qaValidationMarkdown": (run_dir / "QA_VALIDATION_REPORT.md").as_posix(),
-            "finalRunJson": (run_dir / "FINAL_RUN_REPORT.json").as_posix(),
-            "finalRunMarkdown": (run_dir / "FINAL_RUN_REPORT.md").as_posix(),
-            "cycleChangeSummaryJson": (run_dir / "cycle_change_summary.json").as_posix(),
-            "cycleChangeSummaryMarkdown": (run_dir / "cycle_change_summary.md").as_posix(),
-            "failedTasksJson": (run_dir / "failed_tasks.json").as_posix(),
-            "failedTasksMarkdown": (run_dir / "failed_tasks.md").as_posix(),
-            "shutdownReport": (run_dir / "SHUTDOWN_REPORT.md").as_posix(),
-        },
-    }
 
 
 def _history_payload(
@@ -6715,28 +4548,13 @@ def _history_payload(
     branch: str,
     completion_level: str = "all",
 ) -> dict[str, Any]:
-    items = [_history_item(repo, run_dir, branch=branch, completion_level=completion_level) for run_dir in run_dirs]
-    items.sort(key=lambda item: int(item.get("startedAt") or 0), reverse=True)
-    successes = len([item for item in items if item["status"] == "success"])
-    failures = len([item for item in items if item["status"] == "failed"])
-    stopped = len([item for item in items if item["status"] == "stopped"])
-    total_tasks = sum(int(item.get("tasksTotal") or 0) for item in items)
-    done_tasks = sum(int(item.get("tasksDone") or 0) for item in items)
-    failed_tasks = sum(int(item.get("tasksFailed") or 0) for item in items)
-    skipped_tasks = sum(int(item.get("tasksSkipped") or 0) for item in items)
-    return {
-        "items": items,
-        "summary": {
-            "runs": len(items),
-            "successes": successes,
-            "failures": failures,
-            "stopped": stopped,
-            "tasksDone": done_tasks,
-            "tasksTotal": total_tasks,
-            "tasksFailed": failed_tasks,
-            "tasksSkipped": skipped_tasks,
-        },
-    }
+    return _web_payloads.build_history_payload(
+        sys.modules[__name__],
+        repo,
+        run_dirs,
+        branch=branch,
+        completion_level=completion_level,
+    )
 
 
 def _run_dirs(repo: Path) -> list[Path]:
@@ -6837,88 +4655,12 @@ def _build_metrics_payload(
     progress: dict[str, Any],
     controller_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    controller_data = controller_status if isinstance(controller_status, dict) else {}
-    events = _cycle_events(run_dir)
-    cycle_end_events = [event for event in events if str(event.get("event") or event.get("type") or "").strip().lower() == "cycle_end"]
-    tokens24h: list[int] = []
-    success24h: list[int] = []
-    budget: list[float] = []
-    last_tokens = {"in": None, "out": None}
-    last_stage = ""
-    quota = _quota_payload("", None)
-    budget_used: float | None = None
-    tokens_available = False
-    budget_available = False
-
-    for event in cycle_end_events:
-        tokens = event.get("tokens") if isinstance(event.get("tokens"), dict) else {}
-        total = tokens.get("_total") if isinstance(tokens.get("_total"), dict) else {}
-        total_tokens = _coerce_optional_int(total.get("total"))
-        if total_tokens is not None:
-            tokens24h.append(total_tokens)
-            tokens_available = True
-        success24h.append(1 if int(event.get("rc") or 0) == 0 else 0)
-        event_budget = _coerce_optional_float(
-            _pick_value(event.get("budget"), event.get("budget_used"), event.get("budgetUsed"))
-        )
-        if event_budget is not None:
-            budget.append(round(max(0.0, min(1.0, event_budget)), 3))
-            budget_available = True
-            budget_used = max(budget_used or 0.0, event_budget)
-        input_tokens = _coerce_optional_int(total.get("input"))
-        output_tokens = _coerce_optional_int(total.get("output"))
-        if input_tokens is not None or output_tokens is not None:
-            last_tokens = {
-                "in": input_tokens,
-                "out": output_tokens,
-            }
-            tokens_available = True
-        last_stage = str(event.get("stage") or event.get("name") or "").strip() or last_stage
-        event_quota = _quota_payload_from_source(event)
-        if event_quota.get("available"):
-            quota = event_quota
-    controller_tokens = controller_data.get("tokens") if isinstance(controller_data.get("tokens"), dict) else {}
-    input_tokens = _coerce_optional_int(controller_tokens.get("in"))
-    output_tokens = _coerce_optional_int(controller_tokens.get("out"))
-    if input_tokens is not None or output_tokens is not None:
-        last_tokens = {
-            "in": input_tokens,
-            "out": output_tokens,
-        }
-        tokens_available = True
-
-    controller_quota = _quota_payload_from_source(controller_data)
-    if controller_quota.get("available"):
-        quota = controller_quota
-
-    controller_budget = _coerce_optional_float(_pick_value(controller_data.get("budget_used"), controller_data.get("budgetUsed")))
-    if controller_budget is not None:
-        budget_used = controller_budget
-        budget_available = True
-        if not budget:
-            budget.append(round(max(0.0, min(1.0, controller_budget)), 3))
-    last_stage = _pick_text(controller_data.get("last_stage"), controller_data.get("stage"), last_stage)
-    quota_available = bool(quota.get("available"))
-    quota_window = str(quota.get("window") or "")
-    quota_used = quota.get("used")
-
-    return {
-        "tokens24h": tokens24h,
-        "success24h": success24h,
-        "budget": budget,
-        "tokens": last_tokens,
-        "tokens_available": tokens_available,
-        "budget_available": budget_available,
-        "quota_available": quota_available,
-        "quotaAvailable": quota_available,
-        "quota_window": quota.get("window"),
-        "quotaWindow": quota.get("window"),
-        "last_stage": last_stage,
-        "quota_used": quota.get("used"),
-        "quotaUsed": quota.get("used"),
-        "budget_used": budget_used,
-        "quota": quota,
-    }
+    return _web_payloads.build_metrics_payload(
+        sys.modules[__name__],
+        run_dir,
+        progress,
+        controller_status=controller_status,
+    )
 
 
 def _build_progress_payload(
@@ -6930,358 +4672,19 @@ def _build_progress_payload(
     controller_status: dict[str, Any] | None = None,
     events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    controller_data = controller_status if isinstance(controller_status, dict) else {}
-    state = load_state(run_dir / "STATE.json") if run_dir else {"done": [], "failed": [], "warnings": []}
-    backlog = _load_backlog_payload(run_dir, state, current_task_id=_pick_text(controller_data.get("current_task_id"), controller_data.get("task_id"), controller_data.get("task")), events=events)
-    backlog_task_ids = load_backlog_task_ids(run_dir / "BACKLOG.json") if run_dir else set()
-    state_counts = count_state_task_ids(state, backlog_task_ids)
-    completion_level = resolve_goals_completion_level(config.get("goals_completion_level"))
-    goals = _build_goals_payload(repo, completion_level=completion_level)
-    backlog_items = backlog["items"]
-    tasks_total = len(backlog_items)
-    tasks_done = state_counts["done"]
-    tasks_failed = state_counts["failed"]
-    project_completion = _project_completion_status(
-        goals,
-        tasks_total=tasks_total,
-        tasks_done=tasks_done,
-        tasks_failed=tasks_failed,
+    return _web_payloads.build_progress_payload(
+        sys.modules[__name__],
+        repo=repo,
+        run_dir=run_dir,
+        config=config,
+        branch=branch,
+        controller_status=controller_status,
+        events=events,
     )
-    run_summary = _safe_json(run_dir / "run_summary.json", {}) if run_dir else {}
-    last_run_summary = _safe_json(run_dir / "last_run_summary.json", {}) if run_dir else {}
-    final = run_summary.get("final") if isinstance(run_summary.get("final"), dict) else {}
-    final_reason = _pick_text(
-        controller_data.get("final_reason"),
-        controller_data.get("reason"),
-        final.get("reason") if isinstance(final, dict) else "",
-        last_run_summary.get("stop_reason"),
-    )
-    completion = _completion_status_payload(run_dir, final_reason=final_reason)
-    final_reason = completion["final_reason"]
-    final_rc = _coerce_optional_int(controller_data.get("exit_code"))
-    if final_rc is None:
-        final_rc = _coerce_optional_int(final.get("rc") if isinstance(final, dict) else None)
-    if final_rc is None:
-        final_rc = _coerce_optional_int(last_run_summary.get("rc") if isinstance(last_run_summary, dict) else None)
-    stop_file_exists = bool(run_dir and (run_dir / "STOP").exists())
-    execution_status = _normalize_execution_status(
-        _pick_text(
-            controller_data.get("run_status"),
-            controller_data.get("status"),
-            final.get("status") if isinstance(final, dict) else "",
-            last_run_summary.get("status"),
-        ),
-        running=bool(controller_data.get("running")),
-        exit_code=final_rc,
-        final_reason=final_reason,
-        stop_file_exists=stop_file_exists,
-        has_run_dir=bool(run_dir),
-    )
-    run_status = _normalize_run_status(
-        _pick_text(
-            controller_data.get("run_status"),
-            controller_data.get("status"),
-            final.get("status") if isinstance(final, dict) else "",
-            last_run_summary.get("status"),
-        ),
-        running=bool(controller_data.get("running")),
-        exit_code=final_rc,
-        final_reason=final_reason,
-        stop_file_exists=stop_file_exists,
-        has_run_dir=bool(run_dir),
-        project_complete=project_completion["project_complete"],
-    )
-    current_task = _pick_text(
-        controller_data.get("current_task_id"),
-        controller_data.get("task_id"),
-        controller_data.get("task"),
-        backlog["selected_id"],
-    )
-    if not current_task:
-        current_task = backlog["selected_id"] if backlog["selected_id"] else ""
-    current_task_title = _pick_text(
-        controller_data.get("current_task_title"),
-        controller_data.get("task_title"),
-        controller_data.get("taskTitle"),
-    )
-    if not current_task_title and current_task:
-        current_task_title = next((item["title"] for item in backlog_items if item["id"] == current_task), "")
-    progress_value = _coerce_optional_float(
-        _pick_value(
-            controller_data.get("progress"),
-            controller_data.get("progress_ratio"),
-            controller_data.get("progressValue"),
-            run_summary.get("progress"),
-        )
-    )
-    progress_available = progress_value is not None
-    attempt = _coerce_optional_int(
-        _pick_value(
-            controller_data.get("attempt"),
-            controller_data.get("current_attempt"),
-            controller_data.get("attempt_index"),
-            run_summary.get("attempt"),
-            last_run_summary.get("attempt"),
-        )
-    )
-    worktree_mode = _pick_text(controller_data.get("worktree_mode"), controller_data.get("worktreeMode"))
-
-    return {
-        "latest_run_dir": run_dir.as_posix() if run_dir else None,
-        "run_status": run_status,
-        "tasks_done": tasks_done,
-        "tasks_total": tasks_total,
-        "tasks_failed": tasks_failed,
-        "state_counts": state_counts,
-        "progress": round(progress_value, 3) if progress_value is not None else None,
-        "progress_available": progress_available,
-        "execution_status": execution_status,
-        "executionStatus": execution_status,
-        "completion_status": completion["completion_status"],
-        "completionStatus": completion["completionStatus"],
-        "completion_reason": completion["completion_reason"],
-        "completionReason": completion["completionReason"],
-        "project_complete": project_completion["project_complete"],
-        "projectComplete": project_completion["project_complete"],
-        "project_status": project_completion["project_status"],
-        "projectStatus": project_completion["project_status"],
-        "goals_complete": project_completion["goals_complete"],
-        "goalsComplete": project_completion["goals_complete"],
-        "backlog_complete": project_completion["backlog_complete"],
-        "backlogComplete": project_completion["backlog_complete"],
-        "current_task_id": current_task,
-        "current_task_title": current_task_title,
-        "attempt": attempt,
-        "worktree_mode": worktree_mode,
-        "iterations": len(run_summary.get("cycles") or []),
-        "goals": goals,
-        "backlog": backlog,
-        "state": state,
-        "final_reason": final_reason,
-        "final_rc": final_rc,
-    }
 
 
 def _build_worktree_payload(repo: Path, run_dir: Path | None, branch: str) -> dict[str, Any]:
-    repo_root = _repo_root(repo)
-    run_dir_value = run_dir.as_posix() if run_dir else ""
-    source_branch = branch or "HEAD"
-    pending_path = find_pending_worktree_merge(repo_root, run_dir)
-    if pending_path is not None:
-        try:
-            raw_payload = read_pending_worktree_merge(pending_path)
-            if not isinstance(raw_payload, dict):
-                raise TypeError("Pending merge payload must be a JSON object.")
-        except Exception as ex:
-            error_message = f"Pending worktree merge file is malformed: {str(ex).strip() or ex.__class__.__name__}"
-            payload = {}
-            if pending_path.exists():
-                try:
-                    payload = _safe_json(pending_path, {})
-                except Exception:
-                    payload = {}
-                if not isinstance(payload, dict):
-                    payload = {}
-            invalid = _worktree_default_payload(repo_root, run_dir, branch)
-            invalid.update(
-                {
-                    "status": "error",
-                    "reviewRequired": True,
-                    "reviewRequiredMessage": error_message,
-                    "sourceRepo": str(payload.get("source_repo") or payload.get("sourceRepo") or invalid["sourceRepo"]).strip() or invalid["sourceRepo"],
-                    "sourceBranch": str(payload.get("base_ref") or payload.get("baseRef") or source_branch).strip() or source_branch,
-                    "branch": str(payload.get("base_ref") or payload.get("baseRef") or source_branch).strip() or source_branch,
-                    "baseRef": str(payload.get("base_ref") or payload.get("baseRef") or "").strip(),
-                    "headRef": str(payload.get("head_ref") or payload.get("headRef") or "").strip(),
-                    "worktreeDir": str(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree") or "").strip(),
-                    "worktree": str(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree") or "").strip(),
-                    "patchPath": str(payload.get("patch_path") or payload.get("patchPath") or payload.get("patch") or "").strip(),
-                    "patch": str(payload.get("patch_path") or payload.get("patchPath") or payload.get("patch") or "").strip(),
-                    "pendingFile": pending_path.as_posix(),
-                    "statusFile": pending_path.as_posix(),
-                    "cleanupPath": str(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree") or "").strip(),
-                    "cleanupMessage": "Cleanup state is unavailable until the marker is repaired.",
-                    "cleanupState": "none",
-                    "summary": "Pending worktree merge file is malformed.",
-                    "risk": "Fix or delete the pending merge file before applying any source-repo change.",
-                    "changedFiles": [],
-                    "changed_files": [],
-                    "preflight": {},
-                    "applyCheck": {},
-                    "sourceRepoState": str(payload.get("source_repo_state") or payload.get("sourceRepoState") or ""),
-                    "source_repo_state": str(payload.get("source_repo_state") or payload.get("sourceRepoState") or ""),
-                    "sourceHead": str(payload.get("head_ref") or payload.get("headRef") or ""),
-                    "source_head": str(payload.get("head_ref") or payload.get("headRef") or ""),
-                    "expectedBaseRef": str(payload.get("base_ref") or payload.get("baseRef") or ""),
-                    "expected_base_ref": str(payload.get("base_ref") or payload.get("baseRef") or ""),
-                    "patchHash": str(payload.get("patch_hash") or payload.get("patchHash") or ""),
-                    "patch_hash": str(payload.get("patch_hash") or payload.get("patchHash") or ""),
-                    "pendingMarkerPath": pending_path.as_posix(),
-                    "pending_marker_path": pending_path.as_posix(),
-                    "resolutionActions": worktree_resolution_actions(
-                        "stale_pending_marker",
-                        pending_paths=[pending_path.as_posix()],
-                        artifact_path=pending_path.as_posix(),
-                    ),
-                    "resolution_actions": worktree_resolution_actions(
-                        "stale_pending_marker",
-                        pending_paths=[pending_path.as_posix()],
-                        artifact_path=pending_path.as_posix(),
-                    ),
-                    "runDir": str(payload.get("run_dir") or payload.get("runDir") or run_dir_value or "").strip(),
-                    "runnerRc": 0,
-                    "lastRc": 0,
-                }
-            )
-            return invalid
-
-        payload = raw_payload
-        stale_reason = _worktree_pending_is_stale(payload, pending_path)
-        if stale_reason:
-            invalid = _worktree_default_payload(repo_root, run_dir, branch)
-            invalid.update(
-                {
-                    "status": "error",
-                    "reviewRequired": True,
-                    "reviewRequiredMessage": f"Pending worktree merge file is stale: {stale_reason}",
-                    "sourceRepo": str(payload.get("source_repo") or payload.get("sourceRepo") or invalid["sourceRepo"]).strip() or invalid["sourceRepo"],
-                    "sourceBranch": str(payload.get("base_ref") or payload.get("baseRef") or source_branch).strip() or source_branch,
-                    "branch": str(payload.get("base_ref") or payload.get("baseRef") or source_branch).strip() or source_branch,
-                    "baseRef": str(payload.get("base_ref") or payload.get("baseRef") or "").strip(),
-                    "headRef": str(payload.get("head_ref") or payload.get("headRef") or "").strip(),
-                    "worktreeDir": str(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree") or "").strip(),
-                    "worktree": str(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree") or "").strip(),
-                    "patchPath": str(payload.get("patch_path") or payload.get("patchPath") or payload.get("patch") or "").strip(),
-                    "patch": str(payload.get("patch_path") or payload.get("patchPath") or payload.get("patch") or "").strip(),
-                    "pendingFile": pending_path.as_posix(),
-                    "statusFile": pending_path.as_posix(),
-                    "cleanupPath": str(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree") or "").strip(),
-                    "cleanupMessage": "Cleanup state is unavailable until the marker is repaired.",
-                    "cleanupState": "none",
-                    "summary": "Pending worktree merge file is stale.",
-                    "risk": "Fix or delete the stale pending merge file before applying any source-repo change.",
-                    "changedFiles": [],
-                    "changed_files": [],
-                    "preflight": {},
-                    "applyCheck": {},
-                    "sourceRepoState": str(payload.get("source_repo_state") or payload.get("sourceRepoState") or ""),
-                    "source_repo_state": str(payload.get("source_repo_state") or payload.get("sourceRepoState") or ""),
-                    "sourceHead": str(payload.get("head_ref") or payload.get("headRef") or ""),
-                    "source_head": str(payload.get("head_ref") or payload.get("headRef") or ""),
-                    "expectedBaseRef": str(payload.get("base_ref") or payload.get("baseRef") or ""),
-                    "expected_base_ref": str(payload.get("base_ref") or payload.get("baseRef") or ""),
-                    "patchHash": str(payload.get("patch_hash") or payload.get("patchHash") or ""),
-                    "patch_hash": str(payload.get("patch_hash") or payload.get("patchHash") or ""),
-                    "pendingMarkerPath": pending_path.as_posix(),
-                    "pending_marker_path": pending_path.as_posix(),
-                    "resolutionActions": worktree_resolution_actions(
-                        "stale_pending_marker",
-                        pending_paths=[pending_path.as_posix()],
-                        artifact_path=pending_path.as_posix(),
-                    ),
-                    "resolution_actions": worktree_resolution_actions(
-                        "stale_pending_marker",
-                        pending_paths=[pending_path.as_posix()],
-                        artifact_path=pending_path.as_posix(),
-                    ),
-                    "runDir": str(payload.get("run_dir") or payload.get("runDir") or run_dir_value or "").strip(),
-                    "runnerRc": 0,
-                    "lastRc": 0,
-                }
-            )
-            return invalid
-
-        return _worktree_status_payload(
-            repo_root,
-            run_dir,
-            branch,
-            status="pending review",
-            artifact_path=pending_path,
-            payload=payload,
-            pending_path=pending_path,
-        )
-
-    artifact_candidates = [
-        (artifact_status, artifact_path)
-        for artifact_status, artifact_path in _worktree_status_artifacts(repo_root, run_dir)
-        if artifact_status != "pending" and artifact_path.exists()
-    ]
-    selected_artifact = _worktree_select_artifact(artifact_candidates)
-    if selected_artifact is not None:
-        artifact_status, artifact_path = selected_artifact
-        if artifact_status in {"applied", "discarded", "applied_cleanup_failed", "discard_cleanup_failed"}:
-            payload = _safe_json(artifact_path, {})
-            if not isinstance(payload, dict):
-                payload = {}
-            return _worktree_status_payload(
-                repo_root,
-                run_dir,
-                branch,
-                status=artifact_status,
-                artifact_path=artifact_path,
-                payload=payload,
-                pending_path=artifact_path.with_name("WORKTREE_MERGE_PENDING.json"),
-            )
-        if artifact_status in {"apply_failed", "patch_not_applied", "not_applied"}:
-            artifact_patch_path = (run_dir / "worktree.patch") if run_dir is not None else None
-            artifact_patch_text = artifact_patch_path.as_posix() if artifact_patch_path is not None and artifact_patch_path.exists() else ""
-            artifact_changed_files = summarize_worktree_diff(artifact_patch_path, allow_placeholder=True) if artifact_patch_text else []
-            artifact_preflight: dict[str, Any] = {}
-            if artifact_patch_path is not None and artifact_patch_path.exists():
-                try:
-                    if git_show_toplevel(repo_root):
-                        artifact_preflight = summarize_worktree_preflight(repo_root, artifact_patch_path, base_ref="", pending_path=None)
-                except Exception:
-                    artifact_preflight = {}
-            payload = _worktree_default_payload(repo_root, run_dir, branch)
-            payload.update(
-                {
-                    "status": artifact_status,
-                    "reviewRequired": True,
-                    "reviewRequiredMessage": {
-                        "apply_failed": "Worktree patch export failed.",
-                        "patch_not_applied": "Worktree patch was exported but not auto-applied.",
-                        "not_applied": "Worktree patch was not applied.",
-                    }[artifact_status],
-                    "summary": {
-                        "apply_failed": "Worktree patch export failed.",
-                        "patch_not_applied": "Worktree patch was exported but not auto-applied.",
-                        "not_applied": "Worktree patch was not applied.",
-                    }[artifact_status],
-                    "risk": {
-                        "apply_failed": "Manual recovery is required before the source repository can be reviewed.",
-                        "patch_not_applied": "Review the exported patch before applying it manually.",
-                        "not_applied": "Review the exported patch and apply it manually when ready.",
-                    }[artifact_status],
-                    "cleanupPath": "",
-                    "cleanupMessage": "Cleanup state is unavailable because no merge marker was written.",
-                    "cleanupDetails": {},
-                    "cleanupAttempts": [],
-                    "cleanupState": "none",
-                    "statusFile": artifact_path.as_posix(),
-                    "pendingFile": "",
-                    "patchPath": artifact_patch_text,
-                    "patch": artifact_patch_text,
-                    "changedFiles": artifact_changed_files,
-                    "changed_files": artifact_changed_files,
-                    "preflight": artifact_preflight,
-                    "applyCheck": artifact_preflight.get("applyCheck", {}) if isinstance(artifact_preflight, dict) else {},
-                    "sourceRepoState": artifact_preflight.get("sourceRepoState", "") if isinstance(artifact_preflight, dict) else "",
-                    "source_repo_state": artifact_preflight.get("sourceRepoState", "") if isinstance(artifact_preflight, dict) else "",
-                    "sourceHead": artifact_preflight.get("sourceHead", "") if isinstance(artifact_preflight, dict) else "",
-                    "source_head": artifact_preflight.get("sourceHead", "") if isinstance(artifact_preflight, dict) else "",
-                    "expectedBaseRef": artifact_preflight.get("expectedBaseRef", "") if isinstance(artifact_preflight, dict) else "",
-                    "expected_base_ref": artifact_preflight.get("expectedBaseRef", "") if isinstance(artifact_preflight, dict) else "",
-                    "patchHash": artifact_preflight.get("patchHash", "") if isinstance(artifact_preflight, dict) else "",
-                    "patch_hash": artifact_preflight.get("patchHash", "") if isinstance(artifact_preflight, dict) else "",
-                    "pendingMarkerPath": "",
-                    "pending_marker_path": "",
-                    "runDir": run_dir.as_posix() if run_dir else "",
-                }
-            )
-            return payload
-
-    return _worktree_default_payload(repo_root, run_dir, branch)
+    return _web_payloads.build_worktree_payload(sys.modules[__name__], repo, run_dir, branch)
 
 
 def build_snapshot(
@@ -7302,497 +4705,24 @@ def build_snapshot(
     runner_controller_auto_build: bool = True,
     web_instance_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    repo_root = _repo_root(repo)
-    cfg_path, cfg, cfg_source = _load_config_payload(repo_root, config_path)
-    prompts_dir = resolve_prompts_dir(repo_root, str(cfg.get("prompts_dir") or ""))
-    if not prompts_dir:
-        prompts_dir = default_prompts_dir(repo_root)
-    if runner_controls_enabled is None and runner_controls_source is None and not runner_controls_disabled_reason:
-        control_enabled, resolved_source, resolved_disabled_reason = _resolve_runner_controls_enabled(
-            None,
-            bind_host=bind_host,
-            trusted_network=trusted_network,
-        )
-    else:
-        control_enabled = bool(runner_controls_enabled)
-        resolved_source = runner_controls_source or ("cli" if control_enabled else "default")
-        resolved_disabled_reason = runner_controls_disabled_reason or (
-            "" if control_enabled else "Runner controls are disabled until the server is started with AGENTCLI_WEB_RUNNER_CONTROLS=1 or --enable-runner-controls."
-        )
-    redaction_active = _web_redaction_active(bind_host)
-    if redaction_active and _lan_safety_blocks_mutations(bind_host):
-        control_enabled = False
-        resolved_disabled_reason = LAN_SAFETY_MUTATION_DISABLED_MESSAGE
-    web_instance = dict(web_instance_state) if isinstance(web_instance_state, dict) else _web_instance_payload(
-        repo_root,
+    return _web_payloads.build_snapshot(
+        sys.modules[__name__],
+        repo,
+        config_path=config_path,
         bind_host=bind_host,
         bind_port=bind_port,
-        state="primary",
-        mode="read_write",
-        reason="",
-        created_at=now_iso(),
-        runner_control_requested=bool(control_enabled),
-        runner_control_enabled=bool(control_enabled),
-        runner_control_state="enabled" if control_enabled else "disabled",
+        trusted_network=trusted_network,
+        runner_controller=runner_controller,
+        runner_controls_enabled=runner_controls_enabled,
+        runner_controls_source=runner_controls_source,
+        runner_controls_disabled_reason=runner_controls_disabled_reason,
+        runner_control_busy=runner_control_busy,
+        runner_control_last_action=runner_control_last_action,
+        runner_control_last_message=runner_control_last_message,
+        runner_control_last_error=runner_control_last_error,
+        runner_controller_auto_build=runner_controller_auto_build,
+        web_instance_state=web_instance_state,
     )
-    web_instance_state_value = str(web_instance.get("state") or "primary").strip().lower() or "primary"
-    web_instance_mode = str(web_instance.get("mode") or "read_write").strip().lower() or "read_write"
-    if web_instance_mode == "read_only":
-        control_enabled = False
-        resolved_disabled_reason = str(web_instance.get("reason") or resolved_disabled_reason or "Mutating web controls are disabled for this web console instance.").strip()
-        if not resolved_source:
-            resolved_source = "web-lock"
-    config_contract = _build_config_contract(
-        repo_root,
-        cfg,
-        cfg_path,
-        cfg_source,
-        prompts_dir,
-        save_enabled=control_enabled,
-        save_endpoint="/api/config/save",
-        save_requires_opt_in=True,
-        restore_enabled=control_enabled,
-        restore_endpoint="/api/config/restore",
-        restore_requires_opt_in=True,
-    )
-    profile = _prompt_profile(cfg)
-    goals_completion_level = resolve_goals_completion_level(cfg.get("goals_completion_level"))
-    goals = _build_goals_payload(repo_root, completion_level=goals_completion_level)
-    prompt_items = _load_prompt_items(repo_root, prompts_dir, profile=profile)
-    branch = _branch_name(repo_root)
-    controller = runner_controller
-    if controller is None and runner_controller_auto_build:
-        controller = _build_runner_controller(repo_root, cfg, cfg_path)
-    controller_status = _controller_status_payload(controller)
-    latest_run_dir = _resolve_latest_run_dir(repo_root, controller_status, controller)
-    reconcile_cleanup_failed_artifacts(repo_root, latest_run_dir)
-    logs_events = _cycle_events(latest_run_dir)
-    progress = _build_progress_payload(
-        repo=repo_root,
-        run_dir=latest_run_dir,
-        config=cfg,
-        branch=branch,
-        controller_status=controller_status,
-        events=logs_events,
-    )
-    state = progress["state"] if isinstance(progress.get("state"), dict) else {"done": [], "failed": [], "warnings": []}
-    backlog = progress["backlog"] if isinstance(progress.get("backlog"), dict) else {"items": [], "counts": {}, "selected_id": ""}
-    run_summary = _safe_json(latest_run_dir / "run_summary.json", {}) if latest_run_dir else {}
-    last_run_summary = _safe_json(latest_run_dir / "last_run_summary.json", {}) if latest_run_dir else {}
-    log_entries = _load_log_entries(latest_run_dir)
-    metrics = _build_metrics_payload(latest_run_dir, progress, controller_status=controller_status)
-    active_run = _active_run_payload(
-        repo=repo_root,
-        run_dir=latest_run_dir,
-        config=cfg,
-        run_summary=run_summary,
-        last_run_summary=last_run_summary,
-        state=state,
-        backlog=backlog.get("items", []),
-        progress=progress,
-        metrics=metrics,
-        branch=branch,
-        controller_status=controller_status,
-    )
-    active_run_quota = active_run.get("quota") if isinstance(active_run.get("quota"), dict) else {}
-    metrics_quota = metrics.get("quota") if isinstance(metrics.get("quota"), dict) else {}
-    if bool(active_run_quota.get("available")) and metrics_quota != active_run_quota:
-        quota_window = str(active_run_quota.get("window") or "")
-        quota_used = active_run_quota.get("used")
-        metrics = dict(metrics)
-        metrics["quota"] = dict(active_run_quota)
-        metrics["quota_available"] = True
-        metrics["quotaAvailable"] = True
-        metrics["quota_window"] = quota_window
-        metrics["quotaWindow"] = quota_window
-        metrics["quota_used"] = quota_used
-        metrics["quotaUsed"] = quota_used
-    state_counts = progress.get("state_counts") if isinstance(progress.get("state_counts"), dict) else {
-        "done": 0,
-        "failed": 0,
-        "warnings": 0,
-    }
-    stages = _stage_payload(repo_root, active_run, progress, cfg, run_dir=latest_run_dir, run_summary=run_summary, last_run_summary=last_run_summary, controller_status=controller_status, events=logs_events)
-    history = _history_payload(
-        repo_root,
-        _run_dirs(repo_root),
-        branch=branch,
-        completion_level=resolve_goals_completion_level(cfg.get("goals_completion_level")),
-    )
-    notifications = _build_notifications(
-        run_id=active_run["id"],
-        started_at_ms=int(active_run.get("startedAt") or 0),
-        branch=active_run.get("branch") or branch,
-        active_status=str(progress.get("run_status") or "idle"),
-        state=state,
-        backlog=backlog.get("items", []),
-        events=logs_events,
-        final_reason=str(progress.get("final_reason") or ""),
-    )
-    worktree = _build_worktree_payload(repo_root, latest_run_dir, branch=branch)
-    pr_queue = _build_pr_queue_payload(repo_root, detail=False)
-    worktree_diagnostics = scan_worktree_diagnostics(repo_root)
-    log_tail = _tail_text((latest_run_dir / "cycle_summary.log") if latest_run_dir else Path(""), 80)
-    log_source_catalog = _log_tail_source_catalog(latest_run_dir)
-    log_files = {str(source.get("id") or "").strip(): str(source.get("path") or "") for source in log_source_catalog if str(source.get("id") or "").strip()}
-    if latest_run_dir:
-        log_files["metrics"] = (latest_run_dir / "metrics.jsonl").as_posix()
-    live_state = _build_live_state_payload(
-        controller_status,
-        progress=progress,
-        active_run=active_run,
-        controller_available=controller is not None,
-    )
-    runner_control = _runner_control_payload(
-        controller,
-        repo=repo_root,
-        enabled=control_enabled,
-        source=runner_controls_source or resolved_source,
-        disabled_reason=resolved_disabled_reason,
-        config_path=cfg_path.as_posix(),
-        current_run_dir=latest_run_dir.as_posix() if latest_run_dir else "",
-        last_action=runner_control_last_action,
-        last_message=runner_control_last_message,
-        last_error=runner_control_last_error,
-        live_state=live_state,
-        run_status=str(progress.get("run_status") or "idle"),
-        execution_status=str(progress.get("execution_status") or progress.get("executionStatus") or ""),
-        project_complete=bool(progress.get("project_complete", False)),
-        project_status=str(progress.get("project_status") or progress.get("projectStatus") or ""),
-        goals_complete=bool(progress.get("goals_complete", False)),
-        backlog_complete=bool(progress.get("backlog_complete", False)),
-        busy=bool(runner_control_busy),
-        cfg=cfg,
-        cfg_path=cfg_path,
-        redact_sensitive=redaction_active,
-        web_instance=web_instance,
-    )
-    goals = _web_apply_redaction(goals, active=redaction_active, redactor=_redact_web_goals_payload)
-    backlog = _web_apply_redaction(backlog, active=redaction_active, redactor=_redact_web_backlog_payload)
-    progress = dict(progress)
-    progress["goals"] = goals
-    progress["backlog"] = backlog
-    log_payload = _web_apply_redaction(
-        {"entries": log_entries, "tail": log_tail, "files": log_files},
-        active=redaction_active,
-        redactor=_redact_web_log_payload,
-    )
-    logs_redaction = log_payload.get("redaction") if isinstance(log_payload, dict) else {}
-    log_entries = list(log_payload.get("entries") or []) if isinstance(log_payload, dict) else list(log_entries)
-    log_tail = str(log_payload.get("tail") or "") if isinstance(log_payload, dict) else log_tail
-    log_files = dict(log_payload.get("files") or log_files) if isinstance(log_payload, dict) else log_files
-    stages = _web_apply_redaction(stages, active=redaction_active, redactor=_redact_web_stages_payload)
-    config_payload = _web_apply_redaction(
-        {
-            "path": cfg_path.as_posix(),
-            "source": cfg_source,
-            "data": _redact_config(cfg),
-            "resolved_prompts_dir": prompts_dir.as_posix(),
-            "meta": {
-                "path": cfg_path.as_posix(),
-                "source": cfg_source,
-                "resolved_prompts_dir": prompts_dir.as_posix(),
-            },
-        },
-        active=redaction_active,
-        redactor=_redact_web_config_payload,
-    )
-    config_contract = _web_apply_redaction(config_contract, active=redaction_active, redactor=_redact_web_config_contract)
-    prompt_payload = _web_apply_redaction({"dir": prompts_dir.as_posix(), "items": prompt_items}, active=redaction_active, redactor=_redact_web_prompts_payload)
-    prompts_redaction = prompt_payload.get("redaction") if isinstance(prompt_payload, dict) else {}
-    prompt_items = list(prompt_payload.get("items") or []) if isinstance(prompt_payload, dict) else list(prompt_items)
-    notifications = _web_apply_redaction(notifications, active=redaction_active, redactor=_redact_web_notifications_payload)
-    history = _web_apply_redaction(history, active=redaction_active, redactor=_redact_web_history_payload)
-    pr_queue = _web_apply_redaction(pr_queue, active=redaction_active, redactor=_redact_web_pr_queue_payload)
-    runner_control = _web_apply_redaction(runner_control, active=redaction_active, redactor=lambda value: _redact_web_runner_control(value, redact_start_options=True))
-    log_summary_payload: dict[str, Any] = {
-        "source": {
-            "id": "",
-            "label": "",
-            "path": "",
-            "name": "",
-            "exists": False,
-            "available": False,
-            "selected": False,
-            "kind": "log",
-            "unavailable_reason": "missing",
-        },
-        "source_id": "",
-        "selected_source_id": "",
-        "sources": log_source_catalog,
-        "cursor": 0,
-        "nextCursor": 0,
-        "state": "empty",
-        "ok": False,
-        "malformedLines": 0,
-    }
-    log_source_record = _resolve_log_tail_source_record(latest_run_dir)
-    log_source_path = Path(str(log_source_record.get("path") or "")) if log_source_record and str(log_source_record.get("path") or "").strip() else None
-    if log_source_path is not None:
-        try:
-            log_tail_source_payload = _build_log_tail_payload(
-                log_source_path,
-                source=log_source_record,
-                sources=log_source_catalog,
-                cursor=None,
-                max_lines=1,
-                live=str(progress.get("run_status") or "idle").strip().lower() == "running",
-            )
-            log_summary_payload = {
-                "source": log_tail_source_payload.get("source", {}),
-                "source_id": str(log_tail_source_payload.get("source_id") or ""),
-                "selected_source_id": str(log_tail_source_payload.get("selected_source_id") or ""),
-                "sources": list(log_tail_source_payload.get("sources") or log_source_catalog),
-                "cursor": int(log_tail_source_payload.get("next_cursor") or 0),
-                "nextCursor": int(log_tail_source_payload.get("next_cursor") or 0),
-                "state": str(log_tail_source_payload.get("state") or "empty"),
-                "ok": bool(log_tail_source_payload.get("ok", False)),
-                "malformedLines": int(log_tail_source_payload.get("malformed_lines") or 0),
-            }
-        except Exception:
-            log_summary_payload = {
-                "source": {
-                    "id": str(log_source_record.get("id") or "") if log_source_record else "",
-                    "label": str(log_source_record.get("label") or "") if log_source_record else "",
-                    "path": log_source_path.as_posix(),
-                    "name": log_source_path.name,
-                    "exists": False,
-                    "available": False,
-                    "selected": True,
-                    "kind": str(log_source_record.get("kind") or "log") if log_source_record else "log",
-                    "unavailable_reason": "read_error",
-                },
-                "source_id": str(log_source_record.get("id") or "") if log_source_record else "",
-                "selected_source_id": str(log_source_record.get("id") or "") if log_source_record else "",
-                "sources": list(log_source_catalog),
-                "cursor": 0,
-                "nextCursor": 0,
-                "state": "read_error",
-                "ok": False,
-                "malformedLines": 0,
-            }
-    log_summary_payload = _web_apply_redaction(log_summary_payload, active=redaction_active, redactor=_redact_web_log_payload)
-    if redaction_active:
-        progress["redaction"] = _web_redaction_meta("goals", "backlog")
-    else:
-        logs_redaction = {}
-        prompts_redaction = {}
-    active_run_empty = active_run["status"] == "idle" and not active_run.get("task") and not active_run.get("startedAt")
-    runner_control_status = runner_control.get("status") if isinstance(runner_control.get("status"), dict) else {}
-    runner_control_status_reason = str(runner_control_status.get("reason") or "").strip()
-    if runner_control.get("busy"):
-        runner_control_state = "busy"
-    elif web_instance_state_value == "duplicate":
-        runner_control_state = "duplicate"
-    elif runner_control.get("last_error") or runner_control_status_reason.startswith("status_error:") or not runner_control.get("controller_available"):
-        runner_control_state = "error"
-    elif not runner_control.get("enabled"):
-        runner_control_state = "disabled"
-    elif runner_control.get("last_message"):
-        runner_control_state = "success"
-    else:
-        runner_control_state = "ready"
-    goals_summary = goals.get("summary") if isinstance(goals.get("summary"), dict) else {}
-    goals_total = int(goals_summary.get("total") or 0)
-    if not goals_total:
-        goals_items = goals.get("items") if isinstance(goals.get("items"), dict) else {}
-        goals_total = sum(len(items) for items in goals_items.values()) if isinstance(goals_items, dict) else 0
-    has_metrics = bool(
-        metrics.get("tokens24h")
-        or metrics.get("success24h")
-        or metrics.get("budget")
-        or metrics.get("last_stage")
-        or metrics.get("quota_used") is not None
-        or metrics.get("budget_used") is not None
-        or metrics.get("tokens_available")
-        or metrics.get("budget_available")
-        or metrics.get("quota_available")
-    )
-    active_run_section_state = buildSectionState("activeRun", "empty" if active_run_empty else "ready", fallbackSectionMessage("activeRun") if active_run_empty else "")
-    stages_section_state = buildSectionState(
-        "stages",
-        "ready" if len(stages) >= 3 else ("partial" if stages else "empty"),
-        "" if len(stages) >= 3 else ("Only some lifecycle records were published." if stages else fallbackSectionMessage("stages")),
-    )
-    backlog_section_state = buildSectionState("backlog", "ready" if backlog.get("items") else "empty", "" if backlog.get("items") else fallbackSectionMessage("backlog"))
-    goals_section_state = buildSectionState("goals", "ready" if goals_total else "empty", "" if goals_total else fallbackSectionMessage("goals"))
-    config_section_state = buildSectionState("config", "ready" if config_contract.get("schema") else "empty", "")
-    prompts_section_state = buildSectionState("prompts", "ready" if prompt_items else "empty", "" if prompt_items else fallbackSectionMessage("prompts"))
-    logs_section_state = buildSectionState("logs", "ready" if log_entries else "empty", "" if log_entries else fallbackSectionMessage("logs"))
-    notifications_section_state = buildSectionState("notifications", "ready" if notifications else "empty", "" if notifications else fallbackSectionMessage("notifications"))
-    metrics_section_state = buildSectionState("metrics", "ready" if has_metrics else "empty", "" if has_metrics else fallbackSectionMessage("metrics"))
-    history_section_state = buildSectionState("history", "ready" if history.get("items") else "empty", "" if history.get("items") else fallbackSectionMessage("history"))
-    pr_queue_items = pr_queue.get("items") if isinstance(pr_queue.get("items"), list) else []
-    pr_queue_section_state = buildSectionState("prQueue", "ready" if pr_queue_items else "empty", "" if pr_queue_items else fallbackSectionMessage("prQueue"))
-    worktree_status = str(worktree.get("status") or "none").strip()
-    if worktree_status == "none":
-        worktree_section_status = "empty"
-    elif worktree_status == "error":
-        worktree_section_status = "error"
-    elif worktree_status in {"applied", "discarded"}:
-        worktree_section_status = "ready"
-    else:
-        worktree_section_status = "partial"
-    worktree_section_message = (
-        worktree.get("reviewRequiredMessage")
-        or worktree.get("cleanupMessage")
-        or worktree.get("summary")
-        or (fallbackSectionMessage("worktree") if worktree_status == "none" else "")
-    )
-    worktree_section_state = buildSectionState("worktree", worktree_section_status, worktree_section_message)
-    runner_control_section_state = buildSectionState(
-        "runnerControl",
-        runner_control_state,
-        runner_control.get("message") or fallbackSectionMessage("runnerControl"),
-    )
-    live_run = _live_run_payload(
-        repo=repo_root,
-        branch=branch,
-        latest_run_dir=latest_run_dir,
-        active_run=active_run,
-        progress=progress,
-        stages=stages,
-        logs={
-            "entries": log_entries,
-            "tail": log_tail,
-            "files": log_files,
-            "source": log_summary_payload.get("source", {}),
-            "source_id": log_summary_payload.get("source_id", ""),
-            "selected_source_id": log_summary_payload.get("selected_source_id", ""),
-            "sources": log_summary_payload.get("sources", []),
-            "cursor": log_summary_payload.get("cursor", 0),
-            "nextCursor": log_summary_payload.get("nextCursor", 0),
-            "state": log_summary_payload.get("state", "empty"),
-            "ok": log_summary_payload.get("ok", False),
-            "malformedLines": log_summary_payload.get("malformedLines", 0),
-        },
-        notifications=notifications,
-        runner_control=runner_control,
-        live_state=live_state,
-        controller_status=controller_status,
-    )
-    live_identity = live_run.get("identity") if isinstance(live_run.get("identity"), dict) else {}
-    if isinstance(live_identity, dict):
-        live_identity["webInstanceState"] = web_instance_state_value
-        live_identity["web_instance_state"] = web_instance_state_value
-        live_identity["webInstanceMode"] = web_instance_mode
-        live_identity["web_instance_mode"] = web_instance_mode
-        live_identity["webInstanceReadOnly"] = bool(web_instance_mode == "read_only")
-        live_identity["web_instance_read_only"] = bool(web_instance_mode == "read_only")
-        live_identity["webInstanceDuplicate"] = bool(web_instance_state_value == "duplicate")
-        live_identity["web_instance_duplicate"] = bool(web_instance_state_value == "duplicate")
-        live_identity["webInstance"] = dict(web_instance)
-        live_identity["web_instance"] = dict(web_instance)
-
-    return {
-        "ok": True,
-        "repo": {
-            "path": repo_root.as_posix(),
-            "name": repo_root.name or repo_root.as_posix().rsplit("/", 1)[-1],
-            "head": _git_head_short(repo_root),
-            "branch": branch or "HEAD",
-        },
-        "latest_run_dir": latest_run_dir.as_posix() if latest_run_dir else None,
-        "active_run": active_run,
-        "stages": stages,
-        "backlog": backlog,
-        "goals": goals,
-        "logs": {
-            "entries": log_entries,
-            "tail": log_tail,
-            "files": log_files,
-            "source": log_summary_payload.get("source", {}),
-            "source_id": log_summary_payload.get("source_id", ""),
-            "selected_source_id": log_summary_payload.get("selected_source_id", ""),
-            "sources": log_summary_payload.get("sources", []),
-            "redaction": logs_redaction,
-        },
-        "config": config_payload,
-        "config_contract": config_contract,
-        "prompts": {
-            "dir": prompt_payload.get("dir", prompts_dir.as_posix()) if isinstance(prompt_payload, dict) else prompts_dir.as_posix(),
-            "exists": prompts_dir.exists(),
-            "items": prompt_items,
-            "redaction": prompts_redaction,
-        },
-        "history": history,
-        "metrics": metrics,
-        "notifications": notifications,
-        "pr_queue": pr_queue,
-        "prQueue": pr_queue,
-        "worktree": worktree,
-        "worktree_diagnostics": worktree_diagnostics,
-        "runner_control": runner_control,
-        "web_instance": web_instance,
-        "webInstance": web_instance,
-        "liveRun": live_run,
-        "redaction": {
-            "active": redaction_active,
-            "placeholder": REDACTED_VALUE,
-            "scope": "lan" if redaction_active else "local",
-        },
-        "progress": {
-            "latest_run_dir": latest_run_dir.as_posix() if latest_run_dir else None,
-            "run_status": progress.get("run_status"),
-            "tasks_done": progress.get("tasks_done", 0),
-            "tasks_total": progress.get("tasks_total", 0),
-            "tasks_failed": progress.get("tasks_failed", 0),
-            "state_counts": state_counts,
-            "stateCounts": state_counts,
-            "progress": progress.get("progress"),
-            "progress_available": progress.get("progress_available", False),
-            "current_task_id": progress.get("current_task_id", ""),
-            "current_task_title": progress.get("current_task_title", ""),
-            "attempt": progress.get("attempt"),
-            "worktree_mode": progress.get("worktree_mode", ""),
-            "execution_status": progress.get("execution_status", ""),
-            "executionStatus": progress.get("executionStatus", progress.get("execution_status", "")),
-            "completion_status": progress.get("completion_status", ""),
-            "completionStatus": progress.get("completionStatus", progress.get("completion_status", "")),
-            "completion_reason": progress.get("completion_reason", ""),
-            "completionReason": progress.get("completionReason", progress.get("completion_reason", "")),
-            "project_complete": bool(progress.get("project_complete", False)),
-            "projectComplete": bool(progress.get("projectComplete", progress.get("project_complete", False))),
-            "project_status": progress.get("project_status", ""),
-            "projectStatus": progress.get("projectStatus", progress.get("project_status", "")),
-            "goals_complete": bool(progress.get("goals_complete", False)),
-            "goalsComplete": bool(progress.get("goalsComplete", progress.get("goals_complete", False))),
-            "backlog_complete": bool(progress.get("backlog_complete", False)),
-            "backlogComplete": bool(progress.get("backlogComplete", progress.get("backlog_complete", False))),
-            "goals": progress.get("goals", {}),
-            "backlog": backlog,
-            "final_reason": progress.get("final_reason", ""),
-            "final_rc": progress.get("final_rc"),
-            "state": state,
-        },
-        "execution_status": progress.get("execution_status", ""),
-        "executionStatus": progress.get("executionStatus", progress.get("execution_status", "")),
-        "project_complete": bool(progress.get("project_complete", False)),
-        "projectComplete": bool(progress.get("projectComplete", progress.get("project_complete", False))),
-        "project_status": progress.get("project_status", ""),
-        "projectStatus": progress.get("projectStatus", progress.get("project_status", "")),
-        "goals_complete": bool(progress.get("goals_complete", False)),
-        "goalsComplete": bool(progress.get("goalsComplete", progress.get("goals_complete", False))),
-        "backlog_complete": bool(progress.get("backlog_complete", False)),
-        "backlogComplete": bool(progress.get("backlogComplete", progress.get("backlog_complete", False))),
-        "sectionState": {
-            "activeRun": active_run_section_state,
-            "stages": stages_section_state,
-            "backlog": backlog_section_state,
-            "goals": goals_section_state,
-            "config": config_section_state,
-            "prompts": prompts_section_state,
-            "logs": logs_section_state,
-            "notifications": notifications_section_state,
-            "metrics": metrics_section_state,
-            "history": history_section_state,
-            "prQueue": pr_queue_section_state,
-            "worktree": worktree_section_state,
-            "runnerControl": runner_control_section_state,
-        },
-        "run_summary": run_summary,
-        "last_run_summary": last_run_summary,
-    }
 
 
 def build_health(repo: Path | str | None = None) -> dict[str, Any]:
@@ -9976,83 +6906,33 @@ def create_app(
             )
             if not requested_backup_path:
                 return _config_restore_error(400, "config_backup_path_required", "A backup path is required.", field="backup_path")
-            if not confirmation:
+            restore_result, restore_error = _config_restore_backup(
+                cfg_path,
+                requested_backup_path,
+                confirmation,
+                confirmation_phrase=CONFIG_RESTORE_CONFIRMATION_PHRASE,
+            )
+            if restore_error is not None or restore_result is None:
+                if restore_error is None:
+                    return _config_restore_error(500, "config_restore_failed", "Config restore failed.")
                 return _config_restore_error(
-                    400,
-                    "config_restore_confirmation_required",
-                    "A restore confirmation phrase is required.",
-                    field="confirm",
-                    confirmation_phrase=CONFIG_RESTORE_CONFIRMATION_PHRASE,
-                )
-            if confirmation != CONFIG_RESTORE_CONFIRMATION_PHRASE:
-                return _config_restore_error(
-                    400,
-                    "config_restore_confirmation_mismatch",
-                    "The restore confirmation phrase did not match.",
-                    field="confirm",
-                    confirmation_phrase=CONFIG_RESTORE_CONFIRMATION_PHRASE,
-                )
-
-            backups = _config_backup_candidates(cfg_path)
-            restored_from, error = _config_resolve_backup_selection(cfg_path, requested_backup_path, backups=backups)
-            if error is not None or restored_from is None:
-                return error if error is not None else _config_restore_error(404, "config_backup_not_found", "The selected backup file is not available for this config path.")
-            restored_from_path = restored_from.as_posix()
-
-            try:
-                current_raw = load_config(cfg_path)
-            except Exception as ex:
-                return _config_restore_error(
-                    400,
-                    "config_read_error",
-                    "Existing config file could not be read.",
-                    path=cfg_path.as_posix(),
-                    error=str(ex).strip() or ex.__class__.__name__,
-                )
-            if not isinstance(current_raw, dict):
-                return _config_restore_error(400, "config_read_error", "Existing config file could not be read.", path=cfg_path.as_posix())
-
-            try:
-                restored_raw = load_config(restored_from)
-            except Exception as ex:
-                return _config_restore_error(
-                    400,
-                    "config_backup_invalid_json",
-                    "The selected backup file could not be parsed as JSON.",
-                    path=restored_from_path,
-                    error=str(ex).strip() or ex.__class__.__name__,
-                )
-            if not isinstance(restored_raw, dict):
-                return _config_restore_error(400, "config_backup_invalid_json", "The selected backup file could not be parsed as JSON.", path=restored_from_path)
-
-            backup_path = _config_save_backup_path(cfg_path)
-            backup_path.parent.mkdir(parents=True, exist_ok=True)
-            if cfg_path.exists():
-                shutil.copy2(cfg_path, backup_path)
-            else:
-                atomic_write_json(backup_path, current_raw)
-
-            atomic_write_json(cfg_path, restored_raw)
-            post_restore_raw = load_config(cfg_path)
-            if not isinstance(post_restore_raw, dict) or post_restore_raw != restored_raw:
-                return _config_restore_error(
-                    500,
-                    "config_restore_validation_failed",
-                    "Config restore could not be validated after writing.",
-                    path=cfg_path.as_posix(),
-                    restored_from_path=restored_from_path,
-                    backup_path=backup_path.as_posix(),
+                    restore_error.status_code,
+                    restore_error.code,
+                    restore_error.message,
+                    **restore_error.details,
                 )
 
-            cfg = restored_raw
+            backup_path = restore_result.backup_path
+            restored_from_path = restore_result.restored_from.as_posix()
+            cfg = restore_result.restored_raw
             if controller is not None and hasattr(controller, "base_args"):
                 try:
-                    controller.base_args = _build_runner_base_args(repo_root, restored_raw, cfg_path)
+                    controller.base_args = _build_runner_base_args(repo_root, cfg, cfg_path)
                 except Exception:
                     pass
                 try:
                     if hasattr(controller, "runner_mode"):
-                        controller.runner_mode = _runner_mode_from_config(restored_raw)
+                        controller.runner_mode = _runner_mode_from_config(cfg)
                 except Exception:
                     pass
 
@@ -10115,15 +6995,6 @@ def create_app(
             raw_changes = body.get("changes")
             if raw_changes is None:
                 raw_changes = body.get("diffs")
-            if isinstance(raw_changes, dict):
-                raw_changes = [{"path": key, "value": value} for key, value in raw_changes.items()]
-            if not isinstance(raw_changes, list):
-                return _config_save_error(
-                    400,
-                    "config_changes_required",
-                    "Config save request must include a changes array.",
-                    field="changes",
-                )
 
             snapshot = _snapshot(busy_override=False)
             config_contract = snapshot.get("config_contract") if isinstance(snapshot.get("config_contract"), dict) else {}
@@ -10133,143 +7004,34 @@ def create_app(
                 for path in (config_contract.get("restart_required_paths") or [])
                 if str(path).strip()
             }
-
-            try:
-                current_raw = load_config(cfg_path)
-            except Exception as ex:
+            save_result, save_error = _config_save_changes(
+                cfg_path,
+                raw_changes,
+                schema=schema,
+                restart_required_paths=restart_required_paths,
+            )
+            if save_error is not None or save_result is None:
+                if save_error is None:
+                    return _config_save_error(500, "config_save_failed", "Config save failed.")
                 return _config_save_error(
-                    400,
-                    "config_read_error",
-                    "Existing config file could not be read.",
-                    path=cfg_path.as_posix(),
-                    error=str(ex).strip() or ex.__class__.__name__,
-                )
-            if not isinstance(current_raw, dict):
-                return _config_save_error(400, "config_read_error", "Existing config file could not be read.", path=cfg_path.as_posix())
-
-            updated_raw = deepcopy(current_raw)
-            changed_paths: list[str] = []
-            reload_required_paths: list[str] = []
-            validation_errors: list[dict[str, Any]] = []
-
-            for index, entry in enumerate(raw_changes):
-                if not isinstance(entry, dict):
-                    validation_errors.append(
-                        {
-                            "field": "changes",
-                            "code": "config_change_invalid",
-                            "message": "Each config change must be an object.",
-                            "details": {"index": index},
-                        }
-                    )
-                    continue
-                path = str(entry.get("path") or entry.get("field") or entry.get("name") or "").strip()
-                if not path:
-                    validation_errors.append(
-                        {
-                            "field": "changes",
-                            "code": "config_path_required",
-                            "message": "Each config change must include a path.",
-                            "details": {"index": index},
-                        }
-                    )
-                    continue
-                field_schema = schema.get(path)
-                if not isinstance(field_schema, dict):
-                    validation_errors.append(
-                        {
-                            "field": path,
-                            "code": "config_unknown_path",
-                            "message": "Config field is not part of the save schema.",
-                            "details": {"path": path},
-                        }
-                    )
-                    continue
-                if not bool(field_schema.get("editable", True)):
-                    validation_errors.append(
-                        {
-                            "field": path,
-                            "code": "config_field_not_editable",
-                            "message": "Config field cannot be edited.",
-                            "details": {"path": path},
-                        }
-                    )
-                    continue
-
-                raw_value = entry.get("value")
-                if "value" not in entry and "to" in entry:
-                    raw_value = entry.get("to")
-                if "value" not in entry and "to" not in entry and "next" in entry:
-                    raw_value = entry.get("next")
-
-                current_value = _config_path_get(current_raw, path)
-                normalized_value, error_code, error_details = _config_save_validate_change(path, raw_value, field_schema, current_value)
-                if error_code:
-                    validation_errors.append(
-                        {
-                            "field": path,
-                            "code": error_code,
-                            "message": "Config save payload is not valid for this field.",
-                            "details": error_details,
-                        }
-                    )
-                    continue
-                if normalized_value == current_value:
-                    continue
-                _config_path_set(updated_raw, path, normalized_value)
-                changed_paths.append(path)
-                if path in restart_required_paths or bool(field_schema.get("restart", False)):
-                    reload_required_paths.append(path)
-
-            if validation_errors:
-                validation_payload = {
-                    "error_count": len(validation_errors),
-                    "errors": validation_errors,
-                }
-                if len(validation_errors) == 1:
-                    first_error = validation_errors[0]
-                    details = dict(first_error.get("details") or {})
-                    details["field"] = first_error.get("field")
-                    details["validation"] = validation_payload
-                    return _config_save_error(
-                        400,
-                        str(first_error.get("code") or "config_validation_failed"),
-                        str(first_error.get("message") or "Config save payload is not valid for this field."),
-                        **details,
-                    )
-                return _config_save_error(
-                    400,
-                    "config_validation_failed",
-                    "One or more config changes were rejected.",
-                    validation=validation_payload,
+                    save_error.status_code,
+                    save_error.code,
+                    save_error.message,
+                    **save_error.details,
                 )
 
-            changed_paths = list(dict.fromkeys(changed_paths))
-            reload_required_paths = list(dict.fromkeys(reload_required_paths))
-            if not changed_paths:
-                return _config_save_error(400, "config_no_changes", "No config changes were supplied.")
-
-            # Session-only run selection intent should never persist in config.
-            updated_raw.pop("run_dir", None)
-            updated_raw.pop("resume_latest", None)
-
-            backup_path = _config_save_backup_path(cfg_path)
-            backup_path.parent.mkdir(parents=True, exist_ok=True)
-            if cfg_path.exists():
-                shutil.copy2(cfg_path, backup_path)
-            else:
-                atomic_write_json(backup_path, current_raw)
-
-            atomic_write_json(cfg_path, updated_raw)
-            cfg = updated_raw
+            backup_path = save_result.backup_path
+            cfg = save_result.updated_raw
+            changed_paths = save_result.changed_paths
+            reload_required_paths = save_result.reload_required_paths
             if controller is not None and hasattr(controller, "base_args"):
                 try:
-                    controller.base_args = _build_runner_base_args(repo_root, updated_raw, cfg_path)
+                    controller.base_args = _build_runner_base_args(repo_root, cfg, cfg_path)
                 except Exception:
                     pass
                 try:
                     if hasattr(controller, "runner_mode"):
-                        controller.runner_mode = _runner_mode_from_config(updated_raw)
+                        controller.runner_mode = _runner_mode_from_config(cfg)
                 except Exception:
                     pass
 
@@ -10329,72 +7091,14 @@ def create_app(
     def _prompt_action_body(request: Request) -> dict[str, Any] | None:
         return _config_save_body(request)
 
-    def _resolve_prompt_target(
-        prompt_dir: Path,
-        prompt_id: str,
-        prompt_file: str,
-    ) -> tuple[dict[str, str] | None, Path | None, JSONResponse | None]:
-        spec = _prompt_spec_map().get(prompt_id)
-        if spec is None:
-            return None, None, _prompt_error(404, "prompt_not_found", "The requested prompt id was not found.", id=prompt_id)
-
-        expected_rel = Path(spec["file"]).as_posix()
-        requested_file = str(prompt_file or "").strip()
-        candidate = Path(requested_file.replace("\\", "/")).expanduser()
-        resolved = candidate.resolve() if candidate.is_absolute() else (prompt_dir / candidate).resolve()
-
-        try:
-            resolved.relative_to(prompt_dir)
-        except Exception:
-            return (
-                spec,
-                None,
-                _prompt_error(
-                    400,
-                    "prompt_path_outside_prompts_dir",
-                    "Prompt file must stay within the resolved prompts directory.",
-                    path=resolved.as_posix(),
-                    prompts_dir=prompt_dir.as_posix(),
-                ),
-            )
-
-        resolved_rel = resolved.relative_to(prompt_dir).as_posix()
-        if resolved_rel != expected_rel:
-            return (
-                spec,
-                None,
-                _prompt_error(
-                    400,
-                    "prompt_file_mismatch",
-                    "The requested prompt file does not match the prompt id.",
-                    expected=expected_rel,
-                    actual=resolved_rel,
-                ),
-            )
-
-        if not _prompt_file_name_is_bare(requested_file):
-            return (
-                spec,
-                None,
-                _prompt_error(
-                    400,
-                    "prompt_file_invalid",
-                    "Prompt file must be a bare filename within the resolved prompts directory.",
-                    file=requested_file,
-                    expected=expected_rel,
-                ),
-            )
-
-        return spec, resolved, None
-
-    def _prompt_target_payload(
-        spec: dict[str, str],
-        prompt_dir: Path,
-        *,
-        profile: str,
-        repo_root: Path,
-    ) -> dict[str, Any]:
-        return _prompt_read_payload(spec, prompt_dir, repo_root, profile=profile)
+    def _prompt_error_from_payload(error: dict[str, Any], *, action: str | None = None) -> JSONResponse:
+        status_code = int(error.get("status_code") or 500)
+        code = str(error.get("code") or "prompt_error")
+        message = str(error.get("message") or "Prompt request failed.")
+        details = error.get("details") if isinstance(error.get("details"), dict) else {}
+        if action:
+            return _prompt_action_error(status_code, action, code, message, **details)
+        return _prompt_error(status_code, code, message, **details)
 
     def _config_save_error(status_code: int, code: str, message: str, **details: Any) -> JSONResponse:
         payload: dict[str, Any] = {
@@ -10450,9 +7154,9 @@ def create_app(
             return _prompt_error(400, "prompt_id_required", "A prompt id is required.", field="id")
         if not prompt_file:
             return _prompt_error(400, "prompt_file_required", "A prompt file path is required.", field="file")
-        spec, _, error = _resolve_prompt_target(prompt_dir, prompt_id, prompt_file)
+        spec, _, error = resolve_prompt_target(prompt_dir, prompt_id, prompt_file)
         if error is not None:
-            return error
+            return _prompt_error_from_payload(error)
         return _prompt_read_payload(spec, prompt_dir, repo_root, profile=profile)
 
     @app.post("/api/prompts/save")
@@ -10476,7 +7180,6 @@ def create_app(
         if not control_lock.acquire(blocking=False):
             return _prompt_action_error(409, "prompt-save", "prompt_save_busy", "A prompt mutation is already in flight.")
 
-        backup_path: Path | None = None
         try:
             prompt_dir = resolve_prompts_dir(repo_root, str(cfg.get("prompts_dir") or ""))
             if not prompt_dir:
@@ -10499,56 +7202,17 @@ def create_app(
             if not prompt_file:
                 return _prompt_action_error(400, "prompt-save", "prompt_file_required", "A prompt file path is required.", field="file")
 
-            spec, prompt_path, error = _resolve_prompt_target(prompt_dir, prompt_id, prompt_file)
-            if error is not None or spec is None or prompt_path is None:
-                return error if error is not None else _prompt_action_error(404, "prompt-save", "prompt_not_found", "The requested prompt id was not found.", id=prompt_id)
-
-            if not isinstance(content, str):
-                content = str(content)
-
-            required_variables = _prompt_variables(_prompt_default_text(repo_root, spec))
-            validation = _prompt_validation_payload(
-                file_name=str(prompt_file).strip(),
-                expected_file=spec["file"],
+            response_payload, error = save_prompt(
+                repo_root=repo_root,
+                prompt_dir=prompt_dir,
+                profile=profile,
+                prompt_id=prompt_id,
+                prompt_file=prompt_file,
                 content=content,
-                required_variables=required_variables,
             )
-            if not validation["ok"]:
-                first_error = validation["errors"][0] if validation["errors"] else {"code": "prompt_validation_failed", "message": "Prompt validation failed."}
-                return _prompt_action_error(
-                    400,
-                    "prompt-save",
-                    str(first_error.get("code") or "prompt_validation_failed"),
-                    str(first_error.get("message") or "Prompt validation failed."),
-                    path=prompt_path.as_posix(),
-                    validation=validation,
-                )
-
-            current_content, current_exists = _read_prompt_text(prompt_path, _prompt_default_text(repo_root, spec))
-            backup_path = _prompt_backup_path(prompt_path)
-            backup_path.parent.mkdir(parents=True, exist_ok=True)
-            if current_exists:
-                shutil.copy2(prompt_path, backup_path)
-            else:
-                atomic_write_text(backup_path, current_content)
-
-            atomic_write_text(prompt_path, content)
-            saved_prompt = _prompt_target_payload(spec, prompt_dir, profile=profile, repo_root=repo_root)
-            response_payload: dict[str, Any] = {
-                "ok": True,
-                "action": "prompt-save",
-                "status": "saved",
-                "message": f"Prompt saved. Backup written to {backup_path.as_posix()}.",
-                "prompt": saved_prompt,
-                "backup_path": backup_path.as_posix(),
-                "saved_path": prompt_path.as_posix(),
-            }
+            if error is not None:
+                return _prompt_error_from_payload(error, action="prompt-save")
             return JSONResponse(status_code=200, content=response_payload)
-        except Exception as ex:
-            details: dict[str, Any] = {"path": ""}
-            if backup_path is not None:
-                details["backup_path"] = backup_path.as_posix()
-            return _prompt_action_error(500, "prompt-save", "prompt_save_failed", f"Prompt save failed: {ex}", **details)
         finally:
             control_lock.release()
 
@@ -10573,7 +7237,6 @@ def create_app(
         if not control_lock.acquire(blocking=False):
             return _prompt_action_error(409, "prompt-restore", "prompt_restore_busy", "A prompt mutation is already in flight.")
 
-        backup_path: Path | None = None
         try:
             prompt_dir = resolve_prompts_dir(repo_root, str(cfg.get("prompts_dir") or ""))
             if not prompt_dir:
@@ -10603,87 +7266,18 @@ def create_app(
             if not restore_path_value:
                 return _prompt_action_error(400, "prompt-restore", "prompt_backup_path_required", "A backup path is required.", field="backup_path")
 
-            spec, prompt_path, error = _resolve_prompt_target(prompt_dir, prompt_id, prompt_file)
-            if error is not None or spec is None or prompt_path is None:
-                return error if error is not None else _prompt_action_error(404, "prompt-restore", "prompt_not_found", "The requested prompt id was not found.", id=prompt_id)
-
-            expected_confirmation = "RESTORE BACKUP"
-            if not confirmation:
-                return _prompt_action_error(
-                    400,
-                    "prompt-restore",
-                    "prompt_restore_confirmation_required",
-                    "A restore confirmation phrase is required.",
-                    expected=expected_confirmation,
-                )
-            if confirmation != expected_confirmation:
-                return _prompt_action_error(
-                    400,
-                    "prompt-restore",
-                    "prompt_restore_confirmation_mismatch",
-                    "The restore confirmation phrase did not match.",
-                    expected=expected_confirmation,
-                )
-
-            candidate = Path(str(restore_path_value).strip().replace("\\", "/")).expanduser()
-            restored_from = candidate.resolve() if candidate.is_absolute() else (prompt_dir / candidate).resolve()
-            try:
-                restored_from.relative_to(prompt_dir)
-            except Exception:
-                return _prompt_action_error(
-                    400,
-                    "prompt-restore",
-                    "prompt_backup_path_outside_prompts_dir",
-                    "Backup path must stay within the resolved prompts directory.",
-                    path=restored_from.as_posix(),
-                    prompts_dir=prompt_dir.as_posix(),
-                )
-
-            if not restored_from.exists() or not restored_from.is_file():
-                return _prompt_action_error(
-                    404,
-                    "prompt-restore",
-                    "prompt_backup_not_found",
-                    "The selected backup file was not found.",
-                    path=restored_from.as_posix(),
-                )
-
-            backup_pattern = f"{prompt_path.stem}.*.bak{prompt_path.suffix}"
-            if restored_from.parent != prompt_path.parent or not restored_from.name.startswith(f"{prompt_path.stem}.") or not restored_from.name.endswith(f".bak{prompt_path.suffix}") or restored_from.name not in {path.name for path in prompt_path.parent.glob(backup_pattern)}:
-                return _prompt_action_error(
-                    400,
-                    "prompt_backup_not_found",
-                    "The selected backup file is not available for this prompt.",
-                    path=restored_from.as_posix(),
-                )
-
-            current_content, current_exists = _read_prompt_text(prompt_path, _prompt_default_text(repo_root, spec))
-            backup_path = _prompt_backup_path(prompt_path)
-            backup_path.parent.mkdir(parents=True, exist_ok=True)
-            if current_exists:
-                shutil.copy2(prompt_path, backup_path)
-            else:
-                atomic_write_text(backup_path, current_content)
-
-            restore_text = _read_text_robust(restored_from)
-            atomic_write_text(prompt_path, restore_text)
-            restored_prompt = _prompt_target_payload(spec, prompt_dir, profile=profile, repo_root=repo_root)
-            response_payload: dict[str, Any] = {
-                "ok": True,
-                "action": "prompt-restore",
-                "status": "restored",
-                "message": f"Prompt restored from {restored_from.as_posix()}. Backup written to {backup_path.as_posix()}.",
-                "prompt": restored_prompt,
-                "backup_path": backup_path.as_posix(),
-                "restored_from_path": restored_from.as_posix(),
-                "saved_path": prompt_path.as_posix(),
-            }
+            response_payload, error = restore_prompt(
+                repo_root=repo_root,
+                prompt_dir=prompt_dir,
+                profile=profile,
+                prompt_id=prompt_id,
+                prompt_file=prompt_file,
+                restore_path_value=restore_path_value,
+                confirmation=confirmation,
+            )
+            if error is not None:
+                return _prompt_error_from_payload(error, action="prompt-restore")
             return JSONResponse(status_code=200, content=response_payload)
-        except Exception as ex:
-            details: dict[str, Any] = {"path": ""}
-            if backup_path is not None:
-                details["backup_path"] = backup_path.as_posix()
-            return _prompt_action_error(500, "prompt-restore", "prompt_restore_failed", f"Prompt restore failed: {ex}", **details)
         finally:
             control_lock.release()
 
@@ -10694,7 +7288,7 @@ def create_app(
     @app.post("/api/goals/save")
     async def api_goals_save(request: Request) -> Any:
         goal_path = goals_path(repo_root)
-        backup_path: Path | None = None
+        plan: GoalSavePlan | None = None
         if not controls_enabled:
             if lan_safety_active:
                 return _goal_save_error(
@@ -10712,126 +7306,19 @@ def create_app(
             return _goal_save_error(409, "goals_save_busy", "A goal save is already in flight.")
 
         try:
-            if goal_path.exists() and not goal_path.is_file():
-                return _goal_save_error(400, "goals_path_not_file", "GOALS.md path must reference a file.", path=goal_path.as_posix())
-
             body = await _goal_save_body(request)
             if body is None:
                 return _goal_save_error(400, "invalid_json", "Goals save request body must be JSON.")
 
-            raw_draft = body.get("draft")
-            if raw_draft is None:
-                raw_draft = body.get("goals")
-            raw_text_value = body.get("raw_text")
-            if raw_text_value is None:
-                raw_text_value = body.get("text")
-            if raw_text_value is None:
-                raw_text_value = body.get("content")
-
-            next_items: dict[str, list[dict[str, Any]]] | None = None
-            next_text = ""
-            use_line_numbers = False
-            if isinstance(raw_draft, dict):
-                next_items = _goal_save_normalize_draft(raw_draft)
-                next_text = _goal_save_serialize_draft(next_items)
-                use_line_numbers = True
-            elif raw_text_value is not None:
-                if not isinstance(raw_text_value, str):
-                    return _goal_save_error(400, "goals_raw_text_invalid", "Goals save raw text must be a string.", field="raw_text")
-                next_text = raw_text_value
-                next_items = _goal_items(next_text)
-            else:
-                return _goal_save_error(400, "goals_input_required", "Goals save request must include draft or raw_text.", field="draft")
-
-            next_items = _goal_save_normalize_draft(next_items)
-            if not _goal_save_has_required_sections(next_text):
-                return _goal_save_error(400, "goals_sections_required", "GOALS.md must include both ## P0 and ## P1 sections.", path=goal_path.as_posix())
-
-            blank_item = next(
-                (
-                    {
-                        "bucket": bucket,
-                        "line_number": int(item.get("line_number") or item.get("lineNumber") or item.get("line") or 0),
-                    }
-                    for bucket in ("p0", "p1")
-                    for item in next_items.get(bucket, [])
-                    if not str(item.get("text") or "").strip()
-                ),
-                None,
-            )
-            if blank_item is not None:
-                return _goal_save_error(
-                    400,
-                    "goals_item_text_required",
-                    "Goal text cannot be empty.",
-                    path=goal_path.as_posix(),
-                    bucket=blank_item["bucket"],
-                    line_number=blank_item["line_number"],
-                )
-
-            current_path, current_raw = read_goals(repo_root)
-            if current_path is not None and current_raw is None:
-                return _goal_save_error(400, "goals_read_error", "Existing GOALS.md could not be read.", path=goal_path.as_posix())
-
-            current_text = current_raw or ""
-            current_items = _goal_save_normalize_draft(_goal_items(current_text))
-            risk_report = _goal_save_risk_report(current_items, next_items, use_line_numbers=use_line_numbers)
-
-            confirm_raw = body.get("confirm")
-            if confirm_raw is None:
-                confirm_raw = body.get("confirmation")
-            if confirm_raw is None:
-                confirm_raw = body.get("confirmation_phrase")
-            confirmation = str(confirm_raw).strip() if confirm_raw is not None else ""
-            if risk_report["requires_confirmation"]:
-                if not confirmation:
-                    return _goal_save_error(
-                        400,
-                        "goals_confirmation_required",
-                        "Deleting or downgrading unmet P0 goals requires the exact confirmation phrase.",
-                        path=goal_path.as_posix(),
-                        confirmation_phrase=risk_report["confirmation_phrase"],
-                        risk=risk_report,
-                    )
-                if confirmation != risk_report["confirmation_phrase"]:
-                    return _goal_save_error(
-                        400,
-                        "goals_confirmation_mismatch",
-                        "The goals confirmation phrase did not match.",
-                        path=goal_path.as_posix(),
-                        confirmation_phrase=risk_report["confirmation_phrase"],
-                        risk=risk_report,
-                    )
-
-            if next_text == current_text:
-                return _goal_save_error(400, "goals_no_changes", "No goal changes were supplied.", path=goal_path.as_posix())
-
-            backup_path = _goal_save_backup_path(goal_path)
-            backup_path.parent.mkdir(parents=True, exist_ok=True)
-            if current_path is not None and goal_path.exists():
-                shutil.copy2(goal_path, backup_path)
-            else:
-                atomic_write_text(backup_path, current_text)
-
-            atomic_write_text(goal_path, next_text)
-            snapshot = _snapshot(busy_override=False)
-            response_payload: dict[str, Any] = {
-                "ok": True,
-                "action": "goals-save",
-                "status": "saved",
-                "message": f"Goals saved. Backup written to {backup_path.as_posix()}.",
-                "goals_path": goal_path.as_posix(),
-                "saved_path": goal_path.as_posix(),
-                "backup_path": backup_path.as_posix(),
-                "risk": risk_report,
-                "risk_report": risk_report,
-                "snapshot": snapshot,
-            }
+            plan = _goal_save_validate_request(body, repo_root=repo_root, goal_path=goal_path)
+            response_payload = _goal_save_commit(plan, snapshot_factory=lambda: _snapshot(busy_override=False))
             return JSONResponse(status_code=200, content=response_payload)
+        except GoalSaveFailure as ex:
+            return _goal_save_error(ex.status_code, ex.code, ex.message, **ex.details)
         except Exception as ex:
             details: dict[str, Any] = {"path": goal_path.as_posix()}
-            if backup_path is not None:
-                details["backup_path"] = backup_path.as_posix()
+            if plan is not None:
+                details["backup_path"] = plan.backup_path.as_posix()
             return _goal_save_error(500, "goals_save_failed", f"Goals save failed: {ex}", **details)
         finally:
             control_lock.release()
@@ -10839,6 +7326,10 @@ def create_app(
     @app.get("/api/history")
     def api_history() -> dict[str, Any]:
         return _section("history")
+
+    @app.get("/api/experience")
+    def api_experience() -> dict[str, Any]:
+        return _section("experience")
 
     @app.get("/api/pr-queue")
     def api_pr_queue() -> dict[str, Any]:
@@ -10970,3 +7461,4 @@ else:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

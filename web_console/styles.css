@@ -503,6 +503,10 @@ a {
 .worktree-diagnostics,
 .worktree-diagnostics__entry,
 .worktree-check,
+.experience-grid,
+.experience-section,
+.experience-section__body,
+.experience-item,
 .compact-list,
 .compact-list__item {
   min-width: 0;
@@ -2747,6 +2751,121 @@ select.field-control,
   gap: 12px;
 }
 
+.experience-panel {
+  margin-top: 2px;
+}
+
+.experience-summary {
+  margin-top: 12px;
+}
+
+.experience-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 12px;
+}
+
+.experience-section {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  background: var(--surface-2);
+}
+
+.experience-section__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.experience-section__title {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.25;
+  font-weight: 500;
+}
+
+.experience-section__meta {
+  color: var(--text-sub);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.2;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.experience-section__body {
+  display: grid;
+  gap: 10px;
+}
+
+.experience-item {
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.experience-item:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.experience-item__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.experience-item__lead {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.experience-item__chips {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.experience-item__meta,
+.experience-item__evidence {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.experience-item__evidence-label {
+  color: var(--text-sub);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.2;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-right: 8px;
+}
+
+.experience-empty {
+  color: var(--text-sub);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .history-report {
   display: grid;
   gap: 12px;
@@ -4917,6 +5036,7 @@ select.field-control,
 
   .board-grid,
   .board-grid--four,
+  .experience-grid,
   .goal-grid,
   .landing-strip,
   .kpi-grid--three,
@@ -4944,7 +5064,9 @@ select.field-control,
 
   .history-report__head,
   .history-report__attempt-head,
-  .history-report__command-head {
+  .history-report__command-head,
+  .experience-item__head,
+  .experience-section__head {
     flex-direction: column;
     align-items: flex-start;
   }

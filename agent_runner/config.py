@@ -18,6 +18,106 @@ from .utils import atomic_write_json, eprint
 # Runtime artifacts directory name (under target repo root).
 # Design documents stay in ".doc/"; runtime outputs go here.
 AGENT_WORK_DIR = ".AgentCLI"
+EXPERIENCE_DIRNAME = "experience"
+
+EXPERIENCE_REDACTION_DEFAULTS: Dict[str, Any] = {
+    "pm_use_experience_summary": True,
+    "experience_prompt_max_items": 12,
+    "experience_prompt_max_chars": 4000,
+    "experience_lesson_max_chars": 240,
+    "experience_evidence_max_items": 3,
+    "experience_raw_log_excerpt_chars": 0,
+    "experience_redact_paths": True,
+    "experience_redact_secrets": True,
+    "experience_redact_backend_transcripts": True,
+    "experience_redact_prompt_text": True,
+    "experience_redact_prompt_injection": True,
+    "experience_redact_test_output": True,
+}
+
+
+def experience_artifacts_dir(repo: Path) -> Path:
+    return (repo / AGENT_WORK_DIR / "experience").resolve()
+
+
+def latest_experience_summary_path(repo: Path) -> Path:
+    return (experience_artifacts_dir(repo) / "latest_summary.json").resolve()
+
+
+def resolve_experience_redaction_settings(source: Any = None) -> Dict[str, Any]:
+    resolved: Dict[str, Any] = dict(EXPERIENCE_REDACTION_DEFAULTS)
+
+    if isinstance(source, dict):
+        raw = dict(source)
+    else:
+        try:
+            raw = dict(vars(source))
+        except Exception:
+            raw = {}
+
+    nested = raw.get("experience_redaction")
+    if not isinstance(nested, dict):
+        nested = {}
+
+    alias_map = {
+        "enabled": "pm_use_experience_summary",
+        "prompt_max_items": "experience_prompt_max_items",
+        "prompt_max_chars": "experience_prompt_max_chars",
+        "lesson_max_chars": "experience_lesson_max_chars",
+        "evidence_max_items": "experience_evidence_max_items",
+        "raw_log_excerpt_chars": "experience_raw_log_excerpt_chars",
+        "redact_paths": "experience_redact_paths",
+        "redact_secrets": "experience_redact_secrets",
+        "redact_backend_transcripts": "experience_redact_backend_transcripts",
+        "redact_prompt_text": "experience_redact_prompt_text",
+        "redact_prompt_injection": "experience_redact_prompt_injection",
+        "redact_test_output": "experience_redact_test_output",
+    }
+
+    for key in list(resolved.keys()):
+        if key in raw:
+            resolved[key] = raw.get(key)
+            continue
+        for nested_key, target_key in alias_map.items():
+            if target_key == key and nested_key in nested:
+                resolved[key] = nested.get(nested_key)
+                break
+
+    bool_keys = {
+        "pm_use_experience_summary",
+        "experience_redact_paths",
+        "experience_redact_secrets",
+        "experience_redact_backend_transcripts",
+        "experience_redact_prompt_text",
+        "experience_redact_prompt_injection",
+        "experience_redact_test_output",
+    }
+    int_keys = {
+        "experience_prompt_max_items",
+        "experience_prompt_max_chars",
+        "experience_lesson_max_chars",
+        "experience_evidence_max_items",
+        "experience_raw_log_excerpt_chars",
+    }
+
+    for key in bool_keys:
+        resolved[key] = normalize_config_value(
+            resolved.get(key),
+            {"kind": "bool"},
+            key,
+        )
+    for key in int_keys:
+        normalized = normalize_config_value(
+            resolved.get(key),
+            {"kind": "number"},
+            key,
+        )
+        try:
+            resolved[key] = max(0, int(normalized))
+        except Exception:
+            resolved[key] = int(EXPERIENCE_REDACTION_DEFAULTS[key])
+
+    return resolved
 
 def app_home() -> Path:
     """
@@ -498,6 +598,26 @@ def resolve_prompts_dir(repo: Path, explicit: Optional[str]) -> Path:
     return default_prompts_dir(repo)
 
 
+def resolve_experience_dir(repo: Path, explicit: Optional[str] = None) -> Path:
+    """Resolve an experience directory that must stay under repo/.AgentCLI/experience."""
+    repo_root = repo.expanduser().resolve()
+    experience_root = (repo_root / AGENT_WORK_DIR / "experience").resolve()
+    if explicit and str(explicit).strip():
+        candidate = Path(str(explicit)).expanduser()
+        resolved = candidate.resolve() if candidate.is_absolute() else (repo_root / candidate).resolve()
+    else:
+        resolved = experience_root
+    try:
+        resolved.relative_to(experience_root)
+    except Exception as ex:
+        raise ValueError(f"Experience path escapes repo work dir: {resolved}") from ex
+    return resolved
+
+
+def default_experience_db_path(repo: Path) -> Path:
+    return (resolve_experience_dir(repo) / "experience.db").resolve()
+
+
 def ensure_gitignore_entry(repo: Path, entry: str = AGENT_WORK_DIR) -> None:
     """Ensure *entry* is listed in repo/.gitignore (idempotent, best-effort).
 
@@ -537,5 +657,22 @@ def ensure_work_dir(repo: Path) -> Path:
     if first_time:
         ensure_gitignore_entry(repo)
     return work_root
+
+
+def experience_root(repo: Path) -> Path:
+    """Return the repo-local Experience artifact root."""
+    return ensure_work_dir(repo) / EXPERIENCE_DIRNAME
+
+
+def ensure_experience_dir(repo: Path) -> Path:
+    """Create *repo/.AgentCLI/experience/* if needed."""
+    root = experience_root(repo)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def experience_database_path(repo: Path) -> Path:
+    """Return the default repo-local Experience DB path."""
+    return ensure_experience_dir(repo) / "experience.db"
 
 

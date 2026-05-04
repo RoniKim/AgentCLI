@@ -21,11 +21,18 @@ import inspect
 from ..process_guard import register_pid, unregister_pid_if_exited
 from ..analysis_cache import merge_dev_hints_to_global_changelog
 from ..docs import resolve_docs_dir, generate_docs_digest
+from ..experience import load_pm_experience_summary
+from ..runtime_contract import (
+    dispatch_task_branch_disposition,
+    dispatch_worktree_cleanup,
+)
 from ..gates import (
+    classify_task_validation_status,
     extract_build_warnings,
+    run_build_validation_async,
     run_build_gate_async,
     run_fast_web_worktree_regression_async,
-    run_test_gate_async,
+    run_test_validation_async,
     should_run_fast_web_worktree_regression,
     should_retry_fast_web_worktree_regression_failure,
     summarize_fast_web_worktree_regression_failure,
@@ -79,6 +86,10 @@ from ..prompts import (
     PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT,
     PM_TURN_BUDGET_WARNING,
 )
+from ..experience import (
+    ExperienceRedactionSettings,
+    render_pm_experience_summary_from_run,
+)
 from ..reporting import collect_shutdown_context, build_local_shutdown_report
 from ..pipeline import PipelineManager, make_stages
 from ..pipeline.shared_runtime import (
@@ -91,7 +102,6 @@ from ..pipeline.shared_runtime import (
     detect_and_clear_recycled_ids,
     ensure_backlog_artifacts,
     load_backlog_tasks,
-    merge_pm_tasks_with_existing_pending,
     maybe_refresh_tasks_after_pm,
     prepare_pm_inventory_markdown,
     process_qa_followups,
@@ -102,6 +112,7 @@ from ..pipeline.shared_runtime import (
 )
 from ..state import count_state_task_ids
 from ..run_dir import make_run_dir, find_latest_run_dir
+from ..stop_progress import write_stop_snapshot
 from ..schemas import PMOutputV2, pm_output_json_schema
 from ..state import (
     load_backlog_json,
@@ -128,6 +139,7 @@ from ..shared import (
     format_skill_selection as _format_skill_selection,
     coerce_roles_arg as _coerce_roles_arg,
 )
+from ..validation_artifacts import write_task_validation_artifacts
 from ..task_history import format_history_block as _format_history_block, format_split_history_blocks as _format_split_history_blocks, count_unresolved_failures as _count_unresolved_failures, count_consecutive_title_failures as _count_consecutive_title_failures
 from ..task_status import (
     TASK_STATUS_BLOCKED_ENV,
@@ -136,11 +148,11 @@ from ..task_status import (
     is_auto_retry_allowed,
 )
 from ..failure_policy import (
-    build_failure_entry,
     count_task_status_groups,
     should_count_cycle_failure_for_stop,
     should_preserve_for_review,
 )
+from ..task_failures import record_task_failure_result, record_task_failure_state
 from ..progress import print_cycle_report, TokenTracker, extract_claude_tokens
 from ..utils import (
     force_utf8_stdio,
@@ -175,6 +187,7 @@ from ..exc_detect import (
     is_model_invalid_exception,
     is_transient_exception,
 )
+from ..experience import record_task_experience
 from ..qa_utils import (
     extract_qa_followups,
     followups_from_structured,
@@ -183,7 +196,7 @@ from ..qa_utils import (
     write_manual_checks,
 )
 from ..backlog_utils import (
-    normalize_backlog_tasks,
+    postprocess_pm_output_tasks,
     validate_skill_ids,
     load_backlog_context_for_pm,
     build_failed_tasks_block,
@@ -904,6 +917,39 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     cycle_summary_path = run_dir / "cycle_summary.log"
     last_run_summary_path = run_dir / "last_run_summary.json"
 
+    def record_stop_checkpoint(
+        *,
+        stage: str,
+        cycle: int,
+        step: int = -1,
+        task_id: str = "",
+        attempt: int | None = None,
+        message: str = "",
+    ) -> dict[str, Any]:
+        payload = write_stop_snapshot(
+            run_dir,
+            stage=stage,
+            cycle=cycle,
+            step=step,
+            task_id=task_id,
+            attempt=attempt,
+            message=message,
+            stop_paths=[stop_path],
+        )
+        try:
+            metrics.event(
+                "stop_checkpoint",
+                cycle=cycle,
+                step=step,
+                task_id=task_id,
+                attempt=attempt if attempt is not None else -1,
+                stage=stage,
+                reason=str(payload.get("reason") or STOP_REASON_STOP_FILE),
+            )
+        except Exception:
+            pass
+        return payload
+
     # Global PM cache
     from ..config import AGENT_WORK_DIR
     pm_cache_dir = repo / AGENT_WORK_DIR / "PM_CACHE"
@@ -1027,6 +1073,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
     dev_hints_dir = run_dir / "analysis_hints"
     dev_hints_dir.mkdir(parents=True, exist_ok=True)
+    experience_redaction = ExperienceRedactionSettings.from_source(args)
 
     continuous = bool(getattr(args, "continuous", False) or getattr(args, "loop", False))
 
@@ -1094,9 +1141,6 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     _followups_from_structured = followups_from_structured
     _merge_qa_followups = merge_qa_followups
 
-    def _normalize_backlog_tasks(raw_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return normalize_backlog_tasks(raw_tasks, run_dir)
-
     def _validate_skill_ids(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return validate_skill_ids(
             tasks,
@@ -1137,6 +1181,49 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             task_status=task_status, reason=reason, detail=detail, files=files,
             cycle=cycle, attempt=attempt, max_attempts=max_attempts,
             task_history_enabled=bool(getattr(args, "task_history_enabled", True)),
+        )
+
+    def _record_task_experience_event(
+        *,
+        task_id: str,
+        title: str,
+        status: str,
+        reason: str = "",
+        task_status: str = "",
+        cycle_idx: int = 0,
+        step_idx: int = 0,
+        attempt: int = 0,
+        max_attempts: int = 0,
+        validation_status: str = "",
+        validation_summary: str = "",
+        validations: list[dict[str, Any]] | None = None,
+        blocked_dependencies: list[dict[str, Any]] | None = None,
+        artifact_pointers: list[str] | None = None,
+        outcome_action: str = "",
+        outcome_note: str = "",
+        detail: str = "",
+    ) -> None:
+        record_task_experience(
+            repo,
+            run_id=run_dir.name,
+            backend="claudecode",
+            task_id=task_id,
+            title=title,
+            status=status,
+            reason=reason,
+            task_status=task_status,
+            cycle_idx=cycle_idx,
+            step_idx=step_idx,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            validation_status=validation_status,
+            validation_summary=validation_summary,
+            validations=validations,
+            blocked_dependencies=blocked_dependencies,
+            artifact_pointers=artifact_pointers,
+            outcome_action=outcome_action,
+            outcome_note=outcome_note,
+            detail=detail,
         )
 
     # ---------------------------------------------------------------------------
@@ -1298,10 +1385,17 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             goals_evaluation_instruction=GOALS_EVALUATION_INSTRUCTION,
             goals_generation_instruction=GOALS_GENERATION_INSTRUCTION,
         )
+        experience_repo = source_repo if worktree_dir is not None else repo
+        pm_experience_summary = load_pm_experience_summary(experience_repo, run_dir, args=args)
 
         try:
             if need_bootstrap:
                 metrics.event("pm_start", cycle=cycle_idx, kind="bootstrap")
+                experience_summary_block = render_pm_experience_summary_from_run(
+                    run_dir,
+                    settings=experience_redaction,
+                    repo_root=repo,
+                )
                 _hist_enabled = bool(getattr(args, "task_history_enabled", True))
                 _hist_max = int(getattr(args, "task_history_max_items", 50) or 50)
                 if _hist_enabled:
@@ -1317,6 +1411,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "docs_read_mode": docs_read_mode, "digest_rel": str(digest_rel),
                     "skills_index_summary": skills_index_summary,
                     "codex_call_hint": "Use Claude Code built-in tools (Read, Write, Edit, Grep, Glob, Bash) directly. Do NOT call Codex MCP.",
+                    "pm_experience_summary": pm_experience_summary,
                     "task_history_block": _format_history_block(repo, max_items=_hist_max) if _hist_enabled else "(disabled)",
                 }
                 pm_prompt = _patch_prompt_for_claude(append_pm_essential_context(
@@ -1326,30 +1421,66 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     failed_tasks_block=_failed_blk,
                     goals_block=goals_block,
                     goals_instruction=goals_instruction,
+                    experience_summary_block=experience_summary_block,
                 ))
                 pm_out = await _run_pm_structured(pm_prompt, max_turns=_pm_max_turns_boot, cycle_idx=cycle_idx, kind="bootstrap", output_path=pm_output_path)
                 if pm_out is None:
                     metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=1, error="structured_output_failed")
                     return False
 
-                write_pm_output_artifacts(
+                _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
+                _pre_pm_tasks = list(existing_tasks)  # recycled ID comparison
+                pm_postprocess = postprocess_pm_output_tasks(
+                    repo=repo,
                     run_dir=run_dir,
                     cycle_idx=cycle_idx,
+                    kind="bootstrap",
+                    raw_pm_output_path=pm_output_path,
                     pm_output_model_dump=pm_out.model_dump(),
-                    notes_md=pm_out.notes_md,
-                    dump_pretty_fn=dump_pretty,
-                )
-
-                _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
-                _pre_pm_tasks = list(existing_tasks)  # recycled ID 비교용 스냅샷
-                merged_tasks = merge_pm_tasks_with_existing_pending(
-                    pm_tasks=[t.model_dump() for t in (pm_out.tasks or [])],
                     existing_tasks=existing_tasks,
                     done_ids=done_ids,
                     failed_ids=failed_ids,
+                    completion_level=goals_completion_level,
                 )
+                gate = pm_postprocess["pm_gate"]
+                accepted_tasks = pm_postprocess["accepted_pm_tasks"]
+                rejected_tasks = pm_postprocess["rejected_pm_tasks"]
+                merged_tasks = pm_postprocess["backlog_tasks"]
+
+                write_pm_output_artifacts(
+                    run_dir=run_dir,
+                    cycle_idx=cycle_idx,
+                    pm_output_model_dump=pm_postprocess["pm_output_model_dump"],
+                    notes_md=pm_out.notes_md,
+                    dump_pretty_fn=dump_pretty,
+                )
+                if gate.get("status") == "partial":
+                    metrics.event(
+                        "pm_goal_gate",
+                        cycle=cycle_idx,
+                        kind="bootstrap",
+                        status=str(gate.get("status") or ""),
+                        accepted_count=len(accepted_tasks),
+                        rejected_count=len(rejected_tasks),
+                        gate_required=bool(gate.get("gate_required")),
+                        goal_path=str(gate.get("goal_path") or ""),
+                    )
+                elif gate.get("status") == "rejected":
+                    metrics.event(
+                        "pm_goal_gate_rejected",
+                        cycle=cycle_idx,
+                        kind="bootstrap",
+                        status=str(gate.get("status") or ""),
+                        rejected_count=len(rejected_tasks),
+                        accepted_count=len(accepted_tasks),
+                        gate_required=bool(gate.get("gate_required")),
+                        goal_path=str(gate.get("goal_path") or ""),
+                    )
+
+                _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
+                _pre_pm_tasks = list(existing_tasks)  # recycled ID 비교용 스냅샷
+                merged_tasks = pm_postprocess["backlog_tasks"]
                 if merged_tasks:
-                    merged_tasks = _normalize_backlog_tasks(merged_tasks)
                     merged_tasks = _validate_skill_ids(merged_tasks)
                     if merged_tasks:
                         try:
@@ -1362,7 +1493,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         except Exception:
                             pass
                         write_backlog_files(run_dir, merged_tasks)
-                        # Recycled ID 감지: PM이 기존 done 태스크 ID를 새 내용으로 재사용했는지 확인
+                        # Recycled ID 媛먯?: PM??湲곗〈 done ?쒖뒪??ID瑜????댁슜?쇰줈 ?ъ궗?⑺뻽?붿? ?뺤씤
                         try:
                             _new_tasks = load_tasks()
                             _st = load_state(state_path)
@@ -1385,17 +1516,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             if need_incremental or force_refresh:
                 metrics.event("pm_start", cycle=cycle_idx, kind="incremental" if need_incremental else "refresh")
                 changed_files_block = "\n".join([f"- {p}" for p in (changed_files or [])]) or "- (none)"
-                hint_lines: list[str] = []
-                if dev_hints_dir.exists():
-                    for hf in sorted(dev_hints_dir.glob("*.md"), key=lambda x: x.stat().st_mtime)[-12:]:
-                        try:
-                            rel = hf.relative_to(run_dir).as_posix()
-                            content = hf.read_text(encoding="utf-8", errors="replace").strip()
-                            hint_lines.append(f"- {rel}:")
-                            hint_lines.extend([f"  {ln}" for ln in content.splitlines()[:10]])
-                        except Exception:
-                            continue
-                hint_block = "\n".join(hint_lines) or "(none)"
+                experience_summary_block = render_pm_experience_summary_from_run(
+                    run_dir,
+                    settings=experience_redaction,
+                    repo_root=repo,
+                )
+                hint_block = "(see <pm_experience_summary>)" if experience_summary_block not in {"(none)", "(disabled)"} else "(none)"
                 current_backlog_block, _, _, _ = _load_backlog_context_for_pm()
                 failed_tasks_block = _build_failed_tasks_block()
 
@@ -1426,6 +1552,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "current_backlog_block": current_backlog_block,
                     "failed_tasks_block": failed_tasks_block,
                     "hint_block": hint_block,
+                    "pm_experience_summary": pm_experience_summary,
                     "task_history_block": _format_history_block(repo, max_items=_hist_max_i) if _hist_enabled_i else "(disabled)",
                 }
                 pm_prompt = _patch_prompt_for_claude(append_pm_essential_context(
@@ -1436,34 +1563,70 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     goals_block=goals_block,
                     goals_instruction=goals_instruction,
                     build_warnings_block=build_warnings_block,
+                    experience_summary_block=experience_summary_block,
                 ))
                 pm_out = await _run_pm_structured(pm_prompt, max_turns=_pm_max_turns_inc, cycle_idx=cycle_idx, kind="incremental" if need_incremental else "refresh", output_path=pm_output_path)
                 if pm_out is None:
                     metrics.event("pm_end", cycle=cycle_idx, kind="incremental" if need_incremental else "refresh", rc=1, error="structured_output_failed")
                     return False
 
-                write_pm_output_artifacts(
-                    run_dir=run_dir,
-                    cycle_idx=cycle_idx,
-                    pm_output_model_dump=pm_out.model_dump(),
-                    notes_md=pm_out.notes_md,
-                    dump_pretty_fn=dump_pretty,
-                )
-
                 _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
                 _pre_pm_tasks_inc = list(existing_tasks)
-                merged_tasks = merge_pm_tasks_with_existing_pending(
-                    pm_tasks=[t.model_dump() for t in (pm_out.tasks or [])],
+                pm_postprocess = postprocess_pm_output_tasks(
+                    repo=repo,
+                    run_dir=run_dir,
+                    cycle_idx=cycle_idx,
+                    kind="incremental" if need_incremental else "refresh",
+                    raw_pm_output_path=pm_output_path,
+                    pm_output_model_dump=pm_out.model_dump(),
                     existing_tasks=existing_tasks,
                     done_ids=done_ids,
                     failed_ids=failed_ids,
+                    completion_level=goals_completion_level,
                 )
+                gate = pm_postprocess["pm_gate"]
+                accepted_tasks = pm_postprocess["accepted_pm_tasks"]
+                rejected_tasks = pm_postprocess["rejected_pm_tasks"]
+                merged_tasks = pm_postprocess["backlog_tasks"]
+
+                write_pm_output_artifacts(
+                    run_dir=run_dir,
+                    cycle_idx=cycle_idx,
+                    pm_output_model_dump=pm_postprocess["pm_output_model_dump"],
+                    notes_md=pm_out.notes_md,
+                    dump_pretty_fn=dump_pretty,
+                )
+                if gate.get("status") == "partial":
+                    metrics.event(
+                        "pm_goal_gate",
+                        cycle=cycle_idx,
+                        kind="incremental" if need_incremental else "refresh",
+                        status=str(gate.get("status") or ""),
+                        accepted_count=len(accepted_tasks),
+                        rejected_count=len(rejected_tasks),
+                        gate_required=bool(gate.get("gate_required")),
+                        goal_path=str(gate.get("goal_path") or ""),
+                    )
+                elif gate.get("status") == "rejected":
+                    metrics.event(
+                        "pm_goal_gate_rejected",
+                        cycle=cycle_idx,
+                        kind="incremental" if need_incremental else "refresh",
+                        status=str(gate.get("status") or ""),
+                        rejected_count=len(rejected_tasks),
+                        accepted_count=len(accepted_tasks),
+                        gate_required=bool(gate.get("gate_required")),
+                        goal_path=str(gate.get("goal_path") or ""),
+                    )
+
+                _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
+                _pre_pm_tasks_inc = list(existing_tasks)
+                merged_tasks = pm_postprocess["backlog_tasks"]
                 if merged_tasks:
-                    merged_tasks = _normalize_backlog_tasks(merged_tasks)
                     merged_tasks = _validate_skill_ids(merged_tasks)
                     if merged_tasks:
                         write_backlog_files(run_dir, merged_tasks)
-                        # Recycled ID 감지
+                        # Recycled ID 媛먯?
                         try:
                             _new_tasks = load_tasks()
                             _st = load_state(state_path)
@@ -1664,6 +1827,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 metrics=metrics,
                 eprint_fn=eprint,
                 task_results=task_results,
+                step_idx=step,
+                record_task_experience_fn=_record_task_experience_event,
             )
             if not next_task:
                 break
@@ -1718,17 +1883,34 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             _prev_gate_error: str = ""  # Carried across attempts for gate-aware retry
             _prev_gate_error_label: str = ""
             _blocked_env_guides_written: set[tuple[str, str, int]] = set()
+            test_validation_result: dict[str, Any] | None = None
+            fast_regression_triggered = False
+            task_validation_status = "validation_pending"
 
-            def _task_failure_status(reason: str, *, detail: str = "") -> str:
-                return classify_task_failure(reason, detail=detail)
+            def _task_failure_status(
+                reason: str,
+                *,
+                validations: list[dict[str, Any]] | None = None,
+                detail: str = "",
+            ) -> str:
+                return classify_task_failure(reason, validations=validations or [], detail=detail)
 
-            def _task_failure_entry(reason: str, *, detail: str = "", task_status: str = "", **extra: Any) -> dict[str, Any]:
-                return build_failure_entry(
+            def _record_failed_state(
+                reason: str,
+                *,
+                validations: list[dict[str, Any]] | None = None,
+                detail: str = "",
+                task_status: str = "",
+                **extra: Any,
+            ) -> dict[str, Any] | None:
+                return record_task_failure_state(
+                    state,
                     task_id=next_task.id,
                     reason=reason,
                     task_status=task_status,
+                    validations=validations or [],
                     detail=detail,
-                    **extra,
+                    extra=extra,
                 )
 
             def _record_pending_review(
@@ -1738,37 +1920,44 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 detail: str = "",
                 branch: str = "",
                 rescue_branch: str = "",
+                validation_artifact: str = "",
             ) -> None:
                 outcome_status = task_status or _task_failure_status(reason, detail=detail)
-                if not should_preserve_for_review(outcome_status):
-                    return
-                state.setdefault("pending_review", []).append(
-                    _task_failure_entry(
-                        reason,
-                        task_status=outcome_status,
-                        detail=detail,
-                        title=next_task.title,
-                        cycle=cycle_idx,
-                        step=step,
-                        attempt=attempt + 1,
-                        max_attempts=max_attempts,
-                        branch=branch,
-                        rescue_branch=rescue_branch,
-                    )
+                record_task_failure_state(
+                    state,
+                    bucket="pending_review",
+                    task_id=next_task.id,
+                    reason=reason,
+                    task_status=outcome_status,
+                    detail=detail,
+                    extra={
+                        "title": next_task.title,
+                        "cycle": cycle_idx,
+                        "step": step,
+                        "attempt": attempt + 1,
+                        "max_attempts": max_attempts,
+                        "branch": branch,
+                        "rescue_branch": rescue_branch,
+                        "validation_artifact": validation_artifact,
+                    },
                 )
 
             def _record_failed_task_result(
                 reason: str,
                 *,
                 task_status: str,
+                validations: list[dict[str, Any]] | None = None,
                 detail: str = "",
+                validation_artifact: str = "",
             ) -> None:
+                validation_artifacts = [validation_artifact] if validation_artifact else []
                 if task_status == TASK_STATUS_BLOCKED_ENV and reason != "needs_dependency":
                     guide_key = (next_task.id, reason, attempt)
                     if guide_key not in _blocked_env_guides_written:
                         _blocked_env_guides_written.add(guide_key)
                         guide_path = run_dir / "DEPENDENCIES_NEEDED.md"
                         branch = tb.branch_name if tb else ""
+                        log_hint = validation_artifact or str(attempt_dir)
                         try:
                             with guide_path.open("a", encoding="utf-8", errors="replace") as f:
                                 f.write(
@@ -1777,88 +1966,238 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                                     f"- task_status: {task_status}\n"
                                     f"- branch: {branch or '(none)'}\n"
                                     f"- attempt: {attempt + 1}/{max_attempts}\n"
-                                    f"- evidence: {attempt_dir}\n"
+                                    f"- evidence: {log_hint}\n"
                                     f"- detail: {detail or '(none)'}\n\n"
                                     "---\n"
                                 )
                         except Exception:
                             pass
-                task_results.append({
-                    "id": next_task.id,
-                    "title": next_task.title,
-                    "status": task_status,
-                    "reason": reason,
-                    "detail": detail,
-                    "duration": time.time() - task_outer_t0,
-                    "attempt": attempt + 1,
-                    "max_attempts": max_attempts,
-                    "task_status": task_status,
-                })
+                record_task_failure_result(
+                    task_results,
+                    task_id=next_task.id,
+                    task_title=next_task.title,
+                    reason=reason,
+                    duration=time.time() - task_outer_t0,
+                    task_status=task_status,
+                    validations=validations,
+                    detail=detail,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                    validation_artifact=validation_artifact,
+                    validation_status="failed",
+                )
+                _record_task_experience_event(
+                    task_id=next_task.id,
+                    title=next_task.title,
+                    status="failed",
+                    reason=reason,
+                    task_status=task_status,
+                    cycle_idx=cycle_idx,
+                    step_idx=step,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                    validation_status="validation_failed" if validation_artifacts else "",
+                    validation_summary=detail,
+                    artifact_pointers=validation_artifacts,
+                    outcome_action="preserved_for_review" if should_preserve_for_review(task_status) else "discarded",
+                    detail=detail,
+                )
+
+            def _write_task_validation_artifact(
+                *,
+                validations: list[dict[str, Any]],
+                status: str,
+                reason: str,
+                detail: str = "",
+                task_status: str = "",
+            ) -> Path:
+                return write_task_validation_artifacts(
+                    attempt_dir=attempt_dir,
+                    task_id=next_task.id,
+                    task_title=next_task.title,
+                    task_files=next_task.files,
+                    cycle=cycle_idx,
+                    step=step,
+                    attempt=attempt,
+                    validations=validations,
+                    status=status,
+                    reason=reason,
+                    detail=detail,
+                    task_status=task_status,
+                )
 
             def _isolate_or_stop(reason: str, *, task_status: str = "", detail: str = "") -> tuple[bool, str]:
-                """Isolate failed task work.
+                """Apply task-branch disposition while preserving Claude backend side effects."""
 
-                Mirrors the Codex backend semantics: for non-preserve outcomes the branch
-                is abandoned (non-destructive). For preserve-for-review statuses the
-                branch action is the same but metrics/log are tagged ``preserved`` so
-                operators can find the work on the same branch.
-                """
-                outcome_status = task_status or _task_failure_status(reason, detail=detail)
-                preserve = should_preserve_for_review(outcome_status)
-                if tb:
-                    try:
-                        abandon_task_branch(repo, tb)
-                        _record_pending_review(reason, task_status=outcome_status, detail=detail, branch=tb.branch_name)
-                        save_state(state_path, state)
-                        event_name = "task_branch_preserved" if preserve else "task_branch_abandoned"
-                        metrics.event(event_name, cycle=cycle_idx, step=step, task_id=next_task.id,
-                                      reason=reason, branch=tb.branch_name,
-                                      task_status=outcome_status, preserved=preserve)
-                        if preserve:
-                            eprint(f"[PRESERVE] {next_task.id} work kept on branch {tb.branch_name} for review (status={outcome_status}).")
-                        return True, ""
-                    except Exception as ex:
-                        detail = str(ex)
-                        eprint(f"[WARN] abandon_task_branch failed: {detail}")
-                        abandon_status = _task_failure_status("abandon_failed", detail=detail)
-                        state.setdefault("failed", []).append(_task_failure_entry("abandon_failed", detail=detail, task_status=abandon_status))
-                        save_state(state_path, state)
-                        _record_history(next_task.id, next_task.title, "failed", reason="abandon_failed", detail=detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=abandon_status)
-                        metrics.event("task_branch_abandon_failed", cycle=cycle_idx, step=step, task_id=next_task.id, reason=reason, detail=detail)
-                        return False, "abandon_failed"
-                if not cp:
-                    _record_pending_review(reason, task_status=outcome_status, detail=detail)
-                    save_state(state_path, state)
-                    return True, ""
-                try:
-                    rescue_branch = restore_checkpoint(
-                        repo, cp,
-                        dangerous=bool(getattr(args, "dangerous_git_rollback", False)),
-                        run_dir=run_dir, stop_path=stop_path,
+                def _on_branch_success(disposition: Any, branch_name: str) -> None:
+                    metrics.event(
+                        disposition.event_name,
+                        cycle=cycle_idx,
+                        step=step,
                         task_id=next_task.id,
+                        reason=reason,
+                        branch=branch_name,
+                        task_status=disposition.outcome_status,
+                        preserved=disposition.preserve_for_review,
                     )
-                    metrics.event("rollback", cycle=cycle_idx, step=step, task_id=next_task.id, reason=reason,
-                                  rescue_branch=rescue_branch or "")
+                    if disposition.preserve_for_review:
+                        eprint(
+                            f"[PRESERVE] {next_task.id} work kept on branch {branch_name} for review "
+                            f"(status={disposition.outcome_status})."
+                        )
+
+                def _on_abandon_failed(failure_detail: str) -> None:
+                    eprint(f"[WARN] abandon_task_branch failed: {failure_detail}")
+                    abandon_status = _task_failure_status("abandon_failed", detail=failure_detail)
+                    _record_failed_state("abandon_failed", detail=failure_detail, task_status=abandon_status)
+                    save_state(state_path, state)
+                    _record_history(
+                        next_task.id,
+                        next_task.title,
+                        "failed",
+                        reason="abandon_failed",
+                        detail=failure_detail,
+                        files=next_task.files,
+                        cycle=cycle_idx,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        task_status=abandon_status,
+                    )
+                    metrics.event(
+                        "task_branch_abandon_failed",
+                        cycle=cycle_idx,
+                        step=step,
+                        task_id=next_task.id,
+                        reason=reason,
+                        detail=failure_detail,
+                    )
+
+                def _on_rollback_success(_disposition: Any, rescue_branch: str) -> None:
+                    metrics.event(
+                        "rollback",
+                        cycle=cycle_idx,
+                        step=step,
+                        task_id=next_task.id,
+                        reason=reason,
+                        rescue_branch=rescue_branch,
+                    )
                     if rescue_branch:
                         eprint(f"[INFO] Work preserved in branch: {rescue_branch}")
-                    _record_pending_review(reason, task_status=outcome_status, detail=detail, rescue_branch=rescue_branch or "")
+
+                def _on_rollback_failed(fail_reason: str, failure_detail: str) -> None:
+                    rollback_status = _task_failure_status(fail_reason, detail=failure_detail)
+                    _record_failed_state(fail_reason, detail=failure_detail, task_status=rollback_status)
                     save_state(state_path, state)
-                    return True, ""
-                except Exception as ex:
-                    detail = str(ex)
-                    blocked = "blocked" in detail.lower()
-                    fail_reason = "rollback_blocked" if blocked else "rollback_failed"
-                    rollback_status = _task_failure_status(fail_reason, detail=detail)
-                    state.setdefault("failed", []).append(_task_failure_entry(fail_reason, detail=detail, task_status=rollback_status))
-                    save_state(state_path, state)
-                    _record_history(next_task.id, next_task.title, "failed", reason=fail_reason, detail=detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=rollback_status)
-                    metrics.event("rollback_failed", cycle=cycle_idx, step=step, task_id=next_task.id, reason=reason, detail=detail)
-                    eprint(f"[STOP] Rollback {fail_reason}: {detail}")
-                    return False, fail_reason
+                    _record_history(
+                        next_task.id,
+                        next_task.title,
+                        "failed",
+                        reason=fail_reason,
+                        detail=failure_detail,
+                        files=next_task.files,
+                        cycle=cycle_idx,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        task_status=rollback_status,
+                    )
+                    metrics.event(
+                        "rollback_failed",
+                        cycle=cycle_idx,
+                        step=step,
+                        task_id=next_task.id,
+                        reason=reason,
+                        detail=failure_detail,
+                    )
+                    eprint(f"[STOP] Rollback {fail_reason}: {failure_detail}")
+
+                dispatch_result = dispatch_task_branch_disposition(
+                    reason,
+                    task_status=task_status,
+                    detail=detail,
+                    has_task_branch=bool(tb),
+                    has_checkpoint=bool(cp),
+                    task_status_resolver=lambda failure_reason, failure_detail: _task_failure_status(
+                        failure_reason,
+                        detail=failure_detail,
+                    ),
+                    abandon_branch=(lambda: abandon_task_branch(repo, tb)) if tb else None,
+                    restore_checkpoint=(
+                        lambda: restore_checkpoint(
+                            repo,
+                            cp,
+                            dangerous=bool(getattr(args, "dangerous_git_rollback", False)),
+                            run_dir=run_dir,
+                            stop_path=stop_path,
+                            task_id=next_task.id,
+                        )
+                    ) if cp else None,
+                    record_pending_review=_record_pending_review,
+                    persist_state=lambda: save_state(state_path, state),
+                    on_branch_success=_on_branch_success,
+                    on_abandon_failed=_on_abandon_failed,
+                    on_rollback_success=_on_rollback_success,
+                    on_rollback_failed=_on_rollback_failed,
+                )
+                return dispatch_result.ok, dispatch_result.stop_reason
+
+            task_stop_recorded = False
+
+            def _record_task_stop(stage: str, attempt_num: int | None = None) -> None:
+                nonlocal task_stop_recorded
+                if task_stop_recorded:
+                    return
+                task_stop_recorded = True
+                detail = "Stop requested; partial task artifacts and worktree state were preserved."
+                state.setdefault("warnings", []).append(
+                    {
+                        "task": next_task.id,
+                        "reason": STOP_REASON_STOP_FILE,
+                        "detail": detail,
+                        "cycle": cycle_idx,
+                        "step": step,
+                        "attempt": attempt_num,
+                    }
+                )
+                save_state(state_path, state)
+                task_results.append(
+                    {
+                        "id": next_task.id,
+                        "title": next_task.title,
+                        "status": "stopped",
+                        "reason": STOP_REASON_STOP_FILE,
+                        "duration": time.time() - task_outer_t0,
+                        "attempt": attempt_num if attempt_num is not None else 0,
+                        "max_attempts": max_attempts,
+                    }
+                )
+                metrics.event(
+                    "task_stop_requested",
+                    cycle=cycle_idx,
+                    step=step,
+                    task_id=next_task.id,
+                    attempt=attempt_num if attempt_num is not None else -1,
+                    stage=stage,
+                    reason=STOP_REASON_STOP_FILE,
+                )
+                logger.stop_event(
+                    f"Stop requested during task {next_task.id}",
+                    task_id=next_task.id,
+                    attempt=attempt_num,
+                    stage=stage,
+                )
+                record_stop_checkpoint(
+                    stage=stage,
+                    cycle=cycle_idx,
+                    step=step,
+                    task_id=next_task.id,
+                    attempt=attempt_num,
+                    message=detail,
+                )
 
             for attempt in range(max_attempts):
                 if stop_path.exists():
-                    break
+                    _record_task_stop("dev_before_attempt", attempt)
+                    return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
 
                 if attempt > 0 and dev_auto_escalate:
                     if budget_exceeded("total_escalations", budget_state["total_escalations"], int(budgets_cfg.get("max_total_escalations_per_run") or 0)):
@@ -1891,6 +2230,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 model_name = tiers[attempt]
                 attempt_dir = task_dir / f"attempt_{attempt:02d}"
                 attempt_dir.mkdir(parents=True, exist_ok=True)
+                validation_records: list[dict[str, Any]] = []
 
                 before = git_porcelain(repo)
                 before_untracked = set(git_untracked_files(repo))
@@ -1960,6 +2300,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         ok, fail_reason = _isolate_or_stop("stop_requested")
                         if not ok:
                             return 1, fail_reason, 0, (len(done_set) > before_done)
+                    _record_task_stop("dev_attempt", attempt)
                     return 0, STOP_REASON_STOP_FILE, 0, (len(done_set) > before_done)
                 except Exception as ex:
                     dev_exc = ex
@@ -1981,6 +2322,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 (attempt_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
                 (run_dir / "dev_logs").mkdir(parents=True, exist_ok=True)
                 (run_dir / "dev_logs" / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}_a{attempt:02d}.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
+
+                if stop_path.exists():
+                    _record_task_stop("dev_attempt", attempt)
+                    return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
 
                 dev_quota_exhausted = dev_quota_exhausted or has_quota_text(dev_log)
                 if isinstance(dev_exc, BudgetExceeded):
@@ -2007,7 +2352,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
                 if dev_exc and not dev_is_max_turns:
                     task_status = _task_failure_status("exception", detail=str(dev_exc))
-                    state.setdefault("failed", []).append(_task_failure_entry("exception", detail=str(dev_exc), task_status=task_status))
+                    _record_failed_state("exception", detail=str(dev_exc), task_status=task_status)
                     save_state(state_path, state)
                     _record_failed_task_result("exception", task_status=task_status, detail=str(dev_exc))
                     _record_history(next_task.id, next_task.title, "failed", reason="exception", detail=str(dev_exc), files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
@@ -2047,7 +2392,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         f.write(f"\n## {next_task.id}: {next_task.title}\n\n{dep_content.strip()}\n\n---\n")
                     dep_detail = dep_content.strip()[:500]
                     task_status = _task_failure_status("needs_dependency", detail=dep_detail)
-                    state.setdefault("failed", []).append(_task_failure_entry("needs_dependency", detail=dep_detail, task_status=task_status))
+                    _record_failed_state("needs_dependency", detail=dep_detail, task_status=task_status)
                     save_state(state_path, state)
                     _record_failed_task_result("needs_dependency", task_status=task_status, detail=dep_detail)
                     _record_history(next_task.id, next_task.title, "failed", reason="needs_dependency", detail=dep_detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
@@ -2090,7 +2435,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     if task_is_blocked:
                         eprint(f"[SKIP] Task {next_task.id} appears blocked (dependency/resource missing). Skipping...")
                         task_status = _task_failure_status("blocked_dependency", detail=dev_log[:500])
-                        state.setdefault("failed", []).append(_task_failure_entry("blocked_dependency", detail=dev_log[:500], task_status=task_status))
+                        _record_failed_state("blocked_dependency", detail=dev_log[:500], task_status=task_status)
                         save_state(state_path, state)
                         _record_failed_task_result("blocked_dependency", task_status=task_status, detail=dev_log[:500])
                         _record_history(next_task.id, next_task.title, "failed", reason="blocked_dependency", detail=dev_log[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
@@ -2180,7 +2525,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="no_diff")
                         continue
                     task_status = _task_failure_status("no_diff", detail=dev_log[:500])
-                    state.setdefault("failed", []).append(_task_failure_entry("no_diff", detail=dev_log[:500], task_status=task_status))
+                    _record_failed_state("no_diff", detail=dev_log[:500], task_status=task_status)
                     save_state(state_path, state)
                     _record_failed_task_result("no_diff", task_status=task_status, detail=dev_log[:500])
                     _record_history(next_task.id, next_task.title, "failed", reason="no_diff", detail=dev_log[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
@@ -2201,14 +2546,30 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
                 if build_enabled:
                     metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
-                    ok = await run_build_gate_async(
-                        repo=repo, build_cmd=getattr(args, "build_cmd", []),
+                    build_validation = await run_build_validation_async(
+                        repo=repo,
+                        build_cmd=getattr(args, "build_cmd", []),
                         build_timeout_sec=int(getattr(args, "build_timeout_seconds", 1800)),
                         legacy_build_target=str(getattr(args, "dotnet_build_target", "") or ""),
-                        log_path=attempt_dir / "build.txt", stop_path=stop_path,
+                        log_path=attempt_dir / "build.txt",
+                        stop_path=stop_path,
                         command_repo=source_repo,
                     )
+                    build_validation.update(
+                        {
+                            "cycle": cycle_idx,
+                            "step": step,
+                            "task_id": next_task.id,
+                            "task_title": next_task.title,
+                            "attempt": attempt,
+                        }
+                    )
+                    validation_records.append(build_validation)
+                    ok = bool(build_validation.get("ok", False))
                     metrics.event("build_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
+                    if stop_path.exists():
+                        _record_task_stop("build_gate", attempt)
+                        return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
                     if ok and tb:
                         # Auto-commit on task branch as incremental checkpoint
                         try:
@@ -2227,34 +2588,68 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         except Exception as _cp_ex:
                             eprint(f"[WARN] Incremental checkpoint failed: {_cp_ex}")
                     if not ok:
-                        try:
-                            _berr_raw = (attempt_dir / "build.txt").read_text(encoding="utf-8", errors="replace")
-                        except Exception:
-                            _berr_raw = ""
-                        build_detail_for_retry = _berr_raw[-4000:]
-                        task_status_for_retry = _task_failure_status("build_failed", detail=build_detail_for_retry)
+                        build_detail = str(build_validation.get("failure_summary") or build_validation.get("summary") or "")
+                        task_status = _task_failure_status("build_failed", validations=validation_records, detail=build_detail)
                         if (
-                            is_auto_retry_allowed(task_status_for_retry)
+                            is_auto_retry_allowed(task_status)
                             and dev_auto_escalate
                             and (attempt + 1) < max_attempts
                             and "build_failed" in dev_escalate_on
                         ):
+                            try:
+                                _berr_raw = (attempt_dir / "build.txt").read_text(encoding="utf-8", errors="replace")
+                            except Exception:
+                                _berr_raw = ""
                             _berr_lines = [ln for ln in _berr_raw.splitlines() if "error " in ln.lower()]
-                            _prev_gate_error = "\n".join(_berr_lines[:50]) or _berr_raw[-4000:]
+                            _prev_gate_error = "\n".join(_berr_lines[:50]) or build_detail or _berr_raw[-4000:]
                             _prev_gate_error_label = "BUILD FAILED"
+                            _write_task_validation_artifact(
+                                validations=validation_records,
+                                status="failed",
+                                reason="build_failed",
+                                detail=build_detail,
+                                task_status=task_status,
+                            )
+                            _record_task_experience_event(
+                                task_id=next_task.id,
+                                title=next_task.title,
+                                status="failed",
+                                reason="build_failed",
+                                task_status=task_status,
+                                cycle_idx=cycle_idx,
+                                step_idx=step,
+                                attempt=attempt + 1,
+                                max_attempts=max_attempts,
+                                validation_status="validation_failed",
+                                validation_summary=build_detail,
+                                artifact_pointers=[str(attempt_dir / "build.txt"), str(attempt_dir / "validation.json")],
+                                outcome_action="retry_scheduled",
+                                detail=build_detail,
+                            )
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="build_failed")
                             continue
-                        build_detail = ""
-                        try:
-                            build_detail = (attempt_dir / "build.txt").read_text(encoding="utf-8", errors="replace")[-4000:]
-                        except Exception:
-                            build_detail = ""
-                        task_status = _task_failure_status("build_failed", detail=build_detail)
-                        state.setdefault("failed", []).append(_task_failure_entry("build_failed", detail=build_detail[:500], task_status=task_status))
+                        _record_failed_state(
+                            "build_failed",
+                            validations=validation_records,
+                            detail=build_detail[:500],
+                            task_status=task_status,
+                        )
                         save_state(state_path, state)
-                        _record_failed_task_result("build_failed", task_status=task_status, detail=build_detail[:500])
+                        _record_failed_task_result(
+                            "build_failed",
+                            task_status=task_status,
+                            detail=build_detail[:500],
+                            validation_artifact=str(attempt_dir / "validation.json"),
+                        )
                         _record_history(next_task.id, next_task.title, "failed", reason="build_failed", detail=build_detail[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                         logger.gate_event("build", next_task.id, passed=False)
+                        _write_task_validation_artifact(
+                            validations=validation_records,
+                            status="failed",
+                            reason="build_failed",
+                            detail=build_detail,
+                            task_status=task_status,
+                        )
                         if tb or cp:
                             ok_r, fr = _isolate_or_stop("build_failed", task_status=task_status, detail=build_detail[:500])
                             if not ok_r:
@@ -2269,43 +2664,93 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
                 if run_tests:
                     metrics.event("test_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
-                    ok = await run_test_gate_async(
-                        repo=repo, test_cmd=getattr(args, "test_cmd", []),
+                    test_validation = await run_test_validation_async(
+                        repo=repo,
+                        test_cmd=getattr(args, "test_cmd", []),
                         test_timeout_sec=int(getattr(args, "test_timeout_seconds", 3600)),
                         legacy_test_target=str(getattr(args, "dotnet_test_target", "") or ""),
                         legacy_test_filter=str(getattr(args, "dotnet_test_filter", "") or ""),
-                        log_path=attempt_dir / "test.txt", stop_path=stop_path,
+                        log_path=attempt_dir / "test.txt",
+                        stop_path=stop_path,
                         command_repo=source_repo,
                     )
+                    test_validation.update(
+                        {
+                            "cycle": cycle_idx,
+                            "step": step,
+                            "task_id": next_task.id,
+                            "task_title": next_task.title,
+                            "attempt": attempt,
+                        }
+                    )
+                    test_validation_result = test_validation
+                    validation_records.append(test_validation)
+                    ok = bool(test_validation.get("ok", False))
                     metrics.event("test_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
+                    if stop_path.exists():
+                        _record_task_stop("test_gate", attempt)
+                        return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
                     if not ok:
-                        try:
-                            _test_raw = (attempt_dir / "test.txt").read_text(encoding="utf-8", errors="replace")
-                        except Exception:
-                            _test_raw = ""
-                        test_detail_for_retry = _test_raw[-4000:]
-                        task_status_for_retry = _task_failure_status("test_failed", detail=test_detail_for_retry)
+                        test_detail = str(test_validation.get("failure_summary") or test_validation.get("summary") or "")
+                        task_status = _task_failure_status("test_failed", validations=validation_records, detail=test_detail)
                         if (
-                            is_auto_retry_allowed(task_status_for_retry)
+                            is_auto_retry_allowed(task_status)
                             and dev_auto_escalate
                             and (attempt + 1) < max_attempts
                             and "test_failed" in dev_escalate_on
                         ):
-                            _prev_gate_error = test_detail_for_retry
+                            try:
+                                _prev_gate_error = (attempt_dir / "test.txt").read_text(encoding="utf-8", errors="replace")[-4000:]
+                            except Exception:
+                                _prev_gate_error = test_detail
                             _prev_gate_error_label = "TEST FAILED"
+                            _write_task_validation_artifact(
+                                validations=validation_records,
+                                status="failed",
+                                reason="test_failed",
+                                detail=test_detail,
+                                task_status=task_status,
+                            )
+                            _record_task_experience_event(
+                                task_id=next_task.id,
+                                title=next_task.title,
+                                status="failed",
+                                reason="test_failed",
+                                task_status=task_status,
+                                cycle_idx=cycle_idx,
+                                step_idx=step,
+                                attempt=attempt + 1,
+                                max_attempts=max_attempts,
+                                validation_status="validation_failed",
+                                validation_summary=test_detail,
+                                artifact_pointers=[str(attempt_dir / "test.txt"), str(attempt_dir / "validation.json")],
+                                outcome_action="retry_scheduled",
+                                detail=test_detail,
+                            )
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="test_failed")
                             continue
-                        test_detail = ""
-                        try:
-                            test_detail = (attempt_dir / "test.txt").read_text(encoding="utf-8", errors="replace")[-4000:]
-                        except Exception:
-                            test_detail = ""
-                        task_status = _task_failure_status("test_failed", detail=test_detail)
-                        state.setdefault("failed", []).append(_task_failure_entry("test_failed", detail=test_detail[:500], task_status=task_status))
+                        _record_failed_state(
+                            "test_failed",
+                            validations=validation_records,
+                            detail=test_detail[:500],
+                            task_status=task_status,
+                        )
                         save_state(state_path, state)
-                        _record_failed_task_result("test_failed", task_status=task_status, detail=test_detail[:500])
+                        _record_failed_task_result(
+                            "test_failed",
+                            task_status=task_status,
+                            detail=test_detail[:500],
+                            validation_artifact=str(attempt_dir / "validation.json"),
+                        )
                         _record_history(next_task.id, next_task.title, "failed", reason="test_failed", detail=test_detail[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                         logger.gate_event("test", next_task.id, passed=False)
+                        _write_task_validation_artifact(
+                            validations=validation_records,
+                            status="failed",
+                            reason="test_failed",
+                            detail=test_detail,
+                            task_status=task_status,
+                        )
                         if tb or cp:
                             ok_r, fr = _isolate_or_stop("test_failed", task_status=task_status, detail=test_detail[:500])
                             if not ok_r:
@@ -2350,9 +2795,14 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     if not scan_result.get("ok", True):
                         policy_detail = json.dumps(fail_hits, ensure_ascii=False, default=str)[:1000]
                         task_status = _task_failure_status("policy_violation", detail=policy_detail)
-                        state.setdefault("failed", []).append(_task_failure_entry("policy_violation", detail=policy_detail, task_status=task_status))
+                        _record_failed_state("policy_violation", detail=policy_detail, task_status=task_status)
                         save_state(state_path, state)
-                        _record_failed_task_result("policy_violation", task_status=task_status, detail=policy_detail)
+                        _record_failed_task_result(
+                            "policy_violation",
+                            task_status=task_status,
+                            detail=policy_detail,
+                            validation_artifact=str(attempt_dir / "policy_scan.json"),
+                        )
                         _record_history(next_task.id, next_task.title, "failed", reason="policy_violation", detail=policy_detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                         logger.gate_event("policy", next_task.id, passed=False)
                         metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="policy_violation", task_status=task_status, violations=len(fail_hits))
@@ -2376,7 +2826,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     fast_regression_files.extend(git_worktree_changed_files(repo))
                 except Exception:
                     pass
-                if should_run_fast_web_worktree_regression(repo, fast_regression_files):
+                fast_regression_triggered = should_run_fast_web_worktree_regression(repo, fast_regression_files)
+                if fast_regression_triggered:
                     fast_regression_log = attempt_dir / "fast_web_worktree_regression.json"
                     metrics.event(
                         "fast_regression_start",
@@ -2390,7 +2841,32 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         repo=repo,
                         log_path=fast_regression_log,
                         stop_path=stop_path,
+                        trigger_files=fast_regression_files,
                     )
+                    fast_validation = {
+                        "name": "fast_web_worktree_regression",
+                        "kind": "regression",
+                        "gate": "fast_web_worktree_regression",
+                        "cmd": list(fast_regression.get("suite_files") or fast_regression.get("suiteFiles") or []),
+                        "rc": 0 if bool(fast_regression.get("ok", False)) else 1,
+                        "ok": bool(fast_regression.get("ok", False)),
+                        "artifact_path": str(fast_regression_log),
+                        "artifactPath": str(fast_regression_log),
+                        "log_path": str(fast_regression_log),
+                        "logPath": str(fast_regression_log),
+                        "summary": str(fast_regression.get("failure_summary") or fast_regression.get("failureSummary") or fast_regression_log),
+                        "failure_summary": str(fast_regression.get("failure_summary") or ""),
+                        "failureSummary": str(fast_regression.get("failureSummary") or ""),
+                        "trigger_files": list(fast_regression.get("trigger_files") or fast_regression.get("triggerFiles") or fast_regression_files),
+                        "triggerFiles": list(fast_regression.get("trigger_files") or fast_regression.get("triggerFiles") or fast_regression_files),
+                        "suite_files": list(fast_regression.get("suite_files") or fast_regression.get("suiteFiles") or []),
+                        "suiteFiles": list(fast_regression.get("suite_files") or fast_regression.get("suiteFiles") or []),
+                        "commands": list(fast_regression.get("commands") or []),
+                        "failed_command": fast_regression.get("failed_command"),
+                        "started_at": fast_regression.get("started_at"),
+                        "ended_at": fast_regression.get("ended_at"),
+                    }
+                    validation_records.append(fast_validation)
                     fast_command_count = len(fast_regression.get("commands", []) or [])
                     fast_ok = bool(fast_regression.get("ok", False))
                     metrics.event(
@@ -2410,13 +2886,16 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     if not fast_ok:
                         failed_command = fast_regression.get("failed_command") or {}
                         failed_name = str(failed_command.get("name") or failed_command.get("test_file") or "fast_regression")
-                        failed_summary = str(fast_regression_log)
-                        try:
-                            if isinstance(failed_command, dict):
-                                failed_summary = json.dumps(failed_command, ensure_ascii=False, default=str)
-                        except Exception:
-                            pass
-                        task_status = _task_failure_status("fast_regression_failed", detail=failed_summary)
+                        failed_summary = str(fast_regression.get("failure_summary") or fast_regression.get("failureSummary") or "")
+                        if not failed_summary:
+                            try:
+                                failed_summary = summarize_fast_web_worktree_regression_failure(
+                                    fast_regression,
+                                    fast_regression_log,
+                                )
+                            except Exception:
+                                failed_summary = str(fast_regression_log)
+                        task_status = _task_failure_status("fast_regression_failed", validations=validation_records, detail=failed_summary)
                         if (
                             is_auto_retry_allowed(task_status)
                             and should_retry_fast_web_worktree_regression_failure(
@@ -2431,6 +2910,29 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                                 fast_regression_log,
                             )
                             _prev_gate_error_label = "FAST REGRESSION FAILED"
+                            _write_task_validation_artifact(
+                                validations=validation_records,
+                                status="failed",
+                                reason="fast_regression_failed",
+                                detail=failed_summary,
+                                task_status=task_status,
+                            )
+                            _record_task_experience_event(
+                                task_id=next_task.id,
+                                title=next_task.title,
+                                status="failed",
+                                reason="fast_regression_failed",
+                                task_status=task_status,
+                                cycle_idx=cycle_idx,
+                                step_idx=step,
+                                attempt=attempt + 1,
+                                max_attempts=max_attempts,
+                                validation_status="validation_failed",
+                                validation_summary=failed_summary,
+                                artifact_pointers=[str(fast_regression_log), str(attempt_dir / "validation.json")],
+                                outcome_action="retry_scheduled",
+                                detail=failed_summary,
+                            )
                             metrics.event(
                                 "dev_attempt_retry",
                                 cycle=cycle_idx,
@@ -2442,8 +2944,29 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                                 log_path=str(fast_regression_log),
                             )
                             continue
-                        state.setdefault("failed", []).append(_task_failure_entry("fast_regression_failed", detail=failed_summary[:500], task_status=task_status))
+                        _record_failed_state(
+                            "fast_regression_failed",
+                            validations=validation_records,
+                            detail=failed_summary[:500],
+                            task_status=task_status,
+                        )
                         save_state(state_path, state)
+                        _record_task_experience_event(
+                            task_id=next_task.id,
+                            title=next_task.title,
+                            status="failed",
+                            reason="fast_regression_failed",
+                            task_status=task_status,
+                            cycle_idx=cycle_idx,
+                            step_idx=step,
+                            attempt=attempt + 1,
+                            max_attempts=max_attempts,
+                            validation_status="validation_failed",
+                            validation_summary=failed_summary,
+                            artifact_pointers=[str(fast_regression_log)],
+                            outcome_action="preserved_for_review" if should_preserve_for_review(task_status) else "discarded",
+                            detail=failed_summary,
+                        )
                         _record_history(
                             next_task.id,
                             next_task.title,
@@ -2456,15 +2979,25 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                             max_attempts=max_attempts,
                             task_status=task_status,
                         )
-                        task_results.append({
-                            "id": next_task.id,
-                            "title": next_task.title,
-                            "status": task_status,
-                            "reason": "fast_regression_failed",
-                            "detail": failed_name,
-                            "duration": time.time() - task_outer_t0,
-                            "task_status": task_status,
-                        })
+                        _write_task_validation_artifact(
+                            validations=validation_records,
+                            status="failed",
+                            reason="fast_regression_failed",
+                            detail=failed_summary,
+                            task_status=task_status,
+                        )
+                        record_task_failure_result(
+                            task_results,
+                            task_id=next_task.id,
+                            task_title=next_task.title,
+                            reason="fast_regression_failed",
+                            duration=time.time() - task_outer_t0,
+                            task_status=task_status,
+                            validations=validation_records,
+                            detail=failed_name,
+                            validation_artifact=str(attempt_dir / "validation.json"),
+                            validation_status="failed",
+                        )
                         metrics.event(
                             "task_end",
                             cycle=cycle_idx,
@@ -2496,6 +3029,21 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             if task_failure_reason:
                 continue
 
+            task_validation_status = classify_task_validation_status(
+                run_tests=run_tests,
+                fast_regression_triggered=fast_regression_triggered,
+                test_validation=test_validation_result,
+                validation_records=validation_records,
+            )
+
+            if task_completed:
+                _write_task_validation_artifact(
+                    validations=validation_records,
+                    status=task_validation_status,
+                    reason="completed",
+                    task_status=TASK_STATUS_COMPLETED,
+                )
+
             # Merge or abandon task branch
             if task_completed and tb:
                 merge_ok = merge_task_branch(repo, tb)
@@ -2505,7 +3053,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     eprint(f"[WARN] Merge failed for {tb.branch_name}; work preserved on branch")
                     metrics.event("task_branch_merge_failed", cycle=cycle_idx, step=step, task_id=next_task.id, branch=tb.branch_name)
                     task_status = _task_failure_status("merge_conflict", detail=f"Merge conflict on branch {tb.branch_name}")
-                    state.setdefault("failed", []).append(_task_failure_entry("merge_conflict", detail=f"Merge conflict on branch {tb.branch_name}", task_status=task_status, branch=tb.branch_name))
+                    _record_failed_state(
+                        "merge_conflict",
+                        detail=f"Merge conflict on branch {tb.branch_name}",
+                        task_status=task_status,
+                        branch=tb.branch_name,
+                    )
                     save_state(state_path, state)
                     _record_failed_task_result("merge_conflict", task_status=task_status, detail=f"Merge conflict on branch {tb.branch_name}")
                     _record_history(next_task.id, next_task.title, "failed", reason="merge_conflict",
@@ -2526,10 +3079,19 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         metrics.event("task_branch_abandon_failed", task_id=next_task.id, error=str(ex)[:200])
                     tb = None
                 task_status = _task_failure_status("exhausted_attempts")
-                state.setdefault("failed", []).append(_task_failure_entry("exhausted_attempts", task_status=task_status))
+                _record_failed_state("exhausted_attempts", task_status=task_status)
                 save_state(state_path, state)
                 _record_history(next_task.id, next_task.title, "failed", reason="exhausted_attempts", files=next_task.files, cycle=cycle_idx, attempt=max_attempts, max_attempts=max_attempts, task_status=task_status)
-                task_results.append({"id": next_task.id, "title": next_task.title, "status": task_status, "reason": "exhausted_attempts", "duration": time.time() - task_outer_t0, "attempt": max_attempts, "max_attempts": max_attempts, "task_status": task_status})
+                record_task_failure_result(
+                    task_results,
+                    task_id=next_task.id,
+                    task_title=next_task.title,
+                    reason="exhausted_attempts",
+                    duration=time.time() - task_outer_t0,
+                    task_status=task_status,
+                    attempt=max_attempts,
+                    max_attempts=max_attempts,
+                )
                 logger.task_end(task_id=next_task.id, success=False, reason="exhausted_attempts", task_status=task_status, attempts=max_attempts)
                 eprint(f"[SKIP] Exhausted all attempts for {next_task.id}; skipping to next task.")
                 skipped_set.add(next_task.id)
@@ -2542,16 +3104,18 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 metrics.event("phantom_completion_detected", task_id=next_task.id, cycle=cycle_idx)
                 no_commits_detail = "Task passed all gates but no git commits were created (phantom completion)"
                 task_status = _task_failure_status("no_commits", detail=no_commits_detail)
-                state.setdefault("failed", []).append(_task_failure_entry("no_commits", detail=no_commits_detail, task_status=task_status))
+                _record_failed_state("no_commits", detail=no_commits_detail, task_status=task_status)
                 save_state(state_path, state)
                 _record_history(next_task.id, next_task.title, "failed",
                                 reason="no_commits", detail=no_commits_detail, files=next_task.files, cycle=cycle_idx, task_status=task_status)
-                task_results.append({
-                    "id": next_task.id, "title": next_task.title,
-                    "status": task_status, "reason": "no_commits",
-                    "duration": time.time() - task_outer_t0,
-                    "task_status": task_status,
-                })
+                record_task_failure_result(
+                    task_results,
+                    task_id=next_task.id,
+                    task_title=next_task.title,
+                    reason="no_commits",
+                    duration=time.time() - task_outer_t0,
+                    task_status=task_status,
+                )
                 logger.task_end(task_id=next_task.id, success=False, reason="no_commits", task_status=task_status)
                 skipped_set.add(next_task.id)
                 continue
@@ -2563,7 +3127,15 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             save_state(state_path, state)
             mark_backlog_done(backlog_md_path, next_task.id)
             _record_history(next_task.id, next_task.title, "done", files=next_task.files, cycle=cycle_idx, task_status=TASK_STATUS_COMPLETED)
-            task_results.append({"id": next_task.id, "title": next_task.title, "status": "done", "duration": time.time() - task_outer_t0, "task_status": TASK_STATUS_COMPLETED})
+            task_results.append({
+                "id": next_task.id,
+                "title": next_task.title,
+                "status": "done",
+                "duration": time.time() - task_outer_t0,
+                "validation_artifact": str(attempt_dir / "validation.json"),
+                "validation_status": task_validation_status,
+                "task_status": TASK_STATUS_COMPLETED,
+            })
 
             # Use current-cycle task IDs to avoid cross-cycle accumulation (done=16/11 bug)
             _done_this_cycle = len(done_set.intersection(task_ids))
@@ -2727,7 +3299,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 heartbeat_callback=lambda: metrics.event("heartbeat", stage="qa"),
             )
 
-            # Structured JSON fallback: text가 비어있으면 structured output을 사용
+            # Structured JSON fallback: text媛 鍮꾩뼱?덉쑝硫?structured output???ъ슜
             qa_text_out = text or ""
             if not qa_text_out.strip() and _structured is not None:
                 try:
@@ -3034,13 +3606,13 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     break
                 if q_action == "wait":
                     wait_sec = seconds_until_reset(q_resets)
-                    # Failover 판정: enabled + reason이 failover_on에 포함 + 대체 백엔드 존재
+                    # Failover ?먯젙: enabled + reason??failover_on???ы븿 + ?泥?諛깆뿏??議댁옱
                     _fo_enabled = bool(getattr(args, "failover_enabled", False))
                     _fo_on = set(str(x).strip().lower() for x in (getattr(args, "failover_on", []) or []))
                     _fo_backends = [str(b).strip().lower() for b in (getattr(args, "failover_backends", []) or []) if str(b).strip().lower() != "claudecode"]
                     _can_failover = _fo_enabled and STOP_REASON_QUOTA_UTILIZATION in _fo_on and len(_fo_backends) > 0
                     if _can_failover:
-                        # Failover 가능 → 즉시 종료하여 runner_entry가 다른 백엔드로 전환
+                        # Failover 媛????利됱떆 醫낅즺?섏뿬 runner_entry媛 ?ㅻⅨ 諛깆뿏?쒕줈 ?꾪솚
                         append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=quota_utilization_5h_failover 5h={_q5h}% 7d={_q7d}%")
                         logger.stop_event(f"5-hour quota {_q5h}% >= {quota_5h_max}% - failover enabled, stopping for backend switch. (7d={_q7d}%)")
                         metrics.event("quota_utilization_failover", cycle=cycle_idx, window="five_hour",
@@ -3321,10 +3893,18 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 eprint(" - shell:    /merge-worktree  (or /discard-worktree)")
                 eprint("")
             if auto_apply_worktree or (not pending_merge.exists() and not apply_failure.exists()):
-                try:
-                    remove_worktree(source_repo, worktree_dir)
-                except Exception as ex:
-                    eprint(f"[WARN] Failed to remove worktree: {ex}")
+                cleanup_result = dispatch_worktree_cleanup(
+                    source_repo=source_repo,
+                    worktree_dir=worktree_dir,
+                    run_dir=run_dir,
+                    should_remove=True,
+                    remove_worktree_fn=remove_worktree,
+                    eprint_fn=eprint,
+                )
+                if not cleanup_result.ok:
+                    if last_rc == 0:
+                        last_rc = 1
+                    final_reason = cleanup_result.final_reason
         run_summary["final"] = {"rc": last_rc, "reason": final_reason or ""}
         _write_run_summary()
         try:

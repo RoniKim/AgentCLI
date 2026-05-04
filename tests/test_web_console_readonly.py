@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import textwrap
 import unittest
@@ -59,6 +60,221 @@ def _write_config(path: Path, repo: Path, **overrides: object) -> None:
         else:
             payload[key] = value
     _write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+
+def _write_experience_db(repo: Path, *, secret: str = "") -> Path:
+    experience_root = repo / ".AgentCLI" / "experience"
+    experience_root.mkdir(parents=True, exist_ok=True)
+    db_path = experience_root / "experience.db"
+    if db_path.exists():
+        db_path.unlink()
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE lessons (
+                id INTEGER PRIMARY KEY,
+                kind TEXT,
+                severity TEXT,
+                confidence REAL,
+                trigger TEXT,
+                lesson TEXT,
+                evidence TEXT,
+                created_at TEXT,
+                last_seen_at TEXT,
+                seen_count INTEGER
+            );
+            CREATE TABLE task_experiences (
+                task_id TEXT,
+                run_id TEXT,
+                title TEXT,
+                goal_refs TEXT,
+                files TEXT,
+                status TEXT,
+                reason TEXT,
+                task_status TEXT,
+                attempts INTEGER,
+                validation_status TEXT,
+                branch TEXT,
+                pr_id TEXT,
+                lesson TEXT
+            );
+            CREATE TABLE validation_experiences (
+                id INTEGER PRIMARY KEY,
+                run_id TEXT,
+                task_id TEXT,
+                gate TEXT,
+                cmd_hash TEXT,
+                rc INTEGER,
+                status TEXT,
+                classification TEXT,
+                summary TEXT,
+                artifact_path TEXT,
+                recorded_at TEXT
+            );
+            """
+        )
+        evidence = json.dumps(
+            [
+                {"run_id": "20260429-150347", "task_id": "T17", "artifact_path": f"logs/run.log {secret}"},
+                {"run_id": "20260429-150347", "task_id": "T17", "artifact_path": f"prompts/system_prompt.md {secret}"},
+                {"run_id": "20260429-150347", "task_id": "T17", "artifact_path": f"worktree.patch {secret}"},
+            ],
+            ensure_ascii=False,
+        )
+        conn.executemany(
+            """
+            INSERT INTO lessons (kind, severity, confidence, trigger, lesson, evidence, created_at, last_seen_at, seen_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "task_sizing",
+                    "high",
+                    0.86,
+                    "When Playwright is required",
+                    "Split keyboard navigation and accessibility into separate tasks before Playwright.",
+                    evidence,
+                    "2026-04-29T15:03:47Z",
+                    "2026-04-30T09:12:00Z",
+                    3,
+                ),
+                (
+                    "validation",
+                    "medium",
+                    0.78,
+                    "For app.js and styles.css changes",
+                    "Run static web console tests and smoke validation before merge.",
+                    evidence,
+                    "2026-04-28T09:00:00Z",
+                    "2026-04-30T09:10:00Z",
+                    2,
+                ),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO task_experiences (
+                task_id, run_id, title, goal_refs, files, status, reason, task_status, attempts,
+                validation_status, branch, pr_id, lesson
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "T17",
+                    "20260429-150347",
+                    "Experience panel",
+                    "[]",
+                    json.dumps(["web_console/app.js", "web_console/styles.css"]),
+                    "review_required",
+                    f"raw prompt excerpt {secret}",
+                    "review_required",
+                    2,
+                    "no_tests_found",
+                    "task/T17-experience",
+                    "pr-T17",
+                    "Keep review-only browser surfaces small and validation-specific.",
+                ),
+                (
+                    "T18",
+                    "20260430-091500",
+                    "Validation routing",
+                    "[]",
+                    json.dumps(["agent_runner/web.py"]),
+                    "blocked_env",
+                    f"diff --git a/web_console/app.js b/web_console/app.js {secret}",
+                    "blocked_env",
+                    1,
+                    "skipped",
+                    "task/T18-validation",
+                    "pr-T18",
+                    "",
+                ),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO validation_experiences (
+                run_id, task_id, gate, cmd_hash, rc, status, classification, summary, artifact_path, recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "20260429-150347",
+                    "T17",
+                    "build",
+                    "hash-build-1",
+                    1,
+                    "failed",
+                    "regression_failed",
+                    f"tail excerpt {secret}",
+                    f"logs/error.log {secret}",
+                    "2026-04-29T15:10:00Z",
+                ),
+                (
+                    "20260430-091500",
+                    "T18",
+                    "build",
+                    "hash-build-2",
+                    1,
+                    "failed",
+                    "regression_failed",
+                    f"tail excerpt {secret}",
+                    f"logs/error.log {secret}",
+                    "2026-04-30T09:18:00Z",
+                ),
+                (
+                    "20260430-091500",
+                    "T18",
+                    "playwright",
+                    "hash-playwright-1",
+                    0,
+                    "skipped",
+                    "blocked_env",
+                    f"system prompt {secret}",
+                    f"prompts/dev_prompt.md {secret}",
+                    "2026-04-30T09:19:00Z",
+                ),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    _write(
+        experience_root / "latest_summary.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "20260430-091500",
+                "summary": "Experience DB highlights recurring validation blockers before merge.",
+                "task_lessons": [
+                    {
+                        "task_id": "T17",
+                        "kind": "task_sizing",
+                        "severity": "high",
+                        "confidence": 0.86,
+                        "lesson": "Split keyboard navigation and accessibility into separate tasks before Playwright.",
+                        "evidence": [f"logs/run.log {secret}"],
+                    }
+                ],
+                "validation_lessons": [],
+                "pm_hints": [
+                    "If validation is pending or no tests are found, preserve the work and mark it for review."
+                ],
+                "merge_hints": [
+                    "Do not merge browser changes until static web console tests and smoke validation pass."
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+    )
+    return db_path
 
 
 def _make_log_entries(count):
@@ -2599,6 +2815,22 @@ def _run_log_tail_session_harness(steps, fetch_responses=None):
 
 
 class WebConsoleRedactionHelperTests(unittest.TestCase):
+    def test_web_redaction_helpers_are_reexported_from_web(self) -> None:
+        import agent_runner.web as web_module
+        import agent_runner.web_redaction as web_redaction
+
+        for name in (
+            "_redact_config",
+            "_web_redaction_active",
+            "_web_redaction_meta",
+            "_web_apply_redaction",
+            "_redact_web_log_payload",
+            "_redact_web_runner_control",
+            "_redact_web_config_contract",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(web_module, name), getattr(web_redaction, name))
+
     def test_redact_web_log_payload_redacts_files_metadata(self) -> None:
         from agent_runner.web import _redact_web_log_payload
 
@@ -3717,6 +3949,91 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIn("run_start", kinds)
         self.assertIn("task_done", kinds)
 
+    def test_api_experience_and_history_panel_show_explicit_unavailable_state_when_db_missing(self) -> None:
+        experience_response = self.client.get("/api/experience")
+        self.assertEqual(200, experience_response.status_code)
+        experience_payload = experience_response.json()
+
+        self.assertFalse(experience_payload["available"])
+        self.assertEqual("unavailable", experience_payload["state"])
+        self.assertIn("Experience DB is unavailable", experience_payload["message"])
+        self.assertEqual([], experience_payload["recentLessons"])
+        self.assertEqual([], experience_payload["failurePatterns"])
+        self.assertEqual([], experience_payload["validationGaps"])
+        self.assertEqual([], experience_payload["mergeBlockers"])
+
+        status_payload = self.client.get("/api/status").json()
+        self.assertIn("experience", status_payload)
+        self.assertEqual("empty", status_payload["sectionState"]["experience"]["status"])
+        self.assertIn("Experience DB is unavailable", status_payload["sectionState"]["experience"]["message"])
+
+        normalized, history_html, _history_title = self._render_history_view(status_payload)
+        self.assertFalse(normalized["experience"]["available"])
+        self.assertIn("Experience", history_html)
+        self.assertIn("Experience DB is unavailable", history_html)
+        self.assertIn("No recent lessons were recorded.", history_html)
+
+    def test_api_experience_and_history_panel_render_all_sections_without_raw_artifacts(self) -> None:
+        secret = "SECRET-EXPERIENCE-DO-NOT-LEAK"
+        _write_experience_db(self.repo, secret=secret)
+
+        experience_payload = self.client.get("/api/experience").json()
+        self.assertTrue(experience_payload["available"])
+        self.assertEqual("ready", experience_payload["state"])
+        self.assertEqual(2, experience_payload["summary"]["lessons"])
+        self.assertEqual(1, experience_payload["summary"]["failurePatterns"])
+        self.assertEqual(3, experience_payload["summary"]["validationGaps"])
+        self.assertEqual(2, experience_payload["summary"]["mergeBlockers"])
+        self.assertTrue(experience_payload["recentLessons"])
+        self.assertTrue(experience_payload["failurePatterns"])
+        self.assertTrue(experience_payload["validationGaps"])
+        self.assertTrue(experience_payload["mergeBlockers"])
+
+        payload_text = json.dumps(experience_payload, ensure_ascii=False)
+        self.assertNotIn(secret, payload_text)
+        self.assertNotIn("diff --git", payload_text)
+        self.assertNotIn("system prompt", payload_text)
+        self.assertNotIn("tail excerpt", payload_text)
+
+        status_payload = self.client.get("/api/status").json()
+        self.assertEqual("ready", status_payload["sectionState"]["experience"]["status"])
+        self.assertIn("experience", status_payload)
+        self.assertNotIn(secret, json.dumps(status_payload["experience"], ensure_ascii=False))
+
+        normalized, history_html, _history_title = self._render_history_view(status_payload)
+        self.assertTrue(normalized["experience"]["available"])
+        self.assertIn("Recent lessons", history_html)
+        self.assertIn("Repeated failure patterns", history_html)
+        self.assertIn("Validation gaps", history_html)
+        self.assertIn("Merge blockers", history_html)
+        self.assertIn("Split keyboard navigation and accessibility into separate tasks before Playwright.", history_html)
+        self.assertIn("Manual review is still required before merge", history_html)
+        self.assertIn("No tests were found for the affected change", history_html)
+        self.assertIn("Environment blocker still prevents merge", history_html)
+        self.assertNotIn(secret, history_html)
+        self.assertNotIn("No recent lessons were recorded.", history_html)
+        self.assertNotIn("No repeated failure patterns were recorded.", history_html)
+        self.assertNotIn("No validation gaps were recorded.", history_html)
+        self.assertNotIn("No merge blockers were recorded.", history_html)
+
+    def test_api_experience_stays_safe_on_lan_read_only_bind(self) -> None:
+        secret = "SECRET-LAN-EXPERIENCE"
+        _write_experience_db(self.repo, secret=secret)
+
+        from fastapi.testclient import TestClient
+
+        client = TestClient(self._create_app(self.repo, bind_host="0.0.0.0"))
+        experience_payload = client.get("/api/experience").json()
+        status_payload = client.get("/api/status").json()
+
+        self.assertTrue(experience_payload["available"])
+        self.assertEqual("experience_db", experience_payload["source"])
+        self.assertNotIn(secret, json.dumps(experience_payload, ensure_ascii=False))
+        self.assertNotIn("diff --git", json.dumps(experience_payload, ensure_ascii=False))
+        self.assertEqual("ready", status_payload["sectionState"]["experience"]["status"])
+        self.assertNotIn(secret, json.dumps(status_payload["experience"], ensure_ascii=False))
+        self.assertFalse(status_payload["runner_control"]["enabled"])
+
     def test_api_history_and_history_view_show_missing_report_state(self) -> None:
         missing_run_dir = self._make_live_run_dir("20260426-130500")
         _write_run_bundle(
@@ -4488,6 +4805,83 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertTrue(payload["active_run"]["quotaAvailable"])
         self.assertTrue(payload["metrics"]["quotaAvailable"])
 
+    def test_api_status_snapshot_builder_keeps_web_payload_facades_patchable(self) -> None:
+        from agent_runner import web as web_module
+        from fastapi.testclient import TestClient
+
+        controller = FakeRunnerController(
+            self._controller_status(
+                self.run_dir,
+                running=False,
+                reason="project_complete",
+                exit_code=0,
+                stage="QA",
+            )
+        )
+
+        original_build_progress = web_module._build_progress_payload
+        original_stage_payload = web_module._stage_payload
+        original_history_payload = web_module._history_payload
+        original_worktree_payload = web_module._build_worktree_payload
+        original_live_state_payload = web_module._build_live_state_payload
+
+        def fake_build_progress_payload(*args: object, **kwargs: object) -> dict[str, object]:
+            progress = dict(original_build_progress(*args, **kwargs))
+            progress["final_reason"] = "facade-progress-marker"
+            return progress
+
+        def fake_stage_payload(*args: object, **kwargs: object) -> list[dict[str, object]]:
+            stages = [dict(item) for item in original_stage_payload(*args, **kwargs)]
+            stages[0]["reason"] = "facade-stage-marker"
+            return stages
+
+        def fake_history_payload(*args: object, **kwargs: object) -> dict[str, object]:
+            history = dict(original_history_payload(*args, **kwargs))
+            history["summary"] = dict(history.get("summary") or {})
+            history["summary"]["runs"] = 4242
+            return history
+
+        def fake_worktree_payload(*args: object, **kwargs: object) -> dict[str, object]:
+            worktree = dict(original_worktree_payload(*args, **kwargs))
+            worktree["reviewRequiredMessage"] = "facade-worktree-marker"
+            return worktree
+
+        def fake_live_state_payload(*args: object, **kwargs: object) -> dict[str, object]:
+            live_state = dict(original_live_state_payload(*args, **kwargs))
+            live_state["source"] = "facade-live-state"
+            return live_state
+
+        with patch.object(web_module, "_build_runner_controller", return_value=controller), patch.object(
+            web_module,
+            "_build_progress_payload",
+            side_effect=fake_build_progress_payload,
+        ), patch.object(
+            web_module,
+            "_stage_payload",
+            side_effect=fake_stage_payload,
+        ), patch.object(
+            web_module,
+            "_history_payload",
+            side_effect=fake_history_payload,
+        ), patch.object(
+            web_module,
+            "_build_worktree_payload",
+            side_effect=fake_worktree_payload,
+        ), patch.object(
+            web_module,
+            "_build_live_state_payload",
+            side_effect=fake_live_state_payload,
+        ):
+            client = TestClient(self._create_app(self.repo))
+            payload = client.get("/api/status").json()
+
+        self.assertEqual("facade-progress-marker", payload["progress"]["final_reason"])
+        self.assertEqual("facade-stage-marker", payload["stages"][0]["reason"])
+        self.assertEqual(4242, payload["history"]["summary"]["runs"])
+        self.assertEqual("facade-worktree-marker", payload["worktree"]["reviewRequiredMessage"])
+        self.assertEqual("facade-live-state", payload["runner_control"]["live_state"]["source"])
+        self.assertEqual("facade-live-state", payload["liveRun"]["liveState"]["source"])
+
     def test_api_status_normalizes_terminal_snapshots(self) -> None:
         success_run_dir = self._make_live_run_dir("20260426-111000")
         success = self._api_status(
@@ -5041,6 +5435,10 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIn("source_id", logs)
         self.assertIn("selected_source_id", logs)
         self.assertIn("sources", logs)
+        self.assertEqual("run_log", logs["source_id"])
+        self.assertEqual("run_log", logs["selected_source_id"])
+        self.assertEqual(["run_log", "error_log", "events_jsonl", "cycle_summary", "backend_transcript"], [item["id"] for item in logs["sources"]])
+        self.assertTrue(next(item["selected"] for item in logs["sources"] if item["id"] == "run_log"))
 
         goals = self.client.get("/api/goals").json()
         for key in ("path", "exists", "mtime", "size", "raw_text", "items", "completion", "completion_level", "summary", "warnings"):
@@ -5048,6 +5446,17 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(3, goals["summary"]["total"])
         self.assertEqual(1, goals["summary"]["done"])
         self.assertEqual(4, goals["items"]["p0"][0]["line_number"])
+
+    def test_api_logs_uses_next_available_source_when_run_log_is_missing(self) -> None:
+        (self.run_dir / "logs" / "run.log").unlink()
+
+        payload = self.client.get("/api/logs").json()
+
+        self.assertEqual("error_log", payload["source_id"])
+        self.assertEqual("error_log", payload["selected_source_id"])
+        self.assertEqual("error_log", payload["source"]["id"])
+        self.assertFalse(next(item["available"] for item in payload["sources"] if item["id"] == "run_log"))
+        self.assertTrue(next(item["selected"] for item in payload["sources"] if item["id"] == "error_log"))
 
     def test_api_pr_queue_missing_queue_returns_empty_state(self) -> None:
         from fastapi.testclient import TestClient
@@ -5759,6 +6168,9 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("[redacted]", override["preview"])
         self.assertTrue(override["path"].endswith("pm_instructions.md"))
         self.assertTrue(override["source"].endswith("prompts/agentcli"))
+        self.assertNotIn("content", override)
+        self.assertNotIn("validation", override)
+        self.assertNotIn("backups", override)
 
         template = items["pm_bootstrap"]
         self.assertEqual("personal", template["profile"])
@@ -5766,6 +6178,9 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("[redacted]", template["preview"])
         self.assertTrue(template["path"].endswith("pm_bootstrap_prompt.md"))
         self.assertEqual("templates/agent_prompts", template["source"])
+        self.assertNotIn("content", template)
+        self.assertNotIn("validation", template)
+        self.assertNotIn("backups", template)
 
     def test_prompt_read_returns_full_content_for_override_and_template_prompts(self) -> None:
         override = self.client.get(
@@ -6336,6 +6751,35 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(5, no_match["next_cursor"])
         self.assertEqual([], no_match["entries"])
 
+    def test_log_tail_helpers_are_reexported_and_preserve_source_selection_order(self) -> None:
+        from agent_runner import web as web_module
+        from agent_runner import web_logs
+
+        self.assertIs(web_module._build_log_tail_payload, web_logs._build_log_tail_payload)
+        self.assertIs(web_module._log_tail_source_catalog, web_logs._log_tail_source_catalog)
+        self.assertIs(web_module._resolve_log_tail_source_record, web_logs._resolve_log_tail_source_record)
+
+        catalog = web_logs._log_tail_source_catalog(self.run_dir)
+        self.assertEqual(
+            ["run_log", "error_log", "events_jsonl", "cycle_summary", "backend_transcript"],
+            [item["id"] for item in catalog],
+        )
+        self.assertEqual("run_log", web_logs._resolve_log_tail_source_record(self.run_dir)["id"])
+        self.assertEqual("backend_transcript", web_logs._resolve_log_tail_source_record(self.run_dir, "backend_transcript")["id"])
+        self.assertEqual(
+            (self.run_dir / "telegram_runner_subprocess.log").as_posix(),
+            web_logs._resolve_log_tail_source(self.run_dir, "backend_transcript").as_posix(),
+        )
+
+        (self.run_dir / "logs" / "run.log").unlink()
+        self.assertEqual("error_log", web_logs._resolve_log_tail_source_record(self.run_dir)["id"])
+        (self.run_dir / "logs" / "error.log").unlink()
+        self.assertEqual("events_jsonl", web_logs._resolve_log_tail_source_record(self.run_dir)["id"])
+        (self.run_dir / "logs" / "events.jsonl").unlink()
+        self.assertEqual("cycle_summary", web_logs._resolve_log_tail_source_record(self.run_dir)["id"])
+        (self.run_dir / "cycle_summary.log").unlink()
+        self.assertEqual("backend_transcript", web_logs._resolve_log_tail_source_record(self.run_dir)["id"])
+
     def test_api_logs_tail_handles_missing_log_file(self) -> None:
         from agent_runner.web import create_app
         from fastapi.testclient import TestClient
@@ -6421,6 +6865,60 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("[redacted]", redacted["nested"][0]["password"])
         self.assertEqual("safe", redacted["nested"][1]["name"])
 
+    def test_web_config_helper_facade_preserves_list_normalization(self) -> None:
+        import agent_runner.web as web_module
+        import agent_runner.web_config as web_config_module
+
+        self.assertIs(web_module._build_config_contract, web_config_module._build_config_contract)
+        self.assertIs(web_module._config_save_validate_change, web_config_module._config_save_validate_change)
+        self.assertIs(web_module._config_path_get, web_config_module._config_path_get)
+        self.assertIs(web_module._config_path_set, web_config_module._config_path_set)
+
+        _write_config(self.config_path, self.repo, telegram={"allowed_chat_ids": [], "notify_events": []})
+        contract = web_module._build_config_contract(
+            self.repo,
+            {},
+            self.config_path,
+            "explicit",
+            self.prompts_dir,
+            save_enabled=True,
+        )
+        schema = contract["schema"]
+
+        string_ids, string_ids_code, _ = web_module._config_save_validate_change(
+            "telegram.allowed_chat_ids",
+            "101, 202",
+            schema["telegram.allowed_chat_ids"],
+            [],
+        )
+        array_ids, array_ids_code, _ = web_module._config_save_validate_change(
+            "telegram.allowed_chat_ids",
+            ["101", 202],
+            schema["telegram.allowed_chat_ids"],
+            [],
+        )
+        string_events, string_events_code, _ = web_module._config_save_validate_change(
+            "telegram.notify_events",
+            "run_start, task_done",
+            schema["telegram.notify_events"],
+            [],
+        )
+        array_events, array_events_code, _ = web_module._config_save_validate_change(
+            "telegram.notify_events",
+            ["run_start", "task_done"],
+            schema["telegram.notify_events"],
+            [],
+        )
+
+        self.assertEqual("", string_ids_code)
+        self.assertEqual("", array_ids_code)
+        self.assertEqual([101, 202], string_ids)
+        self.assertEqual(string_ids, array_ids)
+        self.assertEqual("", string_events_code)
+        self.assertEqual("", array_events_code)
+        self.assertEqual(["run_start", "task_done"], string_events)
+        self.assertEqual(string_events, array_events)
+
     def test_static_console_assets_are_served(self) -> None:
         root = self.client.get("/")
         self.assertEqual(200, root.status_code)
@@ -6439,9 +6937,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual(404, response.status_code)
 
     def test_api_goals_returns_metadata_items_and_warnings(self) -> None:
-        _write(
-            self.repo / ".doc" / "GOALS.md",
-            """# Project Goals
+        raw_text = """# Project Goals
 
 Intro line that should be ignored.
 
@@ -6458,14 +6954,14 @@ Another unsupported line.
 
 ## Notes
 - [ ] Ignore outside sections
-""",
-        )
+"""
+        _write(self.repo / ".doc" / "GOALS.md", raw_text)
 
         payload = self.client.get("/api/goals").json()
 
         self.assertTrue(payload["exists"])
         self.assertTrue(payload["path"].endswith(".doc/GOALS.md"))
-        self.assertIn("Expose read-only progress views", payload["raw_text"])
+        self.assertEqual(raw_text, payload["raw_text"])
         self.assertGreater(payload["size"], 0)
         self.assertIsNotNone(payload["mtime"])
         self.assertEqual("all", payload["completion_level"])

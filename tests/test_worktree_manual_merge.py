@@ -28,6 +28,7 @@ from agent_runner.gitops import (
     WorktreeSafetyError,
     sha256_text,
 )
+from agent_runner.runtime_contract import dispatch_worktree_cleanup
 from agent_runner.utils import run_cmd
 
 
@@ -312,6 +313,52 @@ class WorktreeManualMergeTests(unittest.TestCase):
             self.assertTrue(error.details["reboot_required"])
             self.assertIn("reboot", str(error.details["reboot_guidance"]).lower())
         self.assertTrue(retry_worktree.exists())
+
+    def test_dispatch_worktree_cleanup_removes_generated_worktree(self) -> None:
+        self._init_repo()
+        create_worktree(self.repo, self.worktree, run_dir=self.fixture_root)
+
+        result = dispatch_worktree_cleanup(
+            source_repo=self.repo,
+            worktree_dir=self.worktree,
+            run_dir=self.fixture_root,
+            should_remove=True,
+            remove_worktree_fn=remove_worktree,
+        )
+
+        self.assertTrue(result.attempted)
+        self.assertTrue(result.ok)
+        self.assertEqual("", result.final_reason)
+        self.assertEqual("", result.artifact_path)
+        self.assertFalse(self.worktree.exists())
+        self.assertFalse((self.fixture_root / "WORKTREE_CLEANUP_FAILURE.md").exists())
+
+    def test_dispatch_worktree_cleanup_writes_failure_visibility_artifact(self) -> None:
+        self._init_repo()
+        self.worktree.mkdir()
+        locked_file = self.worktree / "nested" / "locked.txt"
+        locked_file.parent.mkdir(parents=True, exist_ok=True)
+        locked_file.write_text("locked\n", encoding="utf-8")
+        cleanup_error = self._cleanup_error(locked_file)
+
+        result = dispatch_worktree_cleanup(
+            source_repo=self.repo,
+            worktree_dir=self.worktree,
+            run_dir=self.fixture_root,
+            should_remove=True,
+            remove_worktree_fn=lambda _repo, _worktree: (_ for _ in ()).throw(cleanup_error),
+        )
+
+        self.assertTrue(result.attempted)
+        self.assertFalse(result.ok)
+        self.assertEqual("worktree_cleanup_failed", result.final_reason)
+        self.assertEqual(str(cleanup_error), result.detail)
+        artifact_path = self.fixture_root / "WORKTREE_CLEANUP_FAILURE.md"
+        self.assertEqual(artifact_path.as_posix(), result.artifact_path)
+        self.assertTrue(artifact_path.exists())
+        artifact_text = artifact_path.read_text(encoding="utf-8")
+        self.assertIn(self.worktree.as_posix(), artifact_text)
+        self.assertIn(str(cleanup_error), artifact_text)
 
     def test_apply_pending_worktree_merge_keeps_patch_applied_when_cleanup_fails(self) -> None:
         base_ref = self._init_repo()

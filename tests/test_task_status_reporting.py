@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from agent_runner.reporting import build_cycle_change_summary, build_qa_validation_report
+from agent_runner.task_failures import record_task_failure_state
 from agent_runner.web import _load_backlog_payload
 
 
@@ -24,15 +25,10 @@ class TaskStatusReportingTests(unittest.TestCase):
             {"id": "T4", "title": "Already done", "prompt": "", "files": []},
         ]
         (self.run_dir / "BACKLOG.json").write_text(json.dumps({"tasks": tasks}), encoding="utf-8")
-        self.state = {
-            "done": ["T4"],
-            "failed": [
-                {"task": "T1", "reason": "build_failed", "task_status": "blocked_env"},
-                {"task": "T2", "reason": "fast_regression_failed", "task_status": "test_contract_changed"},
-                {"task": "T3", "reason": "build_failed", "task_status": "regression_failed"},
-            ],
-            "warnings": [],
-        }
+        self.state = {"done": ["T4"], "failed": [], "warnings": []}
+        record_task_failure_state(self.state, task_id="T1", reason="build_failed", task_status="blocked_env")
+        record_task_failure_state(self.state, task_id="T2", reason="fast_regression_failed", task_status="test_contract_changed")
+        record_task_failure_state(self.state, task_id="T3", reason="build_failed", task_status="regression_failed")
         (self.run_dir / "STATE.json").write_text(json.dumps(self.state), encoding="utf-8")
 
     def tearDown(self) -> None:

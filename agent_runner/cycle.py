@@ -12,6 +12,11 @@ from typing import Optional, Any
 
 from .analysis_cache import merge_dev_hints_to_global_changelog
 from .docs import resolve_docs_dir, generate_docs_digest
+from .experience import (
+    load_pm_experience_summary,
+    record_completed_task_experience,
+    record_validation_experiences,
+)
 from .gates import (
     extract_build_warnings,
     classify_task_validation_status,
@@ -85,7 +90,14 @@ from .reporting import (
     write_cycle_change_summary_artifacts,
     write_run_report_artifacts,
 )
+from .runtime_contract import (
+    AttemptContext,
+    RunnerContext,
+    dispatch_task_branch_disposition,
+    dispatch_worktree_cleanup,
+)
 from .run_dir import make_run_dir, find_latest_run_dir
+from .stop_progress import write_stop_snapshot
 from .state import (
     TaskItem,
     count_state_task_ids,
@@ -129,6 +141,7 @@ from .exc_detect import (
     is_quota_exception,
     is_model_invalid_exception,
 )
+from .experience import record_task_experience
 from .qa_utils import (
     extract_qa_followups,
     followups_from_structured,
@@ -137,7 +150,7 @@ from .qa_utils import (
     write_manual_checks,
 )
 from .backlog_utils import (
-    normalize_backlog_tasks,
+    postprocess_pm_output_tasks,
     validate_skill_ids,
     load_backlog_context_for_pm,
     build_failed_tasks_block,
@@ -149,7 +162,6 @@ from .goals import (
     read_goals,
     format_goals_block,
     parse_goals_completion,
-    gate_pm_tasks_against_goals,
     update_goals_checkboxes,
     write_completion_status,
     build_goals_refresh_prompt,
@@ -178,6 +190,7 @@ from .skills import (
     summarize_skills_index_capped,
 )
 from .skills.match import suggest_skills
+from .validation_artifacts import write_task_validation_artifacts
 from .shared import (
     load_json_if_exists as _load_json_if_exists,
     inline_skills_for as _inline_skills_for,
@@ -191,14 +204,18 @@ from .task_status import (
     classify_task_failure,
     is_manual_review_required,
 )
+from .experience import (
+    ExperienceRedactionSettings,
+    render_pm_experience_summary_from_run,
+)
 from .failure_policy import (
     ACTION_RETRY,
-    build_failure_entry,
     count_task_status_groups,
     decide_failure_disposition,
     should_count_cycle_failure_for_stop,
     should_preserve_for_review,
 )
+from .task_failures import record_task_failure_result, record_task_failure_state
 from .progress import print_cycle_report, TokenTracker
 from .codex_exec import codex_exec, CodexExecResult
 
@@ -213,7 +230,6 @@ from .pipeline.shared_runtime import (
     detect_and_clear_recycled_ids,
     ensure_backlog_artifacts,
     load_backlog_tasks,
-    merge_pm_tasks_with_existing_pending,
     maybe_refresh_tasks_after_pm,
     prepare_pm_inventory_markdown,
     process_qa_followups,
@@ -336,54 +352,16 @@ async def main_async(args: argparse.Namespace) -> int:
         message: str = "",
     ) -> dict[str, Any]:
         """Persist a lightweight stop snapshot so manual stops leave usable context."""
-        try:
-            reason = detect_stop_reason([stop_path]) or STOP_REASON_STOP_FILE
-        except Exception:
-            reason = STOP_REASON_STOP_FILE
-        payload: dict[str, Any] = {
-            "ts": now_iso(),
-            "reason": reason,
-            "stage": str(stage or ""),
-            "cycle": int(cycle),
-            "step": int(step),
-            "task_id": str(task_id or ""),
-            "message": str(message or ""),
-            "run_dir": str(run_dir),
-        }
-        if attempt is not None:
-            payload["attempt"] = int(attempt)
-        try:
-            progress_path = run_dir / "progress.txt"
-            if progress_path.exists():
-                payload["progress"] = progress_path.read_text(encoding="utf-8", errors="replace").strip()
-        except Exception:
-            pass
-        try:
-            state_path = run_dir / "STATE.json"
-            if state_path.exists():
-                state_obj = load_state(state_path)
-                backlog_task_ids = load_backlog_task_ids(run_dir / "BACKLOG.json")
-                state_counts = count_state_task_ids(state_obj, backlog_task_ids)
-                payload["state_counts"] = {
-                    "done": state_counts["done"],
-                    "failed": state_counts["failed"],
-                    "warnings": state_counts["warnings"],
-                }
-        except Exception:
-            pass
-        try:
-            (run_dir / "STOP_SNAPSHOT.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-                errors="replace",
-            )
-        except Exception:
-            pass
-        try:
-            with (run_dir / "STOP_SNAPSHOT.log").open("a", encoding="utf-8", errors="replace") as handle:
-                handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
-        except Exception:
-            pass
+        payload = write_stop_snapshot(
+            run_dir,
+            stage=stage,
+            cycle=cycle,
+            step=step,
+            task_id=task_id,
+            attempt=attempt,
+            message=message,
+            stop_paths=[stop_path],
+        )
         try:
             metrics.event(
                 "stop_checkpoint",
@@ -505,6 +483,7 @@ async def main_async(args: argparse.Namespace) -> int:
     # Dev hints dir (run-local)
     dev_hints_dir = run_dir / "analysis_hints"
     dev_hints_dir.mkdir(parents=True, exist_ok=True)
+    experience_redaction = ExperienceRedactionSettings.from_source(args)
 
     # Ensure continuous in loop mode
     continuous = bool(args.continuous or args.loop)
@@ -927,9 +906,6 @@ async def main_async(args: argparse.Namespace) -> int:
             return None
 
         
-        def _normalize_backlog_tasks(raw_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            return normalize_backlog_tasks(raw_tasks, run_dir)
-
         def _validate_skill_ids(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return validate_skill_ids(
                 tasks,
@@ -958,6 +934,49 @@ async def main_async(args: argparse.Namespace) -> int:
                 task_status=task_status, reason=reason, detail=detail, files=files,
                 cycle=cycle, attempt=attempt, max_attempts=max_attempts,
                 task_history_enabled=bool(getattr(args, "task_history_enabled", True)),
+            )
+
+        def _record_task_experience_event(
+            *,
+            task_id: str,
+            title: str,
+            status: str,
+            reason: str = "",
+            task_status: str = "",
+            cycle_idx: int = 0,
+            step_idx: int = 0,
+            attempt: int = 0,
+            max_attempts: int = 0,
+            validation_status: str = "",
+            validation_summary: str = "",
+            validations: list[dict[str, Any]] | None = None,
+            blocked_dependencies: list[dict[str, Any]] | None = None,
+            artifact_pointers: list[str] | None = None,
+            outcome_action: str = "",
+            outcome_note: str = "",
+            detail: str = "",
+        ) -> None:
+            record_task_experience(
+                repo,
+                run_id=run_dir.name,
+                backend="codex",
+                task_id=task_id,
+                title=title,
+                status=status,
+                reason=reason,
+                task_status=task_status,
+                cycle_idx=cycle_idx,
+                step_idx=step_idx,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                validation_status=validation_status,
+                validation_summary=validation_summary,
+                validations=validations,
+                blocked_dependencies=blocked_dependencies,
+                artifact_pointers=artifact_pointers,
+                outcome_action=outcome_action,
+                outcome_note=outcome_note,
+                detail=detail,
             )
 
         async def run_pm_if_needed(cycle_idx: int, curr_head: str, changed_files: list[str], repo_fp: str, force_refresh_backlog: bool = False) -> bool:
@@ -1009,110 +1028,17 @@ async def main_async(args: argparse.Namespace) -> int:
                 goals_evaluation_instruction=GOALS_EVALUATION_INSTRUCTION,
                 goals_generation_instruction=GOALS_GENERATION_INSTRUCTION,
             )
-
-            def _goal_trace_map(tasks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-                trace_map: dict[str, list[dict[str, Any]]] = {}
-                for task in tasks:
-                    tid = str(task.get("id") or "").strip()
-                    if not tid:
-                        continue
-                    trace_val = task.get("goal_trace")
-                    if isinstance(trace_val, list):
-                        traces = [dict(trace) for trace in trace_val if isinstance(trace, dict)]
-                        if traces:
-                            trace_map[tid] = traces
-                return trace_map
-
-            def _restore_goal_trace(tasks: list[dict[str, Any]], trace_map: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
-                if not trace_map:
-                    return tasks
-                restored: list[dict[str, Any]] = []
-                for task in tasks:
-                    tid = str(task.get("id") or "").strip()
-                    if tid and tid in trace_map:
-                        next_task = dict(task)
-                        next_task["goal_trace"] = [dict(trace) for trace in trace_map[tid]]
-                        restored.append(next_task)
-                    else:
-                        restored.append(task)
-                return restored
-
-            def _write_pm_goal_gate_error(
-                *,
-                cycle_idx: int,
-                kind: str,
-                gate: dict[str, Any],
-                pm_dump: dict[str, Any],
-                raw_pm_output_path: Path,
-            ) -> None:
-                payload = {
-                    "generated_at": now_iso(),
-                    "cycle": cycle_idx,
-                    "kind": kind,
-                    "status": gate.get("status", ""),
-                    "message": gate.get("message", ""),
-                    "goal_path": gate.get("goal_path", ""),
-                    "goals": gate.get("goals", {}),
-                    "raw_output_path": raw_pm_output_path.as_posix(),
-                    "accepted_count": len(gate.get("accepted_tasks") or []),
-                    "rejected_count": len(gate.get("rejected_tasks") or []),
-                    "rejected_tasks": gate.get("rejected_tasks", []),
-                    "error": gate.get("error"),
-                    "pm_output": {
-                        "kind": pm_dump.get("kind"),
-                        "summary": pm_dump.get("summary"),
-                        "notes_md": pm_dump.get("notes_md"),
-                        "warnings": pm_dump.get("warnings", []),
-                        "open_questions": pm_dump.get("open_questions", []),
-                        "tasks": pm_dump.get("tasks", []),
-                    },
-                }
-                safe_write_text(
-                    run_dir / f"PM_GOALS_GATE_ERROR_cycle_{cycle_idx:03d}.json",
-                    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-                )
-
-            def _apply_goal_gate_to_pm_output(
-                *,
-                pm_out: PMOutputV2,
-                cycle_idx: int,
-                kind: str,
-                raw_pm_output_path: Path,
-            ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-                gate = gate_pm_tasks_against_goals(
-                    repo,
-                    [t.model_dump() for t in (pm_out.tasks or [])],
-                    completion_level=goals_completion_level,
-                )
-                accepted_tasks = [dict(task) for task in gate.get("accepted_tasks") or []]
-                rejected_tasks = [dict(task) for task in gate.get("rejected_tasks") or []]
-                pm_dump = pm_out.model_dump()
-                pm_dump["tasks"] = accepted_tasks
-                pm_dump["goals_gate"] = {
-                    "goal_path": gate.get("goal_path", ""),
-                    "gate_required": gate.get("gate_required", False),
-                    "status": gate.get("status", ""),
-                    "message": gate.get("message", ""),
-                    "accepted_count": len(accepted_tasks),
-                    "rejected_count": len(rejected_tasks),
-                    "error": gate.get("error"),
-                    "goals": gate.get("goals", {}),
-                }
-                if rejected_tasks:
-                    pm_dump["rejected_tasks"] = rejected_tasks
-                if gate.get("error") or rejected_tasks:
-                    _write_pm_goal_gate_error(
-                        cycle_idx=cycle_idx,
-                        kind=kind,
-                        gate=gate,
-                        pm_dump=pm_dump,
-                        raw_pm_output_path=raw_pm_output_path,
-                    )
-                return gate, pm_dump, accepted_tasks, rejected_tasks
+            experience_repo = source_repo if worktree_dir is not None else repo
+            pm_experience_summary = load_pm_experience_summary(experience_repo, run_dir, args=args)
 
             try:
                 if need_bootstrap:
                     metrics.event("pm_start", cycle=cycle_idx, kind="bootstrap")
+                    experience_summary_block = render_pm_experience_summary_from_run(
+                        run_dir,
+                        settings=experience_redaction,
+                        repo_root=repo,
+                    )
                     _hist_enabled = bool(getattr(args, "task_history_enabled", True))
                     _hist_max = int(getattr(args, "task_history_max_items", 50) or 50)
                     if _hist_enabled:
@@ -1130,6 +1056,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "digest_rel": str(digest_rel),
                         "skills_index_summary": skills_index_summary,
                         "codex_call_hint": codex_call_hint(autopilot),
+                        "pm_experience_summary": pm_experience_summary,
                         "task_history_block": _format_history_block(repo, max_items=_hist_max) if _hist_enabled else "(disabled)",
                     }
                     pm_prompt = append_pm_essential_context(
@@ -1139,6 +1066,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         failed_tasks_block=_failed_blk,
                         goals_block=goals_block,
                         goals_instruction=goals_instruction,
+                        experience_summary_block=experience_summary_block,
                     )
                     pm_out = await _run_pm_structured(
                         pm_prompt,
@@ -1159,11 +1087,31 @@ async def main_async(args: argparse.Namespace) -> int:
                         metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=1, error="structured_output_failed")
                         return False
 
-                    gate, _pm_dump, accepted_tasks, rejected_tasks = _apply_goal_gate_to_pm_output(
-                        pm_out=pm_out,
+                    _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
+                    _pre_pm_tasks = list(existing_tasks)  # recycled ID 鍮꾧탳???ㅻ깄??
+                    pm_postprocess = postprocess_pm_output_tasks(
+                        repo=repo,
+                        run_dir=run_dir,
                         cycle_idx=cycle_idx,
                         kind="bootstrap",
                         raw_pm_output_path=pm_output_path,
+                        pm_output_model_dump=pm_out.model_dump(),
+                        existing_tasks=existing_tasks,
+                        done_ids=done_ids,
+                        failed_ids=failed_ids,
+                        completion_level=goals_completion_level,
+                    )
+                    gate = pm_postprocess["pm_gate"]
+                    _pm_dump = pm_postprocess["pm_output_model_dump"]
+                    accepted_tasks = pm_postprocess["accepted_pm_tasks"]
+                    rejected_tasks = pm_postprocess["rejected_pm_tasks"]
+                    merged_tasks = pm_postprocess["backlog_tasks"]
+                    write_pm_output_artifacts(
+                        run_dir=run_dir,
+                        cycle_idx=cycle_idx,
+                        pm_output_model_dump=_pm_dump,
+                        notes_md=pm_out.notes_md,
+                        dump_pretty_fn=dump_pretty,
                     )
                     if gate.get("status") == "partial":
                         metrics.event(
@@ -1188,19 +1136,11 @@ async def main_async(args: argparse.Namespace) -> int:
                             goal_path=str(gate.get("goal_path") or ""),
                         )
                     _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
-                    _pre_pm_tasks = list(existing_tasks)  # recycled ID 비교용 스냅샷
+                    _pre_pm_tasks = list(existing_tasks)  # recycled ID 鍮꾧탳???ㅻ깄??
 
-                    merged_tasks = merge_pm_tasks_with_existing_pending(
-                        pm_tasks=accepted_tasks,
-                        existing_tasks=existing_tasks,
-                        done_ids=done_ids,
-                        failed_ids=failed_ids,
-                    )
+                    merged_tasks = pm_postprocess["backlog_tasks"]
 
                     if merged_tasks:
-                        merged_tasks = _normalize_backlog_tasks(merged_tasks)
-                        accepted_trace_map = _goal_trace_map(accepted_tasks)
-                        merged_tasks = _restore_goal_trace(merged_tasks, accepted_trace_map)
                         merged_tasks = _validate_skill_ids(merged_tasks)
                         if merged_tasks:
                             try:
@@ -1226,7 +1166,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             except Exception as _qa_merge_ex:
                                 eprint(f"[WARN] QA followup merge during PM bootstrap failed: {_qa_merge_ex}")
                             write_backlog_files(run_dir, merged_tasks)
-                            # Recycled ID 감지: PM이 기존 done 태스크 ID를 새 내용으로 재사용했는지 확인
+                            # Recycled ID 媛먯?: PM??湲곗〈 done ?쒖뒪??ID瑜????댁슜?쇰줈 ?ъ궗?⑺뻽?붿? ?뺤씤
                             try:
                                 _new_tasks = load_tasks()
                                 _st = load_state(run_dir / "STATE.json")
@@ -1252,18 +1192,12 @@ async def main_async(args: argparse.Namespace) -> int:
                 if need_incremental or force_refresh:
                     metrics.event("pm_start", cycle=cycle_idx, kind="incremental" if need_incremental else "refresh")
                     changed_files_block = "\n".join([f"- {p}" for p in (changed_files or [])]) or "- (none)"
-                    # Render dev hint block (local, no tokens)
-                    hint_lines: list[str] = []
-                    if dev_hints_dir.exists():
-                        for hf in sorted(dev_hints_dir.glob("*.md"), key=lambda x: x.stat().st_mtime)[-12:]:
-                            try:
-                                rel = hf.relative_to(run_dir).as_posix()
-                                content = hf.read_text(encoding="utf-8", errors="replace").strip()
-                                hint_lines.append(f"- {rel}:")
-                                hint_lines.extend([f"  {ln}" for ln in content.splitlines()[:10]])
-                            except Exception:
-                                continue
-                    hint_block = "\n".join(hint_lines) or "(none)"
+                    experience_summary_block = render_pm_experience_summary_from_run(
+                        run_dir,
+                        settings=experience_redaction,
+                        repo_root=repo,
+                    )
+                    hint_block = "(see <pm_experience_summary>)" if experience_summary_block not in {"(none)", "(disabled)"} else "(none)"
 
                     current_backlog_block, _, _, _ = _load_backlog_context_for_pm()
                     failed_tasks_block = _build_failed_tasks_block()
@@ -1298,6 +1232,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "current_backlog_block": current_backlog_block,
                         "failed_tasks_block": failed_tasks_block,
                         "hint_block": hint_block,
+                        "pm_experience_summary": pm_experience_summary,
                         "task_history_block": _format_history_block(repo, max_items=_hist_max_i) if _hist_enabled_i else "(disabled)",
                     }
                     pm_prompt = append_pm_essential_context(
@@ -1308,6 +1243,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         goals_block=goals_block,
                         goals_instruction=goals_instruction,
                         build_warnings_block=build_warnings_block,
+                        experience_summary_block=experience_summary_block,
                     )
                     pm_out = await _run_pm_structured(
                         pm_prompt,
@@ -1340,11 +1276,31 @@ async def main_async(args: argparse.Namespace) -> int:
                         )
                         return False
 
-                    gate, _pm_dump, accepted_tasks, rejected_tasks = _apply_goal_gate_to_pm_output(
-                        pm_out=pm_out,
+                    _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
+                    _pre_pm_tasks_inc = list(existing_tasks)
+                    pm_postprocess = postprocess_pm_output_tasks(
+                        repo=repo,
+                        run_dir=run_dir,
                         cycle_idx=cycle_idx,
                         kind="incremental" if need_incremental else "refresh",
                         raw_pm_output_path=pm_output_path,
+                        pm_output_model_dump=pm_out.model_dump(),
+                        existing_tasks=existing_tasks,
+                        done_ids=done_ids,
+                        failed_ids=failed_ids,
+                        completion_level=goals_completion_level,
+                    )
+                    gate = pm_postprocess["pm_gate"]
+                    _pm_dump = pm_postprocess["pm_output_model_dump"]
+                    accepted_tasks = pm_postprocess["accepted_pm_tasks"]
+                    rejected_tasks = pm_postprocess["rejected_pm_tasks"]
+                    merged_tasks = pm_postprocess["backlog_tasks"]
+                    write_pm_output_artifacts(
+                        run_dir=run_dir,
+                        cycle_idx=cycle_idx,
+                        pm_output_model_dump=_pm_dump,
+                        notes_md=pm_out.notes_md,
+                        dump_pretty_fn=dump_pretty,
                     )
                     if gate.get("status") == "partial":
                         metrics.event(
@@ -1371,21 +1327,13 @@ async def main_async(args: argparse.Namespace) -> int:
                     _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
                     _pre_pm_tasks_inc = list(existing_tasks)
 
-                    merged_tasks = merge_pm_tasks_with_existing_pending(
-                        pm_tasks=accepted_tasks,
-                        existing_tasks=existing_tasks,
-                        done_ids=done_ids,
-                        failed_ids=failed_ids,
-                    )
+                    merged_tasks = pm_postprocess["backlog_tasks"]
 
                     if merged_tasks:
-                        merged_tasks = _normalize_backlog_tasks(merged_tasks)
-                        accepted_trace_map = _goal_trace_map(accepted_tasks)
-                        merged_tasks = _restore_goal_trace(merged_tasks, accepted_trace_map)
                         merged_tasks = _validate_skill_ids(merged_tasks)
                         if merged_tasks:
                             write_backlog_files(run_dir, merged_tasks)
-                            # Recycled ID 감지
+                            # Recycled ID 媛먯?
                             try:
                                 _new_tasks = load_tasks()
                                 _st = load_state(run_dir / "STATE.json")
@@ -1609,109 +1557,56 @@ async def main_async(args: argparse.Namespace) -> int:
 
             tasks_root = run_dir / "tasks"
             tasks_root.mkdir(parents=True, exist_ok=True)
+            runner_context = RunnerContext(run_dir)
 
             def _write_task_validation_artifact(
                 *,
                 task: TaskItem,
-                attempt_dir: Path,
+                attempt_context: AttemptContext,
                 validations: list[dict[str, Any]],
                 status: str,
                 reason: str,
                 detail: str = "",
                 task_status: str = "",
             ) -> Path:
-                """Persist a structured per-attempt validation artifact."""
-                artifact_path = attempt_dir / "validation.json"
-                validation_status = str(status or "").strip() or "unknown"
-                validation_reason = str(reason or "").strip()
-                validation_detail = str(detail or "").strip()
-                outcome_status = str(task_status or "").strip()
-                if not outcome_status:
-                    outcome_status = (
-                        TASK_STATUS_COMPLETED
-                        if validation_status in {"passed", TASK_STATUS_COMPLETED}
-                        else classify_task_failure(
-                            validation_reason,
-                            validations=validations,
-                            detail=validation_detail,
-                        )
-                    )
-                fast_validation = next((record for record in validations if str(record.get("gate") or "") == "fast_web_worktree_regression"), {})
-                selected_fast_suite = list(fast_validation.get("suite_files") or fast_validation.get("suiteFiles") or [])
-                trigger_files = list(fast_validation.get("trigger_files") or fast_validation.get("triggerFiles") or [])
-                compile_validation = next((record for record in validations if str(record.get("kind") or "") == "compile"), {})
-                test_validation = next((record for record in validations if str(record.get("kind") or "") == "test"), {})
-                payload = {
-                    "schema_version": 1,
-                    "artifact_path": artifact_path.as_posix(),
-                    "task_id": task.id,
-                    "task_title": task.title,
-                    "task_files": list(task.files or []),
-                    "goal_ref": task_goal_ref,
-                    "goal_text": task_goal_text,
-                    "goal_trace": task_goal_trace,
-                    "cycle": cycle_idx,
-                    "step": step,
-                    "attempt": attempt,
-                    "status": validation_status,
-                    "task_status": outcome_status,
-                    "taskStatus": outcome_status,
-                    "outcome_status": outcome_status,
-                    "outcomeStatus": outcome_status,
-                    "review_required": is_manual_review_required(outcome_status),
-                    "reviewRequired": is_manual_review_required(outcome_status),
-                    "auto_merge_allowed": outcome_status == TASK_STATUS_COMPLETED,
-                    "autoMergeAllowed": outcome_status == TASK_STATUS_COMPLETED,
-                    "reason": validation_reason,
-                    "detail": validation_detail,
-                    "validation_status": validation_status,
-                    "validationStatus": validation_status,
-                    "validation_reason": validation_reason,
-                    "validationReason": validation_reason,
-                    "validation_detail": validation_detail,
-                    "validationDetail": validation_detail,
-                    "compile_validation": compile_validation,
-                    "compileValidation": compile_validation,
-                    "test_validation": test_validation,
-                    "testValidation": test_validation,
-                    "fast_regression_validation": fast_validation,
-                    "fastRegressionValidation": fast_validation,
-                    "selected_fast_regression_suite": selected_fast_suite,
-                    "selectedFastRegressionSuite": selected_fast_suite,
-                    "trigger_files": trigger_files,
-                    "triggerFiles": trigger_files,
-                    "validations": validations,
-                    "failure_summary": validation_detail if validation_status != "passed" else "",
-                    "failureSummary": validation_detail if validation_status != "passed" else "",
-                }
-                try:
-                    safe_write_text(artifact_path, json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n")
-                except Exception:
-                    pass
-
-                summary_lines = [
-                    f"validation_status={validation_status}",
-                    f"task_status={outcome_status}",
-                    f"reason={validation_reason or 'ok'}",
-                ]
-                if selected_fast_suite:
-                    summary_lines.append("fast_suite=" + ", ".join(selected_fast_suite))
-                if trigger_files:
-                    summary_lines.append("trigger_files=" + ", ".join(trigger_files))
-                for record in validations:
-                    record_name = str(record.get("name") or record.get("gate") or record.get("kind") or "validation")
-                    record_rc = record.get("rc")
-                    record_artifact = str(record.get("artifact_path") or record.get("artifactPath") or record.get("log_path") or record.get("logPath") or "")
-                    summary_lines.append(f"{record_name}: rc={record_rc} artifact={record_artifact}")
-                    record_failure = str(record.get("failure_summary") or record.get("failureSummary") or "").strip()
-                    if record_failure and record_failure != validation_detail:
-                        summary_lines.append(f"{record_name}_failure={record_failure}")
-                if validation_detail:
-                    summary_lines.append(f"failure_summary={validation_detail}")
-                try:
-                    safe_write_text(attempt_dir / "validation.txt", "\n".join(summary_lines).rstrip() + "\n")
-                except Exception:
-                    pass
+                records = [record for record in validations if isinstance(record, dict)]
+                artifact_path = write_task_validation_artifacts(
+                    attempt_dir=attempt_context.attempt_dir,
+                    task_id=task.id,
+                    task_title=task.title,
+                    task_files=task.files,
+                    cycle=cycle_idx,
+                    step=step,
+                    attempt=attempt,
+                    validations=records,
+                    status=status,
+                    reason=reason,
+                    detail=detail,
+                    task_status=task_status,
+                    goal_ref=task_goal_ref,
+                    goal_text=task_goal_text,
+                    goal_trace=task_goal_trace,
+                )
+                validation_artifacts: list[str] = [artifact_path.as_posix()]
+                for record in records:
+                    for key in ("artifact_path", "artifactPath", "log_path", "logPath"):
+                        record_artifact = str(record.get(key) or "").strip()
+                        if record_artifact and record_artifact not in validation_artifacts:
+                            validation_artifacts.append(record_artifact)
+                record_validation_experiences(
+                    source_repo,
+                    source_kind="task_validation",
+                    run_id=run_dir.name,
+                    task_id=task.id,
+                    task_title=task.title,
+                    task_ids=[task.id],
+                    validation_status=str(status or "").strip() or "unknown",
+                    validation_reason=str(reason or "").strip(),
+                    validation_detail=str(detail or "").strip(),
+                    validation_artifact_path=artifact_path.as_posix(),
+                    validation_artifacts=validation_artifacts,
+                    validation_records=records,
+                )
                 return artifact_path
 
             # --- Cycle-start git health check ---
@@ -1816,11 +1711,14 @@ async def main_async(args: argparse.Namespace) -> int:
                     metrics=metrics,
                     eprint_fn=eprint,
                     task_results=task_results,
+                    step_idx=step,
+                    record_task_experience_fn=_record_task_experience_event,
                 )
                 if not next_task:
                     break
 
-                task_dir = tasks_root / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}"
+                task_context = runner_context.task_context(cycle=cycle_idx, step=step, task_id=next_task.id)
+                task_dir = task_context.task_dir
                 task_dir.mkdir(parents=True, exist_ok=True)
 
                 task_goal_trace = [dict(trace) for trace in (next_task.goal_trace or []) if isinstance(trace, dict)]
@@ -1927,21 +1825,22 @@ async def main_async(args: argparse.Namespace) -> int:
                 ) -> str:
                     return classify_task_failure(reason, validations=validations or [], detail=detail)
 
-                def _task_failure_entry(
+                def _record_failed_state(
                     reason: str,
                     *,
                     validations: list[dict[str, Any]] | None = None,
                     detail: str = "",
                     task_status: str = "",
                     **extra: Any,
-                ) -> dict[str, Any]:
-                    return build_failure_entry(
+                ) -> dict[str, Any] | None:
+                    return record_task_failure_state(
+                        state,
                         task_id=next_task.id,
                         reason=reason,
                         task_status=task_status,
                         validations=validations or [],
                         detail=detail,
-                        **extra,
+                        extra=extra,
                     )
 
                 def _record_pending_review(
@@ -1954,34 +1853,37 @@ async def main_async(args: argparse.Namespace) -> int:
                     validation_artifact: str = "",
                 ) -> None:
                     outcome_status = _task_failure_status(reason, detail=detail) if not task_status else task_status
-                    if not should_preserve_for_review(outcome_status):
-                        return
-                    state.setdefault("pending_review", []).append(
-                        _task_failure_entry(
-                            reason,
-                            task_status=outcome_status,
-                            detail=detail,
-                            title=next_task.title,
-                            cycle=cycle_idx,
-                            step=step,
-                            attempt=attempt + 1,
-                            max_attempts=max_attempts,
-                            branch=branch,
-                            rescue_branch=rescue_branch,
-                            validation_artifact=validation_artifact,
-                            goal_trace=task_goal_trace,
-                            goal_ref=task_goal_ref,
-                            goal_text=task_goal_text,
-                        )
+                    record_task_failure_state(
+                        state,
+                        bucket="pending_review",
+                        task_id=next_task.id,
+                        reason=reason,
+                        task_status=outcome_status,
+                        detail=detail,
+                        extra={
+                            "title": next_task.title,
+                            "cycle": cycle_idx,
+                            "step": step,
+                            "attempt": attempt + 1,
+                            "max_attempts": max_attempts,
+                            "branch": branch,
+                            "rescue_branch": rescue_branch,
+                            "validation_artifact": validation_artifact,
+                            "goal_trace": task_goal_trace,
+                            "goal_ref": task_goal_ref,
+                            "goal_text": task_goal_text,
+                        },
                     )
 
                 def _record_failed_task_result(
                     reason: str,
                     *,
                     task_status: str,
+                    validations: list[dict[str, Any]] | None = None,
                     detail: str = "",
                     validation_artifact: str = "",
                 ) -> None:
+                    validation_artifacts = [validation_artifact] if validation_artifact else []
                     if task_status == TASK_STATUS_BLOCKED_ENV and reason != "needs_dependency":
                         guide_key = (next_task.id, reason, attempt)
                         if guide_key not in _blocked_env_guides_written:
@@ -2000,146 +1902,172 @@ async def main_async(args: argparse.Namespace) -> int:
                                         f"- evidence: {log_hint}\n"
                                         f"- detail: {detail or '(none)'}\n\n"
                                         "---\n"
-                                    )
+                                )
                             except Exception:
                                 pass
-                    task_results.append({
-                        "id": next_task.id,
-                        "title": next_task.title,
-                        "status": task_status,
-                        "reason": reason,
-                        "detail": detail,
-                        "duration": time.time() - task_outer_t0,
-                        "attempt": attempt + 1,
-                        "max_attempts": max_attempts,
-                        "goal_trace": task_goal_trace,
-                        "goal_ref": task_goal_ref,
-                        "goal_text": task_goal_text,
-                        "validation_artifact": validation_artifact,
-                        "validation_status": "failed",
-                        "task_status": task_status,
-                    })
+                    record_task_failure_result(
+                        task_results,
+                        task_id=next_task.id,
+                        task_title=next_task.title,
+                        reason=reason,
+                        duration=time.time() - task_outer_t0,
+                        task_status=task_status,
+                        validations=validations,
+                        detail=detail,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        validation_artifact=validation_artifact,
+                        validation_status="failed",
+                        extra={
+                            "goal_trace": task_goal_trace,
+                            "goal_ref": task_goal_ref,
+                            "goal_text": task_goal_text,
+                        },
+                    )
+                    _record_task_experience_event(
+                        task_id=next_task.id,
+                        title=next_task.title,
+                        status="failed",
+                        reason=reason,
+                        task_status=task_status,
+                        cycle_idx=cycle_idx,
+                        step_idx=step,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        validation_status="validation_failed" if validations or validation_artifacts else "",
+                        validation_summary=detail,
+                        validations=validations,
+                        artifact_pointers=validation_artifacts,
+                        outcome_action="preserved_for_review" if should_preserve_for_review(task_status) else "discarded",
+                        detail=detail,
+                    )
 
                 def _isolate_or_stop(reason: str, *, task_status: str = "", detail: str = "", validation_artifact: str = "") -> tuple[bool, str]:
-                    """Isolate failed task work.
+                    """Apply task-branch disposition while preserving the old event/state semantics."""
 
-                    For ``regression_failed`` and other non-preserve outcomes the task branch
-                    is abandoned (non-destructive: branch ref retained, checkout returns to
-                    base). For preserve-for-review statuses (``blocked_env``,
-                    ``test_contract_changed``, ``review_required``) the same branch action is
-                    used to release the worktree, but the metric, log message, and pending
-                    review entry are tagged so operators see the work is preserved on the
-                    branch instead of discarded. ``abandon_task_branch`` failure falls back
-                    to ``restore_checkpoint``.
-                    """
-                    outcome_status = _task_failure_status(reason, detail=detail) if not task_status else task_status
-                    preserve = should_preserve_for_review(outcome_status)
-                    if tb:
-                        try:
-                            abandon_task_branch(repo, tb)
-                            _record_pending_review(
-                                reason,
-                                task_status=outcome_status,
-                                detail=detail,
-                                branch=tb.branch_name,
-                                validation_artifact=validation_artifact,
-                            )
-                            save_state(state_path, state)
-                            event_name = "task_branch_preserved" if preserve else "task_branch_abandoned"
-                            metrics.event(
-                                event_name,
-                                cycle=cycle_idx,
-                                step=step,
-                                task_id=next_task.id,
-                                reason=reason,
-                                branch=tb.branch_name,
-                                task_status=outcome_status,
-                                preserved=preserve,
-                                goal_trace=task_goal_trace,
-                                goal_ref=task_goal_ref,
-                                goal_text=task_goal_text,
-                            )
-                            if preserve:
-                                eprint(f"[PRESERVE] {next_task.id} work kept on branch {tb.branch_name} for review (status={outcome_status}).")
-                            return True, ""
-                        except Exception as ex:
-                            detail = str(ex)
-                            eprint(f"[WARN] abandon_task_branch failed: {detail}")
-                            state.setdefault("failed", []).append(_task_failure_entry("abandon_failed", detail=detail))
-                            save_state(state_path, state)
-                            _record_history(next_task.id, next_task.title, "failed", reason="abandon_failed", detail=detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=_task_failure_status("abandon_failed", detail=detail))
-                            metrics.event(
-                                "task_branch_abandon_failed",
-                                cycle=cycle_idx,
-                                step=step,
-                                task_id=next_task.id,
-                                reason=reason,
-                                detail=detail,
-                                goal_trace=task_goal_trace,
-                                goal_ref=task_goal_ref,
-                                goal_text=task_goal_text,
-                            )
-                            return False, "abandon_failed"
-                    if not cp:
-                        _record_pending_review(
-                            reason,
-                            task_status=outcome_status,
-                            detail=detail,
-                            validation_artifact=validation_artifact,
-                        )
-                        save_state(state_path, state)
-                        return True, ""
-                    try:
-                        rescue_branch = restore_checkpoint(
-                            repo,
-                            cp,
-                            dangerous=bool(getattr(args, "dangerous_git_rollback", False)),
-                            run_dir=run_dir,
-                            stop_path=stop_path,
+                    def _on_branch_success(disposition: Any, branch_name: str) -> None:
+                        metrics.event(
+                            disposition.event_name,
+                            cycle=cycle_idx,
+                            step=step,
                             task_id=next_task.id,
+                            reason=reason,
+                            branch=branch_name,
+                            task_status=disposition.outcome_status,
+                            preserved=disposition.preserve_for_review,
+                            goal_trace=task_goal_trace,
+                            goal_ref=task_goal_ref,
+                            goal_text=task_goal_text,
                         )
+                        if disposition.preserve_for_review:
+                            eprint(
+                                f"[PRESERVE] {next_task.id} work kept on branch {branch_name} for review "
+                                f"(status={disposition.outcome_status})."
+                            )
+
+                    def _on_abandon_failed(failure_detail: str) -> None:
+                        eprint(f"[WARN] abandon_task_branch failed: {failure_detail}")
+                        abandon_status = _task_failure_status("abandon_failed", detail=failure_detail)
+                        _record_failed_state("abandon_failed", detail=failure_detail, task_status=abandon_status)
+                        save_state(state_path, state)
+                        _record_history(
+                            next_task.id,
+                            next_task.title,
+                            "failed",
+                            reason="abandon_failed",
+                            detail=failure_detail,
+                            files=next_task.files,
+                            cycle=cycle_idx,
+                            attempt=attempt + 1,
+                            max_attempts=max_attempts,
+                            task_status=abandon_status,
+                        )
+                        metrics.event(
+                            "task_branch_abandon_failed",
+                            cycle=cycle_idx,
+                            step=step,
+                            task_id=next_task.id,
+                            reason=reason,
+                            detail=failure_detail,
+                            goal_trace=task_goal_trace,
+                            goal_ref=task_goal_ref,
+                            goal_text=task_goal_text,
+                        )
+
+                    def _on_rollback_success(_disposition: Any, rescue_branch: str) -> None:
                         metrics.event(
                             "rollback",
                             cycle=cycle_idx,
                             step=step,
                             task_id=next_task.id,
                             reason=reason,
-                            rescue_branch=rescue_branch or "",
+                            rescue_branch=rescue_branch,
                             goal_trace=task_goal_trace,
                             goal_ref=task_goal_ref,
                             goal_text=task_goal_text,
                         )
                         if rescue_branch:
                             eprint(f"[INFO] Work preserved in branch: {rescue_branch}")
-                        _record_pending_review(
-                            reason,
-                            task_status=outcome_status,
-                            detail=detail,
-                            rescue_branch=rescue_branch or "",
-                            validation_artifact=validation_artifact,
+
+                    def _on_rollback_failed(fail_reason: str, failure_detail: str) -> None:
+                        rollback_status = _task_failure_status(fail_reason, detail=failure_detail)
+                        _record_failed_state(fail_reason, detail=failure_detail, task_status=rollback_status)
+                        save_state(state_path, state)
+                        _record_history(
+                            next_task.id,
+                            next_task.title,
+                            "failed",
+                            reason=fail_reason,
+                            detail=failure_detail,
+                            files=next_task.files,
+                            cycle=cycle_idx,
+                            attempt=attempt + 1,
+                            max_attempts=max_attempts,
+                            task_status=rollback_status,
                         )
-                        save_state(state_path, state)
-                        return True, ""
-                    except Exception as ex:
-                        detail = str(ex)
-                        blocked = "blocked" in detail.lower()
-                        fail_reason = "rollback_blocked" if blocked else "rollback_failed"
-                        state.setdefault("failed", []).append(_task_failure_entry(fail_reason, detail=detail))
-                        save_state(state_path, state)
-                        _record_history(next_task.id, next_task.title, "failed", reason=fail_reason, detail=detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=_task_failure_status(fail_reason, detail=detail))
                         metrics.event(
                             "rollback_failed",
                             cycle=cycle_idx,
                             step=step,
                             task_id=next_task.id,
                             reason=reason,
-                            detail=detail,
+                            detail=failure_detail,
                             goal_trace=task_goal_trace,
                             goal_ref=task_goal_ref,
                             goal_text=task_goal_text,
                         )
-                        eprint(f"[STOP] Rollback {fail_reason}: {detail}")
-                        return False, fail_reason
+                        eprint(f"[STOP] Rollback {fail_reason}: {failure_detail}")
+
+                    dispatch_result = dispatch_task_branch_disposition(
+                        reason,
+                        task_status=task_status,
+                        detail=detail,
+                        validation_artifact=validation_artifact,
+                        has_task_branch=bool(tb),
+                        has_checkpoint=bool(cp),
+                        task_status_resolver=lambda failure_reason, failure_detail: _task_failure_status(
+                            failure_reason,
+                            detail=failure_detail,
+                        ),
+                        abandon_branch=(lambda: abandon_task_branch(repo, tb)) if tb else None,
+                        restore_checkpoint=(
+                            lambda: restore_checkpoint(
+                                repo,
+                                cp,
+                                dangerous=bool(getattr(args, "dangerous_git_rollback", False)),
+                                run_dir=run_dir,
+                                stop_path=stop_path,
+                                task_id=next_task.id,
+                            )
+                        ) if cp else None,
+                        record_pending_review=_record_pending_review,
+                        persist_state=lambda: save_state(state_path, state),
+                        on_branch_success=_on_branch_success,
+                        on_abandon_failed=_on_abandon_failed,
+                        on_rollback_success=_on_rollback_success,
+                        on_rollback_failed=_on_rollback_failed,
+                    )
+                    return dispatch_result.ok, dispatch_result.stop_reason
 
                 task_stop_recorded = False
 
@@ -2242,7 +2170,8 @@ async def main_async(args: argparse.Namespace) -> int:
 
                     model_name = tiers[attempt]
 
-                    attempt_dir = task_dir / f"attempt_{attempt:02d}"
+                    attempt_context = task_context.attempt_context(attempt)
+                    attempt_dir = attempt_context.attempt_dir
                     attempt_dir.mkdir(parents=True, exist_ok=True)
                     validation_records: list[dict[str, Any]] = []
 
@@ -2357,7 +2286,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         exc_traceback = "".join(traceback.format_exception(type(dev_exc), dev_exc, dev_exc.__traceback__))
                         dev_log += f"\n[EXCEPTION]\n{exc_header}\n\nTraceback:\n{exc_traceback}\n"
 
-                    (attempt_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
+                    attempt_context.dev_output_path.write_text(dev_log + "\n", encoding="utf-8", errors="replace")
                     (run_dir / "dev_logs").mkdir(parents=True, exist_ok=True)
                     (run_dir / "dev_logs" / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}_a{attempt:02d}.txt").write_text(
                         dev_log + "\n", encoding="utf-8", errors="replace"
@@ -2400,7 +2329,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     # Non-max-turn exceptions are treated as fatal (rollback + stop)
                     if dev_exc and not dev_is_max_turns:
                         task_status = _task_failure_status("exception", detail=str(dev_exc))
-                        state.setdefault("failed", []).append(_task_failure_entry("exception", detail=str(dev_exc)))
+                        _record_failed_state("exception", detail=str(dev_exc), task_status=task_status)
                         save_state(state_path, state)
                         _record_failed_task_result("exception", task_status=task_status, detail=str(dev_exc))
                         _record_history(next_task.id, next_task.title, "failed", reason="exception", detail=str(dev_exc), files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
@@ -2448,9 +2377,9 @@ async def main_async(args: argparse.Namespace) -> int:
                     changed = has_working_tree_changes(repo, before, after, before_untracked=before_untracked)
 
                     # Check for explicit dependency requirement signal
-                    dep_req_path = run_dir / "DEPENDENCY_REQUIRED.md"
+                    dep_req_path = runner_context.dependency_required_path
                     if not dep_req_path.exists():
-                        dep_req_path = attempt_dir / "DEPENDENCY_REQUIRED.md"
+                        dep_req_path = attempt_context.dependency_required_path
                     if dep_req_path.exists():
                         dep_content = dep_req_path.read_text(encoding="utf-8", errors="replace")
                         eprint(f"[SKIP] Task {next_task.id} requires new dependencies:")
@@ -2461,7 +2390,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             f.write(f"\n## {next_task.id}: {next_task.title}\n\n{dep_content.strip()}\n\n---\n")
                         dep_detail = dep_content.strip()[:500]
                         task_status = _task_failure_status("needs_dependency", detail=dep_detail)
-                        state.setdefault("failed", []).append(_task_failure_entry("needs_dependency", detail=dep_detail))
+                        _record_failed_state("needs_dependency", detail=dep_detail, task_status=task_status)
                         save_state(state_path, state)
                         _record_failed_task_result("needs_dependency", task_status=task_status, detail=dep_detail)
                         _record_history(next_task.id, next_task.title, "failed", reason="needs_dependency", detail=dep_detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
@@ -2515,7 +2444,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
                         # Also check NOTES.md file for BLOCKED: marker (dev prompt instructs to write here)
                         if not is_blocked:
-                            notes_path = attempt_dir / "NOTES.md"
+                            notes_path = attempt_context.notes_path
                             if notes_path.exists():
                                 try:
                                     notes_content = notes_path.read_text(encoding="utf-8", errors="ignore").lower()
@@ -2526,7 +2455,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         if is_blocked:
                             eprint(f"[SKIP] Task {next_task.id} appears blocked (dependency/resource missing). Skipping...")
                             task_status = _task_failure_status("blocked_dependency", detail=dev_log)
-                            state.setdefault("failed", []).append(_task_failure_entry("blocked_dependency", detail=dev_log[:500]))
+                            _record_failed_state("blocked_dependency", detail=dev_log[:500], task_status=task_status)
                             save_state(state_path, state)
                             _record_failed_task_result("blocked_dependency", task_status=task_status, detail=dev_log[:500])
                             _record_history(next_task.id, next_task.title, "failed", reason="blocked_dependency", detail=dev_log[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
@@ -2567,7 +2496,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="no_diff")
                             continue
                         task_status = _task_failure_status("no_diff", detail=dev_log)
-                        state.setdefault("failed", []).append(_task_failure_entry("no_diff", detail=dev_log[:500]))
+                        _record_failed_state("no_diff", detail=dev_log[:500], task_status=task_status)
                         save_state(state_path, state)
                         _record_failed_task_result("no_diff", task_status=task_status, detail=dev_log[:500])
                         _record_history(next_task.id, next_task.title, "failed", reason="no_diff", detail=dev_log[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
@@ -2611,7 +2540,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             build_cmd=getattr(args, "build_cmd", []),
                             build_timeout_sec=int(getattr(args, "build_timeout_seconds", 1800)),
                             legacy_build_target=str(getattr(args, "dotnet_build_target", "") or ""),
-                            log_path=attempt_dir / "build.txt",
+                            log_path=attempt_context.build_log_path,
                             stop_path=stop_path,
                             command_repo=source_repo,
                         )
@@ -2677,7 +2606,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             if failure_disposition.action == ACTION_RETRY:
                                 # Capture build errors for injection into the next attempt's prompt.
                                 try:
-                                    _berr_raw = (attempt_dir / "build.txt").read_text(encoding="utf-8", errors="replace")
+                                    _berr_raw = attempt_context.build_log_path.read_text(encoding="utf-8", errors="replace")
                                     _berr_lines = [ln for ln in _berr_raw.splitlines() if "error " in ln.lower()]
                                     _prev_gate_error = "\n".join(_berr_lines[:50]) or _berr_raw[-4000:]
                                     _prev_gate_error_label = "BUILD FAILED"
@@ -2686,28 +2615,51 @@ async def main_async(args: argparse.Namespace) -> int:
                                     _prev_gate_error_label = ""
                                 _write_task_validation_artifact(
                                     task=next_task,
-                                    attempt_dir=attempt_dir,
+                                    attempt_context=attempt_context,
                                     validations=validation_records,
                                     status="failed",
                                     reason="build_failed",
                                     detail=build_detail,
                                     task_status=task_status,
                                 )
+                                _record_task_experience_event(
+                                    task_id=next_task.id,
+                                    title=next_task.title,
+                                    status="failed",
+                                    reason="build_failed",
+                                    task_status=task_status,
+                                    cycle_idx=cycle_idx,
+                                    step_idx=step,
+                                    attempt=attempt + 1,
+                                    max_attempts=max_attempts,
+                                    validation_status="validation_failed",
+                                    validation_summary=build_detail,
+                                    validations=validation_records,
+                                    artifact_pointers=[str(attempt_dir / "validation.json")],
+                                    outcome_action="retry_scheduled",
+                                    detail=build_detail,
+                                )
                                 metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="build_failed")
                                 continue
-                            state.setdefault("failed", []).append(_task_failure_entry("build_failed", validations=validation_records, detail=build_detail))
+                            _record_failed_state(
+                                "build_failed",
+                                validations=validation_records,
+                                detail=build_detail,
+                                task_status=task_status,
+                            )
                             save_state(state_path, state)
                             _record_failed_task_result(
                                 "build_failed",
                                 task_status=task_status,
+                                validations=validation_records,
                                 detail=build_detail,
-                                validation_artifact=str(attempt_dir / "validation.json"),
+                                validation_artifact=str(attempt_context.validation_json_path),
                             )
                             _record_history(next_task.id, next_task.title, "failed", reason="build_failed", detail=build_detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                             logger.gate_event("build", next_task.id, passed=False)
                             _write_task_validation_artifact(
                                 task=next_task,
-                                attempt_dir=attempt_dir,
+                                attempt_context=attempt_context,
                                 validations=validation_records,
                                 status="failed",
                                 reason="build_failed",
@@ -2719,7 +2671,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                     "build_failed",
                                     task_status=task_status,
                                     detail=build_detail,
-                                    validation_artifact=str(attempt_dir / "validation.json"),
+                                    validation_artifact=str(attempt_context.validation_json_path),
                                 )
                                 if not ok_restore:
                                     if not continuous:
@@ -2737,7 +2689,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             test_timeout_sec=int(getattr(args, "test_timeout_seconds", 3600)),
                             legacy_test_target=str(getattr(args, "dotnet_test_target", "") or ""),
                             legacy_test_filter=str(getattr(args, "dotnet_test_filter", "") or ""),
-                            log_path=attempt_dir / "test.txt",
+                            log_path=attempt_context.test_log_path,
                             stop_path=stop_path,
                             command_repo=source_repo,
                         )
@@ -2772,35 +2724,58 @@ async def main_async(args: argparse.Namespace) -> int:
                             )
                             if failure_disposition.action == ACTION_RETRY:
                                 try:
-                                    _prev_gate_error = (attempt_dir / "test.txt").read_text(encoding="utf-8", errors="replace")[-4000:]
+                                    _prev_gate_error = attempt_context.test_log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
                                     _prev_gate_error_label = "TEST FAILED"
                                 except Exception:
                                     _prev_gate_error = ""
                                     _prev_gate_error_label = ""
                                 _write_task_validation_artifact(
                                     task=next_task,
-                                    attempt_dir=attempt_dir,
+                                    attempt_context=attempt_context,
                                     validations=validation_records,
                                     status="failed",
                                     reason="test_failed",
                                     detail=test_detail,
                                     task_status=task_status,
                                 )
+                                _record_task_experience_event(
+                                    task_id=next_task.id,
+                                    title=next_task.title,
+                                    status="failed",
+                                    reason="test_failed",
+                                    task_status=task_status,
+                                    cycle_idx=cycle_idx,
+                                    step_idx=step,
+                                    attempt=attempt + 1,
+                                    max_attempts=max_attempts,
+                                    validation_status="validation_failed",
+                                    validation_summary=test_detail,
+                                    validations=validation_records,
+                                    artifact_pointers=[str(attempt_dir / "validation.json")],
+                                    outcome_action="retry_scheduled",
+                                    detail=test_detail,
+                                )
                                 metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="test_failed")
                                 continue
-                            state.setdefault("failed", []).append(_task_failure_entry("test_failed", validations=validation_records, detail=test_detail))
+                            _record_failed_state(
+                                "test_failed",
+                                validations=validation_records,
+                                detail=test_detail,
+                                task_status=task_status,
+                            )
                             save_state(state_path, state)
                             _record_failed_task_result(
                                 "test_failed",
                                 task_status=task_status,
+                                validations=validation_records,
                                 detail=test_detail,
-                                validation_artifact=str(attempt_dir / "validation.json"),
+                                validation_artifact=str(attempt_context.validation_json_path),
                             )
                             _record_history(next_task.id, next_task.title, "failed", reason="test_failed", detail=test_detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                             logger.gate_event("test", next_task.id, passed=False)
                             _write_task_validation_artifact(
                                 task=next_task,
-                                attempt_dir=attempt_dir,
+                                attempt_context=attempt_context,
                                 validations=validation_records,
                                 status="failed",
                                 reason="test_failed",
@@ -2812,7 +2787,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                     "test_failed",
                                     task_status=task_status,
                                     detail=test_detail,
-                                    validation_artifact=str(attempt_dir / "validation.json"),
+                                    validation_artifact=str(attempt_context.validation_json_path),
                                 )
                                 if not ok_restore:
                                     if not continuous:
@@ -2878,9 +2853,14 @@ async def main_async(args: argparse.Namespace) -> int:
                         if not scan_result.get("ok", True):
                             policy_detail = json.dumps(scan_result.get("fail_violations", []), ensure_ascii=False, default=str)[:1000]
                             task_status = _task_failure_status("policy_violation", detail=policy_detail)
-                            state.setdefault("failed", []).append(_task_failure_entry("policy_violation", detail=policy_detail))
+                            _record_failed_state("policy_violation", detail=policy_detail, task_status=task_status)
                             save_state(state_path, state)
-                            _record_failed_task_result("policy_violation", task_status=task_status, detail=policy_detail)
+                            _record_failed_task_result(
+                                "policy_violation",
+                                task_status=task_status,
+                                detail=policy_detail,
+                                validation_artifact=str(attempt_dir / "policy_scan.json"),
+                            )
                             _record_history(next_task.id, next_task.title, "failed", reason="policy_violation", detail=policy_detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                             logger.gate_event("policy", next_task.id, passed=False)
                             metrics.event(
@@ -2917,7 +2897,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         pass
                     fast_regression_triggered = should_run_fast_web_worktree_regression(repo, fast_regression_files)
                     if fast_regression_triggered:
-                        fast_regression_log = attempt_dir / "fast_web_worktree_regression.json"
+                        fast_regression_log = attempt_context.fast_web_worktree_regression_path
                         metrics.event(
                             "fast_regression_start",
                             cycle=cycle_idx,
@@ -3026,22 +3006,55 @@ async def main_async(args: argparse.Namespace) -> int:
                                 )
                                 _write_task_validation_artifact(
                                     task=next_task,
-                                    attempt_dir=attempt_dir,
+                                    attempt_context=attempt_context,
                                     validations=validation_records,
                                     status="failed",
                                     reason="fast_regression_failed",
                                     detail=failed_summary,
                                     task_status=task_status,
                                 )
-                                continue
-                            state.setdefault("failed", []).append(
-                                _task_failure_entry(
-                                    "fast_regression_failed",
+                                _record_task_experience_event(
+                                    task_id=next_task.id,
+                                    title=next_task.title,
+                                    status="failed",
+                                    reason="fast_regression_failed",
+                                    task_status=task_status,
+                                    cycle_idx=cycle_idx,
+                                    step_idx=step,
+                                    attempt=attempt + 1,
+                                    max_attempts=max_attempts,
+                                    validation_status="validation_failed",
+                                    validation_summary=failed_summary,
                                     validations=validation_records,
-                                    detail=failed_summary[:500],
+                                    artifact_pointers=[str(attempt_dir / "validation.json")],
+                                    outcome_action="retry_scheduled",
+                                    detail=failed_summary,
                                 )
+                                continue
+                            _record_failed_state(
+                                "fast_regression_failed",
+                                validations=validation_records,
+                                detail=failed_summary[:500],
+                                task_status=task_status,
                             )
                             save_state(state_path, state)
+                            _record_task_experience_event(
+                                task_id=next_task.id,
+                                title=next_task.title,
+                                status="failed",
+                                reason="fast_regression_failed",
+                                task_status=task_status,
+                                cycle_idx=cycle_idx,
+                                step_idx=step,
+                                attempt=attempt + 1,
+                                max_attempts=max_attempts,
+                                validation_status="validation_failed",
+                                validation_summary=failed_summary,
+                                validations=validation_records,
+                                artifact_pointers=[str(attempt_dir / "validation.json")],
+                                outcome_action="preserved_for_review" if should_preserve_for_review(task_status) else "discarded",
+                                detail=failed_summary,
+                            )
                             _record_history(
                                 next_task.id,
                                 next_task.title,
@@ -3054,20 +3067,23 @@ async def main_async(args: argparse.Namespace) -> int:
                                 max_attempts=max_attempts,
                                 task_status=task_status,
                             )
-                            task_results.append({
-                                "id": next_task.id,
-                                "title": next_task.title,
-                                "status": task_status,
-                                "reason": "fast_regression_failed",
-                                "detail": failed_name,
-                                "duration": time.time() - task_outer_t0,
-                                "goal_trace": task_goal_trace,
-                                "goal_ref": task_goal_ref,
-                                "goal_text": task_goal_text,
-                                "validation_artifact": str(attempt_dir / "validation.json"),
-                                "validation_status": "failed",
-                                "task_status": task_status,
-                            })
+                            record_task_failure_result(
+                                task_results,
+                                task_id=next_task.id,
+                                task_title=next_task.title,
+                                reason="fast_regression_failed",
+                                duration=time.time() - task_outer_t0,
+                                task_status=task_status,
+                                validations=validation_records,
+                                detail=failed_name,
+                                validation_artifact=str(attempt_dir / "validation.json"),
+                                validation_status="failed",
+                                extra={
+                                    "goal_trace": task_goal_trace,
+                                    "goal_ref": task_goal_ref,
+                                    "goal_text": task_goal_text,
+                                },
+                            )
                             metrics.event(
                                 "task_end",
                                 cycle=cycle_idx,
@@ -3093,7 +3109,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             )
                             _write_task_validation_artifact(
                                 task=next_task,
-                                attempt_dir=attempt_dir,
+                                attempt_context=attempt_context,
                                 validations=validation_records,
                                 status="failed",
                                 reason="fast_regression_failed",
@@ -3106,7 +3122,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                     "fast_regression_failed",
                                     task_status=task_status,
                                     detail=failed_summary,
-                                    validation_artifact=str(attempt_dir / "validation.json"),
+                                    validation_artifact=str(attempt_context.validation_json_path),
                                 )
                                 if not ok_restore:
                                     if not continuous:
@@ -3143,12 +3159,31 @@ async def main_async(args: argparse.Namespace) -> int:
                 if task_completed:
                     _write_task_validation_artifact(
                         task=next_task,
-                        attempt_dir=attempt_dir,
+                        attempt_context=attempt_context,
                         validations=validation_records,
                         status=task_validation_status,
                         reason="completed",
                         task_status=TASK_STATUS_COMPLETED,
                     )
+
+                task_validation_artifacts: list[str] = []
+                task_validation_notes: list[str] = []
+                if task_completed:
+                    task_validation_artifacts.append(str(attempt_dir / "validation.json"))
+                    for record in validation_records:
+                        if not isinstance(record, dict):
+                            continue
+                        artifact_path = str(
+                            record.get("artifact_path")
+                            or record.get("log_path")
+                            or record.get("path")
+                            or ""
+                        ).strip()
+                        if artifact_path and artifact_path not in task_validation_artifacts:
+                            task_validation_artifacts.append(artifact_path)
+                        note = str(record.get("summary") or record.get("detail") or "").strip()
+                        if note and note not in task_validation_notes:
+                            task_validation_notes.append(note)
 
                 if stop_path.exists():
                     _record_task_stop("dev_after_attempt", locals().get("attempt") if "attempt" in locals() else None)
@@ -3156,6 +3191,13 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 # Merge or preserve task branch
                 preserved_task_branch_has_new_commits = False
+                packet_result: dict[str, object] = {}
+                completed_task_branch_ref = ""
+                completed_task_head_ref = ""
+                completed_task_base_ref = ""
+                completed_task_changed_files = list(next_task.files or [])
+                completed_task_validation_artifacts = list(task_validation_artifacts)
+                completed_task_pr_packet_ids: list[str] = []
                 if task_completed and tb:
                     if worktree_dir is not None:
                         try:
@@ -3175,12 +3217,16 @@ async def main_async(args: argparse.Namespace) -> int:
                             )
                         else:
                             branch_head = git_rev_parse_ref(repo, tb.branch_name) or ""
+                            completed_task_branch_ref = tb.branch_name
+                            completed_task_head_ref = branch_head
+                            completed_task_base_ref = tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit
                             preserved_task_branch_has_new_commits = ref_has_new_commits(
                                 repo,
                                 tb.branch_name,
                                 task_head_before,
                             )
                             source_head_after = git_head(repo)
+                            completed_task_changed_files = git_changed_files(source_repo, tb.base_commit, branch_head)
                             try:
                                 packet_result = queue_review_packet(
                                     source_repo,
@@ -3194,29 +3240,10 @@ async def main_async(args: argparse.Namespace) -> int:
                                     source_head_after=source_head_after,
                                     worktree_dir=worktree_dir.as_posix(),
                                     validation_status=task_validation_status,
-                                    validation_artifacts=[
-                                        str(
-                                            record.get("artifact_path")
-                                            or record.get("log_path")
-                                            or record.get("path")
-                                            or ""
-                                        )
-                                        for record in validation_records
-                                        if isinstance(record, dict)
-                                        and (
-                                            record.get("artifact_path")
-                                            or record.get("log_path")
-                                            or record.get("path")
-                                        )
-                                    ],
-                                    qa_notes=[
-                                        str(record.get("summary") or record.get("detail") or "").strip()
-                                        for record in validation_records
-                                        if isinstance(record, dict)
-                                        and str(record.get("summary") or record.get("detail") or "").strip()
-                                    ],
+                                    validation_artifacts=task_validation_artifacts,
+                                    qa_notes=task_validation_notes,
                                     goal_trace=tb.goal_trace,
-                                    changed_files=git_changed_files(source_repo, tb.base_commit, branch_head),
+                                    changed_files=completed_task_changed_files,
                                     merge_preflight={
                                         "base_ref": tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit,
                                         "head_ref": branch_head,
@@ -3250,6 +3277,22 @@ async def main_async(args: argparse.Namespace) -> int:
                                     goal_text=task_goal_text,
                                 )
                             else:
+                                packet_payload = packet_result.get("packet")
+                                if isinstance(packet_payload, dict):
+                                    completed_task_branch_ref = str(packet_payload.get("branch") or completed_task_branch_ref).strip()
+                                    completed_task_head_ref = str(packet_payload.get("head_ref") or completed_task_head_ref).strip()
+                                    completed_task_base_ref = str(packet_payload.get("base_ref") or completed_task_base_ref).strip()
+                                    packet_changed_files = packet_payload.get("changed_files")
+                                    if isinstance(packet_changed_files, list):
+                                        completed_task_changed_files = [str(item).strip() for item in packet_changed_files if str(item).strip()]
+                                    packet_validation_artifacts = packet_payload.get("validation_artifacts")
+                                    if isinstance(packet_validation_artifacts, list):
+                                        completed_task_validation_artifacts = [
+                                            str(item).strip() for item in packet_validation_artifacts if str(item).strip()
+                                        ]
+                                packet_id_text = str(packet_result.get("packet_id") or "").strip()
+                                if packet_id_text:
+                                    completed_task_pr_packet_ids = [packet_id_text]
                                 metrics.event(
                                     "task_review_packet_queued",
                                     cycle=cycle_idx,
@@ -3271,8 +3314,12 @@ async def main_async(args: argparse.Namespace) -> int:
                                     )
                         tb = None
                     else:
+                        completed_task_branch_ref = tb.branch_name
+                        completed_task_base_ref = tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit
+                        completed_task_head_ref = git_head(repo)
                         merge_ok = merge_task_branch(repo, tb)
                         if merge_ok:
+                            completed_task_changed_files = git_changed_files(repo, task_head_before, git_head(repo))
                             metrics.event(
                                 "task_branch_merged",
                                 cycle=cycle_idx,
@@ -3329,10 +3376,24 @@ async def main_async(args: argparse.Namespace) -> int:
                         tb = None
                     # No success after attempts and not otherwise returned: treat as failure.
                     task_status = _task_failure_status("exhausted_attempts")
-                    state.setdefault("failed", []).append(_task_failure_entry("exhausted_attempts"))
+                    _record_failed_state("exhausted_attempts", task_status=task_status)
                     save_state(state_path, state)
                     _record_history(next_task.id, next_task.title, "failed", reason="exhausted_attempts", files=next_task.files, cycle=cycle_idx, attempt=max_attempts, max_attempts=max_attempts, task_status=task_status)
-                    task_results.append({"id": next_task.id, "title": next_task.title, "status": task_status, "reason": "exhausted_attempts", "duration": time.time() - task_outer_t0, "attempt": max_attempts, "max_attempts": max_attempts, "goal_trace": task_goal_trace, "goal_ref": task_goal_ref, "goal_text": task_goal_text, "task_status": task_status})
+                    record_task_failure_result(
+                        task_results,
+                        task_id=next_task.id,
+                        task_title=next_task.title,
+                        reason="exhausted_attempts",
+                        duration=time.time() - task_outer_t0,
+                        task_status=task_status,
+                        attempt=max_attempts,
+                        max_attempts=max_attempts,
+                        extra={
+                            "goal_trace": task_goal_trace,
+                            "goal_ref": task_goal_ref,
+                            "goal_text": task_goal_text,
+                        },
+                    )
                     logger.task_end(task_id=next_task.id, success=False, reason="exhausted_attempts", task_status=task_status, attempts=max_attempts, goal_trace=task_goal_trace, goal_ref=task_goal_ref, goal_text=task_goal_text)
                     if continuous:
                         eprint(f"[SKIP] Exhausted all attempts for {next_task.id}; skipping to next task.")
@@ -3349,20 +3410,24 @@ async def main_async(args: argparse.Namespace) -> int:
                     # Treat as failure - do NOT mark done
                     no_commits_detail = "Task passed all gates but no git commits were created (phantom completion)"
                     task_status = _task_failure_status("no_commits", detail=no_commits_detail)
-                    state.setdefault("failed", []).append(_task_failure_entry("no_commits", detail=no_commits_detail))
+                    _record_failed_state("no_commits", detail=no_commits_detail, task_status=task_status)
                     save_state(state_path, state)
                     _record_history(next_task.id, next_task.title, "failed",
                                     reason="no_commits", detail=no_commits_detail, files=next_task.files,
                                     cycle=cycle_idx, attempt=attempt + 1, task_status=task_status)
-                    task_results.append({
-                        "id": next_task.id, "title": next_task.title,
-                        "status": task_status, "reason": "no_commits",
-                        "duration": time.time() - task_outer_t0,
-                        "goal_trace": task_goal_trace,
-                        "goal_ref": task_goal_ref,
-                        "goal_text": task_goal_text,
-                        "task_status": task_status,
-                    })
+                    record_task_failure_result(
+                        task_results,
+                        task_id=next_task.id,
+                        task_title=next_task.title,
+                        reason="no_commits",
+                        duration=time.time() - task_outer_t0,
+                        task_status=task_status,
+                        extra={
+                            "goal_trace": task_goal_trace,
+                            "goal_ref": task_goal_ref,
+                            "goal_text": task_goal_text,
+                        },
+                    )
                     logger.task_end(task_id=next_task.id, success=False, reason="no_commits", task_status=task_status, goal_trace=task_goal_trace, goal_ref=task_goal_ref, goal_text=task_goal_text)
                     if continuous:
                         eprint(f"[PHANTOM] {next_task.id} has no commits; marking failed and continuing.")
@@ -3378,6 +3443,23 @@ async def main_async(args: argparse.Namespace) -> int:
                 save_state(state_path, state)
                 mark_backlog_done(backlog_md, next_task.id)
                 _record_history(next_task.id, next_task.title, "done", files=next_task.files, cycle=cycle_idx, task_status=TASK_STATUS_COMPLETED)
+                record_completed_task_experience(
+                    repo,
+                    run_id=run_dir.name,
+                    task_id=next_task.id,
+                    title=next_task.title,
+                    status="done",
+                    task_status=TASK_STATUS_COMPLETED,
+                    validation_status=task_validation_status,
+                    goal_trace=task_goal_trace,
+                    changed_files=completed_task_changed_files,
+                    branch_ref=completed_task_branch_ref,
+                    head_ref=completed_task_head_ref,
+                    base_ref=completed_task_base_ref,
+                    validation_artifacts=completed_task_validation_artifacts,
+                    validation_records=validation_records,
+                    pr_packet_ids=completed_task_pr_packet_ids,
+                )
                 task_results.append({
                     "id": next_task.id,
                     "title": next_task.title,
@@ -3386,7 +3468,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     "goal_trace": task_goal_trace,
                     "goal_ref": task_goal_ref,
                     "goal_text": task_goal_text,
-                    "validation_artifact": str(attempt_dir / "validation.json"),
+                    "validation_artifact": str(attempt_context.validation_json_path),
                     "validation_status": task_validation_status,
                     "task_status": TASK_STATUS_COMPLETED,
                 })
@@ -3785,13 +3867,13 @@ async def main_async(args: argparse.Namespace) -> int:
                         wait_sec = seconds_until_unix_reset(q_reset_unix)
                         if wait_sec <= 0:
                             wait_sec = 30  # minimum wait even if reset time already passed
-                        # Failover 판정: enabled + reason이 failover_on에 포함 + 대체 백엔드 존재
+                        # Failover ?먯젙: enabled + reason??failover_on???ы븿 + ?泥?諛깆뿏??議댁옱
                         _fo_enabled = bool(getattr(args, "failover_enabled", False))
                         _fo_on = set(str(x).strip().lower() for x in (getattr(args, "failover_on", []) or []))
                         _fo_backends = [str(b).strip().lower() for b in (getattr(args, "failover_backends", []) or []) if str(b).strip().lower() != "codex"]
                         _can_failover = _fo_enabled and STOP_REASON_QUOTA_UTILIZATION in _fo_on and len(_fo_backends) > 0
                         if _can_failover:
-                            # Failover 가능 → 즉시 종료하여 runner_entry가 다른 백엔드로 전환
+                            # Failover 媛????利됱떆 醫낅즺?섏뿬 runner_entry媛 ?ㅻⅨ 諛깆뿏?쒕줈 ?꾪솚
                             append_cycle_summary(
                                 f"{now_iso()} cycle={cycle_idx} stop=quota_utilization_5h_failover "
                                 f"5h={_q5h}% 7d={_q7d}% limit={q_limit or 'unknown'}"
@@ -4215,19 +4297,18 @@ async def main_async(args: argparse.Namespace) -> int:
                         if queue_result.get("recoverable"):
                             eprint(f" - status:   {queue_result.get('status')} ({queue_result.get('recoverable_reason') or 'recoverable'})")
                         eprint("")
-                try:
-                    remove_worktree(source_repo, worktree_dir)
-                except Exception as ex:
-                    eprint(f"[WARN] Failed to remove worktree: {ex}")
-                    safe_write_text(
-                        run_dir / "WORKTREE_CLEANUP_FAILURE.md",
-                        "# Worktree cleanup failure\n\n"
-                        f"AgentCLI could not remove the isolated worktree:\n\n- `{worktree_dir}`\n\n"
-                        f"Error:\n\n```text\n{ex}\n```\n",
-                    )
+                cleanup_result = dispatch_worktree_cleanup(
+                    source_repo=source_repo,
+                    worktree_dir=worktree_dir,
+                    run_dir=run_dir,
+                    should_remove=True,
+                    remove_worktree_fn=remove_worktree,
+                    eprint_fn=eprint,
+                )
+                if not cleanup_result.ok:
                     if last_rc == 0:
                         last_rc = 1
-                    final_reason = "worktree_cleanup_failed"
+                    final_reason = cleanup_result.final_reason
             run_summary["final"] = {"rc": last_rc, "reason": final_reason or ""}
             _write_run_summary()
             try:

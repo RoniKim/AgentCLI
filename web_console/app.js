@@ -682,6 +682,27 @@
         worktreeOutcomeMeta: 'worktree outcome',
         noPersistedSummary: 'No persisted summary fields available.',
       },
+      experience: {
+        title: 'Experience',
+        subtitle: 'Read-only operational lessons and blockers from Experience DB data.',
+        safeReadOnly: 'Safe read-only summary; raw logs, prompts, and diffs stay hidden.',
+        unavailable: 'Experience DB is unavailable. No read-only Experience data was found.',
+        emptyState: 'Experience DB is available, but no recent lessons or blockers were recorded yet.',
+        sourceDb: 'Experience DB',
+        sourceSummary: 'Cached summary',
+        sourceUnavailable: 'Unavailable',
+        recentLessons: 'Recent lessons',
+        failurePatterns: 'Repeated failure patterns',
+        validationGaps: 'Validation gaps',
+        mergeBlockers: 'Merge blockers',
+        noLessons: 'No recent lessons were recorded.',
+        noFailurePatterns: 'No repeated failure patterns were recorded.',
+        noValidationGaps: 'No validation gaps were recorded.',
+        noMergeBlockers: 'No merge blockers were recorded.',
+        evidencePointers: 'Evidence pointers',
+        confidence: 'confidence',
+        occurrences: 'occurrences',
+      },
       notifications: {
         title: 'Notifications',
         eventFeed: 'Event feed',
@@ -3052,7 +3073,7 @@
     goals: ['goals'],
     config: ['config', 'runnerControl'],
     prompts: ['prompts'],
-    history: ['history'],
+    history: ['history', 'experience'],
     notifications: ['notifications'],
     worktree: ['worktree'],
     mobile: ['activeRun', 'stages', 'logs', 'backlog', 'prQueue', 'goals', 'config', 'prompts', 'notifications', 'worktree', 'runnerControl'],
@@ -5157,6 +5178,7 @@
       notifications: t('notifications.noRecorded'),
       metrics: t('common.noDataAvailableYet'),
       history: t('history.emptyState'),
+      experience: t('experience.unavailable'),
       worktree: t('worktree.noPendingMerge'),
       prQueue: t('prQueue.noPackets'),
       runnerControl: t('runner.controlsDisabled'),
@@ -7057,6 +7079,112 @@
     };
   }
 
+  function normalizeExperienceSeverity(value) {
+    const severity = toText(value, 'medium').toLowerCase();
+    return ['low', 'medium', 'high'].includes(severity) ? severity : 'medium';
+  }
+
+  function normalizeExperienceEvidencePointers(value) {
+    return toArray(value).map((item) => toText(item, '')).filter(Boolean);
+  }
+
+  function normalizeExperienceLesson(item) {
+    const raw = toObject(item);
+    return {
+      kind: toText(raw.kind, 'general'),
+      severity: normalizeExperienceSeverity(raw.severity),
+      confidence: toMaybeNumber(raw.confidence) ?? 0,
+      trigger: toText(raw.trigger, ''),
+      lesson: toText(raw.lesson, ''),
+      evidenceCount: toNumber(raw.evidenceCount ?? raw.evidence_count, normalizeExperienceEvidencePointers(raw.evidencePointers || raw.evidence_pointers).length),
+      evidencePointers: normalizeExperienceEvidencePointers(raw.evidencePointers || raw.evidence_pointers),
+      lastSeenAt: toText(raw.lastSeenAt || raw.last_seen_at, ''),
+      createdAt: toText(raw.createdAt || raw.created_at, ''),
+      seenCount: toNumber(raw.seenCount ?? raw.seen_count, 0),
+      runId: toText(raw.runId || raw.run_id, ''),
+      taskId: toText(raw.taskId || raw.task_id, ''),
+    };
+  }
+
+  function normalizeExperiencePattern(item) {
+    const raw = toObject(item);
+    return {
+      summary: toText(raw.summary || raw.lesson, ''),
+      classification: toText(raw.classification, ''),
+      gate: toText(raw.gate, ''),
+      status: toText(raw.status, ''),
+      taskStatus: toText(raw.taskStatus || raw.task_status, ''),
+      validationStatus: toText(raw.validationStatus || raw.validation_status, ''),
+      severity: normalizeExperienceSeverity(raw.severity),
+      occurrences: toNumber(raw.occurrences, 0),
+      evidenceCount: toNumber(raw.evidenceCount ?? raw.evidence_count, normalizeExperienceEvidencePointers(raw.evidencePointers || raw.evidence_pointers).length),
+      evidencePointers: normalizeExperienceEvidencePointers(raw.evidencePointers || raw.evidence_pointers),
+      lastSeenAt: toText(raw.lastSeenAt || raw.last_seen_at, ''),
+      taskId: toText(raw.taskId || raw.task_id, ''),
+      prId: toText(raw.prId || raw.pr_id, ''),
+    };
+  }
+
+  function experienceSourceLabel(source) {
+    const normalized = toText(source, 'unavailable').toLowerCase();
+    if (normalized === 'experience_db') return t('experience.sourceDb');
+    if (normalized === 'summary') return t('experience.sourceSummary');
+    return t('experience.sourceUnavailable');
+  }
+
+  function adaptExperience(experience, context = {}) {
+    const raw = toObject(experience);
+    const recentLessons = toArray(raw.recentLessons || raw.recent_lessons).map(normalizeExperienceLesson).filter((item) => item.lesson);
+    const failurePatterns = toArray(raw.failurePatterns || raw.failure_patterns).map(normalizeExperiencePattern).filter((item) => item.summary);
+    const validationGaps = toArray(raw.validationGaps || raw.validation_gaps).map(normalizeExperiencePattern).filter((item) => item.summary);
+    const mergeBlockers = toArray(raw.mergeBlockers || raw.merge_blockers).map(normalizeExperiencePattern).filter((item) => item.summary);
+    const counts = {
+      lessons: recentLessons.length,
+      failurePatterns: failurePatterns.length,
+      validationGaps: validationGaps.length,
+      mergeBlockers: mergeBlockers.length,
+      total: recentLessons.length + failurePatterns.length + validationGaps.length + mergeBlockers.length,
+    };
+    const summary = toObject(raw.summary);
+    const available = Boolean(raw.available ?? (toText(raw.source, 'unavailable') !== 'unavailable'));
+    const rawState = toText(raw.state, counts.total ? 'ready' : available ? 'empty' : 'empty').toLowerCase();
+    const sectionStatus = rawState === 'unavailable'
+      ? 'empty'
+      : ['ready', 'partial', 'empty', 'error'].includes(rawState)
+        ? rawState
+        : counts.total
+          ? 'ready'
+          : 'empty';
+    const message = toText(
+      raw.message,
+      counts.total
+        ? t('experience.safeReadOnly')
+        : available
+          ? t('experience.emptyState')
+          : t('experience.unavailable')
+    );
+    return {
+      available,
+      source: toText(raw.source, 'unavailable'),
+      sourceLabel: experienceSourceLabel(raw.source),
+      message,
+      summaryText: toText(raw.summaryText || raw.summary_text, ''),
+      recentLessons,
+      failurePatterns,
+      validationGaps,
+      mergeBlockers,
+      summary: {
+        source: toText(summary.source || raw.source, 'unavailable'),
+        lessons: toNumber(summary.lessons ?? counts.lessons, counts.lessons),
+        failurePatterns: toNumber(summary.failurePatterns ?? summary.failure_patterns ?? counts.failurePatterns, counts.failurePatterns),
+        validationGaps: toNumber(summary.validationGaps ?? summary.validation_gaps ?? counts.validationGaps, counts.validationGaps),
+        mergeBlockers: toNumber(summary.mergeBlockers ?? summary.merge_blockers ?? counts.mergeBlockers, counts.mergeBlockers),
+        total: toNumber(summary.total ?? counts.total, counts.total),
+      },
+      state: buildSectionState('experience', sectionStatus, message),
+    };
+  }
+
   function adaptWorktree(worktree, context = {}) {
     const data = normalizeWorktreeState(worktree);
     const sectionStatus =
@@ -7448,6 +7576,7 @@
     const logs = adaptLogs(raw.logs);
     const notifications = adaptNotifications(raw.notifications);
     const history = adaptHistory(raw.history);
+    const experience = adaptExperience(raw.experience);
     const prQueue = adaptPrQueue(raw.pr_queue || raw.prQueue);
     const worktree = adaptWorktree(raw.worktree);
     const worktreeDiagnostics = normalizeWorktreeDiagnostics(raw.worktree_diagnostics || raw.worktreeDiagnostics || {});
@@ -7519,6 +7648,7 @@
       promptsDir: prompts.dir,
       history: history.items,
       historySummary: history.summary,
+      experience,
       metrics,
       notifications: notifications.items,
       prQueue,
@@ -7546,6 +7676,7 @@
         notifications: notifications.state,
         metrics: metrics.state,
         history: history.state,
+        experience: experience.state,
         prQueue: prQueue.stateInfo,
         worktree: worktree.state,
         runnerControl: buildSectionState(
@@ -8227,6 +8358,23 @@
       worktreeAction: null,
       history: [],
       historySummary: { runs: 0, successes: 0, failures: 0, stopped: 0, tasksDone: 0, tasksTotal: 0 },
+      experience: adaptExperience({
+        available: false,
+        state: 'empty',
+        source: 'unavailable',
+        message: t('experience.unavailable'),
+        recentLessons: [],
+        failurePatterns: [],
+        validationGaps: [],
+        mergeBlockers: [],
+        summary: {
+          lessons: 0,
+          failurePatterns: 0,
+          validationGaps: 0,
+          mergeBlockers: 0,
+          total: 0,
+        },
+      }),
       metrics: {
         tokens24h: [],
         success24h: [],
@@ -8276,6 +8424,7 @@
         notifications: buildSectionState('notifications', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         metrics: buildSectionState('metrics', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         history: buildSectionState('history', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        experience: buildSectionState('experience', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         prQueue: buildSectionState('prQueue', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         worktree: buildSectionState('worktree', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         runnerControl: buildSectionState('runnerControl', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
@@ -8687,6 +8836,23 @@
         },
       ],
       historySummary: { runs: 1, successes: 1, failures: 0, stopped: 0, tasksDone: 2, tasksTotal: 2 },
+      experience: adaptExperience({
+        available: false,
+        state: 'empty',
+        source: 'unavailable',
+        message: t('experience.unavailable'),
+        recentLessons: [],
+        failurePatterns: [],
+        validationGaps: [],
+        mergeBlockers: [],
+        summary: {
+          lessons: 0,
+          failurePatterns: 0,
+          validationGaps: 0,
+          mergeBlockers: 0,
+          total: 0,
+        },
+      }),
       metrics: {
         tokens24h: [320, 480, 620, 720, 840],
         success24h: [1, 1, 1, 1, 1],
@@ -8742,6 +8908,7 @@
         notifications: buildSectionState('notifications', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         metrics: buildSectionState('metrics', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         history: buildSectionState('history', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
+        experience: buildSectionState('experience', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         prQueue: buildSectionState('prQueue', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         worktree: buildSectionState('worktree', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         runnerControl: buildSectionState('runnerControl', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
@@ -8769,6 +8936,7 @@
     adaptNotifications,
     adaptMetrics,
     adaptHistory,
+    adaptExperience,
     adaptPrQueue,
     adaptWorktree,
     currentPrQueuePacket,
@@ -9037,6 +9205,7 @@
     state.history = toArray(next.history);
     state.runs = state.history;
     state.historySummary = toObject(next.historySummary);
+    state.experience = toObject(next.experience);
     state.metrics = normalizeMetrics(next.metrics);
     state.notifications = toArray(next.notifications).slice(-MAX_LOG_ROWS);
     state.progress = toObject(next.progress);
@@ -10935,6 +11104,114 @@
         <span style="text-align:right;"><span class="chip chip--accent">${escapeHTML(t('common.open'))}</span></span>
       </button>
     `;
+  }
+
+  function experienceSeverityChipClass(severity) {
+    const normalized = normalizeExperienceSeverity(severity);
+    if (normalized === 'high') return 'chip--err';
+    if (normalized === 'medium') return 'chip--warn';
+    return 'chip--info';
+  }
+
+  function renderExperienceEvidence(item) {
+    const pointers = normalizeExperienceEvidencePointers(item.evidencePointers || item.evidence_pointers);
+    if (!pointers.length) {
+      return '';
+    }
+    return `
+      <div class="experience-item__evidence">
+        <span class="experience-item__evidence-label">${escapeHTML(t('experience.evidencePointers'))}</span>
+        <span>${escapeHTML(pointers.join(' | '))}</span>
+      </div>
+    `;
+  }
+
+  function renderExperienceEntry(item, kind = 'lesson') {
+    const entry = toObject(item);
+    const lead = kind === 'lesson' ? toText(entry.lesson, '') : toText(entry.summary, '');
+    const supporting = [];
+    if (kind === 'lesson' && entry.trigger) {
+      supporting.push(entry.trigger);
+    }
+    const occurrenceValue = toNumber(entry.occurrences, 0);
+    const confidenceValue = toMaybeNumber(entry.confidence);
+    const metaChips = [
+      entry.kind ? chip(toText(entry.kind, ''), 'chip--info') : '',
+      chip(normalizeExperienceSeverity(entry.severity), experienceSeverityChipClass(entry.severity)),
+      confidenceValue != null && confidenceValue > 0 ? chip(`${t('experience.confidence')} ${confidenceValue.toFixed(2)}`) : '',
+      occurrenceValue > 0 ? chip(`${t('experience.occurrences')} ${occurrenceValue}`, 'chip--warn') : '',
+      entry.gate ? chip(toText(entry.gate, ''), 'chip--dim') : '',
+      entry.validationStatus ? chip(toText(entry.validationStatus, ''), 'chip--warn') : '',
+      entry.taskStatus ? chip(toText(entry.taskStatus, ''), 'chip--warn') : '',
+    ].filter(Boolean).join('');
+    const supportingCopy = supporting.length ? `<div class="summary-note">${escapeHTML(supporting.join(' | '))}</div>` : '';
+    const seenAtText = entry.lastSeenAt
+      ? (timestampMs(entry.lastSeenAt) != null ? fmtDateTime(entry.lastSeenAt) : toText(entry.lastSeenAt, ''))
+      : '';
+    const footerParts = [
+      seenAtText,
+      entry.taskId ? `task ${entry.taskId}` : '',
+      entry.prId ? `pr ${entry.prId}` : '',
+      entry.evidenceCount ? `${entry.evidenceCount} ${t('experience.evidencePointers').toLowerCase()}` : '',
+    ].filter(Boolean);
+    const footer = footerParts.length ? `<div class="experience-item__meta">${escapeHTML(footerParts.join(' | '))}</div>` : '';
+    return `
+      <div class="experience-item">
+        <div class="experience-item__head">
+          <div class="experience-item__lead">${escapeHTML(lead || t('common.none'))}</div>
+          <div class="experience-item__chips">${metaChips}</div>
+        </div>
+        ${supportingCopy}
+        ${renderExperienceEvidence(entry)}
+        ${footer}
+      </div>
+    `;
+  }
+
+  function renderExperienceSection(title, items, emptyCopy, kind = 'lesson') {
+    const list = toArray(items);
+    const content = list.length
+      ? list.map((item) => renderExperienceEntry(item, kind)).join('')
+      : `<div class="experience-empty">${escapeHTML(emptyCopy)}</div>`;
+    return `
+      <section class="experience-section">
+        <div class="experience-section__head">
+          <div class="experience-section__title">${escapeHTML(title)}</div>
+          <div class="experience-section__meta">${escapeHTML(String(list.length))}</div>
+        </div>
+        <div class="experience-section__body">
+          ${content}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderHistoryExperiencePanel(experience = state.experience) {
+    const data = toObject(experience);
+    const summary = toObject(data.summary);
+    const summaryCopy = toText(data.summaryText || data.message, '');
+    return panel(
+      t('experience.title'),
+      `${escapeHTML(experienceSourceLabel(data.source))} | ${escapeHTML(String(toNumber(summary.total, 0)))} ${escapeHTML(t('common.total'))}`,
+      `
+        ${sectionNotice('experience')}
+        <div class="summary-note">${escapeHTML(summaryCopy || t('experience.safeReadOnly'))}</div>
+        <div class="summary-note">${escapeHTML(t('experience.safeReadOnly'))}</div>
+        <div class="kpi-grid kpi-grid--four experience-summary">
+          ${kpiCard(t('experience.recentLessons'), String(toNumber(summary.lessons, 0)), t('experience.recentLessons'))}
+          ${kpiCard(t('experience.failurePatterns'), String(toNumber(summary.failurePatterns, 0)), t('experience.failurePatterns'))}
+          ${kpiCard(t('experience.validationGaps'), String(toNumber(summary.validationGaps, 0)), t('experience.validationGaps'))}
+          ${kpiCard(t('experience.mergeBlockers'), String(toNumber(summary.mergeBlockers, 0)), t('experience.mergeBlockers'))}
+        </div>
+        <div class="experience-grid">
+          ${renderExperienceSection(t('experience.recentLessons'), data.recentLessons, t('experience.noLessons'), 'lesson')}
+          ${renderExperienceSection(t('experience.failurePatterns'), data.failurePatterns, t('experience.noFailurePatterns'), 'pattern')}
+          ${renderExperienceSection(t('experience.validationGaps'), data.validationGaps, t('experience.noValidationGaps'), 'pattern')}
+          ${renderExperienceSection(t('experience.mergeBlockers'), data.mergeBlockers, t('experience.noMergeBlockers'), 'pattern')}
+        </div>
+      `,
+      'experience-panel'
+    );
   }
 
   function renderPromptCard(prompt) {
@@ -16796,6 +17073,7 @@
                           ${renderHistoryReportPanel(t('history.finalRunReport'), selectedFinalRunReport, 'final')}
                           ${renderHistoryReportPanel(t('history.qaValidationReport'), selectedQaValidationReport, 'qa')}
                         </div>
+                        ${renderHistoryExperiencePanel(state.experience)}
                         ${renderHistoryCycleChangePanel(selectedCycleChangeSummary)}
                         <div class="summary-note">${escapeHTML(t('history.persistedSummariesDriveThisView'))}</div>
                       `
@@ -18702,6 +18980,7 @@
     history: clone(defaults.history),
     runs: clone(defaults.history),
     historySummary: clone(defaults.historySummary),
+    experience: clone(defaults.experience),
     metrics: clone(defaults.metrics),
     logs: clone(defaults.logs),
     logTail: clone(defaults.logTail),

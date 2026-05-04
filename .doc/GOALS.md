@@ -260,21 +260,21 @@
 ### P0-V. Maintainability And Module Decomposition
 
 - [ ] Web import compatibility tests protect `agent_runner.web` public and test-used private helper names before any helper extraction.
-- [ ] Web endpoint golden tests protect `/api/status`, `/api/progress`, `/api/worktree`, and `/api/runner/status` payload contracts.
-- [ ] Web endpoint golden tests protect `/api/config`, `/api/goals`, `/api/prompts`, and `/api/logs` payload contracts.
-- [ ] Web redaction helpers are extracted into a focused module while `agent_runner.web` re-exports the old helper names.
-- [ ] Web GOALS parse, serialize, validate, backup, and save helpers are extracted while `/api/goals` behavior stays unchanged.
-- [ ] Web prompt inventory, read, validation, backup, and save helpers are extracted while `/api/prompts` behavior stays unchanged.
-- [ ] Web config schema, normalization, validation, backup, and save helpers are extracted while `/api/config` behavior stays unchanged.
-- [ ] Web log tail source discovery and line parsing helpers are extracted while `/api/logs` behavior stays unchanged.
-- [ ] Web history, metrics/progress, worktree, stage, and snapshot payload builders are extracted behind `agent_runner.web` facade functions.
-- [ ] Runner context objects define source repo, execution worktree, run directory, task directory, attempt directory, and task branch state.
-- [ ] `cycle.py` uses runner/task/attempt context objects for validation artifact paths without changing run artifact filenames.
-- [ ] Validation artifact writing is shared by Codex and Claude backends through a neutral helper module.
-- [ ] Failed-task result recording is shared by Codex and Claude backends through a neutral helper module.
-- [ ] Stop progress recording is shared by shell, Codex backend, Claude backend, and web runner controls.
-- [ ] Task branch preserve, abandon, rollback, and cleanup dispatch are shared by Codex and Claude backends.
-- [ ] Codex and Claude PM output postprocessing use the same GOALS gating, task splitting, and `goal_trace` preservation logic.
+- [x] Web endpoint golden tests protect `/api/status`, `/api/progress`, `/api/worktree`, and `/api/runner/status` payload contracts.
+- [x] Web endpoint golden tests protect `/api/config`, `/api/goals`, `/api/prompts`, and `/api/logs` payload contracts.
+- [x] Web redaction helpers are extracted into a focused module while `agent_runner.web` re-exports the old helper names.
+- [x] Web GOALS parse, serialize, validate, backup, and save helpers are extracted while `/api/goals` behavior stays unchanged.
+- [x] Web prompt inventory, read, validation, backup, and save helpers are extracted while `/api/prompts` behavior stays unchanged.
+- [x] Web config schema, normalization, validation, backup, and save helpers are extracted while `/api/config` behavior stays unchanged.
+- [x] Web log tail source discovery and line parsing helpers are extracted while `/api/logs` behavior stays unchanged.
+- [x] Web history, metrics/progress, worktree, stage, and snapshot payload builders are extracted behind `agent_runner.web` facade functions.
+- [x] Runner context objects define source repo, execution worktree, run directory, task directory, attempt directory, and task branch state.
+- [x] `cycle.py` uses runner/task/attempt context objects for validation artifact paths without changing run artifact filenames.
+- [x] Validation artifact writing is shared by Codex and Claude backends through a neutral helper module.
+- [x] Failed-task result recording is shared by Codex and Claude backends through a neutral helper module.
+- [x] Stop progress recording is shared by shell, Codex backend, Claude backend, and web runner controls.
+- [x] Task branch preserve, abandon, rollback, and cleanup dispatch are shared by Codex and Claude backends.
+- [x] Codex and Claude PM output postprocessing use the same GOALS gating, task splitting, and `goal_trace` preservation logic.
 - [ ] Backend adapter interfaces isolate model invocation, message streaming, model option construction, and quota probing from orchestration code.
 - [ ] Codex backend-specific code is limited to Codex CLI execution, Codex app-server integration, Codex quota probing, and Codex model options.
 - [ ] Claude backend-specific code is limited to Claude SDK/CLI execution, Claude streaming collection, Claude quota probing, and Claude model options.
