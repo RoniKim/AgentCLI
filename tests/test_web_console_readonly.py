@@ -4237,6 +4237,110 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             self.assertIn(backend_phrase, html)
             self.assertIn(warning_text, html)
 
+    def test_api_status_fresh_live_snapshot_does_not_render_stale_badge(self) -> None:
+        payload = self.client.get("/api/status").json()
+        self.assertGreater(payload["snapshotRefresh"]["lastUpdatedAt"], 0)
+
+        normalized = _run_adapter_harness([{"kind": "call", "name": "normalizeSnapshot", "args": [payload]}])[0]
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+                {"kind": "call", "name": "snapshotRefreshDisplay", "args": []},
+                {"kind": "call", "name": "renderTopbar", "args": []},
+            ]
+        )
+
+        display = shell["results"][1]
+        topbar = shell["results"][2]
+        self.assertEqual("ready", display["status"])
+        self.assertFalse(display["stale"])
+        self.assertNotIn("status-chip--stale", topbar)
+
+    def test_api_status_stale_live_snapshot_renders_stale_badge_from_artifact_age(self) -> None:
+        stale_repo = self._tmp / "stale-live-snapshot-repo"
+        stale_repo.mkdir(parents=True, exist_ok=True)
+        stale_config_path = stale_repo / "config" / "agentcli.json"
+        _write_config(stale_config_path, stale_repo)
+
+        run_dir = stale_repo / ".AgentCLI" / "agent_runs" / "20260426-120000"
+        _write_run_bundle(run_dir, status="running", final_rc=0, final_reason="")
+
+        stale_stamp = (datetime.now(timezone.utc) - timedelta(minutes=5)).timestamp()
+        for path in sorted(run_dir.rglob("*")):
+            os.utime(path, (stale_stamp, stale_stamp))
+        os.utime(run_dir, (stale_stamp, stale_stamp))
+
+        controller_status = self._controller_status(
+            run_dir,
+            repo=stale_repo.as_posix(),
+            config_path=stale_config_path.as_posix(),
+            startedAt=int((datetime.now(timezone.utc) - timedelta(minutes=6)).timestamp() * 1000),
+            elapsedSec=360,
+            last_event="2026-04-26T12:00:00 stage_event",
+        )
+        payload = self._api_status(stale_repo, controller_status)
+        self.assertLess(payload["snapshotRefresh"]["lastUpdatedAt"], int((datetime.now(timezone.utc) - timedelta(minutes=4)).timestamp() * 1000))
+
+        normalized = _run_adapter_harness([{"kind": "call", "name": "normalizeSnapshot", "args": [payload]}])[0]
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+                {"kind": "call", "name": "snapshotRefreshDisplay", "args": []},
+                {"kind": "call", "name": "renderTopbar", "args": []},
+            ]
+        )
+
+        display = shell["results"][1]
+        topbar = shell["results"][2]
+        self.assertEqual("stale", display["status"])
+        self.assertTrue(display["stale"])
+        self.assertIn("status-chip--stale", topbar)
+
+    def test_history_view_uses_selected_run_artifact_freshness_for_stale_badge(self) -> None:
+        history_repo = self._tmp / "stale-history-snapshot-repo"
+        history_repo.mkdir(parents=True, exist_ok=True)
+        history_config_path = history_repo / "config" / "agentcli.json"
+        _write_config(history_config_path, history_repo)
+
+        live_run_dir = history_repo / ".AgentCLI" / "agent_runs" / "20260426-130000"
+        _write_run_bundle(live_run_dir, status="running", final_rc=0, final_reason="")
+        stale_run_dir = history_repo / ".AgentCLI" / "agent_runs" / "20260426-120000"
+        _write_run_bundle(stale_run_dir, status="success", final_rc=0, final_reason="project_complete")
+
+        stale_stamp = (datetime.now(timezone.utc) - timedelta(minutes=5)).timestamp()
+        for path in sorted(stale_run_dir.rglob("*")):
+            os.utime(path, (stale_stamp, stale_stamp))
+        os.utime(stale_run_dir, (stale_stamp, stale_stamp))
+
+        controller_status = self._controller_status(
+            live_run_dir,
+            repo=history_repo.as_posix(),
+            config_path=history_config_path.as_posix(),
+            startedAt=int((datetime.now(timezone.utc) - timedelta(seconds=10)).timestamp() * 1000),
+            elapsedSec=10,
+            last_event="2026-04-26T13:00:00 stage_event",
+        )
+        payload = self._api_status(history_repo, controller_status)
+        stale_history = next(item for item in payload["history"]["items"] if item["runDir"] == stale_run_dir.as_posix())
+        self.assertGreater(stale_history["freshnessTimestamp"], 0)
+
+        normalized = _run_adapter_harness([{"kind": "call", "name": "normalizeSnapshot", "args": [payload]}])[0]
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+                {"kind": "call", "name": "setView", "args": ["history"]},
+                {"kind": "call", "name": "setHistorySelection", "args": [stale_history["id"]]},
+                {"kind": "call", "name": "snapshotRefreshDisplay", "args": []},
+                {"kind": "call", "name": "renderTopbar", "args": []},
+            ]
+        )
+
+        display = shell["results"][3]
+        topbar = shell["results"][4]
+        self.assertEqual("stale", display["status"])
+        self.assertTrue(display["stale"])
+        self.assertIn("status-chip--stale", topbar)
+
     def test_api_status_long_running_stage_summary_redacts_secret_signals(self) -> None:
         secret = "token=abc123"
         _, controller_status = self._write_long_running_stage_bundle(

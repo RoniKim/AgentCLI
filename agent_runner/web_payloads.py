@@ -672,6 +672,7 @@ def build_history_item(
     _normalize_execution_status = web._normalize_execution_status
     _normalize_run_status = web._normalize_run_status
     _epoch_ms = web._epoch_ms
+    _latest_path_mtime_ms = web._latest_path_mtime_ms
     _history_worktree_outcome = web._history_worktree_outcome
     _tail_text = web._tail_text
 
@@ -738,7 +739,8 @@ def build_history_item(
     )
 
     started_at = _epoch_ms(run_dir.stat().st_ctime)
-    ended_at = _epoch_ms(run_dir.stat().st_mtime)
+    artifact_updated_at = _latest_path_mtime_ms(run_dir)
+    ended_at = artifact_updated_at or _epoch_ms(run_dir.stat().st_mtime)
     duration_sec = _coerce_optional_int(
         _pick_value(
             last_summary.get("duration_seconds"),
@@ -803,6 +805,10 @@ def build_history_item(
         "shutdownReason": shutdown_reason,
         "stopReason": shutdown_reason,
         "runDir": run_dir.as_posix(),
+        "freshnessTimestamp": ended_at,
+        "freshness_timestamp": ended_at,
+        "freshnessSource": "artifact_mtime" if artifact_updated_at else "run_dir_mtime",
+        "freshness_source": "artifact_mtime" if artifact_updated_at else "run_dir_mtime",
         "lastCycle": last_cycle,
         "runSummary": run_summary,
         "lastRunSummary": last_summary,
@@ -1449,6 +1455,7 @@ def build_snapshot(
     buildSectionState = web.buildSectionState
     fallbackSectionMessage = web.fallbackSectionMessage
     _live_run_payload = web._live_run_payload
+    _snapshot_freshness_timestamp_ms = web._snapshot_freshness_timestamp_ms
     _git_head_short = web._git_head_short
     REDACTED_VALUE = web.REDACTED_VALUE
     LAN_SAFETY_MUTATION_DISABLED_MESSAGE = web.LAN_SAFETY_MUTATION_DISABLED_MESSAGE
@@ -1912,6 +1919,25 @@ def build_snapshot(
         live_identity["web_instance_duplicate"] = bool(web_instance_state_value == "duplicate")
         live_identity["webInstance"] = dict(web_instance)
         live_identity["web_instance"] = dict(web_instance)
+    snapshot_freshness_at = _snapshot_freshness_timestamp_ms(
+        latest_run_dir,
+        active_run=active_run,
+        controller_status=controller_status,
+        logs={"entries": log_entries},
+        notifications=notifications,
+    ) or int(datetime.now(timezone.utc).timestamp() * 1000)
+    snapshot_refresh = {
+        "status": "ready",
+        "lastUpdatedAt": snapshot_freshness_at,
+        "last_updated_at": snapshot_freshness_at,
+        "lastSuccessAt": snapshot_freshness_at,
+        "last_success_at": snapshot_freshness_at,
+        "latestRunDir": latest_run_dir.as_posix() if latest_run_dir else "",
+        "latest_run_dir": latest_run_dir.as_posix() if latest_run_dir else "",
+        "stale": False,
+        "staleReasons": [],
+        "stale_reasons": [],
+    }
 
     return {
         "ok": True,
@@ -1922,6 +1948,8 @@ def build_snapshot(
             "branch": branch or "HEAD",
         },
         "latest_run_dir": latest_run_dir.as_posix() if latest_run_dir else None,
+        "snapshot_refresh": snapshot_refresh,
+        "snapshotRefresh": snapshot_refresh,
         "active_run": active_run,
         "stages": stages,
         "backlog": backlog,

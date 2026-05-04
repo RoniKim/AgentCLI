@@ -2359,6 +2359,85 @@ def _path_mtime_ms(path: Path | None) -> int | None:
         return None
 
 
+def _latest_path_mtime_ms(path: Path | None) -> int | None:
+    if path is None:
+        return None
+    latest = _path_mtime_ms(path)
+    try:
+        if not path.exists():
+            return latest
+        if path.is_file():
+            return latest
+        for candidate in path.rglob("*"):
+            if not candidate.is_file():
+                continue
+            candidate_mtime_ms = _path_mtime_ms(candidate)
+            if candidate_mtime_ms is None:
+                continue
+            if latest is None or candidate_mtime_ms > latest:
+                latest = candidate_mtime_ms
+    except Exception:
+        return latest
+    return latest
+
+
+def _snapshot_freshness_timestamp_ms(
+    run_dir: Path | None,
+    *,
+    active_run: dict[str, Any] | None = None,
+    controller_status: dict[str, Any] | None = None,
+    logs: dict[str, Any] | None = None,
+    notifications: list[dict[str, Any]] | None = None,
+) -> int | None:
+    candidates: list[int] = []
+
+    def add_candidate(value: Any) -> None:
+        ms = _coerce_optional_ms(value)
+        if ms is not None and ms > 0:
+            candidates.append(ms)
+
+    active = active_run if isinstance(active_run, dict) else {}
+    controller_data = controller_status if isinstance(controller_status, dict) else {}
+    log_data = logs if isinstance(logs, dict) else {}
+    notification_items = notifications if isinstance(notifications, list) else []
+
+    add_candidate(_latest_path_mtime_ms(run_dir))
+    add_candidate(active.get("startedAt"))
+    add_candidate(active.get("started_at"))
+    add_candidate(active.get("endedAt"))
+    add_candidate(active.get("ended_at"))
+    add_candidate(controller_data.get("startedAt"))
+    add_candidate(controller_data.get("started_at"))
+    add_candidate(controller_data.get("endedAt"))
+    add_candidate(controller_data.get("ended_at"))
+
+    stop_progress = normalize_stop_progress_payload(controller_data.get("stop_progress"))
+    if isinstance(stop_progress, dict):
+        add_candidate(stop_progress.get("updated_at"))
+        add_candidate(stop_progress.get("updatedAt"))
+        current_phase = stop_progress.get("current_phase")
+        if isinstance(current_phase, dict):
+            add_candidate(current_phase.get("updated_at"))
+            add_candidate(current_phase.get("updatedAt"))
+        for entry in stop_progress.get("history") or []:
+            if not isinstance(entry, dict):
+                continue
+            add_candidate(entry.get("updated_at"))
+            add_candidate(entry.get("updatedAt"))
+
+    for entry in log_data.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        add_candidate(_pick_value(entry.get("t"), entry.get("ts"), entry.get("time"), entry.get("timestamp")))
+
+    for entry in notification_items:
+        if not isinstance(entry, dict):
+            continue
+        add_candidate(_pick_value(entry.get("t"), entry.get("ts"), entry.get("time"), entry.get("timestamp")))
+
+    return max(candidates, default=None)
+
+
 def _host_is_loopback(bind_host: str) -> bool:
     host = str(bind_host or "").strip()
     if not host:

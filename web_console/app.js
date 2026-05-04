@@ -5643,10 +5643,11 @@
     const doneCount = toNumber(stateCounts.done ?? raw.tasksDone ?? taskCounts.done ?? lastRunSummary.done ?? 0, 0);
     const failedCount = toNumber(stateCounts.failed ?? raw.tasksFailed ?? taskCounts.failed ?? lastRunSummary.failed_count ?? 0, 0);
     const warningCount = toNumber(stateCounts.warnings ?? raw.warnings ?? raw.warningCount ?? raw.warning_count ?? 0, 0);
+    const endedAt = toNumber(raw.endedAt || raw.ended_at || 0, 0);
     return {
       id: toText(raw.id, 'run'),
       startedAt: toNumber(raw.startedAt || raw.started_at || 0, 0),
-      endedAt: toNumber(raw.endedAt || raw.ended_at || 0, 0),
+      endedAt,
       status: toText(raw.status, 'idle'),
       executionStatus: toText(raw.executionStatus || raw.execution_status || '', ''),
       execution_status: toText(raw.execution_status || raw.executionStatus || '', ''),
@@ -5680,6 +5681,10 @@
       shutdownReason: toText(raw.shutdownReason || raw.shutdown_reason || raw.stopReason || lastRunSummary.stop_reason || runSummary.final?.reason || '', ''),
       stopReason: toText(raw.stopReason || raw.shutdownReason || raw.shutdown_reason || lastRunSummary.stop_reason || runSummary.final?.reason || '', ''),
       runDir: toText(raw.runDir || raw.run_dir, ''),
+      freshnessTimestamp: toNumber(raw.freshnessTimestamp || raw.freshness_timestamp || endedAt || raw.startedAt || raw.started_at || 0, 0),
+      freshness_timestamp: toNumber(raw.freshness_timestamp || raw.freshnessTimestamp || endedAt || raw.startedAt || raw.started_at || 0, 0),
+      freshnessSource: toText(raw.freshnessSource || raw.freshness_source, ''),
+      freshness_source: toText(raw.freshness_source || raw.freshnessSource, ''),
       lastCycle: toText(raw.lastCycle, ''),
       runSummary,
       lastRunSummary,
@@ -7529,6 +7534,7 @@
     const repo = toObject(raw.repo);
     const progress = toObject(raw.progress);
     const redaction = toObject(raw.redaction);
+    const rawSnapshotRefresh = toObject(raw.snapshot_refresh || raw.snapshotRefresh);
     const webInstance = normalizeWebInstance(raw.web_instance || raw.webInstance);
     const config = adaptConfig(raw.config, { progress, repo });
     const configContract = adaptConfigContract(raw.config_contract || raw.configContract || raw.config, {
@@ -7598,13 +7604,19 @@
       branch: repo.branch || '',
       source: 'api',
     });
+    const snapshotLastUpdatedAt = toMaybeNumber(
+      rawSnapshotRefresh.lastUpdatedAt
+        ?? rawSnapshotRefresh.last_updated_at
+        ?? rawSnapshotRefresh.freshnessTimestamp
+        ?? rawSnapshotRefresh.freshness_timestamp
+    ) ?? nowMs();
     const snapshotRefresh = {
-      status: 'ready',
-      lastUpdatedAt: nowMs(),
+      status: toText(rawSnapshotRefresh.status, 'ready'),
+      lastUpdatedAt: snapshotLastUpdatedAt,
       lastSuccessAt: nowMs(),
-      stale: Boolean(toObject(liveRun.stale).value),
-      staleReasons: toArray(toObject(liveRun.stale).reasons).map((reason) => toText(reason, '')).filter(Boolean),
-      latestRunDir: toText(raw.latest_run_dir, ''),
+      stale: false,
+      staleReasons: [],
+      latestRunDir: toText(rawSnapshotRefresh.latestRunDir || rawSnapshotRefresh.latest_run_dir || raw.latest_run_dir, ''),
     };
 
     return {
@@ -9005,6 +9017,7 @@
     createFallbackFixture,
     createBlankLogTailState,
     createBlankSnapshotRefreshState,
+    snapshotRefreshDisplay,
     normalizeLogTailFilters,
     normalizeLogTailSource,
     normalizeLogTailSources,
@@ -9095,6 +9108,7 @@
     goalSaveInFlight,
     currentLocale,
     setLocale,
+    setHistorySelection,
     setView,
     renderShell,
     inspectGoalSaveState,
@@ -9213,8 +9227,7 @@
     state.sectionState = toObject(next.sectionState);
     const previousRefresh = ensureSnapshotRefreshState();
     const nextRefresh = toObject(next.snapshotRefresh);
-    const nextLiveRunStale = toObject(toObject(next.liveRun).stale);
-    const staleReasons = toArray(nextRefresh.staleReasons || nextLiveRunStale.reasons)
+    const staleReasons = toArray(nextRefresh.staleReasons)
       .map((reason) => toText(reason, ''))
       .filter(Boolean);
     state.snapshotRefresh = {
@@ -9233,7 +9246,7 @@
       lastErrorAt: 0,
       lastErrorStatus: 0,
       lastError: '',
-      stale: Boolean(nextRefresh.stale || nextLiveRunStale.value),
+      stale: Boolean(nextRefresh.stale),
       staleReasons,
       latestRunDir: toText(nextRefresh.latestRunDir || next.latestRunDir, state.latestRunDir),
       timer: previousRefresh.timer,
@@ -9271,7 +9284,25 @@
   }
 
   function snapshotRefreshDisplay(refresh = state.snapshotRefresh) {
-    const current = toObject(refresh);
+    const selectedRun = state.activeView === 'history' ? toObject(currentRun()) : {};
+    const selectedRunLastUpdatedAt = toNumber(
+      selectedRun.freshnessTimestamp
+        || selectedRun.freshness_timestamp
+        || selectedRun.endedAt
+        || selectedRun.ended_at
+        || selectedRun.startedAt
+        || selectedRun.started_at
+        || 0,
+      0
+    );
+    const current = state.activeView === 'history' && selectedRunLastUpdatedAt > 0
+      ? {
+          ...toObject(refresh),
+          lastUpdatedAt: selectedRunLastUpdatedAt,
+          stale: false,
+          staleReasons: [],
+        }
+      : toObject(refresh);
     const status = normalizeSectionStatus(current.status || state.snapshotStatus || 'loading');
     const errorKind = normalizeSnapshotErrorKind(current.lastErrorStatus);
     const lastUpdatedAt = toNumber(current.lastUpdatedAt || state.lastSnapshotAt || 0, 0);

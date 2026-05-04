@@ -996,6 +996,19 @@ class WebConsoleStaticTests(unittest.TestCase):
         self.assertNotIn("text/babel", lowered)
         self.assertNotIn("quota 5h", lowered)
 
+    def test_snapshot_refresh_logic_uses_history_selection_and_api_freshness_timestamps(self) -> None:
+        required_tokens = [
+            "setHistorySelection",
+            "raw.snapshot_refresh || raw.snapshotRefresh",
+            "state.activeView === 'history'",
+            "selectedRun.freshnessTimestamp",
+            "selectedRun.endedAt",
+        ]
+        for token in required_tokens:
+            self.assertIn(token, self.app_js)
+
+        self.assertNotIn("nextRefresh.stale || nextLiveRunStale.value", self.app_js)
+
     def test_locale_persistence_and_bilingual_dashboard_config_palette_copy(self) -> None:
         locale_tokens = [
             "agentcli.console.locale.v1",

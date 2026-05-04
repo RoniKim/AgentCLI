@@ -279,7 +279,7 @@
 - [ ] Backend adapter interfaces isolate model invocation, message streaming, model option construction, and quota probing from orchestration code.
 - [ ] Codex backend-specific code is limited to Codex CLI execution, Codex app-server integration, Codex quota probing, and Codex model options.
 - [ ] Claude backend-specific code is limited to Claude SDK/CLI execution, Claude streaming collection, Claude quota probing, and Claude model options.
-- [ ] Every decomposition PR is extraction-only with no product behavior changes, no endpoint contract changes, and no run artifact filename changes.
+- [x] Every decomposition PR is extraction-only with no product behavior changes, no endpoint contract changes, and no run artifact filename changes.
 
 ### P0-W. Web Operational UX Follow-Up
 
@@ -328,10 +328,10 @@
 ### P0-Z. Stage Effects And Backlog Refiner Runtime
 
 - [ ] `StageOutcome` supports declared effects such as `backlog_written` and `tasks_reload_required` so `PipelineManager` can safely apply stage side effects.
-- [ ] `PipelineSession` exposes safe artifact and backlog write APIs for state-mutating stages.
+- [x] `PipelineSession` exposes safe artifact and backlog write APIs for state-mutating stages.
 - [ ] `PipelineManager` reloads task state after any stage declares backlog mutation.
-- [ ] A built-in PL/Backlog Refiner can run between PM and Dev and split oversized tasks while preserving GOALS trace and dependencies.
-- [ ] Web Config and Pipeline views support PL and plugin stages without dropping unknown role specs.
+- [x] A built-in PL/Backlog Refiner can run between PM and Dev and split oversized tasks while preserving GOALS trace and dependencies.
+- [x] Web Config and Pipeline views support PL and plugin stages without dropping unknown role specs.
 
 ## P1 (Should-Have)
 
