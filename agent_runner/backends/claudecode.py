@@ -18,6 +18,7 @@ from collections.abc import Callable
 from typing import Any, Optional, Tuple
 import inspect
 
+from .base import BackendAdapter, BackendQuotaStatus
 from ..process_guard import register_pid, unregister_pid_if_exited
 from ..analysis_cache import merge_dev_hints_to_global_changelog
 from ..docs import resolve_docs_dir, generate_docs_digest
@@ -666,6 +667,133 @@ def _extract_client_pid(client: object) -> Optional[int]:
     return pid if isinstance(pid, int) else None
 
 
+class ClaudeCodeBackendAdapter(BackendAdapter):
+    """Claude Agent SDK adapter for options, invocation, streams, and quota."""
+
+    name = "claudecode"
+
+    def __init__(
+        self,
+        cfg: ClaudeCodeConfig,
+        *,
+        client_cls: Any = None,
+        quota_probe_fn: Callable[..., tuple[str, dict, Optional[str]]] = check_quota_utilization,
+    ) -> None:
+        self.cfg = cfg
+        self._client_cls = client_cls
+        self._quota_probe_fn = quota_probe_fn
+
+    def _resolve_client_cls(self) -> Any:
+        if self._client_cls is not None:
+            return self._client_cls
+        from claude_agent_sdk import ClaudeSDKClient
+
+        return ClaudeSDKClient
+
+    def build_model_options(self, **kwargs: Any) -> Any:
+        return _build_options(
+            self.cfg,
+            repo=kwargs["repo"],
+            stage=str(kwargs.get("stage") or ""),
+            model_override=str(kwargs.get("model_override") or ""),
+            stage_instructions=str(kwargs.get("stage_instructions") or ""),
+            max_turns_override=int(kwargs.get("max_turns_override") or 0),
+            ext_ctx=kwargs.get("ext_ctx"),
+        )
+
+    async def collect_messages(self, stream: Any, **kwargs: Any) -> tuple[str, Any | None]:
+        return await _collect_messages(
+            stream,
+            stop_path=kwargs["stop_path"],
+            debug=bool(kwargs.get("debug", False)),
+        )
+
+    async def start_query(self, client: Any, prompt: str) -> None:
+        await _start_query(client, prompt)
+
+    async def receive_messages(self, client: Any, *, stop_path: Path, debug: bool) -> tuple[str, Any | None]:
+        return await _receive_messages(client, stop_path=stop_path, debug=debug)
+
+    async def invoke_model(
+        self,
+        prompt: str,
+        **kwargs: Any,
+    ) -> tuple[str, Any | None]:
+        repo = kwargs["repo"]
+        stage = str(kwargs.get("stage") or "")
+        stop_path = kwargs["stop_path"]
+        debug = bool(kwargs.get("debug", False))
+        timeout_seconds = int(kwargs.get("timeout_seconds") or 0)
+        max_retries = int(kwargs.get("max_retries") if kwargs.get("max_retries") is not None else 3)
+        initial_backoff = float(kwargs.get("initial_backoff") or 5.0)
+        heartbeat_callback = kwargs.get("heartbeat_callback")
+        heartbeat_interval_seconds = int(kwargs.get("heartbeat_interval_seconds") or 120)
+
+        client_cls = self._resolve_client_cls()
+        default_safety_timeout = 3600
+        effective_timeout = timeout_seconds if timeout_seconds > 0 else default_safety_timeout
+
+        for attempt in range(max_retries + 1):
+            try:
+                options = self.build_model_options(
+                    repo=repo,
+                    stage=stage,
+                    model_override=kwargs.get("model_override", ""),
+                    stage_instructions=kwargs.get("stage_instructions", ""),
+                    max_turns_override=kwargs.get("max_turns_override", 0),
+                    ext_ctx=kwargs.get("ext_ctx"),
+                )
+                async with client_cls(options=options) as client:
+                    child_pid = _extract_client_pid(client)
+                    if child_pid is not None:
+                        register_pid(child_pid)
+                    hb_task: asyncio.Task[None] | None = None
+                    try:
+                        await asyncio.wait_for(self.start_query(client, prompt), timeout=120)
+                        if heartbeat_callback:
+                            async def _hb_loop() -> None:
+                                while True:
+                                    await asyncio.sleep(heartbeat_interval_seconds)
+                                    try:
+                                        heartbeat_callback()
+                                    except Exception:
+                                        pass
+
+                            hb_task = asyncio.create_task(_hb_loop())
+                        coro = self.receive_messages(client, stop_path=stop_path, debug=debug)
+                        text, structured = await asyncio.wait_for(coro, timeout=effective_timeout)
+                        if has_quota_text(text or ""):
+                            raise RuntimeError(
+                                f"Quota exhaustion detected in Claude output: "
+                                f"{(text or '')[:200]}"
+                            )
+                        return text, structured
+                    finally:
+                        if hb_task is not None:
+                            hb_task.cancel()
+                        if child_pid is not None:
+                            unregister_pid_if_exited(child_pid)
+            except (StopRequested, BudgetExceeded):
+                raise
+            except Exception as ex:
+                if is_quota_exception(ex):
+                    raise
+                if is_transient_exception(ex) and attempt < max_retries:
+                    wait = initial_backoff * (2 ** attempt)
+                    eprint(f"[RETRY] {stage} transient error (attempt {attempt + 1}/{max_retries}): {ex}; retrying in {wait:.0f}s")
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+        raise RuntimeError("unreachable")  # pragma: no cover
+
+    def probe_quota(self, *, five_hour_max: float = 95.0, seven_day_max: float = 95.0) -> BackendQuotaStatus:
+        action, info, resets_at = self._quota_probe_fn(
+            five_hour_max=five_hour_max,
+            seven_day_max=seven_day_max,
+        )
+        return BackendQuotaStatus.from_probe(action, info, resets_at)
+
+
 async def _run_claude_query(
     cfg: ClaudeCodeConfig,
     prompt: str,
@@ -683,6 +811,7 @@ async def _run_claude_query(
     ext_ctx: Any = None,
     heartbeat_callback: Callable[[], None] | None = None,
     heartbeat_interval_seconds: int = 120,
+    backend_adapter: ClaudeCodeBackendAdapter | None = None,
 ) -> Tuple[str, Optional[Any]]:
     """High-level helper: create client, send query, collect messages.
 
@@ -692,61 +821,23 @@ async def _run_claude_query(
     A safety timeout of 1 hour is applied when timeout_seconds is 0 (unlimited)
     to prevent indefinite hangs from stalled SDK streams.
     """
-    from claude_agent_sdk import ClaudeSDKClient
-
-    _DEFAULT_SAFETY_TIMEOUT = 3600  # 1 hour - prevents infinite hang
-    effective_timeout = timeout_seconds if timeout_seconds > 0 else _DEFAULT_SAFETY_TIMEOUT
-
-    # _build_options sets cwd=repo in ClaudeAgentOptions, so the SDK
-    # subprocess will start in the correct directory without os.chdir().
-    for attempt in range(max_retries + 1):
-        try:
-            options = _build_options(cfg, repo=repo, stage=stage, model_override=model_override, stage_instructions=stage_instructions, max_turns_override=max_turns_override, ext_ctx=ext_ctx)
-            async with ClaudeSDKClient(options=options) as client:
-                child_pid = _extract_client_pid(client)
-                if child_pid is not None:
-                    register_pid(child_pid)
-                hb_task: asyncio.Task[None] | None = None
-                try:
-                    await asyncio.wait_for(_start_query(client, prompt), timeout=120)
-                    # Start heartbeat after query begins
-                    if heartbeat_callback:
-                        async def _hb_loop() -> None:
-                            while True:
-                                await asyncio.sleep(heartbeat_interval_seconds)
-                                try:
-                                    heartbeat_callback()
-                                except Exception:
-                                    pass
-                        hb_task = asyncio.create_task(_hb_loop())
-                    coro = _receive_messages(client, stop_path=stop_path, debug=debug)
-                    text, structured = await asyncio.wait_for(coro, timeout=effective_timeout)
-                    # Post-return quota check: Claude Code subprocess may exit
-                    # normally while embedding quota/limit messages in its output
-                    # text instead of raising an exception.
-                    if has_quota_text(text or ""):
-                        raise RuntimeError(
-                            f"Quota exhaustion detected in Claude output: "
-                            f"{(text or '')[:200]}"
-                        )
-                    return text, structured
-                finally:
-                    if hb_task is not None:
-                        hb_task.cancel()
-                    if child_pid is not None:
-                        unregister_pid_if_exited(child_pid)
-        except (StopRequested, BudgetExceeded):
-            raise
-        except Exception as ex:
-            if is_quota_exception(ex):
-                raise
-            if is_transient_exception(ex) and attempt < max_retries:
-                wait = initial_backoff * (2 ** attempt)
-                eprint(f"[RETRY] {stage} transient error (attempt {attempt + 1}/{max_retries}): {ex}; retrying in {wait:.0f}s")
-                await asyncio.sleep(wait)
-                continue
-            raise
-    raise RuntimeError("unreachable")  # pragma: no cover
+    adapter = backend_adapter or ClaudeCodeBackendAdapter(cfg)
+    return await adapter.invoke_model(
+        prompt,
+        repo=repo,
+        stage=stage,
+        stop_path=stop_path,
+        debug=debug,
+        model_override=model_override,
+        stage_instructions=stage_instructions,
+        max_turns_override=max_turns_override,
+        timeout_seconds=timeout_seconds,
+        max_retries=max_retries,
+        initial_backoff=initial_backoff,
+        ext_ctx=ext_ctx,
+        heartbeat_callback=heartbeat_callback,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+    )
 
 
 async def _run_with_continuations(
@@ -769,6 +860,7 @@ async def _run_with_continuations(
     metrics: Any = None,
     _budget_exceeded: Any = None,
     ext_ctx: Any = None,
+    backend_adapter: ClaudeCodeBackendAdapter | None = None,
 ) -> Tuple[str, Optional[Any]]:
     """Run a Claude query, optionally continuing if max-turns exception occurs.
 
@@ -798,6 +890,7 @@ async def _run_with_continuations(
                 max_turns_override=max_turns_override, timeout_seconds=timeout_seconds,
                 ext_ctx=ext_ctx,
                 heartbeat_callback=_hb_cb,
+                backend_adapter=backend_adapter,
             )
         except (StopRequested, BudgetExceeded):
             raise
@@ -850,6 +943,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         return 2
 
     cfg = _load_claudecode_cfg(args)
+    backend_adapter = ClaudeCodeBackendAdapter(cfg)
 
     # Run dir
     if getattr(args, "run_dir", ""):
@@ -1254,6 +1348,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     budget_state=budget_state, budgets_cfg=budgets_cfg,
                     metrics=metrics, _budget_exceeded=budget_exceeded,
                     ext_ctx=ext_ctx,
+                    backend_adapter=backend_adapter,
                 )
             except StopRequested:
                 raise
@@ -1781,6 +1876,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         budget_state=budget_state, budgets_cfg=budgets_cfg,
                         metrics=metrics, _budget_exceeded=budget_exceeded,
                         ext_ctx=ext_ctx,
+                        backend_adapter=backend_adapter,
                     )
                 except Exception as bfx:
                     eprint(f"[BUILD-FIX] Auto-fix agent error: {bfx}")
@@ -2289,6 +2385,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         budget_state=budget_state, budgets_cfg=budgets_cfg,
                         metrics=metrics, _budget_exceeded=budget_exceeded,
                         ext_ctx=ext_ctx,
+                        backend_adapter=backend_adapter,
                     )
                     dev_final = text or ""
                     _inp, _out = extract_claude_tokens(_structured)
@@ -2498,6 +2595,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                                 timeout_seconds=int(getattr(args, "dev_timeout_seconds", 600) or 600),
                                 ext_ctx=ext_ctx,
                                 heartbeat_callback=lambda: metrics.event("heartbeat", stage="Dev", task_id=next_task.id),
+                                backend_adapter=backend_adapter,
                             )
                             dev_log = (dev_log or "") + "\n[PHANTOM_RETRY]\n" + (text2 or "")
                             (attempt_dir / "dev_output.txt").write_text(dev_log + "\n", encoding="utf-8", errors="replace")
@@ -3297,6 +3395,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
                 ext_ctx=ext_ctx,
                 heartbeat_callback=lambda: metrics.event("heartbeat", stage="qa"),
+                backend_adapter=backend_adapter,
             )
 
             # Structured JSON fallback: text媛 鍮꾩뼱?덉쑝硫?structured output???ъ슜
@@ -3392,6 +3491,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 timeout_seconds=300,
                 ext_ctx=ext_ctx,
                 heartbeat_callback=lambda: metrics.event("heartbeat", stage="reporter"),
+                backend_adapter=backend_adapter,
             )
             if text and text.strip():
                 clean_text = text.strip()
@@ -3529,6 +3629,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 max_turns_override=15,
                 timeout_seconds=int(getattr(args, "pm_timeout_seconds", 900) or 900),
                 heartbeat_callback=lambda: metrics.event("heartbeat", stage="goals_refresh"),
+                backend_adapter=backend_adapter,
             )
             result = parse_and_append_refreshed_goals(repo, refresh_text or "")
             if result.get("appended"):
@@ -3592,9 +3693,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
             # --- Pre-cycle quota utilization check ---
             if quota_check_enabled:
-                q_action, q_info, q_resets = check_quota_utilization(
+                quota_status = backend_adapter.probe_quota(
                     five_hour_max=quota_5h_max, seven_day_max=quota_7d_max,
                 )
+                q_action, q_info, q_resets = quota_status.as_tuple()
                 _q5h = q_info.get("five_hour", "N/A")
                 _q7d = q_info.get("seven_day", "N/A")
                 if q_action == "stop":
@@ -3737,9 +3839,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     # Mid-cycle quota exhaustion: wait for reset then continue
                     wait_sec = 0
                     try:
-                        _q_action, _q_info, _q_resets = check_quota_utilization(
+                        _quota_status = backend_adapter.probe_quota(
                             five_hour_max=quota_5h_max, seven_day_max=quota_7d_max,
                         )
+                        _q_action, _q_info, _q_resets = _quota_status.as_tuple()
                         if _q_resets:
                             wait_sec = seconds_until_reset(_q_resets)
                     except Exception:

@@ -123,7 +123,6 @@ from .utils import (
     detect_stop_reason,
     write_heartbeat,
     loop_cycle_indices,
-    check_codex_quota_utilization,
     seconds_until_unix_reset,
     severity_at_or_above,
     budget_exceeded,
@@ -218,7 +217,7 @@ from .failure_policy import (
 )
 from .task_failures import record_task_failure_result, record_task_failure_state
 from .progress import print_cycle_report, TokenTracker
-from .codex_exec import codex_exec, CodexExecResult
+from .backends.codex_runner import CodexBackendAdapter, CodexExecResult
 
 from .pipeline import PipelineManager, make_stages
 from .pipeline.shared_runtime import (
@@ -417,6 +416,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
     autopilot = bool(args.autopilot)
     codex_reasoning_effort = str(getattr(args, "codex_reasoning_effort", "") or "").strip().lower()
+    codex_backend = CodexBackendAdapter()
 
     # Prompt store
     prompts_dir = (repo / args.prompts_dir).resolve() if not Path(args.prompts_dir).is_absolute() else Path(args.prompts_dir).resolve()
@@ -618,7 +618,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "context_json": json.dumps(ctx_obj, ensure_ascii=False, indent=2),
                     },
                 )
-                res = await codex_exec(
+                res = await codex_backend.invoke_model(
                     prompt,
                     instructions=reporter_instructions,
                     model=getattr(args, "reporter_model", None) or args.pm_model,
@@ -697,7 +697,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         metrics.event("model_retry_skipped_stop", stage=label, task_id=task_id, attempt=retry_attempt)
                         return last_result or CodexExecResult(exit_code=130, error=STOP_REASON_STOP_FILE)
 
-                    result = await codex_exec(
+                    result = await codex_backend.invoke_model(
                         prompt,
                         instructions=instructions,
                         model=model,
@@ -1435,7 +1435,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 qa_prompt = store.render("qa_prompt", QA_TEMPLATE_DEFAULT, ctx)
                 if bool(getattr(args, "qa_to_backlog", False)):
                     qa_prompt = qa_prompt.rstrip() + "\n\n" + QA_FOLLOWUPS_OUTPUT_CONTRACT + "\n"
-                qa_result = await codex_exec(
+                qa_result = await codex_backend.invoke_model(
                     qa_prompt,
                     instructions=qa_instructions,
                     model=args.qa_model,
@@ -3763,7 +3763,7 @@ async def main_async(args: argparse.Namespace) -> int:
             try:
                 _gp, _gt = read_goals(repo)
                 refresh_prompt = build_goals_refresh_prompt(_gt or "")
-                _gr_res = await codex_exec(
+                _gr_res = await codex_backend.invoke_model(
                     refresh_prompt,
                     model=str(getattr(args, "pm_model", "gpt-5.5") or "gpt-5.5"),
                     reasoning_effort=codex_reasoning_effort,
@@ -3835,10 +3835,11 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 # --- Pre-cycle quota utilization check (codex app-server) ---
                 if quota_check_enabled:
-                    q_action, q_info, q_reset_unix = check_codex_quota_utilization(
+                    quota_status = codex_backend.probe_quota(
                         five_hour_max=quota_5h_max,
                         seven_day_max=quota_7d_max,
                     )
+                    q_action, q_info, q_reset_unix = quota_status.as_tuple()
                     _q5h = q_info.get("five_hour", "N/A")
                     _q7d = q_info.get("seven_day", "N/A")
                     q_limit = str(q_info.get("max_used_limit_id", "") or "")
@@ -4048,10 +4049,11 @@ async def main_async(args: argparse.Namespace) -> int:
                         wait_sec = 0
                         q_limit = ""
                         try:
-                            _q_action, _q_info, _q_reset_unix = check_codex_quota_utilization(
+                            _quota_status = codex_backend.probe_quota(
                                 five_hour_max=quota_5h_max,
                                 seven_day_max=quota_7d_max,
                             )
+                            _q_action, _q_info, _q_reset_unix = _quota_status.as_tuple()
                             q_limit = str(_q_info.get("max_used_limit_id", "") or "")
                             if _q_reset_unix is not None:
                                 wait_sec = seconds_until_unix_reset(_q_reset_unix)
