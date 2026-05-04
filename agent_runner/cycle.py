@@ -91,6 +91,7 @@ from .reporting import (
     write_cycle_change_summary_artifacts,
     write_run_report_artifacts,
 )
+from .process_guard import write_windows_handle_diagnostics_artifacts
 from .runtime_contract import (
     AttemptContext,
     RunnerContext,
@@ -529,6 +530,66 @@ async def main_async(args: argparse.Namespace) -> int:
             rotate_log_file_fn=rotate_log_file,
         )
 
+    def sync_windows_handle_diagnostics(*, cycle: int = -1, quiet: bool = False) -> dict[str, Any]:
+        try:
+            payload = write_windows_handle_diagnostics_artifacts(repo, run_dir)
+        except Exception as ex:
+            if not quiet:
+                eprint(f"[WARN] Windows diagnostics sync failed: {ex}")
+            return {
+                "status": "error",
+                "reason": str(ex),
+                "artifacts": {},
+            }
+
+        if quiet:
+            return payload
+
+        status = str(payload.get("status") or "").strip().lower()
+        artifact_path = str(payload.get("artifact_path") or "")
+        warnings = [
+            dict(item)
+            for item in (payload.get("warnings") or [])
+            if isinstance(item, dict)
+        ]
+        warning_kinds = [
+            str(item.get("kind") or "").strip()
+            for item in warnings
+            if str(item.get("kind") or "").strip()
+        ]
+        if warning_kinds:
+            metrics.event(
+                "windows_handle_diagnostics_warning",
+                cycle=cycle,
+                warning_count=len(warnings),
+                warning_kinds=warning_kinds,
+                artifact_path=artifact_path,
+                source_path=str(payload.get("source_path") or ""),
+            )
+            append_cycle_summary(
+                f"{now_iso()} cycle={cycle} windows_handle_diagnostics warnings={','.join(warning_kinds)}"
+            )
+            eprint(
+                "[WARN] Windows handle diagnostics anomalies: "
+                f"{', '.join(warning_kinds)}"
+            )
+            return payload
+
+        if status in {"malformed", "partial"}:
+            metrics.event(
+                "windows_handle_diagnostics_error",
+                cycle=cycle,
+                status=status,
+                error_count=len(payload.get("errors") or []),
+                artifact_path=artifact_path,
+                source_path=str(payload.get("source_path") or ""),
+            )
+            append_cycle_summary(
+                f"{now_iso()} cycle={cycle} windows_handle_diagnostics status={status}"
+            )
+            eprint(f"[WARN] Windows handle diagnostics input is {status}.")
+        return payload
+
     # --- Begin pipeline scope (was: async with MCPServerStdio) ---
     # codex exec handles MCP/tools internally; no SDK agent objects needed.
     if True:  # preserve indent level for minimal diff
@@ -550,6 +611,7 @@ async def main_async(args: argparse.Namespace) -> int:
             report_path = run_dir / "SHUTDOWN_REPORT.md"
             ctx_path = run_dir / "SHUTDOWN_CONTEXT.json"
             report_artifacts: dict[str, Any] = {}
+            sync_windows_handle_diagnostics(cycle=cycle, quiet=True)
             try:
                 report_artifacts = write_run_report_artifacts(
                     repo=repo,
@@ -3838,6 +3900,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 check_and_remove_stale_git_lock(repo)
                 write_heartbeat(run_dir)
+                sync_windows_handle_diagnostics(cycle=cycle_idx)
 
                 # --- Pre-cycle quota utilization check (codex app-server) ---
                 if quota_check_enabled:

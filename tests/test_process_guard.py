@@ -30,6 +30,135 @@ class ProcessGuardTests(unittest.TestCase):
         self.fixture_root.mkdir()
         self.addCleanup(lambda: shutil.rmtree(self.fixture_root, ignore_errors=True))
 
+    def _write_jsonl(self, path: Path, rows: list[object]) -> Path:
+        lines: list[str] = []
+        for row in rows:
+            if isinstance(row, str):
+                lines.append(row)
+            else:
+                lines.append(json.dumps(row))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def test_write_windows_handle_diagnostics_artifacts_links_run_artifacts_without_anomaly(self) -> None:
+        repo = self.fixture_root / "repo"
+        run_dir = repo / ".AgentCLI" / "agent_runs" / "20260505-000000"
+        source_path = repo / ".AgentCLI" / "diagnostics" / "windows-handle-diagnostics-20260505-000000.jsonl"
+        run_dir.mkdir(parents=True)
+        self._write_jsonl(
+            source_path,
+            [
+                {
+                    "sample": 0,
+                    "ts": "2026-05-05T00:00:00Z",
+                    "processTree": [{"pid": 10}, {"pid": 11}],
+                    "resourcePressure": {
+                        "systemHandleCount": 1000,
+                        "systemHandleLimit": 5000,
+                    },
+                },
+                {
+                    "sample": 1,
+                    "ts": "2026-05-05T00:01:00Z",
+                    "processTree": [{"pid": 10}, {"pid": 11}, {"pid": 12}],
+                    "resourcePressure": {
+                        "systemHandleCount": 1050,
+                        "systemHandleLimit": 5000,
+                    },
+                },
+            ],
+        )
+
+        with patch.object(process_guard.sys, "platform", "win32"):
+            payload = process_guard.write_windows_handle_diagnostics_artifacts(repo, run_dir)
+
+        summary_path = run_dir / "diagnostics" / "WINDOWS_HANDLE_DIAGNOSTICS.json"
+        normalized_jsonl_path = run_dir / "diagnostics" / "windows-handle-diagnostics.normalized.jsonl"
+        self.assertEqual("ok", payload["status"])
+        self.assertEqual([], payload["warnings"])
+        self.assertTrue(summary_path.exists())
+        self.assertTrue(normalized_jsonl_path.exists())
+        written = json.loads(summary_path.read_text(encoding="utf-8"))
+        self.assertTrue(written["summary"]["healthy"])
+        self.assertEqual(2, written["summary"]["snapshot_count"])
+        self.assertEqual(50, written["summary"]["latest_handle_growth"])
+
+    def test_read_windows_handle_diagnostics_jsonl_flags_process_count_anomaly(self) -> None:
+        path = self.fixture_root / "process-count.jsonl"
+        process_count = process_guard.DEFAULT_WINDOWS_PROCESS_COUNT_WARNING_THRESHOLD + 1
+        self._write_jsonl(
+            path,
+            [
+                {
+                    "sample": 0,
+                    "ts": "2026-05-05T00:00:00Z",
+                    "processTree": [{"pid": idx} for idx in range(process_count)],
+                    "resourcePressure": {
+                        "systemHandleCount": 1000,
+                        "systemHandleLimit": 5000,
+                    },
+                }
+            ],
+        )
+
+        payload = process_guard.read_windows_handle_diagnostics_jsonl(path)
+
+        self.assertEqual("ok", payload["status"])
+        self.assertEqual(["process_count_threshold"], payload["summary"]["warning_kinds"])
+        self.assertEqual(
+            "process_count_threshold",
+            payload["warnings"][0]["kind"],
+        )
+        self.assertEqual(process_count, payload["latest_snapshot"]["process_count"])
+
+    def test_read_windows_handle_diagnostics_jsonl_flags_handle_growth_anomaly(self) -> None:
+        path = self.fixture_root / "handle-growth.jsonl"
+        self._write_jsonl(
+            path,
+            [
+                {
+                    "sample": 0,
+                    "ts": "2026-05-05T00:00:00Z",
+                    "processTree": [{"pid": 10}],
+                    "resourcePressure": {
+                        "systemHandleCount": 1000,
+                        "systemHandleLimit": 5000,
+                    },
+                },
+                {
+                    "sample": 1,
+                    "ts": "2026-05-05T00:01:00Z",
+                    "processTree": [{"pid": 10}, {"pid": 11}],
+                    "resourcePressure": {
+                        "systemHandleCount": 1150,
+                        "systemHandleLimit": 5000,
+                    },
+                },
+            ],
+        )
+
+        payload = process_guard.read_windows_handle_diagnostics_jsonl(path)
+
+        self.assertEqual("ok", payload["status"])
+        self.assertIn("handle_growth", payload["summary"]["warning_kinds"])
+        self.assertEqual(150, payload["summary"]["latest_handle_growth"])
+        self.assertEqual("handle_growth", payload["warnings"][0]["kind"])
+
+    def test_read_windows_handle_diagnostics_jsonl_handles_missing_and_malformed_input(self) -> None:
+        missing_path = self.fixture_root / "missing.jsonl"
+        missing_payload = process_guard.read_windows_handle_diagnostics_jsonl(missing_path)
+        self.assertEqual("missing", missing_payload["status"])
+        self.assertEqual([], missing_payload["warnings"])
+
+        malformed_path = self.fixture_root / "malformed.jsonl"
+        self._write_jsonl(malformed_path, ["{not-json"])
+
+        malformed_payload = process_guard.read_windows_handle_diagnostics_jsonl(malformed_path)
+        self.assertEqual("malformed", malformed_payload["status"])
+        self.assertEqual([], malformed_payload["warnings"])
+        self.assertEqual(1, len(malformed_payload["errors"]))
+
     def test_descendant_pids_walks_nested_tree_without_self(self) -> None:
         child_map = {
             10: [11, 12],

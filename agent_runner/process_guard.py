@@ -83,6 +83,13 @@ _WAIT_TIMEOUT = 0x00000102
 # Parent watchdog polling is intentionally bounded so the helper never holds a
 # single process handle open indefinitely.
 _PARENT_WATCHDOG_POLL_SECONDS = 1.0
+_WINDOWS_HANDLE_DIAGNOSTICS_GLOB = "windows-handle-diagnostics*.jsonl"
+_WINDOWS_HANDLE_DIAGNOSTICS_ARTIFACT = "WINDOWS_HANDLE_DIAGNOSTICS.json"
+_WINDOWS_HANDLE_DIAGNOSTICS_NORMALIZED_JSONL = "windows-handle-diagnostics.normalized.jsonl"
+
+DEFAULT_WINDOWS_PROCESS_COUNT_WARNING_THRESHOLD = 25
+DEFAULT_WINDOWS_HANDLE_COUNT_WARNING_THRESHOLD = 550_000
+DEFAULT_WINDOWS_HANDLE_GROWTH_WARNING_THRESHOLD = 100
 
 # ctypes type alias
 _HANDLE = ctypes.c_void_p
@@ -1138,6 +1145,406 @@ def _start_parent_watchdog(session_dir: Path) -> None:
         except Exception as ex:
             logger.debug(f"[ProcessGuard] L5: Watchdog start failed: {ex}")
             return
+
+
+# ---------------------------------------------------------------------------
+# Windows diagnostics artifact sync
+# ---------------------------------------------------------------------------
+
+def _int_or_none(value: object) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _dict_or_empty(value: object) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _list_or_empty(value: object) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, tuple):
+        return list(value)
+    return []
+
+
+def _windows_diagnostics_warning(
+    kind: str,
+    *,
+    sample: Optional[int],
+    ts: str,
+    value: Optional[int],
+    threshold: Optional[int],
+) -> dict[str, Any]:
+    message = kind
+    if kind == "process_count_threshold":
+        message = f"process_count {value} >= {threshold}"
+    elif kind == "handle_count_threshold":
+        message = f"handle_count {value} >= {threshold}"
+    elif kind == "handle_growth":
+        message = f"handle_growth {value} >= {threshold}"
+    return {
+        "kind": kind,
+        "severity": "warning",
+        "sample": sample,
+        "ts": ts,
+        "value": value,
+        "threshold": threshold,
+        "message": message,
+    }
+
+
+def normalize_windows_handle_diagnostics_snapshot(
+    raw: dict[str, Any],
+    *,
+    previous_snapshot: Optional[dict[str, Any]] = None,
+    process_count_threshold: int = DEFAULT_WINDOWS_PROCESS_COUNT_WARNING_THRESHOLD,
+    handle_count_threshold: int = DEFAULT_WINDOWS_HANDLE_COUNT_WARNING_THRESHOLD,
+    handle_growth_threshold: int = DEFAULT_WINDOWS_HANDLE_GROWTH_WARNING_THRESHOLD,
+) -> dict[str, Any]:
+    """Normalize one collector snapshot into a stable Python-side shape."""
+    sample = _int_or_none(raw.get("sample"))
+    ts = str(raw.get("ts") or raw.get("timestamp") or "").strip()
+    process_tree = _list_or_empty(raw.get("processTree") or raw.get("process_tree"))
+    process_count = _int_or_none(raw.get("processCount"))
+    if process_count is None:
+        process_count = len(process_tree)
+
+    resource_pressure = _dict_or_empty(raw.get("resourcePressure") or raw.get("resource_pressure"))
+    system_counters = _dict_or_empty(raw.get("systemCounters") or raw.get("system_counters"))
+    top_handle_processes = _list_or_empty(raw.get("topHandleProcesses") or raw.get("top_handle_processes"))
+    top_process = _dict_or_empty(resource_pressure.get("topProcess"))
+    if not top_process and top_handle_processes:
+        top_process = _dict_or_empty(top_handle_processes[0])
+
+    system_handle_count = _int_or_none(resource_pressure.get("systemHandleCount"))
+    if system_handle_count is None:
+        system_handle_count = _int_or_none(system_counters.get("handle_count"))
+    system_handle_limit = _int_or_none(resource_pressure.get("systemHandleLimit"))
+    if system_handle_limit is None or system_handle_limit <= 0:
+        system_handle_limit = int(handle_count_threshold)
+
+    top_process_handle_count = _int_or_none(top_process.get("handleCount"))
+    previous_handle_count = _int_or_none(
+        (previous_snapshot or {}).get("system_handle_count")
+    )
+    handle_growth = None
+    if system_handle_count is not None and previous_handle_count is not None:
+        handle_growth = system_handle_count - previous_handle_count
+
+    warnings: list[dict[str, Any]] = []
+    if process_count is not None and process_count_threshold > 0 and process_count >= process_count_threshold:
+        warnings.append(
+            _windows_diagnostics_warning(
+                "process_count_threshold",
+                sample=sample,
+                ts=ts,
+                value=process_count,
+                threshold=int(process_count_threshold),
+            )
+        )
+    if (
+        system_handle_count is not None
+        and system_handle_limit is not None
+        and system_handle_limit > 0
+        and system_handle_count >= system_handle_limit
+    ):
+        warnings.append(
+            _windows_diagnostics_warning(
+                "handle_count_threshold",
+                sample=sample,
+                ts=ts,
+                value=system_handle_count,
+                threshold=system_handle_limit,
+            )
+        )
+    if (
+        handle_growth is not None
+        and handle_growth_threshold > 0
+        and handle_growth >= handle_growth_threshold
+    ):
+        warnings.append(
+            _windows_diagnostics_warning(
+                "handle_growth",
+                sample=sample,
+                ts=ts,
+                value=handle_growth,
+                threshold=int(handle_growth_threshold),
+            )
+        )
+
+    return {
+        "sample": sample,
+        "ts": ts,
+        "process_count": process_count,
+        "process_count_threshold": int(process_count_threshold),
+        "system_handle_count": system_handle_count,
+        "system_handle_limit": system_handle_limit,
+        "top_process_handle_count": top_process_handle_count,
+        "top_process_name": str(top_process.get("name") or "").strip(),
+        "top_process_pid": _int_or_none(top_process.get("pid")),
+        "handle_growth": handle_growth,
+        "handle_growth_threshold": int(handle_growth_threshold),
+        "source_repo_root": str(raw.get("repoRoot") or raw.get("repo_root") or "").strip(),
+        "source_run_dir": str(raw.get("runDir") or raw.get("run_dir") or "").strip(),
+        "resource_pressure_exceeded": bool(resource_pressure.get("exceeded")),
+        "warning_kinds": [str(item.get("kind") or "") for item in warnings],
+        "warnings": warnings,
+    }
+
+
+def read_windows_handle_diagnostics_jsonl(
+    path: Path,
+    *,
+    process_count_threshold: int = DEFAULT_WINDOWS_PROCESS_COUNT_WARNING_THRESHOLD,
+    handle_count_threshold: int = DEFAULT_WINDOWS_HANDLE_COUNT_WARNING_THRESHOLD,
+    handle_growth_threshold: int = DEFAULT_WINDOWS_HANDLE_GROWTH_WARNING_THRESHOLD,
+) -> dict[str, Any]:
+    """Read collector JSONL snapshots without requiring PowerShell execution."""
+    source = Path(path)
+    result: dict[str, Any] = {
+        "status": "missing",
+        "source_path": source.as_posix(),
+        "source_exists": False,
+        "snapshots": [],
+        "warnings": [],
+        "errors": [],
+        "latest_snapshot": {},
+        "summary": {
+            "healthy": True,
+            "snapshot_count": 0,
+            "warning_count": 0,
+            "warning_kinds": [],
+            "process_count_threshold": int(process_count_threshold),
+            "handle_count_threshold": int(handle_count_threshold),
+            "handle_growth_threshold": int(handle_growth_threshold),
+            "max_process_count": 0,
+            "max_handle_count": 0,
+            "max_handle_growth": 0,
+        },
+    }
+    if not source.exists() or not source.is_file():
+        return result
+
+    result["source_exists"] = True
+    snapshots: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    previous_snapshot: Optional[dict[str, Any]] = None
+
+    try:
+        with source.open("r", encoding="utf-8", errors="replace") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception as ex:
+                    errors.append(
+                        {
+                            "line": line_number,
+                            "message": str(ex),
+                        }
+                    )
+                    continue
+                if not isinstance(payload, dict):
+                    errors.append(
+                        {
+                            "line": line_number,
+                            "message": "snapshot must be a JSON object",
+                        }
+                    )
+                    continue
+                normalized = normalize_windows_handle_diagnostics_snapshot(
+                    payload,
+                    previous_snapshot=previous_snapshot,
+                    process_count_threshold=process_count_threshold,
+                    handle_count_threshold=handle_count_threshold,
+                    handle_growth_threshold=handle_growth_threshold,
+                )
+                normalized["line"] = line_number
+                snapshots.append(normalized)
+                warnings.extend(normalized.get("warnings") or [])
+                previous_snapshot = normalized
+    except Exception as ex:
+        errors.append({"line": 0, "message": str(ex)})
+
+    if not snapshots and errors:
+        status = "malformed"
+    elif snapshots and errors:
+        status = "partial"
+    elif snapshots:
+        status = "ok"
+    else:
+        status = "empty"
+
+    latest_snapshot = dict(snapshots[-1]) if snapshots else {}
+    max_process_count = 0
+    max_handle_count = 0
+    max_handle_growth = 0
+    for snapshot in snapshots:
+        process_count = _int_or_none(snapshot.get("process_count"))
+        handle_count = _int_or_none(snapshot.get("system_handle_count"))
+        handle_growth = _int_or_none(snapshot.get("handle_growth"))
+        if process_count is not None:
+            max_process_count = max(max_process_count, process_count)
+        if handle_count is not None:
+            max_handle_count = max(max_handle_count, handle_count)
+        if handle_growth is not None:
+            max_handle_growth = max(max_handle_growth, handle_growth)
+
+    warning_kinds: list[str] = []
+    seen_warning_kinds: set[str] = set()
+    for item in warnings:
+        kind = str(item.get("kind") or "").strip()
+        if not kind or kind in seen_warning_kinds:
+            continue
+        seen_warning_kinds.add(kind)
+        warning_kinds.append(kind)
+    result.update(
+        {
+            "status": status,
+            "snapshots": snapshots,
+            "warnings": warnings,
+            "errors": errors,
+            "latest_snapshot": latest_snapshot,
+            "summary": {
+                "healthy": status == "ok" and not warnings,
+                "snapshot_count": len(snapshots),
+                "warning_count": len(warnings),
+                "warning_kinds": warning_kinds,
+                "process_count_threshold": int(process_count_threshold),
+                "handle_count_threshold": int(
+                    latest_snapshot.get("system_handle_limit") or handle_count_threshold
+                ),
+                "handle_growth_threshold": int(handle_growth_threshold),
+                "latest_process_count": _int_or_none(latest_snapshot.get("process_count")),
+                "latest_handle_count": _int_or_none(latest_snapshot.get("system_handle_count")),
+                "latest_handle_growth": _int_or_none(latest_snapshot.get("handle_growth")),
+                "max_process_count": max_process_count,
+                "max_handle_count": max_handle_count,
+                "max_handle_growth": max_handle_growth,
+            },
+        }
+    )
+    return result
+
+
+def _windows_handle_diagnostics_candidates(repo: Path, run_dir: Path) -> list[Path]:
+    candidates: list[Path] = []
+    run_dir_path = Path(run_dir)
+    run_artifact_root = run_dir_path.parents[1] if len(run_dir_path.parents) >= 2 else None
+    roots = [
+        run_dir_path / "diagnostics",
+        (run_artifact_root / "diagnostics") if run_artifact_root is not None else None,
+        Path(repo) / ".AgentCLI" / "diagnostics",
+    ]
+    seen_roots: set[str] = set()
+    for root in roots:
+        if root is None:
+            continue
+        root_key = root.as_posix()
+        if root_key in seen_roots:
+            continue
+        seen_roots.add(root_key)
+        if not root.exists() or not root.is_dir():
+            continue
+        for path in root.glob(_WINDOWS_HANDLE_DIAGNOSTICS_GLOB):
+            if ".normalized." in path.name.lower():
+                continue
+            if path.is_file():
+                candidates.append(path)
+    candidates.sort(
+        key=lambda item: (
+            0 if item.parent == (run_dir_path / "diagnostics") else 1,
+            -item.stat().st_mtime,
+            item.name,
+        )
+    )
+    return candidates
+
+
+def find_windows_handle_diagnostics_source(repo: Path, run_dir: Path) -> Optional[Path]:
+    candidates = _windows_handle_diagnostics_candidates(repo, run_dir)
+    return candidates[0] if candidates else None
+
+
+def write_windows_handle_diagnostics_artifacts(
+    repo: Path,
+    run_dir: Path,
+    *,
+    process_count_threshold: int = DEFAULT_WINDOWS_PROCESS_COUNT_WARNING_THRESHOLD,
+    handle_count_threshold: int = DEFAULT_WINDOWS_HANDLE_COUNT_WARNING_THRESHOLD,
+    handle_growth_threshold: int = DEFAULT_WINDOWS_HANDLE_GROWTH_WARNING_THRESHOLD,
+) -> dict[str, Any]:
+    """Mirror collector snapshots into run artifacts as normalized JSON/JSONL."""
+    if sys.platform != "win32":
+        return {
+            "status": "noop",
+            "reason": "platform_not_windows",
+            "artifacts": {},
+        }
+
+    source_path = find_windows_handle_diagnostics_source(repo, run_dir)
+    if source_path is None:
+        return {
+            "status": "missing",
+            "reason": "diagnostics_not_found",
+            "artifacts": {},
+        }
+
+    normalized = read_windows_handle_diagnostics_jsonl(
+        source_path,
+        process_count_threshold=process_count_threshold,
+        handle_count_threshold=handle_count_threshold,
+        handle_growth_threshold=handle_growth_threshold,
+    )
+    if normalized.get("status") in {"missing", "empty"}:
+        return normalized
+
+    artifact_dir = Path(run_dir) / "diagnostics"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = artifact_dir / _WINDOWS_HANDLE_DIAGNOSTICS_ARTIFACT
+    normalized_jsonl_path = artifact_dir / _WINDOWS_HANDLE_DIAGNOSTICS_NORMALIZED_JSONL
+
+    payload = dict(normalized)
+    payload["artifact_path"] = summary_path.as_posix()
+    payload["normalized_jsonl_path"] = normalized_jsonl_path.as_posix()
+    payload["artifacts"] = {
+        "summary_json": summary_path.as_posix(),
+        "normalized_jsonl": normalized_jsonl_path.as_posix(),
+        "source_jsonl": source_path.as_posix(),
+    }
+
+    try:
+        summary_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception as ex:
+        logger.debug(f"[ProcessGuard] Failed to write diagnostics summary {summary_path}: {ex}")
+    try:
+        lines = [
+            json.dumps(snapshot, ensure_ascii=False, default=str)
+            for snapshot in payload.get("snapshots") or []
+            if isinstance(snapshot, dict)
+        ]
+        normalized_jsonl_path.write_text(
+            ("\n".join(lines) + ("\n" if lines else "")),
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception as ex:
+        logger.debug(
+            f"[ProcessGuard] Failed to write diagnostics jsonl {normalized_jsonl_path}: {ex}"
+        )
+    return payload
 
 
 # ---------------------------------------------------------------------------
