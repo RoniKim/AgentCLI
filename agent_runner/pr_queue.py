@@ -29,6 +29,7 @@ from .gitops import (
     git_head,
     git_repo_state,
     git_rev_parse_ref,
+    generated_worktree_path_state,
     read_pending_worktree_merge,
     remove_worktree,
 )
@@ -924,6 +925,515 @@ def _write_packet_index_state(
     updated_index = _upsert_index_entry(index, entry)
     _write_branch_index(source_repo_path, updated_index)
     return _find_branch_index_entry(updated_index, packet_id)
+
+
+def _write_branch_index_entry_state(
+    source_repo: Path,
+    entry: dict[str, Any],
+    *,
+    updated_at: str,
+    extra: dict[str, object] | None = None,
+) -> dict[str, Any] | None:
+    entry_id = _packet_id_key(entry.get("id"))
+    if not entry_id:
+        return None
+    updated_entry = dict(entry)
+    updated_entry["id"] = entry_id
+    updated_entry["updated_at"] = updated_at
+    if isinstance(extra, dict):
+        for key, value in extra.items():
+            updated_entry[key] = value
+    index = load_branch_index(source_repo)
+    updated_index = _upsert_index_entry(index, updated_entry)
+    _write_branch_index(source_repo, updated_index)
+    return _find_branch_index_entry(updated_index, entry_id)
+
+
+def _reconciliation_issue(
+    kind: str,
+    state: str,
+    message: str,
+    *,
+    path: str = "",
+    details: dict[str, object] | None = None,
+) -> dict[str, object]:
+    issue: dict[str, object] = {
+        "kind": str(kind or "").strip(),
+        "state": str(state or "").strip(),
+        "message": str(message or "").strip(),
+    }
+    if path:
+        issue["path"] = str(path).strip()
+    if details:
+        issue["details"] = dict(details)
+    return issue
+
+
+def _reconciliation_issue_keys(issues: Sequence[dict[str, object]]) -> list[str]:
+    keys: list[str] = []
+    for issue in issues:
+        kind = str(issue.get("kind") or "").strip()
+        state = str(issue.get("state") or "").strip()
+        if not kind or not state:
+            continue
+        key = f"{kind}:{state}"
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _reconciliation_packet_paths(source_repo: Path, index: dict[str, object]) -> list[Path]:
+    queue_root = pr_queue_root(source_repo)
+    candidates: dict[str, Path] = {}
+    for path in queue_root.glob("*.json"):
+        if path.is_file() and path.name != PR_QUEUE_INDEX_FILENAME:
+            candidates[path.resolve().as_posix()] = path.resolve()
+    for entry in index.get("entries", []) if isinstance(index.get("entries"), list) else []:
+        if not isinstance(entry, dict):
+            continue
+        packet_path_text = str(entry.get("packet_path") or entry.get("packetPath") or "").strip()
+        packet_id = _packet_id_key(entry.get("id"))
+        candidate: Path | None = None
+        if packet_path_text:
+            try:
+                candidate = Path(packet_path_text).expanduser().resolve()
+            except Exception:
+                candidate = Path(packet_path_text).expanduser()
+        elif packet_id:
+            candidate = pr_packet_path(source_repo, packet_id)
+            try:
+                candidate = candidate.resolve()
+            except Exception:
+                pass
+        if candidate is None or not _path_is_within(queue_root, candidate):
+            continue
+        candidates[candidate.as_posix()] = candidate
+    return [candidates[key] for key in sorted(candidates)]
+
+
+def _pr_queue_diff_artifact_candidates(packet: dict[str, Any], run_dir: Path | None) -> list[str]:
+    paths = _normalize_str_list(packet.get("diff_artifacts") or packet.get("diffArtifacts"))
+    for key in ("patch_path", "patchPath", "patch", "diff_artifact", "diffArtifact"):
+        value = str(packet.get(key) or "").strip()
+        if value and value not in paths:
+            paths.append(value)
+    preflight = packet.get("merge_preflight") if isinstance(packet.get("merge_preflight"), dict) else packet.get("mergePreflight")
+    if isinstance(preflight, dict):
+        for key in ("patch_path", "patchPath", "patch", "diff_artifact", "diffArtifact"):
+            value = str(preflight.get(key) or "").strip()
+            if value and value not in paths:
+                paths.append(value)
+    if run_dir is not None:
+        for name in ("worktree.patch", "worktree_dirty_uncommitted.patch"):
+            candidate = run_dir / name
+            if candidate.exists():
+                value = candidate.as_posix()
+                if value not in paths:
+                    paths.append(value)
+    return paths
+
+
+def _packet_expected_index(packet: dict[str, Any]) -> bool:
+    packet_status = str(packet.get("status") or "").strip().lower()
+    branch_index_status = str(packet.get("branch_index_status") or "").strip().lower()
+    if packet_status == "branch_metadata_missing":
+        return False
+    return branch_index_status != "skipped"
+
+
+def _branch_index_entry_is_stale(packet_path: Path, packet: dict[str, Any], index_entry: dict[str, Any]) -> bool:
+    expected_packet_path = packet_path.resolve().as_posix()
+    actual_packet_path = str(index_entry.get("packet_path") or index_entry.get("packetPath") or "").strip()
+    if actual_packet_path:
+        try:
+            actual_packet_path = Path(actual_packet_path).expanduser().resolve().as_posix()
+        except Exception:
+            actual_packet_path = Path(actual_packet_path).expanduser().as_posix()
+    if actual_packet_path != expected_packet_path:
+        return True
+
+    expected_values = {
+        "source_repo": str(packet.get("source_repo") or packet.get("sourceRepo") or "").strip(),
+        "run_id": str(packet.get("run_id") or packet.get("runId") or "").strip(),
+        "branch": str(packet.get("branch") or "").strip(),
+        "base_ref": str(packet.get("base_ref") or packet.get("baseRef") or "").strip(),
+        "head_ref": str(packet.get("head_ref") or packet.get("headRef") or "").strip(),
+    }
+    for key, expected in expected_values.items():
+        actual = str(index_entry.get(key) or "").strip()
+        if expected != actual:
+            return True
+    return _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds")) != _normalize_task_ids(
+        index_entry.get("task_ids") or index_entry.get("taskIds")
+    )
+
+
+def _packet_reconciliation_mode(
+    packet: dict[str, Any],
+    *,
+    diff_artifacts: Sequence[str],
+    branch_ref: str,
+    head_ref: str,
+    worktree_state: dict[str, object],
+) -> str:
+    if not diff_artifacts:
+        return "branch"
+    if branch_ref and head_ref and branch_ref == head_ref:
+        return "branch"
+    if str(worktree_state.get("path") or "").strip():
+        return "patch"
+    return "patch"
+
+
+def _packet_reconciliation_payload(item: dict[str, object], *, scanned_at: str) -> dict[str, object]:
+    return {
+        "scanned_at": scanned_at,
+        "status": str(item.get("reconciliation_status") or "ok"),
+        "mode": str(item.get("mode") or ""),
+        "packet_state": str(item.get("packet_state") or ""),
+        "branch_state": str(item.get("branch_state") or ""),
+        "branch_index_state": str(item.get("branch_index_state") or ""),
+        "patch_artifact_state": str(item.get("patch_artifact_state") or ""),
+        "worktree_state": str(item.get("worktree_state") or ""),
+        "worktree_path": str(item.get("worktree_path") or ""),
+        "generated_worktree": bool(item.get("generated_worktree")),
+        "diff_artifacts": list(item.get("diff_artifacts") or []),
+        "missing_patch_artifacts": list(item.get("missing_patch_artifacts") or []),
+        "issue_keys": list(item.get("issue_keys") or []),
+        "issues": [dict(issue) for issue in item.get("issues") if isinstance(issue, dict)] if isinstance(item.get("issues"), list) else [],
+    }
+
+
+def _reconcile_packet_item(
+    source_repo: Path,
+    packet_path: Path,
+    packet: dict[str, Any],
+    *,
+    index: dict[str, object],
+) -> dict[str, object]:
+    packet_id = str(packet.get("id") or packet_path.stem).strip() or packet_path.stem
+    run_id = str(packet.get("run_id") or packet.get("runId") or "").strip()
+    run_dir = _resolve_run_dir(source_repo, run_id)
+    branch = str(packet.get("branch") or "").strip()
+    base_ref = str(packet.get("base_ref") or packet.get("baseRef") or "").strip()
+    head_ref = str(packet.get("head_ref") or packet.get("headRef") or "").strip()
+    packet_status = str(packet.get("status") or "pr_queued").strip().lower() or "pr_queued"
+
+    branch_ref = git_rev_parse_ref(source_repo, branch) if branch else ""
+    base_ref_resolved = git_rev_parse_ref(source_repo, base_ref) if base_ref else ""
+    head_ref_resolved = git_rev_parse_ref(source_repo, head_ref) if head_ref else ""
+    worktree_state = generated_worktree_path_state(
+        source_repo,
+        run_dir=run_dir,
+        worktree_dir=str(packet.get("worktree_dir") or packet.get("worktreeDir") or "").strip(),
+    )
+    diff_artifacts = _pr_queue_diff_artifact_candidates(packet, run_dir)
+    mode = _packet_reconciliation_mode(
+        packet,
+        diff_artifacts=diff_artifacts,
+        branch_ref=branch_ref,
+        head_ref=head_ref_resolved,
+        worktree_state=worktree_state,
+    )
+
+    issues: list[dict[str, object]] = []
+    branch_state = "not_requested"
+    if mode == "branch":
+        if not branch:
+            branch_state = "missing"
+            issues.append(
+                _reconciliation_issue(
+                    "branch_ref",
+                    "missing",
+                    "Packet is missing its queued branch reference.",
+                    details={"packet_id": packet_id},
+                )
+            )
+        elif not branch_ref:
+            branch_state = "missing"
+            issues.append(
+                _reconciliation_issue(
+                    "branch_ref",
+                    "missing",
+                    "Queued branch no longer exists.",
+                    path=branch,
+                    details={"packet_id": packet_id, "head_ref": head_ref},
+                )
+            )
+        elif head_ref_resolved and branch_ref != head_ref_resolved:
+            branch_state = "stale"
+            issues.append(
+                _reconciliation_issue(
+                    "branch_ref",
+                    "stale",
+                    "Queued branch no longer points at the recorded packet head.",
+                    path=branch,
+                    details={"packet_id": packet_id, "expected_head_ref": head_ref_resolved, "actual_head_ref": branch_ref},
+                )
+            )
+        else:
+            branch_state = "present"
+
+    patch_artifact_state = "not_requested"
+    missing_patch_artifacts: list[str] = []
+    if mode == "patch":
+        if diff_artifacts:
+            for artifact in diff_artifacts:
+                if not Path(artifact).expanduser().exists():
+                    missing_patch_artifacts.append(artifact)
+                    issues.append(
+                        _reconciliation_issue(
+                            "patch_artifact",
+                            "missing",
+                            "Referenced patch or diff artifact is missing.",
+                            path=artifact,
+                            details={"packet_id": packet_id},
+                        )
+                    )
+            patch_artifact_state = "missing" if missing_patch_artifacts else "present"
+        worktree_path = str(worktree_state.get("path") or "").strip()
+        if worktree_path:
+            if str(worktree_state.get("state") or "") == "deleted":
+                issues.append(
+                    _reconciliation_issue(
+                        "generated_worktree",
+                        "deleted",
+                        "Generated worktree path no longer exists.",
+                        path=worktree_path,
+                        details={"packet_id": packet_id, "generated": bool(worktree_state.get("generated"))},
+                    )
+                )
+        elif patch_artifact_state == "present":
+            worktree_state = {
+                **worktree_state,
+                "state": "not_requested",
+            }
+
+    branch_index_entry = _find_branch_index_entry(index, packet_id)
+    branch_index_state = "not_requested"
+    if _packet_expected_index(packet):
+        if branch_index_entry is None:
+            branch_index_state = "missing"
+            issues.append(
+                _reconciliation_issue(
+                    "branch_index",
+                    "missing",
+                    "branch_index.json does not contain this packet.",
+                    path=pr_branch_index_path(source_repo).as_posix(),
+                    details={"packet_id": packet_id},
+                )
+            )
+        elif _branch_index_entry_is_stale(packet_path, packet, branch_index_entry):
+            branch_index_state = "stale"
+            issues.append(
+                _reconciliation_issue(
+                    "branch_index",
+                    "stale",
+                    "branch_index.json entry does not match the packet metadata.",
+                    path=pr_branch_index_path(source_repo).as_posix(),
+                    details={"packet_id": packet_id},
+                )
+            )
+        else:
+            branch_index_state = "present"
+
+    issue_keys = _reconciliation_issue_keys(issues)
+    return {
+        "id": packet_id,
+        "kind": "packet",
+        "packet_state": "present",
+        "packet_path": packet_path.resolve().as_posix(),
+        "status": packet_status,
+        "run_id": run_id,
+        "task_ids": _normalize_task_ids(packet.get("task_ids") or packet.get("taskIds")),
+        "branch": branch,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "mode": mode,
+        "branch_state": branch_state,
+        "branch_index_state": branch_index_state,
+        "patch_artifact_state": patch_artifact_state,
+        "worktree_state": str(worktree_state.get("state") or "not_requested"),
+        "worktree_path": str(worktree_state.get("path") or "").strip(),
+        "generated_worktree": bool(worktree_state.get("generated")),
+        "diff_artifacts": list(diff_artifacts),
+        "missing_patch_artifacts": missing_patch_artifacts,
+        "branch_index_entry": dict(branch_index_entry or {}),
+        "branch_ref": branch_ref,
+        "base_ref_resolved": base_ref_resolved,
+        "head_ref_resolved": head_ref_resolved,
+        "issues": issues,
+        "issue_keys": issue_keys,
+        "reconciliation_status": "issues_found" if issues else "ok",
+        "ok": not issues,
+    }
+
+
+def _reconcile_orphan_index_entry(
+    source_repo: Path,
+    entry: dict[str, Any],
+) -> dict[str, object]:
+    packet_id = str(entry.get("id") or "").strip()
+    packet_path_text = str(entry.get("packet_path") or entry.get("packetPath") or "").strip()
+    packet_path = packet_path_text or pr_packet_path(source_repo, packet_id).as_posix()
+    issues = [
+        _reconciliation_issue(
+            "packet",
+            "missing",
+            "branch_index.json entry points at a packet that no longer exists.",
+            path=packet_path,
+            details={"packet_id": packet_id},
+        )
+    ]
+    return {
+        "id": packet_id,
+        "kind": "orphan_index_entry",
+        "packet_state": "missing",
+        "packet_path": packet_path,
+        "status": str(entry.get("status") or "").strip().lower(),
+        "run_id": str(entry.get("run_id") or entry.get("runId") or "").strip(),
+        "task_ids": _normalize_task_ids(entry.get("task_ids") or entry.get("taskIds")),
+        "branch": str(entry.get("branch") or "").strip(),
+        "base_ref": str(entry.get("base_ref") or entry.get("baseRef") or "").strip(),
+        "head_ref": str(entry.get("head_ref") or entry.get("headRef") or "").strip(),
+        "mode": "index_only",
+        "branch_state": "not_requested",
+        "branch_index_state": "orphaned",
+        "patch_artifact_state": "not_requested",
+        "worktree_state": "not_requested",
+        "worktree_path": "",
+        "generated_worktree": False,
+        "diff_artifacts": [],
+        "missing_patch_artifacts": [],
+        "branch_index_entry": dict(entry),
+        "issues": issues,
+        "issue_keys": _reconciliation_issue_keys(issues),
+        "reconciliation_status": "issues_found",
+        "ok": False,
+    }
+
+
+def reconcile_review_queue(
+    source_repo: Path,
+    *,
+    apply: bool = False,
+) -> dict[str, object]:
+    source_repo_path = Path(source_repo).expanduser().resolve()
+    index = load_branch_index(source_repo_path)
+    queue_root = pr_queue_root(source_repo_path)
+    scanned_at = now_iso()
+
+    items: list[dict[str, object]] = []
+    seen_packet_ids: set[str] = set()
+    for packet_path in _reconciliation_packet_paths(source_repo_path, index):
+        packet = _load_json_dict(packet_path)
+        if not packet:
+            continue
+        item = _reconcile_packet_item(source_repo_path, packet_path, packet, index=index)
+        seen_packet_ids.add(str(item.get("id") or ""))
+        items.append(item)
+
+    for entry in index.get("entries", []) if isinstance(index.get("entries"), list) else []:
+        if not isinstance(entry, dict):
+            continue
+        packet_id = str(entry.get("id") or "").strip()
+        if not packet_id or packet_id in seen_packet_ids:
+            continue
+        items.append(_reconcile_orphan_index_entry(source_repo_path, dict(entry)))
+
+    items.sort(key=lambda item: (str(item.get("id") or ""), str(item.get("kind") or ""), str(item.get("packet_path") or "")))
+
+    applied_updates = 0
+    if apply:
+        for item in items:
+            if not item.get("issues"):
+                continue
+            metadata = _packet_reconciliation_payload(item, scanned_at=scanned_at)
+            packet_id = str(item.get("id") or "").strip()
+            if item.get("kind") == "packet":
+                try:
+                    _, packet_id_text, packet_path, packet = _require_review_packet(source_repo_path, packet_id)
+                except Exception:
+                    continue
+                updated_packet = dict(packet)
+                packet_changed = updated_packet.get("queue_reconciliation") != metadata
+                updated_packet["queue_reconciliation"] = metadata
+                item_applied = packet_changed
+                index_entry = _write_packet_index_state(
+                    source_repo_path,
+                    packet_path,
+                    updated_packet,
+                    packet_id=packet_id_text,
+                    updated_at=scanned_at,
+                    status=str(updated_packet.get("status") or "").strip(),
+                    approval_status=str(updated_packet.get("approval_status") or updated_packet.get("approvalStatus") or "").strip(),
+                    validation_status=_normalize_packet_validation_status(
+                        updated_packet.get("validation_status") or updated_packet.get("validationStatus") or updated_packet.get("status")
+                    ),
+                    extra={"queue_reconciliation": metadata},
+                )
+                if index_entry is not None and str(updated_packet.get("branch_index_status") or "").strip() != "written":
+                    updated_packet["branch_index_status"] = "written"
+                    packet_changed = True
+                if index_entry is not None:
+                    item_applied = True
+                if packet_changed:
+                    atomic_write_json(packet_path, updated_packet)
+                if item_applied:
+                    applied_updates += 1
+            elif item.get("kind") == "orphan_index_entry":
+                entry = item.get("branch_index_entry")
+                if isinstance(entry, dict) and _write_branch_index_entry_state(
+                    source_repo_path,
+                    entry,
+                    updated_at=scanned_at,
+                    extra={"queue_reconciliation": metadata},
+                ) is not None:
+                    applied_updates += 1
+
+    summary = {
+        "total": len(items),
+        "packets": len([item for item in items if item.get("kind") == "packet"]),
+        "orphan_index_entries": len([item for item in items if item.get("kind") == "orphan_index_entry"]),
+        "healthy": len([item for item in items if item.get("ok")]),
+        "issue_count": sum(len(item.get("issues") or []) for item in items),
+        "missing_patch_artifacts": sum(
+            1 for item in items for issue in item.get("issues") or [] if issue.get("kind") == "patch_artifact" and issue.get("state") == "missing"
+        ),
+        "deleted_worktrees": sum(
+            1 for item in items for issue in item.get("issues") or [] if issue.get("kind") == "generated_worktree" and issue.get("state") == "deleted"
+        ),
+        "stale_branches": sum(
+            1 for item in items for issue in item.get("issues") or [] if issue.get("kind") == "branch_ref" and issue.get("state") in {"missing", "stale"}
+        ),
+        "stale_branch_index_entries": sum(
+            1 for item in items for issue in item.get("issues") or [] if issue.get("kind") == "branch_index" and issue.get("state") == "stale"
+        ),
+        "missing_branch_index_entries": sum(
+            1 for item in items for issue in item.get("issues") or [] if issue.get("kind") == "branch_index" and issue.get("state") == "missing"
+        ),
+        "missing_packets": sum(
+            1 for item in items for issue in item.get("issues") or [] if issue.get("kind") == "packet" and issue.get("state") == "missing"
+        ),
+        "applied_updates": applied_updates,
+    }
+    issue_count = int(summary["issue_count"])
+    if not items:
+        state = "empty"
+    elif issue_count:
+        state = "issues_found"
+    else:
+        state = "ok"
+    return {
+        "ok": issue_count == 0,
+        "state": state,
+        "dry_run": not apply,
+        "queue_root": queue_root.as_posix(),
+        "branch_index_path": pr_branch_index_path(source_repo_path).as_posix(),
+        "scanned_at": scanned_at,
+        "items": items,
+        "summary": summary,
+    }
 
 
 def _review_packet_paths(source_repo: Path) -> list[Path]:

@@ -23,6 +23,7 @@ from agent_runner.gitops import (
     create_task_branch,
     create_worktree,
     git_head,
+    git_rev_parse_ref,
     has_new_commits,
     ref_has_new_commits,
     remove_worktree,
@@ -36,6 +37,7 @@ from agent_runner.pr_queue import (
     pr_branch_index_path,
     pr_packet_path,
     rebase_review_packet,
+    reconcile_review_queue,
     merge_review_packet,
     pr_queue_merge_confirmation_phrase,
     queue_review_packet,
@@ -359,6 +361,59 @@ class PRQueueTests(unittest.TestCase):
             "task_branch": tb,
         }
 
+    def _prepare_branch_queue_packet(
+        self,
+        *,
+        packet_branch: str | None = None,
+        packet_base_ref: str | None = None,
+        packet_head_ref: str | None = None,
+        worktree_dir: str = "",
+        remove_worktree_after: bool = True,
+    ) -> dict[str, object]:
+        source_head_before = self._init_repo()
+        create_worktree(self.repo, self.worktree, run_dir=self.run_dir)
+
+        tb = create_task_branch(self.worktree, "T1", task_title="Reconcile PR queue packet")
+        (self.worktree / "feature.txt").write_text("feature\n", encoding="utf-8")
+        self._git("add", "feature.txt", cwd=self.worktree)
+        self._git("commit", "-m", "feature", cwd=self.worktree)
+        branch_head = self._git("rev-parse", "HEAD", cwd=self.worktree).strip()
+        abandon_task_branch(self.worktree, tb)
+
+        result = queue_review_packet(
+            self.repo,
+            run_id=self.run_dir.name,
+            task_ids=["T1"],
+            base_ref=packet_base_ref if packet_base_ref is not None else tb.base_commit,
+            head_ref=packet_head_ref if packet_head_ref is not None else branch_head,
+            branch=packet_branch if packet_branch is not None else tb.branch_name,
+            created_at=tb.created_at,
+            source_head_before=source_head_before,
+            source_head_after=git_head(self.repo),
+            worktree_dir=worktree_dir,
+            validation_status="validation_pending",
+            validation_artifacts=[],
+            qa_notes=["queued for reconciliation"],
+            goal_trace=tb.goal_trace,
+            changed_files=["feature.txt"],
+            status="pr_queued",
+        )
+        if remove_worktree_after:
+            remove_worktree(self.repo, self.worktree)
+        return {
+            "packet_id": result["packet_id"],
+            "packet_path": Path(result["packet_path"]),
+            "source_head_before": source_head_before,
+            "branch_head": branch_head,
+            "task_branch": tb,
+        }
+
+    def _update_packet_file(self, packet_path: Path, **updates: object) -> dict[str, object]:
+        payload = json.loads(packet_path.read_text(encoding="utf-8"))
+        payload.update(updates)
+        packet_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return payload
+
     def _set_packet_validation_status(self, packet: dict[str, object], validation_status: str) -> None:
         packet_path = Path(packet["packet_path"])
         packet_data = json.loads(packet_path.read_text(encoding="utf-8"))
@@ -470,6 +525,104 @@ class PRQueueTests(unittest.TestCase):
         self.assertIn("/merge-pr", completion_texts)
         self.assertIn("/discard-pr", completion_texts)
         self.assertIn("/rebase-pr", completion_texts)
+
+    def test_reconcile_review_queue_reports_missing_patch_in_dry_run(self) -> None:
+        packet = self._prepare_branch_queue_packet(
+            packet_branch="main",
+            worktree_dir=self.worktree.as_posix(),
+            remove_worktree_after=False,
+        )
+        packet_path = Path(packet["packet_path"])
+        index_path = pr_branch_index_path(self.repo)
+        missing_patch = self.fixture_root / "missing.patch"
+        self._update_packet_file(packet_path, diff_artifacts=[missing_patch.as_posix()])
+        packet_before = packet_path.read_text(encoding="utf-8")
+        index_before = index_path.read_text(encoding="utf-8")
+
+        result = reconcile_review_queue(self.repo)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["dry_run"])
+        self.assertEqual("issues_found", result["state"])
+        self.assertEqual(1, result["summary"]["missing_patch_artifacts"])
+        item = result["items"][0]
+        self.assertEqual("patch", item["mode"])
+        self.assertEqual("missing", item["patch_artifact_state"])
+        self.assertEqual("present", item["worktree_state"])
+        self.assertEqual(packet_before, packet_path.read_text(encoding="utf-8"))
+        self.assertEqual(index_before, index_path.read_text(encoding="utf-8"))
+        self.assertNotIn("queue_reconciliation", json.loads(packet_path.read_text(encoding="utf-8")))
+
+    def test_reconcile_review_queue_reports_deleted_generated_worktree(self) -> None:
+        packet = self._prepare_branch_queue_packet(
+            packet_branch="main",
+            worktree_dir=self.worktree.as_posix(),
+            remove_worktree_after=True,
+        )
+        packet_path = Path(packet["packet_path"])
+        patch_path = self.fixture_root / "worktree.patch"
+        patch_path.write_text("diff --git a/feature.txt b/feature.txt\n", encoding="utf-8")
+        self._update_packet_file(packet_path, diff_artifacts=[patch_path.as_posix()])
+
+        result = reconcile_review_queue(self.repo)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(1, result["summary"]["deleted_worktrees"])
+        item = result["items"][0]
+        self.assertEqual("patch", item["mode"])
+        self.assertEqual("deleted", item["worktree_state"])
+        self.assertEqual("present", item["patch_artifact_state"])
+        self.assertFalse(any(issue["kind"] == "branch_ref" for issue in item["issues"]))
+
+    def test_reconcile_review_queue_apply_repairs_stale_branch_index_metadata_without_recreating_branch(self) -> None:
+        packet = self._prepare_branch_queue_packet(worktree_dir="", remove_worktree_after=True)
+        packet_path = Path(packet["packet_path"])
+        branch_name = packet["task_branch"].branch_name
+        self._git("branch", "-D", branch_name)
+
+        index_path = pr_branch_index_path(self.repo)
+        index_payload = load_branch_index(self.repo)
+        index_payload["entries"][0]["branch"] = "task/stale"
+        index_payload["entries"][0]["head_ref"] = "deadbeef"
+        index_payload["entries"][0]["packet_path"] = (self.fixture_root / "wrong-packet.json").as_posix()
+        index_path.write_text(json.dumps(index_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        dry_run = reconcile_review_queue(self.repo)
+        item = dry_run["items"][0]
+        self.assertEqual("missing", item["branch_state"])
+        self.assertEqual("stale", item["branch_index_state"])
+
+        applied = reconcile_review_queue(self.repo, apply=True)
+
+        packet_data = json.loads(packet_path.read_text(encoding="utf-8"))
+        index_data = load_branch_index(self.repo)
+        self.assertEqual("", git_rev_parse_ref(self.repo, branch_name))
+        self.assertTrue(packet_path.exists())
+        self.assertEqual(1, applied["summary"]["applied_updates"])
+        self.assertEqual("written", packet_data["branch_index_status"])
+        self.assertEqual("issues_found", packet_data["queue_reconciliation"]["status"])
+        self.assertIn("branch_ref:missing", packet_data["queue_reconciliation"]["issue_keys"])
+        self.assertIn("branch_index:stale", packet_data["queue_reconciliation"]["issue_keys"])
+        self.assertEqual(branch_name, index_data["entries"][0]["branch"])
+        self.assertEqual(packet["branch_head"], index_data["entries"][0]["head_ref"])
+        self.assertEqual(packet_path.resolve().as_posix(), Path(index_data["entries"][0]["packet_path"]).resolve().as_posix())
+        self.assertEqual(packet_data["queue_reconciliation"], index_data["entries"][0]["queue_reconciliation"])
+
+    def test_reconcile_review_queue_valid_packet_is_noop(self) -> None:
+        packet = self._prepare_branch_queue_packet(worktree_dir="", remove_worktree_after=True)
+        packet_path = Path(packet["packet_path"])
+        index_path = pr_branch_index_path(self.repo)
+        packet_before = packet_path.read_text(encoding="utf-8")
+        index_before = index_path.read_text(encoding="utf-8")
+
+        result = reconcile_review_queue(self.repo, apply=True)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("ok", result["state"])
+        self.assertEqual(0, result["summary"]["issue_count"])
+        self.assertEqual(0, result["summary"]["applied_updates"])
+        self.assertEqual(packet_before, packet_path.read_text(encoding="utf-8"))
+        self.assertEqual(index_before, index_path.read_text(encoding="utf-8"))
 
     def test_shell_prs_reports_empty_queue(self) -> None:
         self.repo.mkdir(parents=True, exist_ok=True)

@@ -1309,6 +1309,54 @@ def allocate_temporary_worktree_dir(repo: Path, *, prefix: str = "pr-queue-valid
     raise RuntimeError("Unable to allocate a unique temporary worktree path.")
 
 
+def generated_worktree_path_state(
+    repo: Path,
+    *,
+    run_dir: Path | None = None,
+    worktree_dir: str = "",
+) -> dict[str, object]:
+    repo_resolved = Path(repo).expanduser().resolve()
+    run_dir_resolved: Path | None = None
+    if run_dir is not None:
+        try:
+            run_dir_resolved = Path(run_dir).expanduser().resolve()
+        except Exception:
+            run_dir_resolved = Path(run_dir).expanduser()
+
+    worktree_text = str(worktree_dir or "").strip()
+    candidate: Path | None = None
+    derived_from = ""
+    if worktree_text:
+        try:
+            candidate = Path(worktree_text).expanduser().resolve()
+        except Exception:
+            candidate = Path(worktree_text).expanduser()
+        derived_from = "explicit"
+    elif run_dir_resolved is not None:
+        candidate = default_worktree_dir(repo_resolved, run_dir_resolved)
+        derived_from = "default"
+
+    if candidate is None:
+        return {
+            "path": "",
+            "exists": False,
+            "state": "not_requested",
+            "generated": False,
+            "derived_from": "",
+        }
+
+    generated_root = _generated_worktree_home(repo_resolved)
+    generated = candidate == generated_root or _path_is_relative_to(candidate, generated_root)
+    exists = candidate.exists()
+    return {
+        "path": candidate.as_posix(),
+        "exists": exists,
+        "state": "present" if exists else "deleted",
+        "generated": generated,
+        "derived_from": derived_from,
+    }
+
+
 def _worktree_validation_error(repo: Path, worktree_dir: Path) -> str | None:
     repo_resolved = repo.expanduser().resolve()
     worktree_resolved = worktree_dir.expanduser().resolve()
