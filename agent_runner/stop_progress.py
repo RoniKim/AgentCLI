@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from .state import count_state_task_ids, load_backlog_task_ids, load_state
-from .utils import STOP_REASON_STOP_FILE, atomic_write_json, detect_stop_reason, now_iso
+from .utils import STOP_REASON_STOP_FILE, atomic_write_json, detect_stop_reason, now_iso, write_heartbeat
 
 STOP_PROGRESS_FILE = "STOP_PROGRESS.json"
 STOP_PROGRESS_LOG_FILE = "stop_progress.log"
@@ -17,6 +19,10 @@ STOP_RECONCILIATION_FILE = "STOP_RECONCILIATION.json"
 STOP_RECONCILIATION_LOG_FILE = "STOP_RECONCILIATION.jsonl"
 DEFAULT_STALE_STOP_RECONCILE_STOP_AGE_SECONDS = 15 * 60
 DEFAULT_STALE_STOP_RECONCILE_HEARTBEAT_AGE_SECONDS = 15 * 60
+DEFAULT_STOP_AWARE_SLEEP_POLL_SECONDS = 1.0
+DEFAULT_STOP_AWARE_HEARTBEAT_INTERVAL_SECONDS = 30.0
+MAX_STOP_AWARE_SLEEP_POLL_SECONDS = 5.0
+MAX_STOP_AWARE_HEARTBEAT_INTERVAL_SECONDS = 300.0
 
 STOP_PROGRESS_PHASE_ALIASES = {
     "requested": "request",
@@ -43,6 +49,88 @@ STOP_PROGRESS_PHASE_LABELS = {
 }
 
 FINAL_STOP_PHASES = frozenset({"finalized", "timeout", "failed", "not_running"})
+
+
+@dataclass(frozen=True)
+class StopAwareSleepResult:
+    status: str
+    stop_reason: str = ""
+
+    @property
+    def stopped(self) -> bool:
+        return self.status == "stop"
+
+    @property
+    def timed_out(self) -> bool:
+        return self.status == "timeout"
+
+
+def _detect_stop_reason_for_wait(stop_paths: Sequence[Path]) -> str:
+    try:
+        reason = detect_stop_reason(stop_paths)
+    except Exception:
+        reason = ""
+    if reason:
+        return reason
+    for path in stop_paths:
+        try:
+            if path.exists():
+                return STOP_REASON_STOP_FILE
+        except Exception:
+            continue
+    return ""
+
+
+async def stop_aware_sleep(
+    seconds: float | int,
+    *,
+    run_dir: Path,
+    stop_paths: Sequence[Path] | None = None,
+    heartbeat_callback: Callable[[], None] | None = None,
+    poll_seconds: float = DEFAULT_STOP_AWARE_SLEEP_POLL_SECONDS,
+    heartbeat_interval_seconds: float = DEFAULT_STOP_AWARE_HEARTBEAT_INTERVAL_SECONDS,
+) -> StopAwareSleepResult:
+    """Sleep in bounded chunks while refreshing HEARTBEAT and honoring STOP."""
+
+    run_dir_path = Path(run_dir)
+    paths = tuple(stop_paths or [run_dir_path / "STOP"])
+    total = max(0.0, float(seconds or 0))
+    poll = max(0.1, min(float(poll_seconds or DEFAULT_STOP_AWARE_SLEEP_POLL_SECONDS), MAX_STOP_AWARE_SLEEP_POLL_SECONDS))
+    heartbeat_every = max(
+        poll,
+        min(
+            float(heartbeat_interval_seconds or DEFAULT_STOP_AWARE_HEARTBEAT_INTERVAL_SECONDS),
+            MAX_STOP_AWARE_HEARTBEAT_INTERVAL_SECONDS,
+        ),
+    )
+
+    stop_reason = _detect_stop_reason_for_wait(paths)
+    if stop_reason:
+        return StopAwareSleepResult(status="stop", stop_reason=stop_reason)
+    if total <= 0:
+        return StopAwareSleepResult(status="timeout")
+
+    deadline = time.monotonic() + total
+    next_heartbeat = 0.0
+    while True:
+        stop_reason = _detect_stop_reason_for_wait(paths)
+        if stop_reason:
+            return StopAwareSleepResult(status="stop", stop_reason=stop_reason)
+
+        now_value = time.monotonic()
+        if now_value >= next_heartbeat:
+            write_heartbeat(run_dir_path)
+            if heartbeat_callback is not None:
+                try:
+                    heartbeat_callback()
+                except Exception:
+                    pass
+            next_heartbeat = now_value + heartbeat_every
+
+        remaining = deadline - now_value
+        if remaining <= 0:
+            return StopAwareSleepResult(status="timeout")
+        await asyncio.sleep(min(poll, remaining))
 
 
 def _now_iso() -> str:

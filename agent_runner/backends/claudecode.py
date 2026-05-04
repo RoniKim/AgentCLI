@@ -113,7 +113,7 @@ from ..pipeline.shared_runtime import (
 )
 from ..state import count_state_task_ids
 from ..run_dir import make_run_dir, find_latest_run_dir
-from ..stop_progress import write_stop_snapshot
+from ..stop_progress import stop_aware_sleep, write_stop_snapshot
 from ..schemas import PMOutputV2, pm_output_json_schema
 from ..state import (
     load_backlog_json,
@@ -781,7 +781,15 @@ class ClaudeCodeBackendAdapter(BackendAdapter):
                 if is_transient_exception(ex) and attempt < max_retries:
                     wait = initial_backoff * (2 ** attempt)
                     eprint(f"[RETRY] {stage} transient error (attempt {attempt + 1}/{max_retries}): {ex}; retrying in {wait:.0f}s")
-                    await asyncio.sleep(wait)
+                    wait_result = await stop_aware_sleep(
+                        wait,
+                        run_dir=stop_path.parent,
+                        stop_paths=[stop_path],
+                        heartbeat_callback=heartbeat_callback,
+                        heartbeat_interval_seconds=heartbeat_interval_seconds,
+                    )
+                    if wait_result.stopped:
+                        raise StopRequested(wait_result.stop_reason or STOP_REASON_STOP_FILE)
                     continue
                 raise
         raise RuntimeError("unreachable")  # pragma: no cover
@@ -3732,7 +3740,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         logger.quota_event("wait", five_hour=_q5h, seven_day=_q7d, resets_at=q_resets, wait_seconds=wait_sec)
                         metrics.event("quota_utilization_wait", cycle=cycle_idx, window="five_hour",
                                       five_hour=_q5h, seven_day=_q7d, wait_seconds=wait_sec, resets_at=q_resets or "")
-                        await asyncio.sleep(wait_sec)
+                        wait_result = await stop_aware_sleep(wait_sec, run_dir=run_dir, stop_paths=[stop_path])
+                        if wait_result.stopped:
+                            last_reason = wait_result.stop_reason or STOP_REASON_STOP_FILE
+                            logger.stop_event("Stop requested during quota wait.")
+                            break
                         logger.info(f"[QUOTA-WAIT] Resumed after {wait_min:.1f}min wait - continuing cycle {cycle_idx}")
                         logger.quota_event("resumed")
                     elif not quota_wait_for_reset:
@@ -3860,7 +3872,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                             stop_path.unlink()
                         except Exception:
                             pass
-                    await asyncio.sleep(wait_sec)
+                    wait_result = await stop_aware_sleep(wait_sec, run_dir=run_dir, stop_paths=[stop_path])
+                    if wait_result.stopped:
+                        last_reason = wait_result.stop_reason or STOP_REASON_STOP_FILE
+                        logger.stop_event("Stop requested during quota exhaustion wait.")
+                        break
                     eprint(f"[QUOTA-WAIT] Resumed after {wait_min:.1f}min wait - continuing next cycle")
                     logger.quota_event("exhausted_resumed")
                     consecutive_failures = 0
@@ -3944,7 +3960,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 if loop_idle_exit_after > 0 and idle_accum >= loop_idle_exit_after:
                     append_cycle_summary(f"{now_iso()} cycle={cycle_idx} stop=idle_exit idle_accum={idle_accum}")
                     break
-                await asyncio.sleep(max(0, loop_sleep_seconds))
+                wait_result = await stop_aware_sleep(max(0, loop_sleep_seconds), run_dir=run_dir, stop_paths=[stop_path])
+                if wait_result.stopped:
+                    last_reason = wait_result.stop_reason or STOP_REASON_STOP_FILE
+                    break
             else:
                 break
     finally:

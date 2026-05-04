@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import subprocess
@@ -11,6 +12,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+import agent_runner.stop_progress as stop_progress_module
 from agent_runner.remote.controller import RunnerController, normalize_runner_start_options
 from agent_runner.shell import RunnerShell
 from agent_runner.stop_progress import (
@@ -24,10 +26,12 @@ from agent_runner.stop_progress import (
     read_stop_progress,
     reconcile_stale_stop_files,
     record_stop_progress,
+    stop_aware_sleep,
     stop_progress_is_active,
     write_stop_progress,
     write_stop_snapshot,
 )
+from agent_runner.utils import STOP_REASON_STOP_FILE
 
 
 def _scratch_dir(name: str) -> Path:
@@ -71,6 +75,59 @@ def _set_file_age(path: Path, age_seconds: int) -> None:
 
 
 class StopProgressTests(unittest.TestCase):
+    def test_stop_aware_sleep_refreshes_heartbeat_during_long_wait(self) -> None:
+        run_dir = _scratch_dir("stop_aware_sleep_heartbeat")
+        stop_path = run_dir / "STOP"
+        heartbeat_calls: list[float] = []
+        real_write_heartbeat = stop_progress_module.write_heartbeat
+
+        def record_heartbeat(target_run_dir: Path) -> None:
+            heartbeat_calls.append(time.monotonic())
+            real_write_heartbeat(target_run_dir)
+
+        with patch("agent_runner.stop_progress.write_heartbeat", side_effect=record_heartbeat):
+            result = asyncio.run(
+                stop_aware_sleep(
+                    0.12,
+                    run_dir=run_dir,
+                    stop_paths=[stop_path],
+                    poll_seconds=0.01,
+                    heartbeat_interval_seconds=0.03,
+                )
+            )
+
+        self.assertEqual("timeout", result.status)
+        self.assertGreaterEqual(len(heartbeat_calls), 2)
+        self.assertTrue((run_dir / "HEARTBEAT").exists())
+
+    def test_stop_aware_sleep_exits_promptly_when_stop_file_appears(self) -> None:
+        run_dir = _scratch_dir("stop_aware_sleep_stop")
+        stop_path = run_dir / "STOP"
+
+        async def _exercise_wait() -> tuple[object, float]:
+            async def _request_stop() -> None:
+                await asyncio.sleep(0.05)
+                stop_path.write_text("manual stop\n", encoding="utf-8")
+
+            stopper = asyncio.create_task(_request_stop())
+            started = time.monotonic()
+            result = await stop_aware_sleep(
+                1.0,
+                run_dir=run_dir,
+                stop_paths=[stop_path],
+                poll_seconds=0.01,
+                heartbeat_interval_seconds=0.03,
+            )
+            elapsed = time.monotonic() - started
+            await stopper
+            return result, elapsed
+
+        result, elapsed = asyncio.run(_exercise_wait())
+
+        self.assertEqual("stop", result.status)
+        self.assertEqual(STOP_REASON_STOP_FILE, result.stop_reason)
+        self.assertLess(elapsed, 0.35)
+
     def test_write_and_read_stop_progress(self) -> None:
         run_dir = _scratch_dir("stop_progress")
         requested_at = time.monotonic()

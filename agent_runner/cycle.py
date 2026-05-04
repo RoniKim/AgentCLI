@@ -98,7 +98,7 @@ from .runtime_contract import (
     dispatch_worktree_cleanup,
 )
 from .run_dir import make_run_dir, find_latest_run_dir
-from .stop_progress import write_stop_snapshot
+from .stop_progress import stop_aware_sleep, write_stop_snapshot
 from .state import (
     TaskItem,
     count_state_task_ids,
@@ -330,17 +330,14 @@ async def main_async(args: argparse.Namespace) -> int:
     last_run_summary_path = run_dir / "last_run_summary.json"
 
     async def sleep_or_stop(seconds: float | int, *, poll_seconds: float = 1.0) -> bool:
-        """Sleep in small chunks and return True if STOP appears."""
-        total = max(0.0, float(seconds or 0))
-        deadline = time.monotonic() + total
-        poll = max(0.1, min(float(poll_seconds or 1.0), 5.0))
-        while True:
-            if stop_path.exists():
-                return True
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return stop_path.exists()
-            await asyncio.sleep(min(poll, remaining))
+        """Sleep in bounded chunks and return True if STOP appears."""
+        result = await stop_aware_sleep(
+            seconds,
+            run_dir=run_dir,
+            stop_paths=[stop_path],
+            poll_seconds=poll_seconds,
+        )
+        return result.stopped
 
     def record_stop_checkpoint(
         *,

@@ -18,6 +18,7 @@ from agent_runner.backends.claudecode import (
 )
 from agent_runner.backends.codex_runner import CodexBackendAdapter
 from agent_runner.codex_exec import CodexExecResult
+from agent_runner.stop_progress import StopAwareSleepResult
 
 
 @contextmanager
@@ -210,6 +211,85 @@ def test_claude_adapter_builds_options_and_invokes_client() -> None:
             assert client.options.kwargs["cwd"] == str(tmp_path)
             assert client.options.kwargs["max_turns"] == 4
             assert "stage instructions" in client.options.kwargs["system_prompt"]
+
+
+def test_claude_adapter_retry_wait_uses_shared_stop_aware_sleep() -> None:
+    class FakeOptions:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class FakeStream:
+        async def __aiter__(self):
+            yield SimpleNamespace(type="result", result="delegated output")
+
+    attempts = {"count": 0}
+
+    class FakeClient:
+        def __init__(self, *, options: FakeOptions) -> None:
+            self.options = options
+            self.prompt = ""
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def query(self, prompt: str) -> None:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise RuntimeError("connection timed out")
+            self.prompt = prompt
+
+        def receive_response(self) -> FakeStream:
+            return FakeStream()
+
+    helper_calls: list[tuple[float, Path, tuple[Path, ...]]] = []
+
+    async def fake_stop_aware_sleep(seconds: float, **kwargs: object) -> StopAwareSleepResult:
+        helper_calls.append(
+            (
+                float(seconds),
+                Path(str(kwargs["run_dir"])),
+                tuple(Path(str(path)) for path in kwargs["stop_paths"]),
+            )
+        )
+        return StopAwareSleepResult(status="timeout")
+
+    async def fail_raw_sleep(delay: float, *args: object, **kwargs: object) -> None:
+        raise AssertionError(f"raw asyncio.sleep should not handle retry wait: {delay}")
+
+    with patch.dict(
+        sys.modules,
+        {"claude_agent_sdk": SimpleNamespace(ClaudeAgentOptions=FakeOptions)},
+    ):
+        cfg = _load_claudecode_cfg(argparse.Namespace())
+        adapter = ClaudeCodeBackendAdapter(cfg, client_cls=FakeClient)
+
+        with _temp_path() as tmp_path, patch(
+            "agent_runner.backends.claudecode.stop_aware_sleep",
+            side_effect=fake_stop_aware_sleep,
+        ) as patched_sleep, patch(
+            "agent_runner.backends.claudecode.asyncio.sleep",
+            side_effect=fail_raw_sleep,
+        ):
+            text, structured = asyncio.run(
+                adapter.invoke_model(
+                    "hello claude",
+                    repo=tmp_path,
+                    stage="PM",
+                    stop_path=tmp_path / "STOP",
+                    debug=False,
+                    timeout_seconds=5,
+                    max_retries=1,
+                    initial_backoff=7,
+                )
+            )
+
+    assert text == "delegated output"
+    assert structured is None
+    assert patched_sleep.call_count == 1
+    assert helper_calls == [(7.0, tmp_path, (tmp_path / "STOP",))]
 
 
 def test_quota_probe_maps_availability() -> None:
