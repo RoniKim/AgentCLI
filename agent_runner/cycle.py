@@ -150,7 +150,7 @@ from .qa_utils import (
     write_manual_checks,
 )
 from .backlog_utils import (
-    normalize_backlog_tasks,
+    postprocess_pm_output_tasks,
     validate_skill_ids,
     load_backlog_context_for_pm,
     build_failed_tasks_block,
@@ -162,7 +162,6 @@ from .goals import (
     read_goals,
     format_goals_block,
     parse_goals_completion,
-    gate_pm_tasks_against_goals,
     update_goals_checkboxes,
     write_completion_status,
     build_goals_refresh_prompt,
@@ -231,7 +230,6 @@ from .pipeline.shared_runtime import (
     detect_and_clear_recycled_ids,
     ensure_backlog_artifacts,
     load_backlog_tasks,
-    merge_pm_tasks_with_existing_pending,
     maybe_refresh_tasks_after_pm,
     prepare_pm_inventory_markdown,
     process_qa_followups,
@@ -908,9 +906,6 @@ async def main_async(args: argparse.Namespace) -> int:
             return None
 
         
-        def _normalize_backlog_tasks(raw_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            return normalize_backlog_tasks(raw_tasks, run_dir)
-
         def _validate_skill_ids(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return validate_skill_ids(
                 tasks,
@@ -1036,106 +1031,6 @@ async def main_async(args: argparse.Namespace) -> int:
             experience_repo = source_repo if worktree_dir is not None else repo
             pm_experience_summary = load_pm_experience_summary(experience_repo, run_dir, args=args)
 
-            def _goal_trace_map(tasks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-                trace_map: dict[str, list[dict[str, Any]]] = {}
-                for task in tasks:
-                    tid = str(task.get("id") or "").strip()
-                    if not tid:
-                        continue
-                    trace_val = task.get("goal_trace")
-                    if isinstance(trace_val, list):
-                        traces = [dict(trace) for trace in trace_val if isinstance(trace, dict)]
-                        if traces:
-                            trace_map[tid] = traces
-                return trace_map
-
-            def _restore_goal_trace(tasks: list[dict[str, Any]], trace_map: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
-                if not trace_map:
-                    return tasks
-                restored: list[dict[str, Any]] = []
-                for task in tasks:
-                    tid = str(task.get("id") or "").strip()
-                    if tid and tid in trace_map:
-                        next_task = dict(task)
-                        next_task["goal_trace"] = [dict(trace) for trace in trace_map[tid]]
-                        restored.append(next_task)
-                    else:
-                        restored.append(task)
-                return restored
-
-            def _write_pm_goal_gate_error(
-                *,
-                cycle_idx: int,
-                kind: str,
-                gate: dict[str, Any],
-                pm_dump: dict[str, Any],
-                raw_pm_output_path: Path,
-            ) -> None:
-                payload = {
-                    "generated_at": now_iso(),
-                    "cycle": cycle_idx,
-                    "kind": kind,
-                    "status": gate.get("status", ""),
-                    "message": gate.get("message", ""),
-                    "goal_path": gate.get("goal_path", ""),
-                    "goals": gate.get("goals", {}),
-                    "raw_output_path": raw_pm_output_path.as_posix(),
-                    "accepted_count": len(gate.get("accepted_tasks") or []),
-                    "rejected_count": len(gate.get("rejected_tasks") or []),
-                    "rejected_tasks": gate.get("rejected_tasks", []),
-                    "error": gate.get("error"),
-                    "pm_output": {
-                        "kind": pm_dump.get("kind"),
-                        "summary": pm_dump.get("summary"),
-                        "notes_md": pm_dump.get("notes_md"),
-                        "warnings": pm_dump.get("warnings", []),
-                        "open_questions": pm_dump.get("open_questions", []),
-                        "tasks": pm_dump.get("tasks", []),
-                    },
-                }
-                safe_write_text(
-                    run_dir / f"PM_GOALS_GATE_ERROR_cycle_{cycle_idx:03d}.json",
-                    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-                )
-
-            def _apply_goal_gate_to_pm_output(
-                *,
-                pm_out: PMOutputV2,
-                cycle_idx: int,
-                kind: str,
-                raw_pm_output_path: Path,
-            ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-                gate = gate_pm_tasks_against_goals(
-                    repo,
-                    [t.model_dump() for t in (pm_out.tasks or [])],
-                    completion_level=goals_completion_level,
-                )
-                accepted_tasks = [dict(task) for task in gate.get("accepted_tasks") or []]
-                rejected_tasks = [dict(task) for task in gate.get("rejected_tasks") or []]
-                pm_dump = pm_out.model_dump()
-                pm_dump["tasks"] = accepted_tasks
-                pm_dump["goals_gate"] = {
-                    "goal_path": gate.get("goal_path", ""),
-                    "gate_required": gate.get("gate_required", False),
-                    "status": gate.get("status", ""),
-                    "message": gate.get("message", ""),
-                    "accepted_count": len(accepted_tasks),
-                    "rejected_count": len(rejected_tasks),
-                    "error": gate.get("error"),
-                    "goals": gate.get("goals", {}),
-                }
-                if rejected_tasks:
-                    pm_dump["rejected_tasks"] = rejected_tasks
-                if gate.get("error") or rejected_tasks:
-                    _write_pm_goal_gate_error(
-                        cycle_idx=cycle_idx,
-                        kind=kind,
-                        gate=gate,
-                        pm_dump=pm_dump,
-                        raw_pm_output_path=raw_pm_output_path,
-                    )
-                return gate, pm_dump, accepted_tasks, rejected_tasks
-
             try:
                 if need_bootstrap:
                     metrics.event("pm_start", cycle=cycle_idx, kind="bootstrap")
@@ -1192,11 +1087,31 @@ async def main_async(args: argparse.Namespace) -> int:
                         metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=1, error="structured_output_failed")
                         return False
 
-                    gate, _pm_dump, accepted_tasks, rejected_tasks = _apply_goal_gate_to_pm_output(
-                        pm_out=pm_out,
+                    _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
+                    _pre_pm_tasks = list(existing_tasks)  # recycled ID 鍮꾧탳???ㅻ깄??
+                    pm_postprocess = postprocess_pm_output_tasks(
+                        repo=repo,
+                        run_dir=run_dir,
                         cycle_idx=cycle_idx,
                         kind="bootstrap",
                         raw_pm_output_path=pm_output_path,
+                        pm_output_model_dump=pm_out.model_dump(),
+                        existing_tasks=existing_tasks,
+                        done_ids=done_ids,
+                        failed_ids=failed_ids,
+                        completion_level=goals_completion_level,
+                    )
+                    gate = pm_postprocess["pm_gate"]
+                    _pm_dump = pm_postprocess["pm_output_model_dump"]
+                    accepted_tasks = pm_postprocess["accepted_pm_tasks"]
+                    rejected_tasks = pm_postprocess["rejected_pm_tasks"]
+                    merged_tasks = pm_postprocess["backlog_tasks"]
+                    write_pm_output_artifacts(
+                        run_dir=run_dir,
+                        cycle_idx=cycle_idx,
+                        pm_output_model_dump=_pm_dump,
+                        notes_md=pm_out.notes_md,
+                        dump_pretty_fn=dump_pretty,
                     )
                     if gate.get("status") == "partial":
                         metrics.event(
@@ -1223,17 +1138,9 @@ async def main_async(args: argparse.Namespace) -> int:
                     _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
                     _pre_pm_tasks = list(existing_tasks)  # recycled ID 鍮꾧탳???ㅻ깄??
 
-                    merged_tasks = merge_pm_tasks_with_existing_pending(
-                        pm_tasks=accepted_tasks,
-                        existing_tasks=existing_tasks,
-                        done_ids=done_ids,
-                        failed_ids=failed_ids,
-                    )
+                    merged_tasks = pm_postprocess["backlog_tasks"]
 
                     if merged_tasks:
-                        merged_tasks = _normalize_backlog_tasks(merged_tasks)
-                        accepted_trace_map = _goal_trace_map(accepted_tasks)
-                        merged_tasks = _restore_goal_trace(merged_tasks, accepted_trace_map)
                         merged_tasks = _validate_skill_ids(merged_tasks)
                         if merged_tasks:
                             try:
@@ -1369,11 +1276,31 @@ async def main_async(args: argparse.Namespace) -> int:
                         )
                         return False
 
-                    gate, _pm_dump, accepted_tasks, rejected_tasks = _apply_goal_gate_to_pm_output(
-                        pm_out=pm_out,
+                    _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
+                    _pre_pm_tasks_inc = list(existing_tasks)
+                    pm_postprocess = postprocess_pm_output_tasks(
+                        repo=repo,
+                        run_dir=run_dir,
                         cycle_idx=cycle_idx,
                         kind="incremental" if need_incremental else "refresh",
                         raw_pm_output_path=pm_output_path,
+                        pm_output_model_dump=pm_out.model_dump(),
+                        existing_tasks=existing_tasks,
+                        done_ids=done_ids,
+                        failed_ids=failed_ids,
+                        completion_level=goals_completion_level,
+                    )
+                    gate = pm_postprocess["pm_gate"]
+                    _pm_dump = pm_postprocess["pm_output_model_dump"]
+                    accepted_tasks = pm_postprocess["accepted_pm_tasks"]
+                    rejected_tasks = pm_postprocess["rejected_pm_tasks"]
+                    merged_tasks = pm_postprocess["backlog_tasks"]
+                    write_pm_output_artifacts(
+                        run_dir=run_dir,
+                        cycle_idx=cycle_idx,
+                        pm_output_model_dump=_pm_dump,
+                        notes_md=pm_out.notes_md,
+                        dump_pretty_fn=dump_pretty,
                     )
                     if gate.get("status") == "partial":
                         metrics.event(
@@ -1400,17 +1327,9 @@ async def main_async(args: argparse.Namespace) -> int:
                     _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
                     _pre_pm_tasks_inc = list(existing_tasks)
 
-                    merged_tasks = merge_pm_tasks_with_existing_pending(
-                        pm_tasks=accepted_tasks,
-                        existing_tasks=existing_tasks,
-                        done_ids=done_ids,
-                        failed_ids=failed_ids,
-                    )
+                    merged_tasks = pm_postprocess["backlog_tasks"]
 
                     if merged_tasks:
-                        merged_tasks = _normalize_backlog_tasks(merged_tasks)
-                        accepted_trace_map = _goal_trace_map(accepted_tasks)
-                        merged_tasks = _restore_goal_trace(merged_tasks, accepted_trace_map)
                         merged_tasks = _validate_skill_ids(merged_tasks)
                         if merged_tasks:
                             write_backlog_files(run_dir, merged_tasks)

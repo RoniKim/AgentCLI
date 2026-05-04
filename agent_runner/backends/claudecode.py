@@ -102,7 +102,6 @@ from ..pipeline.shared_runtime import (
     detect_and_clear_recycled_ids,
     ensure_backlog_artifacts,
     load_backlog_tasks,
-    merge_pm_tasks_with_existing_pending,
     maybe_refresh_tasks_after_pm,
     prepare_pm_inventory_markdown,
     process_qa_followups,
@@ -197,7 +196,7 @@ from ..qa_utils import (
     write_manual_checks,
 )
 from ..backlog_utils import (
-    normalize_backlog_tasks,
+    postprocess_pm_output_tasks,
     validate_skill_ids,
     load_backlog_context_for_pm,
     build_failed_tasks_block,
@@ -1142,9 +1141,6 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     _followups_from_structured = followups_from_structured
     _merge_qa_followups = merge_qa_followups
 
-    def _normalize_backlog_tasks(raw_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return normalize_backlog_tasks(raw_tasks, run_dir)
-
     def _validate_skill_ids(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return validate_skill_ids(
             tasks,
@@ -1432,24 +1428,59 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     metrics.event("pm_end", cycle=cycle_idx, kind="bootstrap", rc=1, error="structured_output_failed")
                     return False
 
-                write_pm_output_artifacts(
+                _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
+                _pre_pm_tasks = list(existing_tasks)  # recycled ID comparison
+                pm_postprocess = postprocess_pm_output_tasks(
+                    repo=repo,
                     run_dir=run_dir,
                     cycle_idx=cycle_idx,
+                    kind="bootstrap",
+                    raw_pm_output_path=pm_output_path,
                     pm_output_model_dump=pm_out.model_dump(),
-                    notes_md=pm_out.notes_md,
-                    dump_pretty_fn=dump_pretty,
-                )
-
-                _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
-                _pre_pm_tasks = list(existing_tasks)  # recycled ID 鍮꾧탳???ㅻ깄??
-                merged_tasks = merge_pm_tasks_with_existing_pending(
-                    pm_tasks=[t.model_dump() for t in (pm_out.tasks or [])],
                     existing_tasks=existing_tasks,
                     done_ids=done_ids,
                     failed_ids=failed_ids,
+                    completion_level=goals_completion_level,
                 )
+                gate = pm_postprocess["pm_gate"]
+                accepted_tasks = pm_postprocess["accepted_pm_tasks"]
+                rejected_tasks = pm_postprocess["rejected_pm_tasks"]
+                merged_tasks = pm_postprocess["backlog_tasks"]
+
+                write_pm_output_artifacts(
+                    run_dir=run_dir,
+                    cycle_idx=cycle_idx,
+                    pm_output_model_dump=pm_postprocess["pm_output_model_dump"],
+                    notes_md=pm_out.notes_md,
+                    dump_pretty_fn=dump_pretty,
+                )
+                if gate.get("status") == "partial":
+                    metrics.event(
+                        "pm_goal_gate",
+                        cycle=cycle_idx,
+                        kind="bootstrap",
+                        status=str(gate.get("status") or ""),
+                        accepted_count=len(accepted_tasks),
+                        rejected_count=len(rejected_tasks),
+                        gate_required=bool(gate.get("gate_required")),
+                        goal_path=str(gate.get("goal_path") or ""),
+                    )
+                elif gate.get("status") == "rejected":
+                    metrics.event(
+                        "pm_goal_gate_rejected",
+                        cycle=cycle_idx,
+                        kind="bootstrap",
+                        status=str(gate.get("status") or ""),
+                        rejected_count=len(rejected_tasks),
+                        accepted_count=len(accepted_tasks),
+                        gate_required=bool(gate.get("gate_required")),
+                        goal_path=str(gate.get("goal_path") or ""),
+                    )
+
+                _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
+                _pre_pm_tasks = list(existing_tasks)  # recycled ID 비교용 스냅샷
+                merged_tasks = pm_postprocess["backlog_tasks"]
                 if merged_tasks:
-                    merged_tasks = _normalize_backlog_tasks(merged_tasks)
                     merged_tasks = _validate_skill_ids(merged_tasks)
                     if merged_tasks:
                         try:
@@ -1539,24 +1570,59 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     metrics.event("pm_end", cycle=cycle_idx, kind="incremental" if need_incremental else "refresh", rc=1, error="structured_output_failed")
                     return False
 
-                write_pm_output_artifacts(
-                    run_dir=run_dir,
-                    cycle_idx=cycle_idx,
-                    pm_output_model_dump=pm_out.model_dump(),
-                    notes_md=pm_out.notes_md,
-                    dump_pretty_fn=dump_pretty,
-                )
-
                 _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
                 _pre_pm_tasks_inc = list(existing_tasks)
-                merged_tasks = merge_pm_tasks_with_existing_pending(
-                    pm_tasks=[t.model_dump() for t in (pm_out.tasks or [])],
+                pm_postprocess = postprocess_pm_output_tasks(
+                    repo=repo,
+                    run_dir=run_dir,
+                    cycle_idx=cycle_idx,
+                    kind="incremental" if need_incremental else "refresh",
+                    raw_pm_output_path=pm_output_path,
+                    pm_output_model_dump=pm_out.model_dump(),
                     existing_tasks=existing_tasks,
                     done_ids=done_ids,
                     failed_ids=failed_ids,
+                    completion_level=goals_completion_level,
                 )
+                gate = pm_postprocess["pm_gate"]
+                accepted_tasks = pm_postprocess["accepted_pm_tasks"]
+                rejected_tasks = pm_postprocess["rejected_pm_tasks"]
+                merged_tasks = pm_postprocess["backlog_tasks"]
+
+                write_pm_output_artifacts(
+                    run_dir=run_dir,
+                    cycle_idx=cycle_idx,
+                    pm_output_model_dump=pm_postprocess["pm_output_model_dump"],
+                    notes_md=pm_out.notes_md,
+                    dump_pretty_fn=dump_pretty,
+                )
+                if gate.get("status") == "partial":
+                    metrics.event(
+                        "pm_goal_gate",
+                        cycle=cycle_idx,
+                        kind="incremental" if need_incremental else "refresh",
+                        status=str(gate.get("status") or ""),
+                        accepted_count=len(accepted_tasks),
+                        rejected_count=len(rejected_tasks),
+                        gate_required=bool(gate.get("gate_required")),
+                        goal_path=str(gate.get("goal_path") or ""),
+                    )
+                elif gate.get("status") == "rejected":
+                    metrics.event(
+                        "pm_goal_gate_rejected",
+                        cycle=cycle_idx,
+                        kind="incremental" if need_incremental else "refresh",
+                        status=str(gate.get("status") or ""),
+                        rejected_count=len(rejected_tasks),
+                        accepted_count=len(accepted_tasks),
+                        gate_required=bool(gate.get("gate_required")),
+                        goal_path=str(gate.get("goal_path") or ""),
+                    )
+
+                _current_backlog_block, existing_tasks, done_ids, failed_ids = _load_backlog_context_for_pm()
+                _pre_pm_tasks_inc = list(existing_tasks)
+                merged_tasks = pm_postprocess["backlog_tasks"]
                 if merged_tasks:
-                    merged_tasks = _normalize_backlog_tasks(merged_tasks)
                     merged_tasks = _validate_skill_ids(merged_tasks)
                     if merged_tasks:
                         write_backlog_files(run_dir, merged_tasks)

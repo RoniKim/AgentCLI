@@ -15,10 +15,10 @@ if str(ROOT) not in sys.path:
 
 
 from agent_runner.goals import gate_pm_tasks_against_goals
-from agent_runner.backlog_utils import normalize_backlog_tasks
+from agent_runner.backlog_utils import normalize_backlog_tasks, postprocess_pm_output_tasks
 from agent_runner.gitops import create_task_branch, format_task_commit_message
 from agent_runner.metrics import MetricsLogger
-from agent_runner.state import load_backlog_json, write_backlog_files
+from agent_runner.state import TaskItem, load_backlog_json, write_backlog_files
 
 
 GOALS_MD = """# Project Goals
@@ -156,6 +156,136 @@ class GoalsGateTests(unittest.TestCase):
         self.assertEqual([2, 2, 1], [len(t.get("goal_trace") or []) for t in normalized])
         self.assertEqual("P0-L4", normalized[0]["goal_trace"][0]["goal_ref"])
         self.assertEqual("P0-L8", normalized[2]["goal_trace"][0]["goal_ref"])
+
+    def test_postprocess_preserves_valid_existing_goal_trace(self) -> None:
+        existing_tasks = [
+            TaskItem(
+                id="T7",
+                title="Follow-through work",
+                prompt="Finish the already-traced work.",
+                files=[],
+                done_when="The gate work is complete.",
+                skills=[],
+                skills_rationale=None,
+                depends_on=[],
+                goal_trace=[
+                    {
+                        "goal_ref": "P0-L4",
+                        "goal_text": "Ship web console gate",
+                        "matched_fields": ["prompt"],
+                    }
+                ],
+            )
+        ]
+
+        processed = postprocess_pm_output_tasks(
+            repo=self.repo,
+            run_dir=self.run_dir,
+            cycle_idx=1,
+            kind="incremental",
+            raw_pm_output_path=self.run_dir / "pm_raw.txt",
+            pm_output_model_dump={"kind": "incremental", "summary": "Keep the traced task.", "tasks": []},
+            existing_tasks=existing_tasks,
+            done_ids=set(),
+            failed_ids=set(),
+            completion_level="p0",
+        )
+
+        self.assertEqual(["T7"], [task["id"] for task in processed["backlog_tasks"]])
+        self.assertEqual("P0-L4", processed["backlog_tasks"][0]["goal_trace"][0]["goal_ref"])
+        self.assertEqual("preserved_goal_trace", processed["backlog_tasks"][0]["goal_trace"][0]["match_mode"])
+
+    def test_postprocess_splits_oversized_tasks_and_keeps_dependency_trace(self) -> None:
+        goals_text = """# Project Goals
+
+## P0
+- [ ] Goal alpha
+- [ ] Goal beta
+- [ ] Goal gamma
+"""
+        (self.repo / ".doc" / "GOALS.md").write_text(goals_text, encoding="utf-8")
+        processed = postprocess_pm_output_tasks(
+            repo=self.repo,
+            run_dir=self.run_dir,
+            cycle_idx=2,
+            kind="bootstrap",
+            raw_pm_output_path=self.run_dir / "pm_raw.txt",
+            pm_output_model_dump={
+                "kind": "bootstrap",
+                "summary": "Split the bundled goals and keep dependencies.",
+                "tasks": [
+                    {
+                        "id": "T1",
+                        "title": "Goal alpha Goal beta Goal gamma",
+                        "prompt": "Implement Goal alpha, Goal beta, and Goal gamma.",
+                        "done_when": "All listed goals are complete.",
+                    },
+                    {
+                        "id": "T9",
+                        "title": "Goal gamma verification",
+                        "prompt": "After Goal gamma is implemented, verify the Goal gamma flow end-to-end.",
+                        "done_when": "Goal gamma validation passes.",
+                        "depends_on": ["T1"],
+                    },
+                ],
+            },
+            existing_tasks=[],
+            done_ids=set(),
+            failed_ids=set(),
+            completion_level="p0",
+        )
+
+        backlog = processed["backlog_tasks"]
+        self.assertEqual(["T1", "T2", "T9"], [task["id"] for task in backlog])
+        self.assertEqual([2, 1, 1], [len(task.get("goal_trace") or []) for task in backlog])
+        self.assertEqual(["T1", "T2"], backlog[2]["depends_on"])
+        self.assertEqual("P0-L4", backlog[0]["goal_trace"][0]["goal_ref"])
+        self.assertEqual("P0-L6", backlog[2]["goal_trace"][0]["goal_ref"])
+
+    def test_postprocess_rejects_irrelevant_existing_backlog_tasks_while_p0_unmet(self) -> None:
+        existing_tasks = [
+            TaskItem(
+                id="T4",
+                title="Refine layout",
+                prompt="Tighten spacing on the backlog view.",
+                files=[],
+                done_when="The backlog view has a calmer visual hierarchy.",
+                skills=[],
+                skills_rationale=None,
+                depends_on=[],
+                goal_trace=[],
+            )
+        ]
+
+        processed = postprocess_pm_output_tasks(
+            repo=self.repo,
+            run_dir=self.run_dir,
+            cycle_idx=3,
+            kind="incremental",
+            raw_pm_output_path=self.run_dir / "pm_raw.txt",
+            pm_output_model_dump={
+                "kind": "incremental",
+                "summary": "Keep only unmet P0 work in the backlog.",
+                "tasks": [
+                    {
+                        "id": "T2",
+                        "title": "Ship web console gate",
+                        "prompt": "Implement Ship web console gate exactly as written in GOALS.md.",
+                        "done_when": "The Ship web console gate goal is satisfied and documented.",
+                    }
+                ],
+            },
+            existing_tasks=existing_tasks,
+            done_ids=set(),
+            failed_ids=set(),
+            completion_level="p0",
+        )
+
+        self.assertEqual(["T2"], [task["id"] for task in processed["backlog_tasks"]])
+        self.assertEqual(1, len(processed["rejected_backlog_tasks"]))
+        self.assertEqual("T4", processed["rejected_backlog_tasks"][0]["id"])
+        self.assertEqual("missing_unchecked_p0_reference", processed["rejected_backlog_tasks"][0]["reason"])
+        self.assertEqual(1, processed["pm_output_model_dump"]["goals_gate"]["backlog_rejected_count"])
 
     def test_task_branch_and_commit_message_include_goal_trace(self) -> None:
         gate = gate_pm_tasks_against_goals(self.repo, self._pm_tasks(), completion_level="p0")

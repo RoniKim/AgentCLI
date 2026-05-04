@@ -5,17 +5,20 @@ backends can import and call them identically.
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any, Optional
 
+from .goals import gate_pm_tasks_against_goals
+from .pipeline.shared_runtime import merge_pm_tasks_with_existing_pending
 from .state import load_backlog_json, parse_backlog_md, load_state, TaskItem
 from .task_history import (
     build_failed_tasks_artifact as _build_failed_tasks_artifact,
     record_task as _record_task_history,
     render_failed_tasks_block as _render_failed_tasks_block,
 )
-from .utils import eprint
+from .utils import eprint, now_iso, safe_write_text
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +187,136 @@ def normalize_backlog_tasks(
         eprint(f"[WARN] {w}")
 
     return out
+
+
+def _write_pm_goal_gate_error(
+    *,
+    run_dir: Path,
+    cycle_idx: int,
+    kind: str,
+    raw_pm_output_path: Path,
+    pm_gate: dict[str, Any],
+    backlog_gate: dict[str, Any],
+    pm_output_model_dump: dict[str, Any],
+) -> None:
+    payload = {
+        "generated_at": now_iso(),
+        "cycle": cycle_idx,
+        "kind": kind,
+        "status": pm_gate.get("status", ""),
+        "message": pm_gate.get("message", ""),
+        "goal_path": pm_gate.get("goal_path", ""),
+        "goals": pm_gate.get("goals", {}),
+        "raw_output_path": raw_pm_output_path.as_posix(),
+        "accepted_count": len(pm_gate.get("accepted_tasks") or []),
+        "rejected_count": len(pm_gate.get("rejected_tasks") or []),
+        "rejected_tasks": pm_gate.get("rejected_tasks", []),
+        "backlog_status": backlog_gate.get("status", ""),
+        "backlog_accepted_count": len(backlog_gate.get("accepted_tasks") or []),
+        "backlog_rejected_count": len(backlog_gate.get("rejected_tasks") or []),
+        "backlog_rejected_tasks": backlog_gate.get("rejected_tasks", []),
+        "error": pm_gate.get("error"),
+        "backlog_error": backlog_gate.get("error"),
+        "pm_output": {
+            "kind": pm_output_model_dump.get("kind"),
+            "summary": pm_output_model_dump.get("summary"),
+            "notes_md": pm_output_model_dump.get("notes_md"),
+            "warnings": pm_output_model_dump.get("warnings", []),
+            "open_questions": pm_output_model_dump.get("open_questions", []),
+            "tasks": pm_output_model_dump.get("tasks", []),
+        },
+    }
+    safe_write_text(
+        run_dir / f"PM_GOALS_GATE_ERROR_cycle_{cycle_idx:03d}.json",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+def postprocess_pm_output_tasks(
+    *,
+    repo: Path,
+    run_dir: Path,
+    cycle_idx: int,
+    kind: str,
+    raw_pm_output_path: Path,
+    pm_output_model_dump: dict[str, Any],
+    existing_tasks: list[Any],
+    done_ids: set[str],
+    failed_ids: set[str],
+    completion_level: str,
+) -> dict[str, Any]:
+    """Apply shared GOALS/backlog postprocessing to a PM output payload."""
+    raw_tasks_val = pm_output_model_dump.get("tasks")
+    raw_tasks = [dict(task) for task in raw_tasks_val if isinstance(task, dict)] if isinstance(raw_tasks_val, list) else []
+
+    pm_gate = gate_pm_tasks_against_goals(
+        repo,
+        raw_tasks,
+        completion_level=completion_level,
+    )
+    accepted_pm_tasks = [dict(task) for task in pm_gate.get("accepted_tasks") or []]
+    rejected_pm_tasks = [dict(task) for task in pm_gate.get("rejected_tasks") or []]
+
+    merged_tasks = merge_pm_tasks_with_existing_pending(
+        pm_tasks=accepted_pm_tasks,
+        existing_tasks=existing_tasks,
+        done_ids=done_ids,
+        failed_ids=failed_ids,
+    )
+    backlog_gate = gate_pm_tasks_against_goals(
+        repo,
+        merged_tasks,
+        completion_level=completion_level,
+    )
+    accepted_backlog_tasks = [dict(task) for task in backlog_gate.get("accepted_tasks") or []]
+    rejected_backlog_tasks = [dict(task) for task in backlog_gate.get("rejected_tasks") or []]
+    normalized_backlog_tasks = normalize_backlog_tasks(accepted_backlog_tasks, run_dir) if accepted_backlog_tasks else []
+
+    pm_dump = dict(pm_output_model_dump)
+    pm_dump["tasks"] = accepted_pm_tasks
+    pm_dump["goals_gate"] = {
+        "goal_path": pm_gate.get("goal_path", ""),
+        "gate_required": pm_gate.get("gate_required", False),
+        "status": pm_gate.get("status", ""),
+        "message": pm_gate.get("message", ""),
+        "accepted_count": len(accepted_pm_tasks),
+        "rejected_count": len(rejected_pm_tasks),
+        "error": pm_gate.get("error"),
+        "goals": pm_gate.get("goals", {}),
+        "backlog_status": backlog_gate.get("status", ""),
+        "backlog_accepted_count": len(accepted_backlog_tasks),
+        "backlog_rejected_count": len(rejected_backlog_tasks),
+        "backlog_error": backlog_gate.get("error"),
+    }
+    if rejected_pm_tasks:
+        pm_dump["rejected_tasks"] = rejected_pm_tasks
+    else:
+        pm_dump.pop("rejected_tasks", None)
+    if rejected_backlog_tasks:
+        pm_dump["backlog_rejected_tasks"] = rejected_backlog_tasks
+    else:
+        pm_dump.pop("backlog_rejected_tasks", None)
+
+    if pm_gate.get("error") or rejected_pm_tasks or backlog_gate.get("error") or rejected_backlog_tasks:
+        _write_pm_goal_gate_error(
+            run_dir=run_dir,
+            cycle_idx=cycle_idx,
+            kind=kind,
+            raw_pm_output_path=raw_pm_output_path,
+            pm_gate=pm_gate,
+            backlog_gate=backlog_gate,
+            pm_output_model_dump=pm_dump,
+        )
+
+    return {
+        "pm_gate": pm_gate,
+        "accepted_pm_tasks": accepted_pm_tasks,
+        "rejected_pm_tasks": rejected_pm_tasks,
+        "pm_output_model_dump": pm_dump,
+        "backlog_gate": backlog_gate,
+        "backlog_tasks": normalized_backlog_tasks,
+        "rejected_backlog_tasks": rejected_backlog_tasks,
+    }
 
 
 def _break_circular_deps(tasks: list[dict[str, Any]]) -> None:

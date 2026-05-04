@@ -274,7 +274,7 @@
 - [x] Failed-task result recording is shared by Codex and Claude backends through a neutral helper module.
 - [x] Stop progress recording is shared by shell, Codex backend, Claude backend, and web runner controls.
 - [x] Task branch preserve, abandon, rollback, and cleanup dispatch are shared by Codex and Claude backends.
-- [ ] Codex and Claude PM output postprocessing use the same GOALS gating, task splitting, and `goal_trace` preservation logic.
+- [x] Codex and Claude PM output postprocessing use the same GOALS gating, task splitting, and `goal_trace` preservation logic.
 - [ ] Backend adapter interfaces isolate model invocation, message streaming, model option construction, and quota probing from orchestration code.
 - [ ] Codex backend-specific code is limited to Codex CLI execution, Codex app-server integration, Codex quota probing, and Codex model options.
 - [ ] Claude backend-specific code is limited to Claude SDK/CLI execution, Claude streaming collection, Claude quota probing, and Claude model options.
