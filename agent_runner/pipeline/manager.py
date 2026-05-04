@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Tuple
+from typing import Iterable, List
 
 from .session import PipelineSession
-from .stages.base import Stage, StageOutcome
+from .stages.base import (
+    STAGE_EFFECT_BACKLOG_WRITTEN,
+    STAGE_EFFECT_TASKS_RELOAD_REQUIRED,
+    Stage,
+    StageOutcome,
+)
 from ..utils import STOP_REASON_ALL_TASKS_DONE, STOP_REASON_ALL_TASKS_ATTEMPTED, STOP_REASON_PROJECT_COMPLETE, STOP_REASON_NO_TASKS
 
 # Stop reasons that should propagate through CycleResult for outer-loop handling
@@ -38,6 +43,23 @@ class PipelineManager:
         low = name.strip().lower()
         return any((getattr(s, "name", "") or "").strip().lower() == low for s in self.stages)
 
+    @staticmethod
+    def _invalidate_session_tasks(session: PipelineSession) -> None:
+        invalidate = getattr(session, "invalidate_tasks", None)
+        if callable(invalidate):
+            invalidate()
+            return
+        setattr(session, "tasks", [])
+
+    @classmethod
+    def _ensure_current_tasks(cls, session: PipelineSession, *, force_reload: bool) -> bool:
+        if force_reload:
+            reload_tasks = getattr(session, "reload_tasks", None)
+            if callable(reload_tasks):
+                return bool(reload_tasks())
+            cls._invalidate_session_tasks(session)
+        return bool(session.ensure_tasks_loaded())
+
     async def run_cycle(self, session: PipelineSession, cycle_idx: int, *, continuous: bool) -> CycleResult:
         if session.has_stop():
             return CycleResult(rc=0, reason="stop_file", done_delta=0, stages=[])
@@ -54,6 +76,8 @@ class PipelineManager:
                 return CycleResult(rc=1, reason=f"ensure_backlog_exception: {exc}", done_delta=0, stages=[])
 
         tasks_checked = False
+        tasks_reload_required = False
+        task_stage_started = False
 
         stage_results: list[dict[str, str | int]] = []
 
@@ -64,18 +88,22 @@ class PipelineManager:
             stage_name = (getattr(stage, "name", "") or "").strip().lower()
 
             # Before running any non-PM stage, make sure tasks are available.
-            if stage_name != "pm" and not tasks_checked:
+            if stage_name != "pm" and (tasks_reload_required or not tasks_checked):
                 try:
-                    if not session.ensure_tasks_loaded():
+                    if not self._ensure_current_tasks(session, force_reload=tasks_reload_required):
                         # missing backlog or cannot parse
                         return CycleResult(rc=1, reason=STOP_REASON_NO_TASKS, done_delta=0, stages=stage_results)
                 except Exception as exc:
-                    return CycleResult(rc=1, reason=f"ensure_tasks_exception: {exc}", done_delta=0, stages=stage_results)
+                    load_step = "reload_tasks" if tasks_reload_required else "ensure_tasks_loaded"
+                    return CycleResult(rc=1, reason=f"{load_step}_exception: {exc}", done_delta=0, stages=stage_results)
+                tasks_reload_required = False
                 tasks_checked = True
 
-                if not continuous:
+                if not continuous and not task_stage_started:
                     # behave like legacy: prepare artifacts and stop before executing tasks
                     return CycleResult(rc=0, reason="prepared_only", done_delta=0, stages=stage_results)
+            if stage_name != "pm":
+                task_stage_started = True
 
             try:
                 out: StageOutcome = await stage.run(session, cycle_idx)
@@ -91,6 +119,11 @@ class PipelineManager:
                 }
             )
 
+            if out.has_effect(STAGE_EFFECT_BACKLOG_WRITTEN) or out.has_effect(STAGE_EFFECT_TASKS_RELOAD_REQUIRED):
+                self._invalidate_session_tasks(session)
+                tasks_checked = False
+                tasks_reload_required = True
+
             if out.status == "skip":
                 continue
             if out.status == "stop":
@@ -98,14 +131,16 @@ class PipelineManager:
             if out.status == "fail":
                 return CycleResult(rc=out.rc, reason=out.reason or "failed", done_delta=session.done_delta, stages=stage_results)
 
-        # PM-only (or stages that never needed tasks): still validate/load backlog so the user can inspect it.
-        if not tasks_checked:
+        # PM-only runs, or runs whose last stage invalidated tasks, should still leave current task state loaded.
+        if tasks_reload_required or not tasks_checked:
             try:
-                if not session.ensure_tasks_loaded():
+                if not self._ensure_current_tasks(session, force_reload=tasks_reload_required):
                     return CycleResult(rc=1, reason=STOP_REASON_NO_TASKS, done_delta=0, stages=stage_results)
             except Exception as exc:
-                return CycleResult(rc=1, reason=f"ensure_tasks_exception: {exc}", done_delta=0, stages=stage_results)
+                load_step = "reload_tasks" if tasks_reload_required else "ensure_tasks_loaded"
+                return CycleResult(rc=1, reason=f"{load_step}_exception: {exc}", done_delta=0, stages=stage_results)
             tasks_checked = True
+            tasks_reload_required = False
 
             if not continuous:
                 return CycleResult(rc=0, reason="prepared_only", done_delta=0, stages=stage_results)

@@ -56,6 +56,16 @@ class PipelineSession:
         self.tasks = self.load_tasks() or []
         return bool(self.tasks)
 
+    def invalidate_tasks(self) -> None:
+        self.tasks = []
+
+    def reload_tasks(self) -> bool:
+        self.invalidate_tasks()
+        if not self.ensure_backlog():
+            return False
+        self.tasks = self.load_tasks() or []
+        return bool(self.tasks)
+
     async def security(self, cycle_idx: int) -> StageOutcome:
         if callable(self.security_phase):
             return await self.security_phase(cycle_idx)
