@@ -299,10 +299,10 @@
 - [ ] Direct runner and resume entrypoints reconcile stale STOP files using heartbeat age and an audit event without deleting fresh operator STOP requests.
 - [ ] Long sleeps, quota waits, and loop idle waits refresh `HEARTBEAT` at bounded intervals while remaining STOP-aware.
 - [ ] Claude backend quota and wait paths use the shared STOP-aware sleep helper instead of raw long `asyncio.sleep` calls.
-- [ ] Startup readiness can auto-reconcile stale `WORKTREE_MERGE_PENDING.json` markers when the patch/worktree is missing or source `HEAD` already reflects the pending head, while preserving valid pending merges.
-- [ ] Stale task branches and attempt directories are listed by doctor/readiness with age, status, reason, and owning run before any cleanup is offered.
-- [ ] Stale branch, stale attempt, and old run cleanup require explicit operator approval and write dry-run plus applied cleanup artifacts.
-- [ ] An unattended preset documents or configures `goals_auto_refresh`, quota wait, loop, loop idle exit, iteration limits, diagnostics, and safe cleanup defaults as one operator-facing profile.
+- [x] Startup readiness can auto-reconcile stale `WORKTREE_MERGE_PENDING.json` markers when the patch/worktree is missing or source `HEAD` already reflects the pending head, while preserving valid pending merges.
+- [x] Stale task branches and attempt directories are listed by doctor/readiness with age, status, reason, and owning run before any cleanup is offered.
+- [x] Stale branch, stale attempt, and old run cleanup require explicit operator approval and write dry-run plus applied cleanup artifacts.
+- [x] An unattended preset documents or configures `goals_auto_refresh`, quota wait, loop, loop idle exit, iteration limits, diagnostics, and safe cleanup defaults as one operator-facing profile.
 - [ ] Backlog scheduling records task effort, priority, touched file globs, and dependencies before selection.
 - [ ] Backlog selection uses dependency-aware ordering plus remaining-window budget caps so overnight runs prefer small unblocked tasks before large risky tasks.
 - [ ] Overnight runs write a concise post-run operations summary covering completed, queued, review-required, blocked-env, stale-cleanup, handle/process warnings, and next operator actions.

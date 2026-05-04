@@ -2,11 +2,266 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List
 
 from .utils import now_iso, atomic_write_json, atomic_write_text, safe_write_text, eprint
+
+
+_TASK_PRIORITY_ALIASES = {
+    "p0": "P0",
+    "0": "P0",
+    "high": "P0",
+    "critical": "P0",
+    "urgent": "P0",
+    "p1": "P1",
+    "1": "P1",
+    "medium": "P1",
+    "normal": "P1",
+    "default": "P1",
+    "p2": "P2",
+    "2": "P2",
+    "low": "P2",
+    "p3": "P3",
+    "3": "P3",
+}
+
+_TASK_EFFORT_ALIASES = {
+    "s": "S",
+    "small": "S",
+    "xs": "S",
+    "m": "M",
+    "medium": "M",
+    "med": "M",
+    "l": "L",
+    "large": "L",
+    "xl": "L",
+}
+
+_TASK_P0_HINTS = (
+    "bug",
+    "fix",
+    "crash",
+    "block",
+    "security",
+    "regression",
+    "failure",
+    "urgent",
+    "hotfix",
+)
+_TASK_TEST_HINTS = ("test", "qa", "verify", "validation", "smoke", "playwright")
+_TASK_FRONTEND_HINTS = ("web", "ui", "blazor", "razor", "xaml", "component", "page", "screen")
+_TASK_BACKEND_HINTS = ("agent_runner", "runner", "backlog", "pipeline", "runtime", "state", "scheduler")
+_TASK_DOC_HINTS = ("docs", "doc", "readme", "notes")
+_TASK_LARGE_HINTS = (
+    "refactor",
+    "overhaul",
+    "scheduler",
+    "pipeline",
+    "runtime",
+    "migration",
+    "cross-cutting",
+    "end-to-end",
+    "multi-step",
+    "large",
+)
+_TASK_CORE_PATH_HINTS = (
+    "agent_runner/cycle.py",
+    "agent_runner/web.py",
+    "agent_runner/pipeline/shared_runtime.py",
+    "agent_runner/backends/claudecode.py",
+    "web_console/app.js",
+)
+
+
+def _ordered_unique_text(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def _clean_task_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_items = [part.strip() for part in value.split(",")]
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = []
+    cleaned = [str(item).replace("\\", "/").strip() for item in raw_items if str(item).strip()]
+    return _ordered_unique_text(cleaned)
+
+
+def normalize_task_priority(
+    value: Any,
+    *,
+    title: str = "",
+    prompt: str = "",
+    files: list[str] | None = None,
+) -> str:
+    text = str(value or "").strip().lower()
+    if text in _TASK_PRIORITY_ALIASES:
+        return _TASK_PRIORITY_ALIASES[text]
+
+    blob = " ".join(
+        [
+            str(title or ""),
+            str(prompt or ""),
+            " ".join(_clean_task_string_list(files or [])),
+        ]
+    ).lower()
+    if any(token in blob for token in _TASK_P0_HINTS):
+        return "P0"
+    if any(token in blob for token in _TASK_TEST_HINTS):
+        return "P1"
+    if any(path.startswith(".doc/") for path in _clean_task_string_list(files or [])):
+        return "P2"
+    return "P1"
+
+
+def normalize_task_touched_file_globs(
+    value: Any,
+    *,
+    files: list[str] | None = None,
+    title: str = "",
+    prompt: str = "",
+) -> list[str]:
+    explicit = _clean_task_string_list(value)
+    if explicit:
+        return explicit
+
+    file_globs = _clean_task_string_list(files or [])
+    if file_globs:
+        return file_globs
+
+    blob = f"{title} {prompt}".lower()
+    inferred: list[str] = []
+    if any(token in blob for token in _TASK_FRONTEND_HINTS):
+        inferred.append("web_console/**/*")
+    if any(token in blob for token in _TASK_BACKEND_HINTS):
+        inferred.append("agent_runner/**/*")
+    if any(token in blob for token in _TASK_TEST_HINTS):
+        inferred.append("tests/**/*")
+    if any(token in blob for token in _TASK_DOC_HINTS):
+        inferred.append(".doc/**/*")
+    if not inferred:
+        inferred.append("**/*")
+    return _ordered_unique_text(inferred)
+
+
+def normalize_task_effort(
+    value: Any,
+    *,
+    title: str = "",
+    prompt: str = "",
+    done_when: str = "",
+    files: list[str] | None = None,
+    touched_file_globs: list[str] | None = None,
+    depends_on: list[str] | None = None,
+) -> str:
+    text = str(value or "").strip().lower()
+    if text in _TASK_EFFORT_ALIASES:
+        return _TASK_EFFORT_ALIASES[text]
+
+    normalized_files = _clean_task_string_list(files or [])
+    normalized_globs = normalize_task_touched_file_globs(
+        touched_file_globs,
+        files=normalized_files,
+        title=title,
+        prompt=prompt,
+    )
+    normalized_deps = _clean_task_string_list(depends_on or [])
+    blob = " ".join(
+        [
+            str(title or ""),
+            str(prompt or ""),
+            str(done_when or ""),
+            " ".join(normalized_files),
+            " ".join(normalized_globs),
+        ]
+    ).lower()
+
+    score = 1
+    scope_count = max(len(normalized_files), len(normalized_globs))
+    if scope_count >= 4:
+        score += 2
+    elif scope_count >= 2:
+        score += 1
+    if any("*" in item for item in normalized_globs):
+        score += 1
+    if len(normalized_deps) >= 2:
+        score += 1
+    if len(str(prompt or "").split()) >= 80 or len(str(done_when or "").split()) >= 40:
+        score += 1
+    if any(token in blob for token in _TASK_LARGE_HINTS):
+        score += 1
+    if any(path_hint in item.lower() for path_hint in _TASK_CORE_PATH_HINTS for item in normalized_files + normalized_globs):
+        score += 1
+
+    if score <= 1:
+        return "S"
+    if score <= 3:
+        return "M"
+    return "L"
+
+
+def normalize_task_scheduling_metadata(
+    *,
+    title: str,
+    prompt: str,
+    done_when: str,
+    files: Any,
+    depends_on: Any,
+    effort: Any = None,
+    priority: Any = None,
+    touched_file_globs: Any = None,
+) -> dict[str, Any]:
+    normalized_files = _clean_task_string_list(files)
+    normalized_deps = _clean_task_string_list(depends_on)
+    normalized_globs = normalize_task_touched_file_globs(
+        touched_file_globs,
+        files=normalized_files,
+        title=title,
+        prompt=prompt,
+    )
+    normalized_priority = normalize_task_priority(
+        priority,
+        title=title,
+        prompt=prompt,
+        files=normalized_files,
+    )
+    normalized_effort = normalize_task_effort(
+        effort,
+        title=title,
+        prompt=prompt,
+        done_when=done_when,
+        files=normalized_files,
+        touched_file_globs=normalized_globs,
+        depends_on=normalized_deps,
+    )
+    return {
+        "files": normalized_files,
+        "depends_on": normalized_deps,
+        "priority": normalized_priority,
+        "effort": normalized_effort,
+        "touched_file_globs": normalized_globs,
+    }
+
+
+def task_priority_rank(value: Any) -> int:
+    return {"P0": 0, "P1": 1, "P2": 2, "P3": 3}.get(
+        normalize_task_priority(value),
+        9,
+    )
+
+
+def task_effort_rank(value: Any) -> int:
+    return {"S": 0, "M": 1, "L": 2}.get(normalize_task_effort(value), 9)
 
 
 @dataclass
@@ -19,7 +274,60 @@ class TaskItem:
     skills: list[str]
     skills_rationale: str | None
     depends_on: list[str]
+    effort: str = "M"
+    priority: str = "P1"
+    touched_file_globs: list[str] = field(default_factory=list)
     goal_trace: list[dict[str, Any]] | None = None
+
+
+def task_scheduling_snapshot(task: Any) -> dict[str, Any]:
+    if isinstance(task, dict):
+        raw = task
+        title = str(raw.get("title") or "").strip()
+        prompt = str(raw.get("prompt") or "").strip()
+        done_when = str(raw.get("done_when") or "").strip()
+        files = raw.get("files") or []
+        depends_on = raw.get("depends_on") or []
+        effort = raw.get("effort")
+        priority = raw.get("priority")
+        touched_file_globs = raw.get("touched_file_globs")
+    else:
+        title = str(getattr(task, "title", "") or "").strip()
+        prompt = str(getattr(task, "prompt", "") or "").strip()
+        done_when = str(getattr(task, "done_when", "") or "").strip()
+        files = getattr(task, "files", []) or []
+        depends_on = getattr(task, "depends_on", []) or []
+        effort = getattr(task, "effort", None)
+        priority = getattr(task, "priority", None)
+        touched_file_globs = getattr(task, "touched_file_globs", None)
+
+    meta = normalize_task_scheduling_metadata(
+        title=title,
+        prompt=prompt,
+        done_when=done_when,
+        files=files,
+        depends_on=depends_on,
+        effort=effort,
+        priority=priority,
+        touched_file_globs=touched_file_globs,
+    )
+    risk = "high" if (
+        task_effort_rank(meta["effort"]) >= 2
+        or len(meta["depends_on"]) >= 2
+        or any("*" in item for item in meta["touched_file_globs"])
+        or any(path_hint in item.lower() for path_hint in _TASK_CORE_PATH_HINTS for item in meta["files"] + meta["touched_file_globs"])
+    ) else "normal"
+    return {
+        "priority": meta["priority"],
+        "effort": meta["effort"],
+        "touched_file_globs": meta["touched_file_globs"],
+        "depends_on": meta["depends_on"],
+        "files": meta["files"],
+        "risk": risk,
+        "risk_rank": 1 if risk == "high" else 0,
+        "priority_rank": task_priority_rank(meta["priority"]),
+        "effort_rank": task_effort_rank(meta["effort"]),
+    }
 
 
 def load_backlog_json(path: Path) -> list[TaskItem]:
@@ -98,10 +406,20 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
             skills_rationale = str(skills_rationale)
 
         depends_on_val = x.get("depends_on") or []
-        if isinstance(depends_on_val, list):
-            depends_on = [str(d).strip() for d in depends_on_val if str(d).strip()]
-        else:
-            depends_on = []
+        scheduling = normalize_task_scheduling_metadata(
+            title=title,
+            prompt=prompt,
+            done_when=done_when,
+            files=files,
+            depends_on=depends_on_val,
+            effort=x.get("effort"),
+            priority=x.get("priority"),
+            touched_file_globs=(
+                x.get("touched_file_globs")
+                if x.get("touched_file_globs") is not None
+                else x.get("touchedFilesGlobs")
+            ),
+        )
 
         goal_trace_val = x.get("goal_trace") or []
         goal_trace: list[dict[str, Any]] = []
@@ -123,7 +441,10 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
                     done_when=done_when,
                     skills=skills,
                     skills_rationale=skills_rationale,
-                    depends_on=depends_on,
+                    depends_on=scheduling["depends_on"],
+                    effort=scheduling["effort"],
+                    priority=scheduling["priority"],
+                    touched_file_globs=scheduling["touched_file_globs"],
                     goal_trace=goal_trace,
                 )
             )
@@ -167,16 +488,26 @@ def parse_backlog_md(path: Path) -> list[TaskItem]:
             continue
         tid = m.group(1).strip()
         title = m.group(2).strip()
+        scheduling = normalize_task_scheduling_metadata(
+            title=title,
+            prompt=f"Implement {tid}: {title}",
+            done_when="Git diff exists and build passes.",
+            files=[],
+            depends_on=[],
+        )
         items.append(
             TaskItem(
                 id=tid,
                 title=title,
                 prompt=f"Implement {tid}: {title}",
-                files=[],
+                files=scheduling["files"],
                 done_when="Git diff exists and build passes.",
                 skills=[],
                 skills_rationale=None,
-                depends_on=[],
+                depends_on=scheduling["depends_on"],
+                effort=scheduling["effort"],
+                priority=scheduling["priority"],
+                touched_file_globs=scheduling["touched_file_globs"],
                 goal_trace=[],
             )
         )
@@ -338,6 +669,9 @@ def write_default_p0_backlog(run_dir: Path) -> None:
                 "skills": [],
                 "skills_rationale": None,
                 "depends_on": [],
+                "effort": "S",
+                "priority": "P0",
+                "touched_file_globs": ["(run_dir)/PM_FAILURE.md"],
             }
         ],
     }

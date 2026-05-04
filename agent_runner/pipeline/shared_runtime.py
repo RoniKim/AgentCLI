@@ -11,6 +11,12 @@ from typing import Any, Awaitable, Callable, Optional
 
 from ..scan import collect_scan_files
 from ..task_status import TASK_STATUS_REVIEW_REQUIRED
+from ..state import (
+    normalize_task_scheduling_metadata,
+    task_effort_rank,
+    task_priority_rank,
+    task_scheduling_snapshot,
+)
 from .session import PipelineSession
 from .stages.base import StageOutcome
 
@@ -201,6 +207,9 @@ def merge_pm_tasks_with_existing_pending(
                     "skills": t.skills or [],
                     "skills_rationale": t.skills_rationale,
                     "depends_on": t.depends_on,
+                    "effort": getattr(t, "effort", ""),
+                    "priority": getattr(t, "priority", ""),
+                    "touched_file_globs": getattr(t, "touched_file_globs", []),
                     "goal_trace": [dict(trace) for trace in (t.goal_trace or []) if isinstance(trace, dict)],
                 }
             )
@@ -259,6 +268,9 @@ def _task_to_backlog_dict(task: Any) -> dict[str, Any]:
             "skills": getattr(task, "skills", []),
             "skills_rationale": getattr(task, "skills_rationale", None),
             "depends_on": getattr(task, "depends_on", []),
+            "effort": getattr(task, "effort", None),
+            "priority": getattr(task, "priority", None),
+            "touched_file_globs": getattr(task, "touched_file_globs", []),
             "goal_trace": getattr(task, "goal_trace", []),
         }
         for key in ("parent_task_id", "split_from_task_id", "split_reason", "split_index", "split_count"):
@@ -268,15 +280,28 @@ def _task_to_backlog_dict(task: Any) -> dict[str, Any]:
     task_id = str(raw.get("id") or "").strip()
     title = str(raw.get("title") or task_id).strip() or task_id
     prompt = str(raw.get("prompt") or "").strip() or f"Implement {task_id}: {title}"
+    scheduling = normalize_task_scheduling_metadata(
+        title=title,
+        prompt=prompt,
+        done_when=str(raw.get("done_when") or "Git diff exists and build passes.").strip(),
+        files=raw.get("files"),
+        depends_on=raw.get("depends_on"),
+        effort=raw.get("effort"),
+        priority=raw.get("priority"),
+        touched_file_globs=raw.get("touched_file_globs"),
+    )
     out: dict[str, Any] = {
         "id": task_id,
         "title": title,
         "prompt": prompt,
-        "files": _clean_task_string_list(raw.get("files")),
+        "files": scheduling["files"],
         "done_when": str(raw.get("done_when") or "Git diff exists and build passes.").strip(),
         "skills": _clean_task_string_list(raw.get("skills")),
         "skills_rationale": None if raw.get("skills_rationale") is None else str(raw.get("skills_rationale")),
-        "depends_on": _clean_task_string_list(raw.get("depends_on")),
+        "depends_on": scheduling["depends_on"],
+        "effort": scheduling["effort"],
+        "priority": scheduling["priority"],
+        "touched_file_globs": scheduling["touched_file_globs"],
     }
     goal_trace = _clean_task_goal_trace(raw.get("goal_trace"))
     if goal_trace:
@@ -435,6 +460,21 @@ def _build_child_task(
         "split_index": index + 1,
         "split_count": count,
     }
+    scheduling = normalize_task_scheduling_metadata(
+        title=str(child.get("title") or child_id),
+        prompt=str(child.get("prompt") or ""),
+        done_when=str(child.get("done_when") or ""),
+        files=child.get("files"),
+        depends_on=child.get("depends_on"),
+        effort=None,
+        priority=parent.get("priority"),
+        touched_file_globs=files or parent.get("touched_file_globs") or parent.get("files"),
+    )
+    child["files"] = scheduling["files"]
+    child["depends_on"] = scheduling["depends_on"]
+    child["effort"] = scheduling["effort"]
+    child["priority"] = scheduling["priority"]
+    child["touched_file_globs"] = scheduling["touched_file_globs"]
     goal_trace = _clean_task_goal_trace(parent.get("goal_trace"))
     if goal_trace:
         child["goal_trace"] = goal_trace
@@ -918,6 +958,92 @@ def _dependency_blocked_detail(blockers: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _dependency_reverse_graph(tasks: list[Any]) -> dict[str, set[str]]:
+    reverse: dict[str, set[str]] = {}
+    valid_ids = {
+        str(getattr(task, "id", "") or "").strip()
+        for task in tasks
+        if str(getattr(task, "id", "") or "").strip()
+    }
+    for task in tasks:
+        task_id = str(getattr(task, "id", "") or "").strip()
+        if not task_id:
+            continue
+        depends_on = getattr(task, "depends_on", []) or []
+        for dep in depends_on:
+            dep_id = str(dep or "").strip()
+            if dep_id and dep_id in valid_ids:
+                reverse.setdefault(dep_id, set()).add(task_id)
+    return reverse
+
+
+def _transitive_unblocks_count(
+    task_id: str,
+    reverse_graph: dict[str, set[str]],
+    *,
+    processed: set[str],
+) -> int:
+    stack = list(reverse_graph.get(task_id, set()))
+    visited: set[str] = set()
+    while stack:
+        current = str(stack.pop() or "").strip()
+        if not current or current in visited or current in processed:
+            continue
+        visited.add(current)
+        stack.extend(reverse_graph.get(current, set()))
+    return len(visited)
+
+
+def _remaining_window_effort_cap(remaining_window_budget: int | None) -> str:
+    if remaining_window_budget is None:
+        return ""
+    if remaining_window_budget <= 1:
+        return "S"
+    if remaining_window_budget == 2:
+        return "M"
+    return ""
+
+
+def _select_ready_task(
+    *,
+    ready_candidates: list[dict[str, Any]],
+    remaining_window_budget: int | None,
+) -> tuple[Any, list[dict[str, Any]], str]:
+    if not ready_candidates:
+        raise ValueError("ready_candidates must not be empty")
+
+    top_priority_rank = min(int(candidate["priority_rank"]) for candidate in ready_candidates)
+    effort_cap = _remaining_window_effort_cap(remaining_window_budget)
+    effort_cap_rank = task_effort_rank(effort_cap) if effort_cap else None
+    has_budget_preferred_ready = bool(
+        effort_cap
+        and any(
+            int(candidate["priority_rank"]) == top_priority_rank
+            and int(candidate["effort_rank"]) <= int(effort_cap_rank or 0)
+            for candidate in ready_candidates
+        )
+    )
+
+    ordered = sorted(
+        ready_candidates,
+        key=lambda candidate: (
+            int(candidate["priority_rank"]),
+            1
+            if (
+                has_budget_preferred_ready
+                and int(candidate["priority_rank"]) == top_priority_rank
+                and int(candidate["effort_rank"]) > int(effort_cap_rank or 0)
+            )
+            else 0,
+            -int(candidate["unblocks_count"]),
+            int(candidate["effort_rank"]),
+            int(candidate["risk_rank"]),
+            int(candidate["index"]),
+        ),
+    )
+    return ordered[0]["task"], ordered, effort_cap
+
+
 def select_next_task_with_dependency_checks(
     *,
     tasks: list[Any],
@@ -936,10 +1062,21 @@ def select_next_task_with_dependency_checks(
     eprint_fn: Callable[[str], None],
     task_results: list[dict[str, Any]],
     step_idx: int = 0,
+    total_iterations: int = 0,
+    remaining_window_budget: int | None = None,
     record_task_experience_fn: Callable[..., None] | None = None,
 ) -> Optional[Any]:
     processed = done_set | skipped_set
-    for t in tasks:
+    reverse_graph = _dependency_reverse_graph(tasks)
+    ready_candidates: list[dict[str, Any]] = []
+    window_budget = (
+        remaining_window_budget
+        if remaining_window_budget is not None
+        else max(0, int(total_iterations or 0) - int(step_idx or 0))
+        if int(total_iterations or 0) > 0
+        else None
+    )
+    for index, t in enumerate(tasks):
         if t.id in processed:
             continue
 
@@ -948,6 +1085,7 @@ def select_next_task_with_dependency_checks(
             if consec >= max_consecutive_failures:
                 logger.skip_event(t.id, f"failed {consec} times consecutively (>= {max_consecutive_failures})")
                 skipped_set.add(t.id)
+                processed.add(t.id)
                 state.setdefault("failed", []).append(
                     {
                         "task": t.id,
@@ -1010,6 +1148,7 @@ def select_next_task_with_dependency_checks(
                     detail = _dependency_blocked_detail(blockers)
                     eprint_fn(f"[SKIP] Task {t.id} depends on unresolvable tasks {permanently_blocked}; skipping.")
                     skipped_set.add(t.id)
+                    processed.add(t.id)
                     state.setdefault("failed", []).append(
                         {
                             "task": t.id,
@@ -1066,7 +1205,68 @@ def select_next_task_with_dependency_checks(
                     continue
                 continue
 
-        return t
+        scheduling = task_scheduling_snapshot(t)
+        ready_candidates.append(
+            {
+                "task": t,
+                "index": index,
+                "priority": scheduling["priority"],
+                "priority_rank": task_priority_rank(scheduling["priority"]),
+                "effort": scheduling["effort"],
+                "effort_rank": task_effort_rank(scheduling["effort"]),
+                "touched_file_globs": scheduling["touched_file_globs"],
+                "depends_on": scheduling["depends_on"],
+                "risk": scheduling["risk"],
+                "risk_rank": scheduling["risk_rank"],
+                "unblocks_count": _transitive_unblocks_count(
+                    t.id,
+                    reverse_graph,
+                    processed=processed,
+                ),
+            }
+        )
+
+    if ready_candidates:
+        selected_task, ordered_candidates, effort_cap = _select_ready_task(
+            ready_candidates=ready_candidates,
+            remaining_window_budget=window_budget,
+        )
+        metrics.event(
+            "task_selection",
+            cycle=cycle_idx,
+            step=step_idx,
+            selected_task_id=selected_task.id,
+            selected_priority=getattr(selected_task, "priority", ""),
+            selected_effort=getattr(selected_task, "effort", ""),
+            remaining_window_budget=window_budget,
+            effort_cap=effort_cap,
+            ready_candidates=[
+                {
+                    "task_id": str(candidate["task"].id or "").strip(),
+                    "priority": candidate["priority"],
+                    "effort": candidate["effort"],
+                    "risk": candidate["risk"],
+                    "depends_on": list(candidate["depends_on"]),
+                    "touched_file_globs": list(candidate["touched_file_globs"]),
+                    "unblocks_count": int(candidate["unblocks_count"]),
+                    "index": int(candidate["index"]),
+                }
+                for candidate in ordered_candidates[:20]
+            ],
+        )
+        return selected_task
+
+    metrics.event(
+        "task_selection",
+        cycle=cycle_idx,
+        step=step_idx,
+        selected_task_id="",
+        selected_priority="",
+        selected_effort="",
+        remaining_window_budget=window_budget,
+        effort_cap=_remaining_window_effort_cap(window_budget),
+        ready_candidates=[],
+    )
 
     return None
 

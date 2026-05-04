@@ -121,6 +121,7 @@ from ..state import (
     parse_backlog_md,
     load_state,
     save_state,
+    task_scheduling_snapshot,
     write_backlog_files,
     mark_backlog_done,
     TaskItem,
@@ -1932,6 +1933,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 eprint_fn=eprint,
                 task_results=task_results,
                 step_idx=step,
+                total_iterations=iterations,
+                remaining_window_budget=max(0, iterations - step),
                 record_task_experience_fn=_record_task_experience_event,
             )
             if not next_task:
@@ -1940,7 +1943,18 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             task_dir = tasks_root / f"c{cycle_idx:03d}_s{step:03d}_{next_task.id}"
             task_dir.mkdir(parents=True, exist_ok=True)
 
-            metrics.event("task_start", cycle=cycle_idx, step=step, task_id=next_task.id)
+            scheduling = task_scheduling_snapshot(next_task)
+            metrics.event(
+                "task_start",
+                cycle=cycle_idx,
+                step=step,
+                task_id=next_task.id,
+                priority=scheduling["priority"],
+                effort=scheduling["effort"],
+                touched_file_globs=scheduling["touched_file_globs"],
+                depends_on=scheduling["depends_on"],
+                risk=scheduling["risk"],
+            )
             task_outer_t0 = time.time()
             task_head_before = git_head(repo)
             task_already_implemented = False

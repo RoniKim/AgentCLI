@@ -3587,6 +3587,9 @@ def _load_tasks(run_dir: Path | None) -> list[TaskItem]:
 
 
 def _task_priority(task: TaskItem, index: int) -> str:
+    explicit = str(getattr(task, "priority", "") or "").strip().upper()
+    if explicit in {"P0", "P1", "P2", "P3"}:
+        return explicit
     text = f"{task.title} {task.prompt}".lower()
     if any(token in text for token in ("test", "qa", "verify", "regression")):
         return "P1"
@@ -3596,6 +3599,9 @@ def _task_priority(task: TaskItem, index: int) -> str:
 
 
 def _task_estimate(task: TaskItem) -> str:
+    explicit = str(getattr(task, "effort", "") or "").strip().upper()
+    if explicit in {"S", "M", "L"}:
+        return explicit
     score = len(task.files) + max(1, len(task.prompt.split()) // 45)
     if score <= 1:
         return "S"
@@ -3762,8 +3768,10 @@ def _load_backlog_payload(
                 "depends_on": task.depends_on,
                 "status": status,
                 "priority": _task_priority(task, index),
+                "effort": _task_estimate(task),
                 "tags": _task_tags(task),
                 "estimate": _task_estimate(task),
+                "touched_file_globs": list(getattr(task, "touched_file_globs", []) or []),
                 "skill": task.skills[0] if task.skills else None,
                 "attempt": attempt,
                 "failure": {

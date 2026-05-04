@@ -107,6 +107,7 @@ from .state import (
     parse_backlog_md,
     load_state,
     save_state,
+    task_scheduling_snapshot,
     mark_backlog_done,
     write_default_p0_backlog,
     write_backlog_files,
@@ -1710,6 +1711,8 @@ async def main_async(args: argparse.Namespace) -> int:
                     eprint_fn=eprint,
                     task_results=task_results,
                     step_idx=step,
+                    total_iterations=int(args.iterations),
+                    remaining_window_budget=max(0, int(args.iterations) - step),
                     record_task_experience_fn=_record_task_experience_event,
                 )
                 if not next_task:
@@ -1722,6 +1725,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 task_goal_trace = [dict(trace) for trace in (next_task.goal_trace or []) if isinstance(trace, dict)]
                 task_goal_ref = str(task_goal_trace[0].get("goal_ref") or task_goal_trace[0].get("goal_id") or "").strip() if task_goal_trace else ""
                 task_goal_text = str(task_goal_trace[0].get("goal_text") or task_goal_trace[0].get("text") or "").strip() if task_goal_trace else ""
+                scheduling = task_scheduling_snapshot(next_task)
 
                 metrics.event(
                     "task_start",
@@ -1731,6 +1735,11 @@ async def main_async(args: argparse.Namespace) -> int:
                     goal_trace=task_goal_trace,
                     goal_ref=task_goal_ref,
                     goal_text=task_goal_text,
+                    priority=scheduling["priority"],
+                    effort=scheduling["effort"],
+                    touched_file_globs=scheduling["touched_file_globs"],
+                    depends_on=scheduling["depends_on"],
+                    risk=scheduling["risk"],
                 )
                 task_outer_t0 = time.time()
                 task_head_before = git_head(repo)

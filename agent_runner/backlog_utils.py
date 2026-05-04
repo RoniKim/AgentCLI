@@ -12,7 +12,13 @@ from typing import Any, Optional
 
 from .goals import gate_pm_tasks_against_goals
 from .pipeline.shared_runtime import merge_pm_tasks_with_existing_pending
-from .state import load_backlog_json, parse_backlog_md, load_state, TaskItem
+from .state import (
+    TaskItem,
+    load_backlog_json,
+    load_state,
+    normalize_task_scheduling_metadata,
+    parse_backlog_md,
+)
 from .task_history import (
     build_failed_tasks_artifact as _build_failed_tasks_artifact,
     record_task as _record_task_history,
@@ -150,15 +156,32 @@ def normalize_backlog_tasks(
             depends_on = [str(d).strip() for d in depends_on_val if str(d).strip()]
         else:
             depends_on = []
+        scheduling = normalize_task_scheduling_metadata(
+            title=str(t.get("title") or fixed_id).strip() or fixed_id,
+            prompt=str(t.get("prompt") or "").strip() or f"Implement {fixed_id}.",
+            done_when=str(t.get("done_when") or "Git diff exists and build passes.").strip(),
+            files=t.get("files") if isinstance(t.get("files"), list) else [],
+            depends_on=depends_on,
+            effort=t.get("effort"),
+            priority=t.get("priority"),
+            touched_file_globs=(
+                t.get("touched_file_globs")
+                if t.get("touched_file_globs") is not None
+                else t.get("touchedFilesGlobs")
+            ),
+        )
         normalized_task = {
             "id": fixed_id,
             "title": str(t.get("title") or fixed_id).strip() or fixed_id,
             "prompt": str(t.get("prompt") or "").strip() or f"Implement {fixed_id}.",
-            "files": t.get("files") if isinstance(t.get("files"), list) else [],
+            "files": scheduling["files"],
             "done_when": str(t.get("done_when") or "Git diff exists and build passes.").strip(),
             "skills": skills,
             "skills_rationale": None if t.get("skills_rationale") is None else str(t.get("skills_rationale")),
-            "depends_on": depends_on,
+            "depends_on": scheduling["depends_on"],
+            "effort": scheduling["effort"],
+            "priority": scheduling["priority"],
+            "touched_file_globs": scheduling["touched_file_globs"],
         }
         goal_trace = _clean_goal_trace(t.get("goal_trace"))
         if goal_trace:

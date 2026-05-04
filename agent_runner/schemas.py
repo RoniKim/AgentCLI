@@ -26,6 +26,18 @@ class BacklogTaskV2(BaseModel):
         default_factory=list,
         description="Task IDs this task depends on (e.g. ['T1']); empty if no dependencies",
     )
+    effort: Optional[Literal["S", "M", "L"]] = Field(
+        default=None,
+        description="Estimated task effort bucket for runtime scheduling",
+    )
+    priority: Optional[Literal["P0", "P1", "P2", "P3"]] = Field(
+        default=None,
+        description="Priority bucket for runtime scheduling",
+    )
+    touched_file_globs: List[str] = Field(
+        default_factory=list,
+        description="File globs the task is expected to touch",
+    )
 
 
 class PMOutputV2(BaseModel):
