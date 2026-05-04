@@ -90,7 +90,12 @@ from .reporting import (
     write_cycle_change_summary_artifacts,
     write_run_report_artifacts,
 )
-from .runtime_contract import AttemptContext, RunnerContext
+from .runtime_contract import (
+    AttemptContext,
+    RunnerContext,
+    dispatch_task_branch_disposition,
+    dispatch_worktree_cleanup,
+)
 from .run_dir import make_run_dir, find_latest_run_dir
 from .stop_progress import write_stop_snapshot
 from .state import (
@@ -2019,125 +2024,131 @@ async def main_async(args: argparse.Namespace) -> int:
                     )
 
                 def _isolate_or_stop(reason: str, *, task_status: str = "", detail: str = "", validation_artifact: str = "") -> tuple[bool, str]:
-                    """Isolate failed task work.
+                    """Apply task-branch disposition while preserving the old event/state semantics."""
 
-                    For ``regression_failed`` and other non-preserve outcomes the task branch
-                    is abandoned (non-destructive: branch ref retained, checkout returns to
-                    base). For preserve-for-review statuses (``blocked_env``,
-                    ``test_contract_changed``, ``review_required``) the same branch action is
-                    used to release the worktree, but the metric, log message, and pending
-                    review entry are tagged so operators see the work is preserved on the
-                    branch instead of discarded. ``abandon_task_branch`` failure falls back
-                    to ``restore_checkpoint``.
-                    """
-                    outcome_status = _task_failure_status(reason, detail=detail) if not task_status else task_status
-                    preserve = should_preserve_for_review(outcome_status)
-                    if tb:
-                        try:
-                            abandon_task_branch(repo, tb)
-                            _record_pending_review(
-                                reason,
-                                task_status=outcome_status,
-                                detail=detail,
-                                branch=tb.branch_name,
-                                validation_artifact=validation_artifact,
-                            )
-                            save_state(state_path, state)
-                            event_name = "task_branch_preserved" if preserve else "task_branch_abandoned"
-                            metrics.event(
-                                event_name,
-                                cycle=cycle_idx,
-                                step=step,
-                                task_id=next_task.id,
-                                reason=reason,
-                                branch=tb.branch_name,
-                                task_status=outcome_status,
-                                preserved=preserve,
-                                goal_trace=task_goal_trace,
-                                goal_ref=task_goal_ref,
-                                goal_text=task_goal_text,
-                            )
-                            if preserve:
-                                eprint(f"[PRESERVE] {next_task.id} work kept on branch {tb.branch_name} for review (status={outcome_status}).")
-                            return True, ""
-                        except Exception as ex:
-                            detail = str(ex)
-                            eprint(f"[WARN] abandon_task_branch failed: {detail}")
-                            _record_failed_state("abandon_failed", detail=detail)
-                            save_state(state_path, state)
-                            _record_history(next_task.id, next_task.title, "failed", reason="abandon_failed", detail=detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=_task_failure_status("abandon_failed", detail=detail))
-                            metrics.event(
-                                "task_branch_abandon_failed",
-                                cycle=cycle_idx,
-                                step=step,
-                                task_id=next_task.id,
-                                reason=reason,
-                                detail=detail,
-                                goal_trace=task_goal_trace,
-                                goal_ref=task_goal_ref,
-                                goal_text=task_goal_text,
-                            )
-                            return False, "abandon_failed"
-                    if not cp:
-                        _record_pending_review(
-                            reason,
-                            task_status=outcome_status,
-                            detail=detail,
-                            validation_artifact=validation_artifact,
-                        )
-                        save_state(state_path, state)
-                        return True, ""
-                    try:
-                        rescue_branch = restore_checkpoint(
-                            repo,
-                            cp,
-                            dangerous=bool(getattr(args, "dangerous_git_rollback", False)),
-                            run_dir=run_dir,
-                            stop_path=stop_path,
+                    def _on_branch_success(disposition: Any, branch_name: str) -> None:
+                        metrics.event(
+                            disposition.event_name,
+                            cycle=cycle_idx,
+                            step=step,
                             task_id=next_task.id,
+                            reason=reason,
+                            branch=branch_name,
+                            task_status=disposition.outcome_status,
+                            preserved=disposition.preserve_for_review,
+                            goal_trace=task_goal_trace,
+                            goal_ref=task_goal_ref,
+                            goal_text=task_goal_text,
                         )
+                        if disposition.preserve_for_review:
+                            eprint(
+                                f"[PRESERVE] {next_task.id} work kept on branch {branch_name} for review "
+                                f"(status={disposition.outcome_status})."
+                            )
+
+                    def _on_abandon_failed(failure_detail: str) -> None:
+                        eprint(f"[WARN] abandon_task_branch failed: {failure_detail}")
+                        abandon_status = _task_failure_status("abandon_failed", detail=failure_detail)
+                        _record_failed_state("abandon_failed", detail=failure_detail, task_status=abandon_status)
+                        save_state(state_path, state)
+                        _record_history(
+                            next_task.id,
+                            next_task.title,
+                            "failed",
+                            reason="abandon_failed",
+                            detail=failure_detail,
+                            files=next_task.files,
+                            cycle=cycle_idx,
+                            attempt=attempt + 1,
+                            max_attempts=max_attempts,
+                            task_status=abandon_status,
+                        )
+                        metrics.event(
+                            "task_branch_abandon_failed",
+                            cycle=cycle_idx,
+                            step=step,
+                            task_id=next_task.id,
+                            reason=reason,
+                            detail=failure_detail,
+                            goal_trace=task_goal_trace,
+                            goal_ref=task_goal_ref,
+                            goal_text=task_goal_text,
+                        )
+
+                    def _on_rollback_success(_disposition: Any, rescue_branch: str) -> None:
                         metrics.event(
                             "rollback",
                             cycle=cycle_idx,
                             step=step,
                             task_id=next_task.id,
                             reason=reason,
-                            rescue_branch=rescue_branch or "",
+                            rescue_branch=rescue_branch,
                             goal_trace=task_goal_trace,
                             goal_ref=task_goal_ref,
                             goal_text=task_goal_text,
                         )
                         if rescue_branch:
                             eprint(f"[INFO] Work preserved in branch: {rescue_branch}")
-                        _record_pending_review(
-                            reason,
-                            task_status=outcome_status,
-                            detail=detail,
-                            rescue_branch=rescue_branch or "",
-                            validation_artifact=validation_artifact,
+
+                    def _on_rollback_failed(fail_reason: str, failure_detail: str) -> None:
+                        rollback_status = _task_failure_status(fail_reason, detail=failure_detail)
+                        _record_failed_state(fail_reason, detail=failure_detail, task_status=rollback_status)
+                        save_state(state_path, state)
+                        _record_history(
+                            next_task.id,
+                            next_task.title,
+                            "failed",
+                            reason=fail_reason,
+                            detail=failure_detail,
+                            files=next_task.files,
+                            cycle=cycle_idx,
+                            attempt=attempt + 1,
+                            max_attempts=max_attempts,
+                            task_status=rollback_status,
                         )
-                        save_state(state_path, state)
-                        return True, ""
-                    except Exception as ex:
-                        detail = str(ex)
-                        blocked = "blocked" in detail.lower()
-                        fail_reason = "rollback_blocked" if blocked else "rollback_failed"
-                        _record_failed_state(fail_reason, detail=detail)
-                        save_state(state_path, state)
-                        _record_history(next_task.id, next_task.title, "failed", reason=fail_reason, detail=detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=_task_failure_status(fail_reason, detail=detail))
                         metrics.event(
                             "rollback_failed",
                             cycle=cycle_idx,
                             step=step,
                             task_id=next_task.id,
                             reason=reason,
-                            detail=detail,
+                            detail=failure_detail,
                             goal_trace=task_goal_trace,
                             goal_ref=task_goal_ref,
                             goal_text=task_goal_text,
                         )
-                        eprint(f"[STOP] Rollback {fail_reason}: {detail}")
-                        return False, fail_reason
+                        eprint(f"[STOP] Rollback {fail_reason}: {failure_detail}")
+
+                    dispatch_result = dispatch_task_branch_disposition(
+                        reason,
+                        task_status=task_status,
+                        detail=detail,
+                        validation_artifact=validation_artifact,
+                        has_task_branch=bool(tb),
+                        has_checkpoint=bool(cp),
+                        task_status_resolver=lambda failure_reason, failure_detail: _task_failure_status(
+                            failure_reason,
+                            detail=failure_detail,
+                        ),
+                        abandon_branch=(lambda: abandon_task_branch(repo, tb)) if tb else None,
+                        restore_checkpoint=(
+                            lambda: restore_checkpoint(
+                                repo,
+                                cp,
+                                dangerous=bool(getattr(args, "dangerous_git_rollback", False)),
+                                run_dir=run_dir,
+                                stop_path=stop_path,
+                                task_id=next_task.id,
+                            )
+                        ) if cp else None,
+                        record_pending_review=_record_pending_review,
+                        persist_state=lambda: save_state(state_path, state),
+                        on_branch_success=_on_branch_success,
+                        on_abandon_failed=_on_abandon_failed,
+                        on_rollback_success=_on_rollback_success,
+                        on_rollback_failed=_on_rollback_failed,
+                    )
+                    return dispatch_result.ok, dispatch_result.stop_reason
 
                 task_stop_recorded = False
 
@@ -4367,19 +4378,18 @@ async def main_async(args: argparse.Namespace) -> int:
                         if queue_result.get("recoverable"):
                             eprint(f" - status:   {queue_result.get('status')} ({queue_result.get('recoverable_reason') or 'recoverable'})")
                         eprint("")
-                try:
-                    remove_worktree(source_repo, worktree_dir)
-                except Exception as ex:
-                    eprint(f"[WARN] Failed to remove worktree: {ex}")
-                    safe_write_text(
-                        run_dir / "WORKTREE_CLEANUP_FAILURE.md",
-                        "# Worktree cleanup failure\n\n"
-                        f"AgentCLI could not remove the isolated worktree:\n\n- `{worktree_dir}`\n\n"
-                        f"Error:\n\n```text\n{ex}\n```\n",
-                    )
+                cleanup_result = dispatch_worktree_cleanup(
+                    source_repo=source_repo,
+                    worktree_dir=worktree_dir,
+                    run_dir=run_dir,
+                    should_remove=True,
+                    remove_worktree_fn=remove_worktree,
+                    eprint_fn=eprint,
+                )
+                if not cleanup_result.ok:
                     if last_rc == 0:
                         last_rc = 1
-                    final_reason = "worktree_cleanup_failed"
+                    final_reason = cleanup_result.final_reason
             run_summary["final"] = {"rc": last_rc, "reason": final_reason or ""}
             _write_run_summary()
             try:
