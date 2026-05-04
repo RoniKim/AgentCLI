@@ -3670,6 +3670,18 @@ async def main_async(args: argparse.Namespace) -> int:
                         checked = goals_update.get("checked_items", [])
                         eprint(f"[GOALS] Auto-checked {len(checked)} item(s): {checked[:5]}")
                         metrics.event("goals_updated", cycle=cycle_idx, checked_count=len(checked), items=checked[:10])
+                    elif str(goals_update.get("status") or "").strip().lower() == "conflict":
+                        matched = [
+                            str(item).strip()
+                            for item in list(goals_update.get("matched_items") or [])
+                            if str(item).strip()
+                        ]
+                        metrics.event(
+                            "goals_update_conflict",
+                            cycle=cycle_idx,
+                            matched_count=len(matched),
+                            items=matched[:10],
+                        )
                 except Exception as goals_ex:
                     eprint(f"[WARN] Goals auto-check failed: {goals_ex}")
 

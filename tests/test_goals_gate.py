@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+from io import StringIO
 import json
 import shutil
 import sys
@@ -14,11 +16,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-from agent_runner.goals import gate_pm_tasks_against_goals
+import agent_runner.goals as goals_module
+from agent_runner.goals import gate_pm_tasks_against_goals, update_goals_checkboxes
 from agent_runner.backlog_utils import normalize_backlog_tasks, postprocess_pm_output_tasks
 from agent_runner.gitops import create_task_branch, format_task_commit_message
 from agent_runner.metrics import MetricsLogger
 from agent_runner.state import TaskItem, load_backlog_json, write_backlog_files
+from agent_runner.utils import atomic_write_text as real_atomic_write_text
 
 
 GOALS_MD = """# Project Goals
@@ -42,7 +46,8 @@ class GoalsGateTests(unittest.TestCase):
         self.run_dir = self.fixture_root / "run"
         self.repo.mkdir()
         (self.repo / ".doc").mkdir()
-        (self.repo / ".doc" / "GOALS.md").write_text(GOALS_MD, encoding="utf-8")
+        self.goals_path = self.repo / ".doc" / "GOALS.md"
+        self.goals_path.write_text(GOALS_MD, encoding="utf-8")
         self.addCleanup(lambda: shutil.rmtree(self.fixture_root, ignore_errors=True))
 
     def _pm_tasks(self) -> list[dict[str, object]]:
@@ -60,6 +65,93 @@ class GoalsGateTests(unittest.TestCase):
                 "done_when": "The Ship web console gate goal is satisfied and documented.",
             },
         ]
+
+    def test_goals_auto_check_uses_atomic_write_for_matching_tasks(self) -> None:
+        with patch("agent_runner.goals.atomic_write_text", wraps=real_atomic_write_text) as atomic_write:
+            result = update_goals_checkboxes(
+                self.repo,
+                ["Ship web console gate"],
+                ["GOALS: Ship web console gate"],
+                completion_level="p0",
+            )
+
+        self.assertTrue(result["updated"])
+        self.assertEqual("updated", result["status"])
+        self.assertFalse(result["conflict"])
+        self.assertEqual(["Ship web console gate"], result["checked_items"])
+        atomic_write.assert_called_once()
+        self.assertEqual(self.goals_path, Path(atomic_write.call_args.args[0]))
+
+        updated_text = self.goals_path.read_text(encoding="utf-8")
+        self.assertIn("- [x] Ship web console gate", updated_text)
+        self.assertIn("- [ ] Add goal trace metadata", updated_text)
+
+    def test_goals_auto_check_preserves_concurrent_edit_and_returns_conflict(self) -> None:
+        conflict_text = GOALS_MD.replace("- [ ] Add goal trace metadata", "- [x] Add goal trace metadata", 1)
+        original_read_snapshot = goals_module._read_goals_snapshot
+        read_count = 0
+
+        def conflicting_read_snapshot(path: Path) -> dict[str, object] | None:
+            nonlocal read_count
+            read_count += 1
+            if read_count == 2:
+                path.write_text(conflict_text, encoding="utf-8")
+            return original_read_snapshot(path)
+
+        stderr_buffer = StringIO()
+        with (
+            redirect_stderr(stderr_buffer),
+            patch("agent_runner.goals._read_goals_snapshot", side_effect=conflicting_read_snapshot),
+        ):
+            result = update_goals_checkboxes(
+                self.repo,
+                ["Ship web console gate"],
+                ["GOALS: Ship web console gate"],
+                completion_level="p0",
+            )
+
+        self.assertFalse(result["updated"])
+        self.assertEqual("conflict", result["status"])
+        self.assertTrue(result["conflict"])
+        self.assertTrue(result["skipped"])
+        self.assertEqual([], result["checked_items"])
+        self.assertEqual(["Ship web console gate"], result["matched_items"])
+        self.assertEqual(conflict_text, self.goals_path.read_text(encoding="utf-8"))
+        self.assertEqual(1, result["new_status"]["p0_done"])
+        self.assertFalse(result["new_status"]["project_complete"])
+        self.assertIn("concurrent edit conflict", stderr_buffer.getvalue())
+
+    def test_goals_auto_check_no_match_is_non_mutating(self) -> None:
+        original_text = self.goals_path.read_text(encoding="utf-8")
+        with patch("agent_runner.goals.atomic_write_text", side_effect=AssertionError("unexpected write")):
+            result = update_goals_checkboxes(
+                self.repo,
+                ["Unrelated task"],
+                ["Unrelated prompt"],
+                completion_level="p0",
+            )
+
+        self.assertFalse(result["updated"])
+        self.assertEqual("no_match", result["status"])
+        self.assertTrue(result["skipped"])
+        self.assertFalse(result["conflict"])
+        self.assertEqual(original_text, self.goals_path.read_text(encoding="utf-8"))
+
+    def test_goals_auto_check_missing_file_is_non_mutating(self) -> None:
+        self.goals_path.unlink()
+        with patch("agent_runner.goals.atomic_write_text", side_effect=AssertionError("unexpected write")):
+            result = update_goals_checkboxes(
+                self.repo,
+                ["Ship web console gate"],
+                ["GOALS: Ship web console gate"],
+                completion_level="p0",
+            )
+
+        self.assertFalse(result["updated"])
+        self.assertEqual("missing_file", result["status"])
+        self.assertTrue(result["skipped"])
+        self.assertFalse(result["conflict"])
+        self.assertFalse(self.goals_path.exists())
 
     def test_gate_rejects_unrelated_tasks_while_p0_remain(self) -> None:
         gate = gate_pm_tasks_against_goals(self.repo, self._pm_tasks(), completion_level="p0")
