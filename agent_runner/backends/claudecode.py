@@ -1,4 +1,4 @@
-﻿"""Claude Code backend - full feature parity with Codex backend (cycle.py).
+"""Claude Code backend - full feature parity with Codex backend (cycle.py).
 
 This backend uses the Claude Agent SDK (claude_agent_sdk) as the execution engine
 while providing the same artifacts, logging, and orchestration as the Codex backend.

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import ipaddress
@@ -258,7 +258,6 @@ CONFIG_CONTRACT_GROUPS = _web_config.CONFIG_CONTRACT_GROUPS
 CONFIG_CONTRACT_FIELDS = _web_config.CONFIG_CONTRACT_FIELDS
 ConfigMutationError = _web_config.ConfigMutationError
 _is_sensitive_config_key = _web_config._is_sensitive_config_key
-_redact_config = _web_config._redact_config
 _config_path_get = _web_config._config_path_get
 _config_path_set = _web_config._config_path_set
 _merge_config_tree = _web_config._merge_config_tree
@@ -3438,6 +3437,8 @@ def _text_excerpt(text: str, *, max_lines: int = 8, max_chars: int = 280) -> str
 
 
 def _branch_name(repo: Path) -> str:
+    if not (repo / ".git").exists():
+        return ""
     rc, out = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, timeout_sec=10)
     if rc != 0:
         return ""
@@ -3449,6 +3450,8 @@ def _branch_name(repo: Path) -> str:
 
 
 def _git_head_short(repo: Path) -> str:
+    if not (repo / ".git").exists():
+        return ""
     try:
         head = git_head(repo).strip()
         return head[:8] if head else ""

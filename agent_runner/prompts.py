@@ -144,7 +144,6 @@ def append_pm_essential_context(
     goals_instruction: str = "",
     experience_summary_block: str = "",
     build_warnings_block: str = "",
-    experience_summary_block: str = "",
 ) -> str:
     """Programmatically append essential runtime context to a PM prompt.
 

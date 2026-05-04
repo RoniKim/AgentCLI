@@ -1,4 +1,4 @@
-﻿"""Repo-local Experience DB initialization and schema migration helpers.
+"""Repo-local Experience DB initialization and schema migration helpers.
 
 This module stores only compact structured experience metadata. It does not
 store raw prompts, raw logs, or raw diffs.
@@ -179,7 +179,6 @@ def initialize_experience_db(
     return paths
 
 """Completed-task experience records stored on top of task history DB."""
-from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
@@ -339,9 +338,8 @@ def record_completed_task_experience(
     """Persist a redacted completed-task experience record. Never raises."""
     try:
         repo_path = Path(repo).expanduser().resolve()
-        conn = _connect(repo_path)
+        conn = _connect_task_history_experience_db(repo_path)
         try:
-            conn.execute(_SCHEMA_SQL)
             payload = {
                 "run_id": _text(run_id),
                 "task_id": _text(task_id),
@@ -362,42 +360,46 @@ def record_completed_task_experience(
                 "pr_packet_ids": _normalize_pr_packet_ids(pr_packet_ids),
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
             }
-            conn.execute(
-                "INSERT INTO task_experiences "
-                "("
-                "run_id, task_id, title, status, task_status, validation_status, goal_refs, "
-                "changed_files, branch_ref, head_ref, base_ref, validation_artifacts, pr_packet_ids, recorded_at"
-                ") "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(run_id, task_id, status) DO UPDATE SET "
-                "title=excluded.title, "
-                "task_status=excluded.task_status, "
-                "validation_status=excluded.validation_status, "
-                "goal_refs=excluded.goal_refs, "
-                "changed_files=excluded.changed_files, "
-                "branch_ref=excluded.branch_ref, "
-                "head_ref=excluded.head_ref, "
-                "base_ref=excluded.base_ref, "
-                "validation_artifacts=excluded.validation_artifacts, "
-                "pr_packet_ids=excluded.pr_packet_ids, "
-                "recorded_at=excluded.recorded_at",
-                (
-                    payload["run_id"],
-                    payload["task_id"],
-                    payload["title"],
-                    payload["status"],
-                    payload["task_status"],
-                    payload["validation_status"],
-                    json.dumps(payload["goal_refs"], ensure_ascii=False),
-                    json.dumps(payload["changed_files"], ensure_ascii=False),
-                    payload["branch_ref"],
-                    payload["head_ref"],
-                    payload["base_ref"],
-                    json.dumps(payload["validation_artifacts"], ensure_ascii=False),
-                    json.dumps(payload["pr_packet_ids"], ensure_ascii=False),
-                    payload["recorded_at"],
-                ),
+            existing = conn.execute(
+                "SELECT id FROM task_experiences WHERE run_id = ? AND task_id = ? AND status = ? "
+                "AND (backend = '' OR backend IS NULL) ORDER BY id DESC LIMIT 1",
+                (payload["run_id"], payload["task_id"], payload["status"]),
+            ).fetchone()
+            values = (
+                payload["run_id"],
+                payload["task_id"],
+                payload["title"],
+                payload["status"],
+                payload["task_status"],
+                payload["validation_status"],
+                json.dumps(payload["goal_refs"], ensure_ascii=False),
+                json.dumps(payload["changed_files"], ensure_ascii=False),
+                payload["branch_ref"],
+                payload["head_ref"],
+                payload["base_ref"],
+                json.dumps(payload["validation_artifacts"], ensure_ascii=False),
+                json.dumps(payload["pr_packet_ids"], ensure_ascii=False),
+                payload["recorded_at"],
             )
+            if existing:
+                conn.execute(
+                    "UPDATE task_experiences SET "
+                    "run_id = ?, task_id = ?, title = ?, status = ?, task_status = ?, validation_status = ?, "
+                    "goal_refs = ?, changed_files = ?, branch_ref = ?, head_ref = ?, base_ref = ?, "
+                    "validation_artifacts = ?, pr_packet_ids = ?, recorded_at = ? "
+                    "WHERE id = ?",
+                    (*values, existing[0]),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO task_experiences "
+                    "("
+                    "run_id, task_id, title, status, task_status, validation_status, goal_refs, "
+                    "changed_files, branch_ref, head_ref, base_ref, validation_artifacts, pr_packet_ids, recorded_at"
+                    ") "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    values,
+                )
             conn.commit()
         finally:
             conn.close()
@@ -415,9 +417,8 @@ def query_completed_task_experiences(
     """Return completed-task experience rows as dicts. Never raises."""
     try:
         repo_path = Path(repo).expanduser().resolve()
-        conn = _connect(repo_path)
+        conn = _connect_task_history_experience_db(repo_path)
         try:
-            conn.execute(_SCHEMA_SQL)
             sql = (
                 "SELECT run_id, task_id, title, status, task_status, validation_status, goal_refs, "
                 "changed_files, branch_ref, head_ref, base_ref, validation_artifacts, pr_packet_ids, recorded_at "
@@ -473,7 +474,6 @@ def query_completed_task_experiences(
         return []
 
 """Structured Experience DB helpers for failed/review-required task outcomes."""
-from __future__ import annotations
 
 import json
 import sqlite3
@@ -530,6 +530,86 @@ _VALIDATION_REASON_SUMMARIES = {
     "fast_regression_failed": "Fast regression validation failed.",
     "policy_violation": "Policy validation failed.",
 }
+
+_TASK_HISTORY_EXPERIENCE_SCHEMA_SQL = """\
+CREATE TABLE IF NOT EXISTS task_experiences (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id               TEXT DEFAULT '',
+    backend              TEXT DEFAULT '',
+    task_id              TEXT NOT NULL DEFAULT '',
+    title                TEXT NOT NULL DEFAULT '',
+    status               TEXT NOT NULL DEFAULT '',
+    task_status          TEXT DEFAULT '',
+    validation_status    TEXT DEFAULT '',
+    goal_refs            TEXT DEFAULT '[]',
+    changed_files        TEXT DEFAULT '[]',
+    branch_ref           TEXT DEFAULT '',
+    head_ref             TEXT DEFAULT '',
+    base_ref             TEXT DEFAULT '',
+    validation_artifacts TEXT DEFAULT '[]',
+    pr_packet_ids        TEXT DEFAULT '[]',
+    reason               TEXT DEFAULT '',
+    cycle_idx            INTEGER DEFAULT 0,
+    step_idx             INTEGER DEFAULT 0,
+    attempt              INTEGER DEFAULT 0,
+    max_attempts         INTEGER DEFAULT 0,
+    outcome_action       TEXT DEFAULT '',
+    experience_payload   TEXT NOT NULL DEFAULT '{}',
+    recorded_at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_experiences_task_id
+    ON task_experiences(task_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_experiences_run_id
+    ON task_experiences(run_id, recorded_at DESC);
+"""
+
+_TASK_HISTORY_EXPERIENCE_COLUMNS: dict[str, str] = {
+    "run_id": "TEXT DEFAULT ''",
+    "backend": "TEXT DEFAULT ''",
+    "task_id": "TEXT NOT NULL DEFAULT ''",
+    "title": "TEXT NOT NULL DEFAULT ''",
+    "status": "TEXT NOT NULL DEFAULT ''",
+    "task_status": "TEXT DEFAULT ''",
+    "validation_status": "TEXT DEFAULT ''",
+    "goal_refs": "TEXT DEFAULT '[]'",
+    "changed_files": "TEXT DEFAULT '[]'",
+    "branch_ref": "TEXT DEFAULT ''",
+    "head_ref": "TEXT DEFAULT ''",
+    "base_ref": "TEXT DEFAULT ''",
+    "validation_artifacts": "TEXT DEFAULT '[]'",
+    "pr_packet_ids": "TEXT DEFAULT '[]'",
+    "reason": "TEXT DEFAULT ''",
+    "cycle_idx": "INTEGER DEFAULT 0",
+    "step_idx": "INTEGER DEFAULT 0",
+    "attempt": "INTEGER DEFAULT 0",
+    "max_attempts": "INTEGER DEFAULT 0",
+    "outcome_action": "TEXT DEFAULT ''",
+    "experience_payload": "TEXT NOT NULL DEFAULT '{}'",
+    "recorded_at": "TEXT NOT NULL DEFAULT ''",
+}
+
+
+def _ensure_task_history_experience_columns(conn: sqlite3.Connection) -> None:
+    existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(task_experiences)").fetchall()}
+    for column, ddl in _TASK_HISTORY_EXPERIENCE_COLUMNS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE task_experiences ADD COLUMN {column} {ddl}")
+
+
+def _connect_task_history_experience_db(repo: Path) -> sqlite3.Connection:
+    db = default_database_path(repo)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db), timeout=10)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        conn.executescript(_TASK_HISTORY_EXPERIENCE_SCHEMA_SQL)
+        _ensure_task_history_experience_columns(conn)
+        conn.commit()
+    except Exception:
+        conn.close()
+        raise
+    return conn
 
 
 def _db_path(repo: Path) -> Path:
@@ -802,7 +882,7 @@ def record_task_experience(
                 "note": _sanitize_summary_text(outcome_note, max_chars=_MAX_OUTCOME_NOTE_LEN),
             },
         }
-        conn = _connect(repo)
+        conn = _connect_task_history_experience_db(repo)
         try:
             conn.execute(
                 "INSERT INTO task_experiences "
@@ -841,7 +921,7 @@ def query_task_experiences(
 ) -> list[dict[str, Any]]:
     """Return recent structured task experiences. Never raises."""
     try:
-        conn = _connect(repo)
+        conn = _connect_task_history_experience_db(repo)
         try:
             sql = (
                 "SELECT run_id, backend, task_id, title, status, task_status, reason, cycle_idx, step_idx, "
@@ -889,7 +969,6 @@ def query_task_experiences(
         eprint(f"[WARN] experience.query_task_experiences failed: {exc}")
         return []
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -939,6 +1018,8 @@ CREATE INDEX IF NOT EXISTS idx_validation_experiences_task_id ON validation_expe
 CREATE INDEX IF NOT EXISTS idx_validation_experiences_packet_id ON validation_experiences(packet_id);
 CREATE INDEX IF NOT EXISTS idx_validation_experiences_classification ON validation_experiences(classification);
 """
+
+_VALIDATION_EXPERIENCE_SCHEMA_SQL = _SCHEMA_SQL
 
 _MAX_SUMMARY_LINES = 4
 _MAX_SUMMARY_CHARS = 320
@@ -1532,7 +1613,6 @@ def load_validation_experiences(
         )
     return out
 
-from __future__ import annotations
 
 import json
 import sqlite3
@@ -1572,6 +1652,8 @@ CREATE INDEX IF NOT EXISTS idx_pr_queue_experiences_task
 CREATE INDEX IF NOT EXISTS idx_pr_queue_experiences_signal
     ON pr_queue_experiences(signal_kind, decision_status, id DESC);
 """
+
+_PR_QUEUE_EXPERIENCE_SCHEMA_SQL = _SCHEMA_SQL
 
 
 def experience_root(source_repo: Path) -> Path:
@@ -1625,7 +1707,7 @@ def _normalize_str_list(value: Sequence[object] | object | None) -> list[str]:
     return result
 
 
-def _normalize_evidence_pointers(value: Sequence[object] | object | None) -> list[dict[str, object]]:
+def _normalize_pr_queue_evidence_pointers(value: Sequence[object] | object | None) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     seen: set[str] = set()
     for item in _normalize_list(value):
@@ -1710,7 +1792,7 @@ def record_pr_queue_signal(
             or ""
         ).strip()
         goal_trace_value = _normalize_list(packet.get("goal_trace") or packet.get("goalTrace"))
-        evidence_value = _normalize_evidence_pointers(evidence)
+        evidence_value = _normalize_pr_queue_evidence_pointers(evidence)
 
         conn = _connect(source_repo_path)
         try:
@@ -1857,7 +1939,6 @@ def query_pr_queue_signals(
         eprint(f"[WARN] experience.query_pr_queue_signals failed: {exc}")
         return []
 
-from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -1913,7 +1994,6 @@ def load_run_experience_records(run_dir: Path) -> list[dict[str, Any]]:
     return records
 
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -2046,7 +2126,7 @@ def sanitize_lesson_record(repo: Path, lesson: dict[str, Any], *, now: str | Non
             goal_refs,
             file_globs,
         )
-    evidence_pointers = _normalize_evidence_pointers(
+    evidence_pointers = _normalize_lesson_evidence_pointers(
         repo,
         lesson.get("evidence_pointers")
         or lesson.get("evidencePointers")
@@ -2271,11 +2351,11 @@ def _normalize_file_globs(repo: Path, value: object) -> list[str]:
     return _unique_sorted(globs)
 
 
-def _normalize_evidence_pointers(repo: Path, value: object) -> list[dict[str, Any]]:
+def _normalize_lesson_evidence_pointers(repo: Path, value: object) -> list[dict[str, Any]]:
     pointers: list[dict[str, Any]] = []
     seen: set[str] = set()
     for entry in _as_list(value):
-        pointer = _normalize_evidence_pointer(repo, entry)
+        pointer = _normalize_lesson_evidence_pointer(repo, entry)
         if not pointer:
             continue
         key = json.dumps(pointer, ensure_ascii=False, sort_keys=True)
@@ -2288,7 +2368,7 @@ def _normalize_evidence_pointers(repo: Path, value: object) -> list[dict[str, An
     return pointers
 
 
-def _normalize_evidence_pointer(repo: Path, value: object) -> dict[str, Any] | None:
+def _normalize_lesson_evidence_pointer(repo: Path, value: object) -> dict[str, Any] | None:
     if isinstance(value, dict):
         pointer: dict[str, Any] = {}
         kind = _normalize_token(value.get("kind") or "artifact") or "artifact"
@@ -2490,7 +2570,6 @@ def _camel_case(value: str) -> str:
     head, *tail = value.split("_")
     return head + "".join(part.capitalize() for part in tail)
 
-from __future__ import annotations
 
 import math
 import re
@@ -2560,7 +2639,7 @@ class _PreparedLesson:
     line: str
 
 
-def render_experience_summary(
+def _render_ranked_experience_summary(
     lessons: Iterable[Mapping[str, Any]],
     *,
     config: ExperienceSummaryConfig | None = None,
@@ -2923,7 +3002,6 @@ def _coerce_len(value: Any) -> int:
     items = _coerce_iterable(value)
     return len(items)
 
-from __future__ import annotations
 
 import json
 import re
@@ -2981,7 +3059,7 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     return default
 
 
-def _coerce_int(value: Any, default: int, *, minimum: int = 0) -> int:
+def _coerce_int(value: Any, default: int = 0, *, minimum: int = 0) -> int:
     try:
         return max(minimum, int(value))
     except Exception:
@@ -3346,7 +3424,6 @@ def load_pm_experience_summary(repo: Path, run_dir: Path, *, args: Any | None = 
         return ""
     return _compose_block(rendered_lines, cfg=cfg)
 
-from __future__ import annotations
 
 import json
 import re
@@ -3456,7 +3533,7 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     return default
 
 
-def _coerce_int(value: Any, default: int, *, minimum: int = 0) -> int:
+def _coerce_int(value: Any, default: int = 0, *, minimum: int = 0) -> int:
     try:
         return max(minimum, int(value))
     except Exception:
@@ -4010,7 +4087,7 @@ def _compose_block(lines: Sequence[str], cfg: ExperiencePromptConfig) -> str:
     return "\n".join([opening, *lines, "</pm_experience_summary>"])
 
 
-def render_experience_summary(
+def _render_payload_experience_summary(
     payload: Mapping[str, Any] | None = None,
     *,
     task_lessons: Sequence[Mapping[str, Any]] | None = None,
@@ -4444,7 +4521,6 @@ def derive_experience_lessons(
 
 extract_experience_lessons = recommend_experience_lessons
 
-from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -4630,7 +4706,7 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     return default
 
 
-def _coerce_int(value: Any, default: int, *, minimum: int = 0) -> int:
+def _coerce_int(value: Any, default: int = 0, *, minimum: int = 0) -> int:
     try:
         return max(minimum, int(value))
     except Exception:
@@ -5829,7 +5905,7 @@ def _compose_block(lines: Sequence[str], cfg: ExperiencePromptConfig) -> str:
     return "\n".join([opening, *lines, "</pm_experience_summary>"])
 
 
-def render_experience_summary(
+def _render_payload_experience_summary(
     payload: Mapping[str, Any] | None = None,
     *,
     task_lessons: Sequence[Mapping[str, Any]] | None = None,
@@ -6266,7 +6342,6 @@ prune_experience_store = prune_experience_retention
 apply_experience_retention = prune_experience_retention
 prune_experience_lessons = prune_experience_payload
 
-from __future__ import annotations
 
 import json
 import re
@@ -6454,7 +6529,7 @@ def sanitize_experience_evidence(
     seen: set[str] = set()
 
     for item in items:
-        pointer = _sanitize_evidence_pointer(
+        pointer = _sanitize_pm_evidence_pointer(
             item,
             settings=redaction,
             repo_root=repo_root,
@@ -6697,7 +6772,7 @@ def _normalize_lesson_item(
     return lesson_text, "", []
 
 
-def _sanitize_evidence_pointer(
+def _sanitize_pm_evidence_pointer(
     item: Any,
     *,
     settings: ExperienceRedactionSettings,
@@ -6812,3 +6887,58 @@ def _repo_root_from_run_dir(run_dir: Path) -> Path:
         return current.parents[2]
     except Exception:
         return current
+
+
+def render_experience_summary(
+    payload: Any = None,
+    *,
+    config: ExperienceSummaryConfig | None = None,
+    context: ExperienceRenderContext | None = None,
+    task_lessons: Sequence[Mapping[str, Any]] | None = None,
+    validation_lessons: Sequence[Mapping[str, Any]] | None = None,
+    pm_hints: Sequence[str] | None = None,
+    merge_hints: Sequence[str] | None = None,
+    operator_actions: Sequence[str] | None = None,
+    args: Any = None,
+    max_items: int | None = None,
+    max_chars: int | None = None,
+    lesson_max_chars: int | None = None,
+    evidence_max_items: int | None = None,
+) -> str:
+    if config is not None or context is not None or (payload is not None and not isinstance(payload, Mapping)):
+        lessons = payload if payload is not None else []
+        return _render_ranked_experience_summary(lessons, config=config, context=context)
+    return _render_payload_experience_summary(
+        payload,
+        task_lessons=task_lessons,
+        validation_lessons=validation_lessons,
+        pm_hints=pm_hints,
+        merge_hints=merge_hints,
+        operator_actions=operator_actions,
+        args=args,
+        max_items=max_items,
+        max_chars=max_chars,
+        lesson_max_chars=lesson_max_chars,
+        evidence_max_items=evidence_max_items,
+    )
+
+
+def _connect(repo: Path) -> sqlite3.Connection:
+    db_path = experience_db_path(repo)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        (db_path.parent / "schema_version").write_text(f"{EXPERIENCE_SCHEMA_VERSION}\n", encoding="utf-8")
+    except Exception:
+        pass
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        conn.executescript(_VALIDATION_EXPERIENCE_SCHEMA_SQL)
+        conn.executescript(_PR_QUEUE_EXPERIENCE_SCHEMA_SQL)
+        conn.executescript(_CREATE_SCHEMA_SQL)
+        conn.commit()
+    except Exception:
+        conn.close()
+        raise
+    return conn

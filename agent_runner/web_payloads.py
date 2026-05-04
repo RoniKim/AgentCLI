@@ -1373,6 +1373,7 @@ def build_snapshot(
     _build_notifications = web._build_notifications
     _build_worktree_payload = web._build_worktree_payload
     _build_pr_queue_payload = web._build_pr_queue_payload
+    _build_experience_payload = web._build_experience_payload
     scan_worktree_diagnostics = web.scan_worktree_diagnostics
     _tail_text = web._tail_text
     _log_tail_source_catalog = web._log_tail_source_catalog
@@ -1544,6 +1545,7 @@ def build_snapshot(
     )
     worktree = _build_worktree_payload(repo_root, latest_run_dir, branch=branch)
     pr_queue = _build_pr_queue_payload(repo_root, detail=False)
+    experience = _build_experience_payload(repo_root, latest_run_dir)
     worktree_diagnostics = scan_worktree_diagnostics(repo_root)
     log_tail = _tail_text((latest_run_dir / "cycle_summary.log") if latest_run_dir else Path(""), 80)
     log_source_catalog = _log_tail_source_catalog(latest_run_dir)
@@ -1789,6 +1791,17 @@ def build_snapshot(
         "ready" if pr_queue_items else "empty",
         "" if pr_queue_items else fallbackSectionMessage("prQueue"),
     )
+    experience_state = str(experience.get("state") or "").strip().lower() if isinstance(experience, dict) else ""
+    experience_section_status = (
+        "ready"
+        if experience_state == "ready"
+        else "partial" if experience_state == "partial" else "empty"
+    )
+    experience_section_state = buildSectionState(
+        "experience",
+        experience_section_status,
+        str(experience.get("message") or fallbackSectionMessage("experience")) if isinstance(experience, dict) else fallbackSectionMessage("experience"),
+    )
     worktree_status = str(worktree.get("status") or "none").strip()
     if worktree_status == "none":
         worktree_section_status = "empty"
@@ -1883,6 +1896,7 @@ def build_snapshot(
         "history": history,
         "metrics": metrics,
         "notifications": notifications,
+        "experience": experience,
         "pr_queue": pr_queue,
         "prQueue": pr_queue,
         "worktree": worktree,
@@ -1951,6 +1965,7 @@ def build_snapshot(
             "notifications": notifications_section_state,
             "metrics": metrics_section_state,
             "history": history_section_state,
+            "experience": experience_section_state,
             "prQueue": pr_queue_section_state,
             "worktree": worktree_section_state,
             "runnerControl": runner_control_section_state,

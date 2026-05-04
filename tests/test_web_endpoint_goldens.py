@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -33,7 +33,7 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", errors="replace")
 
 
-def _write_config(path: Path, repo: Path) -> None:
+def _write_basic_config(path: Path, repo: Path) -> None:
     payload = {
         "repo": repo.as_posix(),
         "profile": "personal",
@@ -71,7 +71,7 @@ class WebEndpointGoldenTests(unittest.TestCase):
         self.addCleanup(self._restore_home)
 
         self.config_path = self.home / "configs" / "agentcli.json"
-        _write_config(self.config_path, self.repo)
+        _write_basic_config(self.config_path, self.repo)
 
     def _restore_home(self) -> None:
         if self._old_home is None:
@@ -875,7 +875,6 @@ class WebEndpointGoldenTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
-from __future__ import annotations
 
 import json
 import os

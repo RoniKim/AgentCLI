@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -676,7 +676,7 @@ def _compose_summary(
     return "; ".join(bits) + "."
 
 
-def build_analyzer_summary(run_dir: Path) -> dict[str, Any]:
+def _build_local_analyzer_summary(run_dir: Path) -> dict[str, Any]:
     root = Path(run_dir).expanduser()
     backlog = _load_backlog_tasks(root)
     title_lookup = {task.id: task.title for task in backlog}
@@ -728,11 +728,10 @@ def build_analyzer_summary(run_dir: Path) -> dict[str, Any]:
 
 def write_analyzer_summary(run_dir: Path) -> dict[str, Any]:
     root = Path(run_dir).expanduser()
-    summary = build_analyzer_summary(root)
+    summary = _build_local_analyzer_summary(root)
     atomic_write_json(root / ANALYZER_SUMMARY_FILENAME, summary)
     return summary
 
-from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -746,7 +745,7 @@ ANALYZER_SCHEMA_VERSION = 2
 _VALIDATION_GAP_STATUSES = {"no_tests_found", "tests_skipped", "validation_pending"}
 
 
-def build_analyzer_summary(repo: Path, run_dir: Path) -> dict[str, Any]:
+def _build_experience_analyzer_summary(repo: Path, run_dir: Path) -> dict[str, Any]:
     repo_path = Path(repo).expanduser().resolve()
     run_dir_path = Path(run_dir).expanduser().resolve()
     backlog_map = _load_backlog_context(run_dir_path)
@@ -802,11 +801,11 @@ def build_analyzer_summary(repo: Path, run_dir: Path) -> dict[str, Any]:
     }
 
 
-def write_analyzer_artifacts(repo: Path, run_dir: Path) -> dict[str, Any]:
+def _write_experience_analyzer_artifacts(repo: Path, run_dir: Path) -> dict[str, Any]:
     repo_path = Path(repo).expanduser().resolve()
     run_dir_path = Path(run_dir).expanduser().resolve()
     try:
-        summary = build_analyzer_summary(repo_path, run_dir_path)
+        summary = _build_experience_analyzer_summary(repo_path, run_dir_path)
     except Exception as exc:
         eprint(f"[WARN] analyzer.write_analyzer_artifacts failed: {exc}")
         summary = {
@@ -1193,14 +1192,20 @@ def _relative_path(base: Path, value: object) -> str:
         return path.name
 
 
-def _json_file(path: Path) -> dict[str, Any]:
+_JSON_FILE_MISSING = object()
+
+
+def _json_file(path: Path, default: Any = _JSON_FILE_MISSING) -> Any:
+    fallback = {} if default is _JSON_FILE_MISSING else default
     if not path.exists() or not path.is_file():
-        return {}
+        return fallback
     try:
         payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+        return fallback
+    if default is _JSON_FILE_MISSING:
+        return payload if isinstance(payload, dict) else {}
+    return payload
 
 
 def _summary_text(lessons: list[dict[str, Any]], *, done_count: int, failed_count: int) -> str:
@@ -1268,7 +1273,6 @@ def _unique(values: list[str]) -> list[str]:
         out.append(text)
     return out
 
-from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -1571,7 +1575,76 @@ __all__ = [
     "write_analyzer_artifacts",
 ]
 
-from __future__ import annotations
+
+def build_analyzer_summary(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    if len(args) == 1 and not kwargs:
+        return _build_local_analyzer_summary(Path(args[0]))
+    if len(args) == 2 and not kwargs:
+        return _build_experience_analyzer_summary(Path(args[0]), Path(args[1]))
+    return _build_advisory_analyzer_summary(*args, **kwargs)
+
+
+def write_analyzer_artifacts(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    if len(args) == 2 and not kwargs:
+        return _write_experience_analyzer_artifacts(Path(args[0]), Path(args[1]))
+    return _write_advisory_analyzer_artifacts(*args, **kwargs)
+
+
+def run_advisory_analyzer(
+    run_dir: Path,
+    *,
+    run_id: str,
+    summary: str,
+    task_lessons: Sequence[Mapping[str, Any]] | None = None,
+    validation_lessons: Sequence[Mapping[str, Any]] | None = None,
+    pm_hints: Sequence[str] | None = None,
+    merge_hints: Sequence[str] | None = None,
+    operator_actions: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    return _run_advisory_analyzer_impl(
+        run_dir,
+        run_id=run_id,
+        summary=summary,
+        task_lessons=task_lessons,
+        validation_lessons=validation_lessons,
+        pm_hints=pm_hints,
+        merge_hints=merge_hints,
+        operator_actions=operator_actions,
+    )
+
+
+def execute_analyzer(
+    run_dir: Path,
+    *,
+    run_id: str,
+    summary: str,
+    task_lessons: Sequence[Mapping[str, Any]] | None = None,
+    validation_lessons: Sequence[Mapping[str, Any]] | None = None,
+    pm_hints: Sequence[str] | None = None,
+    merge_hints: Sequence[str] | None = None,
+    operator_actions: Sequence[str] | None = None,
+    experience_records: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if experience_records is not None:
+        derived = classify_experience_lessons(experience_records)
+        task_lessons = task_lessons if task_lessons is not None else derived.get("task_lessons") or []
+        validation_lessons = (
+            validation_lessons if validation_lessons is not None else derived.get("validation_lessons") or []
+        )
+        pm_hints = pm_hints if pm_hints is not None else derived.get("pm_hints") or []
+        merge_hints = merge_hints if merge_hints is not None else derived.get("merge_hints") or []
+        operator_actions = operator_actions if operator_actions is not None else derived.get("operator_actions") or []
+    return run_advisory_analyzer(
+        run_dir,
+        run_id=run_id,
+        summary=summary,
+        task_lessons=task_lessons,
+        validation_lessons=validation_lessons,
+        pm_hints=pm_hints,
+        merge_hints=merge_hints,
+        operator_actions=operator_actions,
+    )
+
 
 import json
 from pathlib import Path
@@ -1689,7 +1762,7 @@ def _normalize_lessons(records: Sequence[Mapping[str, Any]] | None, *, default_k
     return normalized
 
 
-def build_analyzer_summary(
+def _build_advisory_analyzer_summary(
     run_id: str,
     summary: str,
     task_lessons: Sequence[Mapping[str, Any]] | None = None,
@@ -1730,7 +1803,11 @@ def _render_report(summary_payload: Mapping[str, Any]) -> str:
         "",
         f"- Run ID: {summary_payload.get('run_id') or ''}",
         f"- Generated At: {summary_payload.get('generated_at') or ''}",
-        f"- Authority: {authority.get('summary') if isinstance(authority, Mapping) else ''}",
+        f"- Authority: {authority.get('level') if isinstance(authority, Mapping) else ANALYZER_AUTHORITY} only",
+        (
+            "- Boundaries: "
+            f"{authority.get('summary') if isinstance(authority, Mapping) else ''}"
+        ),
         "",
         "## Summary",
         "",
@@ -1778,7 +1855,7 @@ def _render_experience_updates(summary_payload: Mapping[str, Any]) -> str:
     return "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
 
 
-def write_analyzer_artifacts(
+def _write_advisory_analyzer_artifacts(
     run_dir: Path,
     *,
     run_id: str,
@@ -1790,7 +1867,7 @@ def write_analyzer_artifacts(
     operator_actions: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     run_dir_path = Path(run_dir)
-    summary_payload = build_analyzer_summary(
+    summary_payload = _build_advisory_analyzer_summary(
         run_id=run_id,
         summary=summary,
         task_lessons=task_lessons,
@@ -1816,7 +1893,7 @@ def write_analyzer_artifacts(
     }
 
 
-def run_advisory_analyzer(
+def _run_advisory_analyzer_impl(
     run_dir: Path,
     *,
     run_id: str,
@@ -1827,7 +1904,7 @@ def run_advisory_analyzer(
     merge_hints: Sequence[str] | None = None,
     operator_actions: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    return write_analyzer_artifacts(
+    return _write_advisory_analyzer_artifacts(
         run_dir,
         run_id=run_id,
         summary=summary,
@@ -1839,7 +1916,7 @@ def run_advisory_analyzer(
     )
 
 
-def execute_analyzer(
+def _execute_analyzer_from_experience_records(
     run_dir: Path,
     *,
     run_id: str,
@@ -1847,7 +1924,7 @@ def execute_analyzer(
     experience_records: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     derived = classify_experience_lessons(experience_records or [])
-    return run_advisory_analyzer(
+    return _run_advisory_analyzer_impl(
         run_dir,
         run_id=run_id,
         summary=summary,
