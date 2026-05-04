@@ -18,7 +18,7 @@ from typing import Any
 from ..cli import DEFAULTS, parse_args
 from ..config import AGENT_WORK_DIR
 from ..config import load_config, save_config
-from ..pr_queue import build_telegram_pr_queue_summary
+from ..pr_queue import build_telegram_pr_queue_detail, build_telegram_pr_queue_summary
 from ..shell import _parse_kv_tokens
 from .controller import RunnerController
 
@@ -1300,6 +1300,7 @@ class TelegramControlService:
             f"  \uc5f0\uacb0\ub41c \ucc44\ud305: {len(self.allowed_chat_ids)}\uac1c",    # 연결된 채팅: N개
             "\uba85\ub839\uc5b4: /whoami /pair /status /detail /experience /errors /events /grep /run_start /run_stop /runs /tail /notify",  # 명령어
         ]
+        lines.append("PR queue: /prs /pr <id>")
         if not authorized:
             if self.pairing_code:
                 lines.append("\ud398\uc5b4\ub9c1 \ud544\uc694: /pair <\ucf54\ub4dc>")  # 페어링 필요
@@ -1308,12 +1309,85 @@ class TelegramControlService:
         await self._reply(update, "\n".join(lines))
 
 
+    def _append_pr_queue_summary_lines(self, lines: list[str], *, limit: int) -> None:
+        pr_queue = build_telegram_pr_queue_summary(self.repo, limit=limit)
+        queue_items = pr_queue.get("items") if isinstance(pr_queue.get("items"), list) else []
+        if queue_items:
+            lines.append(
+                "PR queue: "
+                f"{int(pr_queue.get('total') or 0)} queued | "
+                f"{int(pr_queue.get('needs_validation') or 0)} need validation | "
+                f"{int(pr_queue.get('needs_approval') or 0)} need approval."
+            )
+            for item in queue_items:
+                if not isinstance(item, dict):
+                    continue
+                evidence = item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) else []
+                evidence_text = ", ".join(str(entry) for entry in evidence[:3] if str(entry).strip()) or "packet-only"
+                task_ids = item.get("task_ids")
+                task_text = ",".join(str(task_id) for task_id in task_ids[:2]) if isinstance(task_ids, list) and task_ids else "-"
+                packet_id = _sanitize_summary_text(item.get("id"), limit=48) or "-"
+                branch = _sanitize_summary_text(item.get("branch"), limit=32) or "-"
+                validation_status = _humanize_summary_label(item.get("validation_status"))
+                merge_status = _humanize_summary_label(item.get("merge_label") or item.get("merge_status"))
+                lines.append(
+                    f"- {packet_id} | validation={validation_status} | merge={merge_status} | branch={branch} | task={task_text} | evidence={evidence_text}"
+                )
+        else:
+            lines.append("PR queue: no queued PRs need validation or approval.")
+
+    def _build_pr_queue_summary_text(self) -> str:
+        lines = [f"{_EMOJI['info']} {self.instance_name} PR queue"]
+        self._append_pr_queue_summary_lines(lines, limit=6)
+        return "\n".join(lines)
+
+    def _build_pr_queue_detail_text(self, packet_id: str) -> str:
+        packet_id_text = str(packet_id or "").strip()
+        if not packet_id_text:
+            return "Usage: /pr <id>"
+        try:
+            detail = build_telegram_pr_queue_detail(self.repo, packet_id_text)
+        except FileNotFoundError:
+            return f"PR packet not found: {packet_id_text}"
+
+        lines = [f"{_EMOJI['detail']} {self.instance_name} PR {detail.get('id') or packet_id_text}"]
+        lines.append(f"status: {_humanize_summary_label(detail.get('status'))}")
+        lines.append(f"validation: {_humanize_summary_label(detail.get('validation_status'))}")
+        lines.append(f"merge: {_humanize_summary_label(detail.get('merge_label') or detail.get('merge_status'))}")
+        approval_status = str(detail.get("approval_status") or "").strip()
+        if approval_status:
+            lines.append(f"approval: {_humanize_summary_label(approval_status)}")
+        lines.append(f"branch: {_sanitize_summary_text(detail.get('branch'), limit=48) or '-'}")
+        lines.append(f"tasks: {', '.join(detail.get('task_ids') or []) or '-'}")
+        lines.append(f"run_id: {detail.get('run_id') or '-'}")
+        lines.append(f"updated: {detail.get('updated_at') or '-'}")
+
+        validation_reason = str(detail.get("validation_reason") or "").strip()
+        validation_detail = str(detail.get("validation_detail") or "").strip()
+        if validation_reason:
+            lines.append(f"validation reason: {validation_reason}")
+        if validation_detail and validation_detail != validation_reason:
+            lines.append(f"validation detail: {validation_detail}")
+
+        qa_notes = detail.get("qa_notes") if isinstance(detail.get("qa_notes"), list) else []
+        if qa_notes:
+            lines.append(f"qa: {' | '.join(str(note) for note in qa_notes if str(note).strip())}")
+
+        artifacts = detail.get("validation_artifacts") if isinstance(detail.get("validation_artifacts"), list) else []
+        if artifacts:
+            lines.append(f"artifacts: {', '.join(str(artifact) for artifact in artifacts if str(artifact).strip())}")
+
+        evidence = detail.get("evidence_refs") if isinstance(detail.get("evidence_refs"), list) else []
+        if evidence:
+            lines.append(f"evidence: {', '.join(str(ref) for ref in evidence if str(ref).strip())}")
+
+        return "\n".join(lines)
+
     def _build_experience_summary_text(self) -> str:
         status = self.controller.status()
         run_dir_text = str(status.get("run_dir") or "").strip()
         run_dir = Path(run_dir_text) if run_dir_text else None
         blockers = _load_telegram_experience_blockers(self.repo, run_dir=run_dir, limit=3)
-        pr_queue = build_telegram_pr_queue_summary(self.repo, limit=4)
 
         lines = [f"{_EMOJI['info']} {self.instance_name} experience summary"]
         blocker_items = blockers.get("items") if isinstance(blockers.get("items"), list) else []
@@ -1329,29 +1403,7 @@ class TelegramControlService:
         else:
             lines.append("Blockers: none from the latest experience summary.")
 
-        queue_items = pr_queue.get("items") if isinstance(pr_queue.get("items"), list) else []
-        if queue_items:
-            lines.append(
-                "PR queue: "
-                f"{int(pr_queue.get('needs_validation') or 0)} validation, "
-                f"{int(pr_queue.get('needs_approval') or 0)} approval."
-            )
-            for item in queue_items:
-                if not isinstance(item, dict):
-                    continue
-                evidence = item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) else []
-                evidence_text = ", ".join(str(entry) for entry in evidence[:3] if str(entry).strip()) or "packet-only"
-                task_ids = item.get("task_ids")
-                task_text = ",".join(str(task_id) for task_id in task_ids[:2]) if isinstance(task_ids, list) and task_ids else "-"
-                packet_id = _sanitize_summary_text(item.get("id"), limit=48) or "-"
-                branch = _sanitize_summary_text(item.get("branch"), limit=32) or "-"
-                label = _humanize_summary_label(item.get("label") or item.get("validation_status"))
-                need = _humanize_summary_label(item.get("need"))
-                lines.append(
-                    f"- {packet_id} | {need} | {label} | branch={branch} | task={task_text} | evidence={evidence_text}"
-                )
-        else:
-            lines.append("PR queue: no queued PRs need validation or approval.")
+        self._append_pr_queue_summary_lines(lines, limit=4)
         return "\n".join(lines)
 
 
@@ -1387,6 +1439,17 @@ class TelegramControlService:
         if not await self._require_auth(update):
             return
         await self._reply(update, self._build_experience_summary_text())
+
+    async def cmd_prs(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._require_auth(update):
+            return
+        await self._reply(update, self._build_pr_queue_summary_text())
+
+    async def cmd_pr(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._require_auth(update):
+            return
+        packet_id = str(context.args[0]).strip() if context.args else ""
+        await self._reply(update, self._build_pr_queue_detail_text(packet_id))
 
 
     async def cmd_errors(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1465,8 +1528,19 @@ class TelegramControlService:
     async def cmd_whoami(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
         chat_id = int(chat.id) if chat else 0
+        allowed = self._is_allowed(chat_id) if chat_id else False
         text = f"chat_id: {chat_id}" if chat_id else "chat_id: (\uc54c \uc218 \uc5c6\uc74c)"  # (알 수 없음)
-        await self._reply(update, text)
+        lines = [
+            text,
+            f"authorized: {'yes' if allowed else 'no'}",
+            "protected commands: /status /detail /experience /prs /pr <id>",
+        ]
+        if not allowed:
+            if self.pairing_code:
+                lines.append("next: /pair <code>")
+            else:
+                lines.append("next: ask the operator to allow this chat_id.")
+        await self._reply(update, "\n".join(lines))
 
     async def cmd_pair(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
@@ -1636,6 +1710,8 @@ class TelegramControlService:
             app.add_handler(CommandHandler("status", self.cmd_status))
             app.add_handler(CommandHandler("detail", self.cmd_detail))
             app.add_handler(CommandHandler("experience", self.cmd_experience))
+            app.add_handler(CommandHandler("prs", self.cmd_prs))
+            app.add_handler(CommandHandler("pr", self.cmd_pr))
             app.add_handler(CommandHandler("errors", self.cmd_errors))
             app.add_handler(CommandHandler("events", self.cmd_events))
             app.add_handler(CommandHandler("grep", self.cmd_grep))

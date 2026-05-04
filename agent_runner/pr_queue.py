@@ -8,7 +8,12 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
-from .experience import record_pr_queue_signal, record_validation_experiences
+from .experience import (
+    record_pr_queue_signal,
+    record_validation_experiences,
+    redact_validation_summary,
+    sanitize_experience_lesson,
+)
 from .gates import (
     classify_pr_queue_validation_status,
     repo_has_web_worktree_markers,
@@ -1048,6 +1053,69 @@ def _review_packet_need(packet: dict[str, Any]) -> tuple[str, str]:
     return "validation", labels.get(validation_status, "validation_pending")
 
 
+def _review_packet_merge_status(packet: dict[str, Any]) -> tuple[str, str]:
+    packet_status = str(packet.get("status") or "pr_queued").strip().lower()
+    approval_status = str(packet.get("approval_status") or packet.get("approvalStatus") or "").strip().lower()
+    validation_status = _normalize_packet_validation_status(
+        packet.get("validation_status") or packet.get("validationStatus") or packet.get("status")
+    )
+    merge_status = str(packet.get("merge_status") or packet.get("mergeStatus") or packet_status).strip().lower()
+    rebase_status = str(packet.get("rebase_status") or packet.get("rebaseStatus") or "").strip().lower()
+    discard_status = str(packet.get("discard_status") or packet.get("discardStatus") or "").strip().lower()
+    if discard_status == "discarded" or packet_status == "discarded":
+        return "discarded", "discarded"
+    if merge_status == "merged" or packet_status == "merged":
+        return "merged", "merged"
+    if merge_status == "approved" or approval_status == "approved" or packet_status == "approved":
+        return "approved", "approved"
+    if rebase_status == "requested":
+        return "rebase_requested", "rebase_requested"
+    if validation_status != "validation_passed":
+        return "blocked_on_validation", "blocked_on_validation"
+    return "approval_required", "approval_required"
+
+
+def _sanitize_telegram_packet_text(
+    source_repo: Path,
+    value: object,
+    *,
+    run_dir: Path | None = None,
+    limit: int = 160,
+) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    sanitized = sanitize_experience_lesson(
+        redact_validation_summary(raw),
+        repo_root=Path(source_repo).expanduser().resolve(),
+        run_dir=run_dir,
+    )
+    sanitized = re.sub(r"\s+", " ", sanitized).strip(" -:")
+    if not sanitized:
+        return ""
+    if len(sanitized) > limit:
+        return sanitized[: max(1, limit - 3)].rstrip() + "..."
+    return sanitized
+
+
+def _review_packet_artifact_refs(packet: dict[str, Any], *, limit: int = 3) -> list[str]:
+    refs: list[str] = []
+    candidates = [
+        packet.get("validation_artifact_path"),
+        packet.get("validationArtifactPath"),
+        *(_normalize_str_list(packet.get("validation_artifacts") or packet.get("validationArtifacts"))),
+    ]
+    for raw in candidates:
+        name = Path(str(raw or "").strip()).name.strip()
+        ref = f"artifact:{name}" if name else ""
+        if not ref or ref in refs:
+            continue
+        refs.append(ref)
+        if len(refs) >= max(1, int(limit)):
+            break
+    return refs
+
+
 def list_review_packets(source_repo: Path) -> dict[str, object]:
     source_repo_path = Path(source_repo).expanduser().resolve()
     queue_root = pr_queue_root(source_repo_path)
@@ -1154,6 +1222,7 @@ def build_telegram_pr_queue_summary(source_repo: Path, *, limit: int = 3) -> dic
         )
         approval_status = str(packet.get("approval_status") or packet.get("approvalStatus") or "").strip().lower()
         need, label = _review_packet_need(packet)
+        merge_status, merge_label = _review_packet_merge_status(packet)
         if validation_status == "validation_passed" and approval_status == "approved":
             continue
         attention_items.append(
@@ -1167,6 +1236,8 @@ def build_telegram_pr_queue_summary(source_repo: Path, *, limit: int = 3) -> dic
                 "branch": str(packet.get("branch") or "").strip(),
                 "validation_status": validation_status or "validation_pending",
                 "approval_status": approval_status,
+                "merge_status": merge_status,
+                "merge_label": merge_label,
                 "updated_at": str(packet.get("updated_at") or packet.get("updatedAt") or "").strip(),
                 "evidence_refs": _review_packet_evidence_refs(packet, packet_id),
             }
@@ -1179,6 +1250,59 @@ def build_telegram_pr_queue_summary(source_repo: Path, *, limit: int = 3) -> dic
         "needs_validation": needs_validation,
         "needs_approval": needs_approval,
         "items": attention_items[:max_items],
+    }
+
+
+def build_telegram_pr_queue_detail(source_repo: Path, packet_id: str) -> dict[str, object]:
+    source_repo_path = Path(source_repo).expanduser().resolve()
+    detail = describe_review_packet(source_repo_path, packet_id)
+    run_id_text = str(detail.get("run_id") or "").strip()
+    run_dir = _resolve_run_dir(source_repo_path, run_id_text)
+    merge_status, merge_label = _review_packet_merge_status(detail)
+
+    qa_notes: list[str] = []
+    for raw_note in detail.get("qa_notes") if isinstance(detail.get("qa_notes"), list) else []:
+        note = _sanitize_telegram_packet_text(source_repo_path, raw_note, run_dir=run_dir, limit=120)
+        if note and note not in qa_notes:
+            qa_notes.append(note)
+        if len(qa_notes) >= 2:
+            break
+
+    return {
+        "ok": True,
+        "id": str(detail.get("id") or packet_id).strip(),
+        "status": str(detail.get("status") or "pr_queued").strip().lower() or "pr_queued",
+        "need": str(detail.get("need") or "").strip(),
+        "need_label": str(detail.get("need_label") or "").strip(),
+        "validation_status": str(detail.get("validation_status") or "validation_pending").strip() or "validation_pending",
+        "validation_reason": _sanitize_telegram_packet_text(
+            source_repo_path,
+            detail.get("validation_reason"),
+            run_dir=run_dir,
+            limit=120,
+        ),
+        "validation_detail": _sanitize_telegram_packet_text(
+            source_repo_path,
+            detail.get("validation_detail"),
+            run_dir=run_dir,
+            limit=160,
+        ),
+        "approval_status": str(detail.get("approval_status") or "").strip().lower(),
+        "merge_status": merge_status,
+        "merge_label": merge_label,
+        "run_id": run_id_text,
+        "task_ids": _normalize_task_ids(detail.get("task_ids") or []),
+        "branch": str(detail.get("branch") or "").strip(),
+        "base_ref": str(detail.get("base_ref") or "").strip(),
+        "head_ref": str(detail.get("head_ref") or "").strip(),
+        "created_at": str(detail.get("created_at") or "").strip(),
+        "updated_at": str(detail.get("updated_at") or "").strip(),
+        "qa_notes": qa_notes,
+        "validation_artifacts": _review_packet_artifact_refs(detail, limit=3),
+        "evidence_refs": _review_packet_evidence_refs(detail, str(detail.get("id") or packet_id).strip())[:4],
+        "branch_index_status": str(detail.get("branch_index_status") or "").strip(),
+        "rebase_status": str(detail.get("rebase_status") or "").strip().lower(),
+        "discard_status": str(detail.get("discard_status") or "").strip().lower(),
     }
 
 
