@@ -117,11 +117,12 @@ def normalize_backlog_tasks(
 
     for t in filtered:
         tid = str(t.get("id") or "").strip()
-        m = re.match(r"^T(\d+)$", tid)
+        m = re.match(r"^T0*([1-9]\d*)([A-Za-z][A-Za-z0-9_-]*)?$", tid)
         n = int(m.group(1)) if m else 0
+        suffix = (m.group(2) or "") if m else ""
 
         # Canonicalize: T01 → T1, T002 → T2 (선행 0 제거로 ID 충돌 방지)
-        canonical = f"T{n}" if n >= 1 else ""
+        canonical = f"T{n}{suffix}" if n >= 1 else ""
         if canonical and canonical not in used:
             fixed_id = canonical
         elif n >= 1 and tid == canonical and tid not in used:
@@ -162,7 +163,7 @@ def normalize_backlog_tasks(
         goal_trace = _clean_goal_trace(t.get("goal_trace"))
         if goal_trace:
             normalized_task["goal_trace"] = goal_trace
-        for key in ("split_from_task_id", "split_reason", "split_index", "split_count"):
+        for key in ("parent_task_id", "split_from_task_id", "split_reason", "split_index", "split_count"):
             if key in t:
                 normalized_task[key] = t[key]
         out.append(normalized_task)

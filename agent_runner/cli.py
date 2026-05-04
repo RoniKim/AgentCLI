@@ -116,7 +116,7 @@ DEFAULTS: Dict[str, Any] = {
     "claudecode_subagent_auditor_model": "",
 
     # Pipeline roles (comma-separated). Default keeps the personal pipeline order.
-    # Example: "PM,Dev,QA" or "PM,Security,Dev,QA".
+    # Example: "PM,Dev,QA", "PM,PL,Dev,QA", or "PM,Security,Dev,QA".
     "roles": default_role_string(),
 
     # Profile
@@ -397,7 +397,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Comma-separated pipeline roles/stages to run. "
             f"Built-in order: {','.join(BUILTIN_ROLE_SPECS)}. "
-            "Examples: PM,Dev,QA (default), or PM,Security,Dev,QA. "
+            "Examples: PM,Dev,QA (default), PM,PL,Dev,QA, or PM,Security,Dev,QA. "
             "Forward-compatible with plugin stages."
         ),
     )

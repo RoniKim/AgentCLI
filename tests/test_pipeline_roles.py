@@ -83,6 +83,11 @@ class PipelineRolesTests(unittest.TestCase):
         self.assertEqual("gpt-5.5", CODEX_MODEL_DEFAULTS["qa_model"])
         self.assertEqual("gpt-5.4-mini", CODEX_MODEL_DEFAULTS["reporter_model"])
 
+    def test_make_stages_includes_builtin_pl_between_pm_and_dev(self) -> None:
+        stages = make_stages("PM,PL,Dev,QA", plugins_enabled=False, plugins_allowlist=[], plugins_strict=True)
+
+        self.assertEqual(["PM", "PL", "Dev", "QA"], [stage.name for stage in stages])
+
     def test_empty_pipeline_stage_list_fails_instead_of_succeeding(self) -> None:
         class Session:
             done_delta = 0

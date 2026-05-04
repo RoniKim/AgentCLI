@@ -5623,7 +5623,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertTrue(config["schema"]["repo"]["restart"])
         self.assertEqual(self.repo.as_posix(), config["values"]["repo"])
         self.assertEqual(list(BUILTIN_ROLE_SPECS), config["schema"]["roles"]["options"])
-        self.assertEqual("Built-in order: PM, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.", config["schema"]["roles"]["hint"])
+        self.assertEqual("Built-in order: PM, PL, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.", config["schema"]["roles"]["hint"])
         self.assertIn("security.enabled", config["schema"])
         self.assertEqual("Security enabled", config["schema"]["security.enabled"]["label"])
         self.assertEqual("project", config["schema"]["security.enabled"]["group"])

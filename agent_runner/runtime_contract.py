@@ -12,19 +12,22 @@ from typing import Any
 from .failure_policy import should_preserve_for_review
 
 
-PIPELINE_STAGE_ORDER: tuple[str, ...] = ("PM", "Security", "Dev", "QA", "Reporter")
+PIPELINE_STAGE_ORDER: tuple[str, ...] = ("PM", "PL", "Security", "Dev", "QA", "Reporter")
 BUILTIN_ROLE_SPECS: tuple[str, ...] = tuple(stage for stage in PIPELINE_STAGE_ORDER if stage != "Reporter")
 DEFAULT_ROLE_SPECS: tuple[str, ...] = ("PM", "Dev", "QA")
 ENTERPRISE_ROLE_SPECS: tuple[str, ...] = ("PM", "Security", "Dev", "QA")
 
 ROLE_SPEC_CANONICALS: dict[str, str] = {
     "pm": "PM",
+    "pl": "PL",
+    "backlog_refiner": "PL",
+    "backlogrefiner": "PL",
     "security": "Security",
     "dev": "Dev",
     "qa": "QA",
 }
 
-PIPELINE_ROLE_HINT = "Built-in order: PM, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved."
+PIPELINE_ROLE_HINT = "Built-in order: PM, PL, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved."
 
 CODEX_DEV_MODEL_LADDER: tuple[str, str, str] = ("gpt-5.4-mini", "gpt-5.4", "gpt-5.5")
 CODEX_MODEL_DEFAULTS: dict[str, str] = {

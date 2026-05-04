@@ -17,6 +17,7 @@ from agent_runner.pipeline.stages.base import (
     Stage,
     StageOutcome,
 )
+from agent_runner.pipeline.stages.backlog_refiner_stage import BacklogRefinerStage
 from agent_runner.state import load_backlog_json, write_backlog_files
 
 
@@ -40,6 +41,30 @@ def _task(task_id: str, title: str) -> dict[str, object]:
         "done_when": "done",
         "skills": [],
         "depends_on": [],
+    }
+
+
+def _oversized_task() -> dict[str, object]:
+    goal_trace = [
+        {"goal_ref": "P0-L10", "goal_text": "Expose PR queue data", "matched_fields": ["title"]},
+        {"goal_ref": "P0-L11", "goal_text": "Render PR queue UI", "matched_fields": ["prompt"]},
+    ]
+    return {
+        "id": "T2",
+        "title": "Web PR Queue shows diff, QA notes, validation logs, merge preflight, and blocking reasons",
+        "prompt": "Implement API, serializer, UI, redaction, tests, and Playwright coverage for PR Queue details.",
+        "files": [
+            "agent_runner/web.py",
+            "web_console/app.js",
+            "web_console/styles.css",
+            "tests/test_web_console_readonly.py",
+            "tests/test_web_console_static.py",
+            "tests/web_console_playwright_smoke.py",
+        ],
+        "done_when": "API returns bounded data; UI renders list/detail; QA notes show; validation logs show; Playwright smoke passes.",
+        "skills": [],
+        "depends_on": ["T1"],
+        "goal_trace": goal_trace,
     }
 
 
@@ -286,6 +311,62 @@ class PipelineStageEffectsTests(unittest.TestCase):
         self.assertIsNotNone(pl.audit_path)
         self.assertEqual([], sorted(session.pending_stage_effects()))
         self.assertEqual(["T02"], [task.id for task in session.tasks])
+
+    def test_backlog_refiner_noops_for_already_sized_backlog(self) -> None:
+        run_dir = self._make_temp_run_dir()
+        original = [_task("T1", "Small backend task"), _task("T2", "Small UI task")]
+        write_backlog_files(run_dir, original)
+        session = self._make_real_session(run_dir)
+
+        outcome = asyncio.run(BacklogRefinerStage().run(session, 0))
+
+        self.assertEqual("ok", outcome.status)
+        self.assertEqual("backlog_refiner_noop", outcome.reason)
+        self.assertEqual(frozenset(), outcome.effects)
+        self.assertEqual(frozenset(), session.pending_stage_effects())
+        self.assertEqual(["T1", "T2"], [task.id for task in load_backlog_json(run_dir / "BACKLOG.json")])
+        self.assertFalse((run_dir / "PL_OUTPUT_cycle_000.json").exists())
+
+    def test_backlog_refiner_splits_oversized_multi_goals_task_preserving_trace_and_dependencies(self) -> None:
+        run_dir = self._make_temp_run_dir()
+        oversized = _oversized_task()
+        write_backlog_files(run_dir, [_task("T1", "Prepare queue data"), oversized, {**_task("T3", "Consume refined queue"), "depends_on": ["T2"]}])
+        session = self._make_real_session(run_dir)
+
+        outcome = asyncio.run(BacklogRefinerStage().run(session, 0))
+
+        self.assertEqual("ok", outcome.status)
+        self.assertEqual("backlog_refined", outcome.reason)
+        self.assertEqual(STAGE_EFFECTS_BACKLOG_MUTATION, outcome.effects)
+        payload = json.loads((run_dir / "BACKLOG.json").read_text(encoding="utf-8"))
+        tasks = payload["tasks"]
+        by_id = {task["id"]: task for task in tasks}
+        self.assertEqual(["T1", "T2a", "T2b", "T2c", "T2d", "T3"], [task["id"] for task in tasks])
+        for child_id in ["T2a", "T2b", "T2c", "T2d"]:
+            self.assertEqual(oversized["goal_trace"], by_id[child_id]["goal_trace"])
+            self.assertEqual("T2", by_id[child_id]["parent_task_id"])
+            self.assertEqual("T2", by_id[child_id]["split_from_task_id"])
+        self.assertEqual(["T1"], by_id["T2a"]["depends_on"])
+        self.assertEqual(["T2a"], by_id["T2b"]["depends_on"])
+        self.assertEqual(["T2b"], by_id["T2c"]["depends_on"])
+        self.assertEqual(["T2c"], by_id["T2d"]["depends_on"])
+        self.assertEqual(["T2d"], by_id["T3"]["depends_on"])
+        self.assertTrue((run_dir / "PL_OUTPUT_cycle_000.json").exists())
+        self.assertEqual(STAGE_EFFECTS_BACKLOG_MUTATION, session.pending_stage_effects())
+
+    def test_dev_observes_reloaded_refined_task_list_after_pl_runs(self) -> None:
+        run_dir = self._make_temp_run_dir()
+        write_backlog_files(run_dir, [_task("T1", "Prepare queue data"), _oversized_task()])
+        session = self._make_real_session(run_dir)
+        pm = _StaticStage("PM", StageOutcome.ok("pm_ok"))
+        pl = BacklogRefinerStage()
+        dev = _StaticStage("Dev", StageOutcome.ok("dev_ok"))
+
+        result = asyncio.run(PipelineManager([pm, pl, dev]).run_cycle(session, 0, continuous=True))
+
+        self.assertEqual(0, result.rc)
+        self.assertEqual([["T1", "T2a", "T2b", "T2c", "T2d"]], dev.seen_tasks)
+        self.assertEqual(["T1", "T2a", "T2b", "T2c", "T2d"], [task.id for task in session.tasks])
 
 
 if __name__ == "__main__":
