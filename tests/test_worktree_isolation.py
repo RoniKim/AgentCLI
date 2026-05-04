@@ -20,6 +20,8 @@ if str(ROOT) not in sys.path:
 
 
 from agent_runner.gitops import (
+    WORKTREE_CLEANUP_APPLIED,
+    WORKTREE_CLEANUP_DRY_RUN,
     WORKTREE_MERGE_PENDING,
     WORKTREE_MERGE_PENDING_RECONCILED,
     WorktreeSafetyError,
@@ -99,6 +101,53 @@ class WorktreeIsolationTests(unittest.TestCase):
         python_path.parent.mkdir(parents=True, exist_ok=True)
         python_path.write_text("", encoding="utf-8")
         return python_path
+
+    def _branch_exists(self, branch_name: str) -> bool:
+        code, _ = run_cmd(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+            cwd=self.repo,
+            timeout_sec=60,
+        )
+        return code == 0
+
+    def _write_state_payload(self, run_dir: Path, payload: dict[str, object]) -> None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "STATE.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _create_stale_task_branch(
+        self,
+        *,
+        run_dir: Path,
+        task_id: str,
+        branch_suffix: str,
+        filename: str,
+    ) -> str:
+        base_branch = self._source_branch()
+        branch_name = f"task/{task_id}_{branch_suffix}"
+        self._git("checkout", "-b", branch_name)
+        (self.repo / filename).write_text(f"{task_id}\n", encoding="utf-8")
+        self._git("add", filename)
+        self._git("commit", "-m", f"{task_id} work")
+        self._git("checkout", base_branch)
+        self._git("merge", "--ff-only", branch_name)
+        metrics_event = {
+            "event": "task_branch_created",
+            "branch": branch_name,
+            "task_id": task_id,
+            "cycle": 1,
+            "step": 1,
+        }
+        (run_dir / "metrics.jsonl").write_text(json.dumps(metrics_event) + "\n", encoding="utf-8")
+        return branch_name
+
+    def _write_interrupted_attempt(self, run_dir: Path, *, task_dir_name: str, content: str = "interrupted\n") -> Path:
+        attempt_dir = run_dir / "tasks" / task_dir_name / "attempt_00"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        (attempt_dir / "dev_output.txt").write_text(content, encoding="utf-8")
+        return attempt_dir
 
     def _record_pending_review(self, sink: list[dict[str, object]]):
         def _record(
@@ -1095,6 +1144,181 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertIn("Permission denied", output)
         self.assertIn("reboot", output.lower())
         self.assertIn("administrator", output.lower())
+
+    def test_shell_worktree_cleanup_dry_run_writes_artifact_without_mutation(self) -> None:
+        self._init_repo()
+        stale_branch = self._create_stale_task_branch(
+            run_dir=self.run_dir,
+            task_id="T-clean",
+            branch_suffix="2026-05-04T23-00-00",
+            filename="stale-branch.txt",
+        )
+        attempt_dir = self._write_interrupted_attempt(
+            self.run_dir,
+            task_dir_name="c001_s001_T-clean",
+        )
+        old_run_dir = self.repo / ".AgentCLI" / "agent_runs" / "20260424-101010"
+        old_run_dir.mkdir(parents=True, exist_ok=True)
+        (old_run_dir / "run.log").write_text("old run\n", encoding="utf-8")
+
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        shell.run_dir = self.run_dir
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            shell.worktree(["cleanup"])
+
+        artifact_path = self.run_dir / WORKTREE_CLEANUP_DRY_RUN
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        candidates = payload["candidates"]
+        actions = {item["kind"]: item["action"] for item in candidates}
+
+        self.assertTrue(artifact_path.exists())
+        self.assertEqual("dry_run", payload["status"])
+        self.assertEqual("delete_branch", actions["stale_task_branch"])
+        self.assertEqual("remove_directory", actions["interrupted_attempt_directory"])
+        self.assertEqual("remove_run_directory", actions["old_run_directory"])
+        self.assertIn("approval_phrase", payload)
+        self.assertTrue(self._branch_exists(stale_branch))
+        self.assertTrue(attempt_dir.exists())
+        self.assertTrue(old_run_dir.exists())
+        self.assertIn("Dry run only", stream.getvalue())
+
+    def test_shell_worktree_cleanup_apply_rejects_wrong_phrase_without_mutation(self) -> None:
+        self._init_repo()
+        stale_branch = self._create_stale_task_branch(
+            run_dir=self.run_dir,
+            task_id="T-clean",
+            branch_suffix="2026-05-04T23-10-00",
+            filename="stale-branch.txt",
+        )
+        attempt_dir = self._write_interrupted_attempt(
+            self.run_dir,
+            task_dir_name="c001_s001_T-clean",
+        )
+        old_run_dir = self.repo / ".AgentCLI" / "agent_runs" / "20260424-101020"
+        old_run_dir.mkdir(parents=True, exist_ok=True)
+        (old_run_dir / "run.log").write_text("old run\n", encoding="utf-8")
+
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        shell.run_dir = self.run_dir
+        with redirect_stdout(io.StringIO()):
+            shell.worktree(["cleanup"])
+        stream = io.StringIO()
+        with (
+            redirect_stdout(stream),
+            patch("builtins.input", return_value="WRONG PHRASE"),
+        ):
+            shell.worktree(["cleanup", "apply"])
+
+        applied_path = self.run_dir / WORKTREE_CLEANUP_APPLIED
+        payload = json.loads(applied_path.read_text(encoding="utf-8"))
+
+        self.assertEqual("approval_rejected", payload["status"])
+        self.assertTrue(self._branch_exists(stale_branch))
+        self.assertTrue(attempt_dir.exists())
+        self.assertTrue(old_run_dir.exists())
+        self.assertIn("did not match", stream.getvalue())
+
+    def test_shell_worktree_cleanup_apply_writes_applied_artifact_and_removes_candidates(self) -> None:
+        self._init_repo()
+        stale_branch = self._create_stale_task_branch(
+            run_dir=self.run_dir,
+            task_id="T-clean",
+            branch_suffix="2026-05-04T23-20-00",
+            filename="stale-branch.txt",
+        )
+        attempt_dir = self._write_interrupted_attempt(
+            self.run_dir,
+            task_dir_name="c001_s001_T-clean",
+        )
+        old_run_dir = self.repo / ".AgentCLI" / "agent_runs" / "20260424-101030"
+        old_run_dir.mkdir(parents=True, exist_ok=True)
+        (old_run_dir / "run.log").write_text("old run\n", encoding="utf-8")
+
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        shell.run_dir = self.run_dir
+        with redirect_stdout(io.StringIO()):
+            shell.worktree(["cleanup"])
+        dry_run = json.loads((self.run_dir / WORKTREE_CLEANUP_DRY_RUN).read_text(encoding="utf-8"))
+        stream = io.StringIO()
+        with (
+            redirect_stdout(stream),
+            patch("builtins.input", return_value=str(dry_run["approval_phrase"])),
+        ):
+            shell.worktree(["cleanup", "apply"])
+
+        applied_path = self.run_dir / WORKTREE_CLEANUP_APPLIED
+        payload = json.loads(applied_path.read_text(encoding="utf-8"))
+        result_by_kind = {item["kind"]: item["result"] for item in payload["results"]}
+
+        self.assertEqual("applied", payload["status"])
+        self.assertEqual("deleted", result_by_kind["stale_task_branch"])
+        self.assertEqual("deleted", result_by_kind["interrupted_attempt_directory"])
+        self.assertEqual("deleted", result_by_kind["old_run_directory"])
+        self.assertFalse(self._branch_exists(stale_branch))
+        self.assertFalse(attempt_dir.exists())
+        self.assertFalse(old_run_dir.exists())
+        self.assertIn("Cleanup applied", stream.getvalue())
+
+    def test_shell_worktree_cleanup_preserves_pending_review_evidence(self) -> None:
+        self._init_repo()
+        old_run_dir = self.repo / ".AgentCLI" / "agent_runs" / "20260424-101040"
+        old_run_dir.mkdir(parents=True, exist_ok=True)
+        preserved_branch = self._create_stale_task_branch(
+            run_dir=old_run_dir,
+            task_id="T-review",
+            branch_suffix="2026-05-04T23-30-00",
+            filename="review-branch.txt",
+        )
+        attempt_dir = self._write_interrupted_attempt(
+            old_run_dir,
+            task_dir_name="c001_s001_T-review",
+        )
+        self._write_state_payload(
+            old_run_dir,
+            {
+                "pending_review": [
+                    {
+                        "task": "T-review",
+                        "task_status": "review_required",
+                        "branch": preserved_branch,
+                        "validation_artifact": (attempt_dir / "review.log").as_posix(),
+                    }
+                ]
+            },
+        )
+
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        shell.run_dir = self.run_dir
+        with redirect_stdout(io.StringIO()):
+            shell.worktree(["cleanup"])
+        dry_run = json.loads((self.run_dir / WORKTREE_CLEANUP_DRY_RUN).read_text(encoding="utf-8"))
+        action_by_kind = {item["kind"]: item["action"] for item in dry_run["candidates"]}
+
+        self.assertEqual("preserve_pending_review_evidence", action_by_kind["stale_task_branch"])
+        self.assertEqual("preserve_pending_review_evidence", action_by_kind["interrupted_attempt_directory"])
+        self.assertEqual("preserve_pending_review_evidence", action_by_kind["old_run_directory"])
+
+        with (
+            redirect_stdout(io.StringIO()),
+            patch("builtins.input", return_value=str(dry_run["approval_phrase"])),
+        ):
+            shell.worktree(["cleanup", "apply"])
+
+        payload = json.loads((self.run_dir / WORKTREE_CLEANUP_APPLIED).read_text(encoding="utf-8"))
+        result_by_kind = {item["kind"]: item["result"] for item in payload["results"]}
+
+        self.assertEqual("applied", payload["status"])
+        self.assertEqual("preserved", result_by_kind["stale_task_branch"])
+        self.assertEqual("preserved", result_by_kind["interrupted_attempt_directory"])
+        self.assertEqual("preserved", result_by_kind["old_run_directory"])
+        self.assertTrue(self._branch_exists(preserved_branch))
+        self.assertTrue(attempt_dir.exists())
+        self.assertTrue(old_run_dir.exists())
 
     def test_runner_start_readiness_reports_missing_source_venv_and_records_shell_event(self) -> None:
         self._init_repo()

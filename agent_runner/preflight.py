@@ -10,7 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .gitops import reconcile_stale_pending_worktree_markers, scan_worktree_diagnostics
+from .gitops import (
+    collect_worktree_cleanup_candidates,
+    reconcile_stale_pending_worktree_markers,
+    scan_worktree_diagnostics,
+)
 from .stop_progress import FINAL_STOP_PHASES, STOP_RECONCILIATION_FILE, read_stop_progress
 from .utils import now_iso, run_cmd
 
@@ -401,6 +405,8 @@ def check_runner_start_readiness(repo: Path | str, run_dir: Path | str, *, stop_
                 )
             )
 
+    cleanup_candidates = collect_worktree_cleanup_candidates(repo_path, run_dir=run_dir_path)
+
     report = {
         "schema_version": READINESS_SCHEMA_VERSION,
         "checked_at": now_iso(),
@@ -420,6 +426,7 @@ def check_runner_start_readiness(repo: Path | str, run_dir: Path | str, *, stop_
             "stale_task_branches": [dict(item) for item in worktree_diagnostics.get("stale_task_branches", []) if isinstance(item, dict)],
             "interrupted_attempts": [dict(item) for item in worktree_diagnostics.get("interrupted_attempts", []) if isinstance(item, dict)],
             "pending_marker_reconciliations": [dict(item) for item in pending_marker_reconciliations if isinstance(item, dict)],
+            "cleanup_candidates": [dict(item) for item in cleanup_candidates if isinstance(item, dict)],
         },
         "blockers": blockers,
         "warnings": warnings,

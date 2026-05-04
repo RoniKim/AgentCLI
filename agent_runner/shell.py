@@ -53,7 +53,11 @@ from .pr_queue import (
     validate_review_packet,
 )
 from .gitops import (
+    WORKTREE_CLEANUP_APPLIED,
+    WORKTREE_CLEANUP_DRY_RUN,
+    apply_worktree_cleanup,
     apply_pending_worktree_merge,
+    build_worktree_cleanup_dry_run,
     discard_pending_worktree_merge,
     find_pending_worktree_merge,
     read_pending_worktree_merge,
@@ -1359,6 +1363,84 @@ class RunnerShell:
         except Exception as ex:
             print(f"[ERR] Failed to discard pending worktree merge: {ex}")
 
+    def _cleanup_plan_run_dir(self) -> Optional[Path]:
+        if not self.repo:
+            return None
+        if self.run_dir is not None:
+            return self.run_dir.expanduser().resolve()
+        latest = find_latest_run_dir(self.repo)
+        if latest is not None:
+            self.run_dir = latest.expanduser().resolve()
+            return self.run_dir
+        self.run_dir = make_run_dir(self.repo)
+        return self.run_dir
+
+    def _print_worktree_cleanup_plan(self, payload: dict[str, Any]) -> None:
+        run_dir = str(payload.get("run_dir") or "").strip()
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        print("\n=== Worktree Cleanup Dry Run ===")
+        print(f"run_dir:   {run_dir or '(unknown)'}")
+        print(f"artifact:  {(Path(run_dir) / WORKTREE_CLEANUP_DRY_RUN).as_posix() if run_dir else WORKTREE_CLEANUP_DRY_RUN}")
+        print(
+            "summary:   "
+            f"total={int(summary.get('total') or 0)} "
+            f"protected={int(summary.get('protected') or 0)} "
+            f"mutating={int(summary.get('mutating_candidates') or 0)}"
+        )
+        print(f"confirm:   {payload.get('approval_phrase') or '-'}")
+        print("candidates:")
+        for candidate in payload.get("candidates", []):
+            if not isinstance(candidate, dict):
+                continue
+            print(
+                "  - "
+                f"{candidate.get('kind') or 'candidate'} "
+                f"owning_run={candidate.get('owning_run') or 'unknown'} "
+                f"action={candidate.get('action') or 'unknown'} "
+                f"reason={candidate.get('reason') or 'unknown'} "
+                f"target={candidate.get('path') or candidate.get('branch') or '(unknown)'}"
+            )
+        print("================================\n")
+
+    def _worktree_cleanup(self, args: list[str]) -> None:
+        if not self.repo:
+            print("[ERR] repo is not set; use /repo <path>")
+            return
+        run_dir = self._cleanup_plan_run_dir()
+        if run_dir is None:
+            print("[ERR] Unable to determine a run directory for cleanup artifacts.")
+            return
+
+        apply_mode = bool(args and str(args[0]).strip().lower() == "apply")
+        dry_run = build_worktree_cleanup_dry_run(self.repo, run_dir=run_dir)
+        self._print_worktree_cleanup_plan(dry_run)
+        if not apply_mode:
+            print("[INFO] Dry run only. No cleanup was applied.")
+            return
+
+        phrase = input("Type the confirmation phrase exactly to apply cleanup: ").strip()
+        result = apply_worktree_cleanup(self.repo, run_dir=run_dir, approval_phrase=phrase)
+        applied_path = (run_dir / WORKTREE_CLEANUP_APPLIED).as_posix()
+        status = str(result.get("status") or "").strip().lower()
+        if status == "approval_rejected":
+            print(f"[ERR] Cleanup not applied. Confirmation phrase did not match. artifact={applied_path}")
+            return
+        failures = result.get("failures") if isinstance(result.get("failures"), list) else []
+        if failures:
+            print(f"[WARN] Cleanup applied with failures. artifact={applied_path}")
+            for failure in failures:
+                if not isinstance(failure, dict):
+                    continue
+                print(
+                    "  - "
+                    f"{failure.get('kind') or 'candidate'} "
+                    f"action={failure.get('action') or 'unknown'} "
+                    f"path={failure.get('path') or '(unknown)'} "
+                    f"error={failure.get('error') or failure.get('message') or 'unknown'}"
+                )
+            return
+        print(f"[OK] Cleanup applied. artifact={applied_path}")
+
     def cmd_set(self, key: str, raw_value: str) -> None:
         key = key.replace("-", "_").strip()
         if key not in DEFAULTS:
@@ -1437,6 +1519,8 @@ class RunnerShell:
             "  /help                      Show shell help",
             "  /doctor                    Write a shell environment report to DOCTOR.md",
             "  /worktree                  Show worktree diagnostics",
+            "  /worktree cleanup          Write a non-mutating cleanup dry-run artifact",
+            "  /worktree cleanup apply    Apply the cleanup plan after typing the exact phrase",
             "  /repo <path>               Set the repo root",
             "  /config [--all]            Show the effective config",
             "  /set <key> <value>         Override a config value for this shell session",
@@ -1471,6 +1555,10 @@ class RunnerShell:
     def worktree(self, args: list[str]) -> None:
         if not self.repo:
             print("[ERR] repo is not set; use /repo <path>")
+            return
+
+        if args and str(args[0]).strip().lower() == "cleanup":
+            self._worktree_cleanup(args[1:])
             return
 
         diagnostics = scan_worktree_diagnostics(self.repo)
@@ -1915,7 +2003,7 @@ def _build_completer() -> Any:
         {
             "/help": None,
             "/doctor": None,
-            "/worktree": None,
+            "/worktree": {"cleanup": {"apply": None}},
             "/repo": None,
             "/config": None,
             "/set": set_keys,
