@@ -57,6 +57,42 @@ AgentCLI Web은 현재 `one repo, one web instance` 모델입니다.
 | `--dotnet-build-target` | dotnet build target |
 | `--dotnet-test-target` | dotnet test target |
 | `--dotnet-test-filter` | dotnet test filter |
+| `--profile` | operator role profile (`personal` or `enterprise`) |
+| `--unattended` / `--no-unattended` | unattended operator preset toggle |
+
+## Unattended preset
+
+`--unattended` or `"unattended": true` applies one conservative unattended operator preset.
+Explicit config values and explicit CLI flags still override the preset. The existing
+`profile=personal|enterprise` behavior is preserved, so enterprise guardrails still apply
+after the unattended defaults are merged.
+
+Equivalent config settings:
+
+```json
+{
+  "unattended": true,
+  "goals_auto_refresh": true,
+  "quota_wait_for_reset": true,
+  "loop": true,
+  "idle_exit_cycles": 0,
+  "loop_idle_exit_after": 1800,
+  "iterations": 5,
+  "debug": true,
+  "budgets": {
+    "max_total_repair_attempts_per_run": 2
+  },
+  "gitops": {
+    "worktree_merge_mode": "manual"
+  }
+}
+```
+
+- `loop=true` enables the outer rerun loop; runtime already treats loop mode as continuous.
+- `idle_exit_cycles=0` plus `loop_idle_exit_after=1800` keeps unattended polling alive, but caps empty loop time at 30 minutes.
+- `debug=true` keeps `debug.log` available for unattended diagnostics.
+- `gitops.worktree_merge_mode=manual` keeps worktree merge/cleanup review in the loop.
+- `/worktree` stays read-only and `/worktree cleanup` remains dry-run unless `apply` is requested explicitly.
 
 ## Stop reason reference
 

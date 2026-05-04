@@ -121,6 +121,7 @@ DEFAULTS: Dict[str, Any] = {
 
     # Profile
     "profile": "personal",
+    "unattended": False,
 
     # Runner behavior
     "autopilot": False,
@@ -353,6 +354,23 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 
+UNATTENDED_PRESET_DEFAULTS: Dict[str, Any] = {
+    "goals_auto_refresh": True,
+    "quota_wait_for_reset": True,
+    "loop": True,
+    "idle_exit_cycles": 0,
+    "loop_idle_exit_after": 1800,
+    "iterations": 5,
+    "debug": True,
+    "budgets": {
+        "max_total_repair_attempts_per_run": 2,
+    },
+    "gitops": {
+        "worktree_merge_mode": "manual",
+    },
+}
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(add_help=True)
 
@@ -405,6 +423,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("--profile", default=None, choices=["personal", "enterprise"])
+    p.add_argument(
+        "--unattended",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Apply the unattended operator preset. Explicit config values and CLI flags still win.",
+    )
 
     # Behavior
     p.add_argument("--autopilot", action=argparse.BooleanOptionalAction, default=None)
@@ -618,6 +642,14 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         eff[k] = v
 
     explicit_args = {k for k, v in vars(args_ns).items() if v is not None}
+
+    def _config_has_path(path: str) -> bool:
+        current: Any = cfg
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return False
+            current = current[part]
+        return True
 
 
     # ---- MIGRATIONS (best-effort, for older saved configs) ----
@@ -930,6 +962,39 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
         eff["budgets"]["max_total_continuations_per_run"] = int(eff.get("budget_max_total_continuations_per_run") or 0)
     if "budget_max_total_repair_attempts_per_run" in explicit_args:
         eff["budgets"]["max_total_repair_attempts_per_run"] = int(eff.get("budget_max_total_repair_attempts_per_run") or 0)
+
+    eff["unattended"] = bool(eff.get("unattended", defaults.get("unattended", False)))
+
+    # ---- apply unattended preset defaults ----
+    def _apply_unattended_preset() -> None:
+        if not bool(eff.get("unattended", False)):
+            return
+
+        def _can_apply(path: str, *, cli_key: str | None = None) -> bool:
+            if cli_key and cli_key in explicit_args:
+                return False
+            return not _config_has_path(path)
+
+        for key in ("goals_auto_refresh", "quota_wait_for_reset", "loop", "idle_exit_cycles", "loop_idle_exit_after", "iterations", "debug"):
+            if _can_apply(key, cli_key=key):
+                eff[key] = UNATTENDED_PRESET_DEFAULTS[key]
+
+        budgets = eff.get("budgets", {})
+        if _can_apply("budgets.max_total_repair_attempts_per_run", cli_key="budget_max_total_repair_attempts_per_run"):
+            budgets["max_total_repair_attempts_per_run"] = int(
+                UNATTENDED_PRESET_DEFAULTS["budgets"]["max_total_repair_attempts_per_run"]
+            )
+        eff["budgets"] = budgets
+
+        gitops = eff.get("gitops")
+        if not isinstance(gitops, dict):
+            defaults_gitops = defaults.get("gitops", {})
+            gitops = dict(defaults_gitops) if isinstance(defaults_gitops, dict) else {}
+        if _can_apply("gitops.worktree_merge_mode"):
+            gitops["worktree_merge_mode"] = str(UNATTENDED_PRESET_DEFAULTS["gitops"]["worktree_merge_mode"])
+        eff["gitops"] = gitops
+
+    _apply_unattended_preset()
 
     # ---- apply profile defaults ----
     def _apply_profile() -> None:
