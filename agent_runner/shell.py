@@ -1479,6 +1479,8 @@ class RunnerShell:
         pending_markers = diagnostics.get("pending_markers") if isinstance(diagnostics.get("pending_markers"), list) else []
         cleanup_failed = diagnostics.get("cleanup_failed") if isinstance(diagnostics.get("cleanup_failed"), list) else []
         generated_worktrees = diagnostics.get("generated_worktrees") if isinstance(diagnostics.get("generated_worktrees"), list) else []
+        stale_task_branches = diagnostics.get("stale_task_branches") if isinstance(diagnostics.get("stale_task_branches"), list) else []
+        interrupted_attempts = diagnostics.get("interrupted_attempts") if isinstance(diagnostics.get("interrupted_attempts"), list) else []
 
         print("\n=== Worktree Diagnostics ===")
         print(f"status:   {diagnostics.get('status') or 'unknown'}")
@@ -1494,6 +1496,8 @@ class RunnerShell:
             f"cleanup_failed={int(summary.get('cleanup_failed') or 0)} "
             f"worktrees={int(summary.get('generated_worktrees') or 0)} "
             f"orphaned={int(summary.get('orphaned_worktrees') or 0)} "
+            f"stale_branches={int(summary.get('stale_task_branches') or 0)} "
+            f"interrupted_attempts={int(summary.get('interrupted_attempts') or 0)} "
             f"issues={int(summary.get('issue_count') or 0)}"
         )
 
@@ -1557,6 +1561,30 @@ class RunnerShell:
                     bits.append(f"contract={contract_path}")
                 if reason:
                     bits.append(reason)
+                print(f"  - {path}: {' | '.join(bits)}")
+
+        if stale_task_branches:
+            print("stale task branches:")
+            for item in stale_task_branches:
+                branch = str(item.get("branch") or item.get("path") or "").strip()
+                bits = [
+                    f"age={item.get('age') or '0s'}",
+                    f"status={item.get('status') or 'unknown'}",
+                    f"reason={item.get('reason') or 'unknown'}",
+                    f"owning_run={item.get('owning_run') or 'unknown'}",
+                ]
+                print(f"  - {branch}: {' | '.join(bits)}")
+
+        if interrupted_attempts:
+            print("interrupted attempts:")
+            for item in interrupted_attempts:
+                path = str(item.get("path") or "").strip()
+                bits = [
+                    f"age={item.get('age') or '0s'}",
+                    f"status={item.get('status') or 'unknown'}",
+                    f"reason={item.get('reason') or 'unknown'}",
+                    f"owning_run={item.get('owning_run') or 'unknown'}",
+                ]
                 print(f"  - {path}: {' | '.join(bits)}")
 
         if issues:
@@ -1652,6 +1680,46 @@ class RunnerShell:
             status = "OK" if result.ok else "FAIL"
             detail = f" ({'; '.join(result.issues)})" if result.issues else ""
             report_lines.append(f"  - {result.backend}: {status}{detail}")
+
+        try:
+            diagnostics = scan_worktree_diagnostics(self.repo)
+            summary = diagnostics.get("summary") if isinstance(diagnostics.get("summary"), dict) else {}
+            report_lines.append(
+                "- worktree diagnostics: "
+                f"status={diagnostics.get('status') or 'unknown'} "
+                f"stale_branches={int(summary.get('stale_task_branches') or 0)} "
+                f"interrupted_attempts={int(summary.get('interrupted_attempts') or 0)}"
+            )
+            stale_task_branches = diagnostics.get("stale_task_branches") if isinstance(diagnostics.get("stale_task_branches"), list) else []
+            interrupted_attempts = diagnostics.get("interrupted_attempts") if isinstance(diagnostics.get("interrupted_attempts"), list) else []
+            if stale_task_branches:
+                report_lines.append("  - stale task branches:")
+                for item in stale_task_branches:
+                    if not isinstance(item, dict):
+                        continue
+                    report_lines.append(
+                        "    - "
+                        f"{item.get('branch') or item.get('path') or '(unknown)'}: "
+                        f"age={item.get('age') or '0s'} "
+                        f"status={item.get('status') or 'unknown'} "
+                        f"reason={item.get('reason') or 'unknown'} "
+                        f"owning_run={item.get('owning_run') or 'unknown'}"
+                    )
+            if interrupted_attempts:
+                report_lines.append("  - interrupted attempts:")
+                for item in interrupted_attempts:
+                    if not isinstance(item, dict):
+                        continue
+                    report_lines.append(
+                        "    - "
+                        f"{item.get('path') or '(unknown)'}: "
+                        f"age={item.get('age') or '0s'} "
+                        f"status={item.get('status') or 'unknown'} "
+                        f"reason={item.get('reason') or 'unknown'} "
+                        f"owning_run={item.get('owning_run') or 'unknown'}"
+                    )
+        except Exception as ex:
+            report_lines.append(f"- worktree diagnostics: ERROR ({ex})")
 
         def _first_cmd(cmd_val: Any, fallback: str) -> str:
             if isinstance(cmd_val, list) and cmd_val:

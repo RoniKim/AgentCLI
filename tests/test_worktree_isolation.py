@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 from agent_runner.gitops import (
     WORKTREE_MERGE_PENDING,
+    WORKTREE_MERGE_PENDING_RECONCILED,
     WorktreeSafetyError,
     _cleanup_pytest_cache_tempdirs,
     abandon_task_branch,
@@ -776,6 +777,150 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertEqual("warning", diagnostics["status"])
         self.assertTrue(readiness["ok"])
         self.assertEqual([], readiness["blockers"])
+
+    def test_runner_start_readiness_reconciles_missing_patch_pending_marker(self) -> None:
+        base_head = self._init_repo()
+        self._ensure_source_venv()
+        self.worktree.mkdir(parents=True, exist_ok=True)
+        marker = {
+            "schema_version": 1,
+            "status": "pending",
+            "created_at": "2026-04-27T12:00:00",
+            "source_repo": self.repo.resolve().as_posix(),
+            "run_dir": self.run_dir.resolve().as_posix(),
+            "worktree_dir": self.worktree.resolve().as_posix(),
+            "patch_path": self.patch_path.resolve().as_posix(),
+            "base_ref": base_head,
+            "head_ref": "abc12345",
+            "last_rc": 0,
+        }
+        central_pending = self.repo / ".AgentCLI" / WORKTREE_MERGE_PENDING
+        self.run_dir.joinpath(WORKTREE_MERGE_PENDING).write_text(json.dumps(marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        central_pending.write_text(json.dumps(marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        self.assertTrue(readiness["ok"])
+        self.assertFalse(self.run_dir.joinpath(WORKTREE_MERGE_PENDING).exists())
+        self.assertFalse(central_pending.exists())
+        self.assertTrue(self.run_dir.joinpath(WORKTREE_MERGE_PENDING_RECONCILED).exists())
+        self.assertTrue((self.repo / ".AgentCLI" / WORKTREE_MERGE_PENDING_RECONCILED).exists())
+        reconciliations = readiness["worktree_diagnostics"]["pending_marker_reconciliations"]
+        self.assertEqual("missing_patch", reconciliations[0]["reason"])
+        self.assertEqual([], readiness["worktree_diagnostics"]["pending_markers"])
+
+    def test_runner_start_readiness_reconciles_pending_marker_when_source_head_contains_head_ref(self) -> None:
+        base_head = self._init_repo()
+        self._ensure_source_venv()
+        (self.repo / "merged.txt").write_text("already merged\n", encoding="utf-8")
+        self._git("add", "merged.txt")
+        self._git("commit", "-m", "already merged")
+        merged_head = self._git("rev-parse", "HEAD").strip()
+        self.worktree.mkdir(parents=True, exist_ok=True)
+        self.patch_path.write_text("diff --git a/merged.txt b/merged.txt\n", encoding="utf-8")
+        marker = {
+            "schema_version": 1,
+            "status": "pending",
+            "created_at": "2026-04-27T12:00:00",
+            "source_repo": self.repo.resolve().as_posix(),
+            "run_dir": self.run_dir.resolve().as_posix(),
+            "worktree_dir": self.worktree.resolve().as_posix(),
+            "patch_path": self.patch_path.resolve().as_posix(),
+            "base_ref": base_head,
+            "head_ref": merged_head,
+            "last_rc": 0,
+        }
+        self.run_dir.joinpath(WORKTREE_MERGE_PENDING).write_text(json.dumps(marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        self.assertTrue(readiness["ok"])
+        self.assertFalse(self.run_dir.joinpath(WORKTREE_MERGE_PENDING).exists())
+        self.assertTrue(self.run_dir.joinpath(WORKTREE_MERGE_PENDING_RECONCILED).exists())
+        reconciliations = readiness["worktree_diagnostics"]["pending_marker_reconciliations"]
+        self.assertEqual("source_head_contains_pending_head", reconciliations[0]["reason"])
+
+    def test_runner_start_readiness_preserves_valid_pending_marker(self) -> None:
+        base_head = self._init_repo()
+        self._ensure_source_venv()
+        self.worktree.mkdir(parents=True, exist_ok=True)
+        self.patch_path.write_text("diff --git a/pending.txt b/pending.txt\n", encoding="utf-8")
+        marker = {
+            "schema_version": 1,
+            "status": "pending",
+            "created_at": "2026-04-27T12:00:00",
+            "source_repo": self.repo.resolve().as_posix(),
+            "run_dir": self.run_dir.resolve().as_posix(),
+            "worktree_dir": self.worktree.resolve().as_posix(),
+            "patch_path": self.patch_path.resolve().as_posix(),
+            "base_ref": base_head,
+            "head_ref": "abc12345abc12345abc12345abc12345abc12345",
+            "last_rc": 0,
+        }
+        self.run_dir.joinpath(WORKTREE_MERGE_PENDING).write_text(json.dumps(marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        self.assertTrue(readiness["ok"])
+        self.assertTrue(self.run_dir.joinpath(WORKTREE_MERGE_PENDING).exists())
+        self.assertFalse(self.run_dir.joinpath(WORKTREE_MERGE_PENDING_RECONCILED).exists())
+        self.assertEqual("pending", readiness["worktree_diagnostics"]["pending_markers"][0]["status"])
+        self.assertEqual([], readiness["worktree_diagnostics"]["pending_marker_reconciliations"])
+
+    def test_runner_start_readiness_and_doctor_list_stale_branch_and_interrupted_attempt_metadata(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
+        base_branch = self._source_branch()
+        branch_name = "task/T-stale_2026-05-04T23-00-00"
+        self._git("checkout", "-b", branch_name)
+        (self.repo / "stale-branch.txt").write_text("stale branch\n", encoding="utf-8")
+        self._git("add", "stale-branch.txt")
+        self._git("commit", "-m", "stale branch work")
+        self._git("checkout", base_branch)
+        self._git("merge", "--ff-only", branch_name)
+        metrics_event = {
+            "event": "task_branch_created",
+            "branch": branch_name,
+            "task_id": "T-stale",
+            "cycle": 1,
+            "step": 2,
+        }
+        (self.run_dir / "metrics.jsonl").write_text(json.dumps(metrics_event) + "\n", encoding="utf-8")
+        attempt_dir = self.run_dir / "tasks" / "c001_s002_T-stale" / "attempt_00"
+        attempt_dir.mkdir(parents=True)
+        (attempt_dir / "dev_output.txt").write_text("interrupted\n", encoding="utf-8")
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        diagnostics = readiness["worktree_diagnostics"]
+        self.assertEqual(1, diagnostics["summary"]["stale_task_branches"])
+        self.assertEqual(1, diagnostics["summary"]["interrupted_attempts"])
+        branch = diagnostics["stale_task_branches"][0]
+        attempt = diagnostics["interrupted_attempts"][0]
+        self.assertEqual(branch_name, branch["branch"])
+        self.assertEqual(self.run_dir.name, branch["owning_run"])
+        self.assertIn("age", branch)
+        self.assertEqual("merged", branch["status"])
+        self.assertIn("source HEAD", branch["reason"])
+        self.assertEqual(self.run_dir.name, attempt["owning_run"])
+        self.assertEqual("interrupted", attempt["status"])
+        self.assertIn("missing validation", attempt["reason"])
+        warning_codes = {item["code"] for item in readiness["warnings"]}
+        self.assertIn("stale_task_branch", warning_codes)
+        self.assertIn("interrupted_attempt_directory", warning_codes)
+
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            shell.doctor()
+        output = stream.getvalue()
+        self.assertIn("stale task branches", output)
+        self.assertIn("interrupted attempts", output)
+        self.assertIn("age=", output)
+        self.assertIn("status=", output)
+        self.assertIn("reason=", output)
+        self.assertIn(f"owning_run={self.run_dir.name}", output)
 
     def test_scan_worktree_diagnostics_reports_orphaned_generated_worktree(self) -> None:
         generated_worktree = self.fixture_root / ".agentcli_worktrees" / self.repo.name / "orphaned"

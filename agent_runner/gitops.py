@@ -1683,6 +1683,7 @@ def _git_worktree_registration_state(repo: Path, worktree_dir: Path) -> dict[str
 
 WORKTREE_MERGE_PENDING = "WORKTREE_MERGE_PENDING.json"
 WORKTREE_MERGE_PENDING_MD = "WORKTREE_MERGE_PENDING.md"
+WORKTREE_MERGE_PENDING_RECONCILED = "WORKTREE_MERGE_PENDING_RECONCILED.json"
 WORKTREE_REUSE_CONTRACT = "WORKTREE_REUSE_CONTRACT.json"
 
 
@@ -2229,6 +2230,212 @@ def _worktree_run_dirs(repo: Path) -> list[Path]:
         return []
 
 
+def _worktree_format_age(seconds: int | float) -> str:
+    age_seconds = max(0, int(seconds or 0))
+    if age_seconds < 60:
+        return f"{age_seconds}s"
+    minutes = age_seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def _worktree_age_fields(timestamp: int | float) -> dict[str, object]:
+    if not timestamp:
+        return {"age_seconds": 0, "age": "0s"}
+    age_seconds = max(0, int(time.time() - float(timestamp)))
+    return {"age_seconds": age_seconds, "age": _worktree_format_age(age_seconds)}
+
+
+def _worktree_attempt_mtime(attempt_dir: Path) -> float:
+    latest = 0.0
+    try:
+        latest = max(latest, attempt_dir.stat().st_mtime)
+    except Exception:
+        pass
+    try:
+        for child in attempt_dir.iterdir():
+            try:
+                latest = max(latest, child.stat().st_mtime)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return latest
+
+
+def _worktree_task_id_from_artifact_dir(name: str) -> str:
+    match = re.match(r"^c\d+_s\d+_(?P<task_id>.+)$", str(name or ""))
+    return str(match.group("task_id") if match else "").strip()
+
+
+def _worktree_attempt_number(name: str) -> int:
+    match = re.match(r"^attempt_(?P<attempt>\d+)$", str(name or ""))
+    if not match:
+        return -1
+    try:
+        return int(match.group("attempt"))
+    except Exception:
+        return -1
+
+
+def _worktree_task_id_from_branch(branch: str) -> str:
+    text = str(branch or "").strip()
+    if text.startswith("task/"):
+        text = text[len("task/") :]
+    if "_" in text:
+        return text.rsplit("_", 1)[0]
+    return text
+
+
+def _worktree_branch_owners(run_dirs: Sequence[Path]) -> dict[str, dict[str, object]]:
+    owners: dict[str, dict[str, object]] = {}
+
+    def remember(branch: str, run_dir: Path, *, source: str, payload: dict[str, object] | None = None) -> None:
+        branch_text = str(branch or "").strip()
+        if not branch_text or not branch_text.startswith("task/"):
+            return
+        data = dict(payload or {})
+        owners[branch_text] = {
+            "owning_run": run_dir.name,
+            "owning_run_dir": run_dir.resolve().as_posix(),
+            "run_id": run_dir.name,
+            "source": source,
+            "task_id": str(data.get("task_id") or data.get("taskId") or "").strip(),
+            "cycle": data.get("cycle"),
+            "step": data.get("step"),
+            "event": str(data.get("event") or data.get("type") or "").strip(),
+        }
+
+    for run_dir in run_dirs:
+        metrics_path = run_dir / "metrics.jsonl"
+        if metrics_path.exists():
+            try:
+                for raw_line in metrics_path.read_text(encoding="utf-8", errors="replace").splitlines()[-1000:]:
+                    try:
+                        event = json.loads(raw_line)
+                    except Exception:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                    branch = str(event.get("branch") or payload.get("branch") or "").strip()
+                    remember(branch, run_dir, source="metrics", payload={**dict(payload), **event})
+            except Exception:
+                pass
+
+        state_path = run_dir / "STATE.json"
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                state = {}
+            if isinstance(state, dict):
+                for bucket in ("pending_review", "failed", "completed"):
+                    rows = state.get(bucket)
+                    if not isinstance(rows, list):
+                        continue
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        remember(str(row.get("branch") or row.get("rescue_branch") or ""), run_dir, source=f"state.{bucket}", payload=row)
+
+    return owners
+
+
+def _worktree_stale_task_branches(repo: Path, run_dirs: Sequence[Path], source_head: str) -> list[dict[str, object]]:
+    owners = _worktree_branch_owners(run_dirs)
+    code, out = run_cmd(
+        ["git", "for-each-ref", "--format=%(refname:short)%09%(objectname)%09%(committerdate:unix)", "refs/heads/task"],
+        cwd=repo,
+        timeout_sec=60,
+    )
+    if code != 0:
+        return []
+
+    branches: list[dict[str, object]] = []
+    for raw_line in (out or "").splitlines():
+        parts = raw_line.split("\t")
+        if len(parts) < 2:
+            continue
+        branch_name = parts[0].strip()
+        head_ref = parts[1].strip()
+        if not branch_name.startswith("task/") or not head_ref:
+            continue
+        try:
+            commit_ts = float(parts[2]) if len(parts) > 2 and parts[2].strip() else 0.0
+        except Exception:
+            commit_ts = 0.0
+        head_in_source = bool(source_head and (head_ref == source_head or _git_is_ancestor(repo, head_ref, source_head)))
+        if not head_in_source:
+            continue
+        owner = owners.get(branch_name, {})
+        task_id = str(owner.get("task_id") or _worktree_task_id_from_branch(branch_name)).strip()
+        reason = "branch head is already contained in source HEAD"
+        branches.append(
+            {
+                "branch": branch_name,
+                "path": branch_name,
+                "head_ref": head_ref,
+                "source_head": source_head,
+                "status": "merged",
+                "reason": reason,
+                "task_id": task_id,
+                "owning_run": str(owner.get("owning_run") or "unknown"),
+                "owning_run_dir": str(owner.get("owning_run_dir") or ""),
+                "run_id": str(owner.get("run_id") or owner.get("owning_run") or "unknown"),
+                "owner_source": str(owner.get("source") or ""),
+                "categories": ["stale"],
+                **_worktree_age_fields(commit_ts),
+            }
+        )
+    return branches
+
+
+def _worktree_interrupted_attempt_dirs(run_dirs: Sequence[Path]) -> list[dict[str, object]]:
+    attempts: list[dict[str, object]] = []
+    for run_dir in run_dirs:
+        tasks_root = run_dir / "tasks"
+        if not tasks_root.exists():
+            continue
+        try:
+            task_dirs = [candidate for candidate in tasks_root.iterdir() if candidate.is_dir()]
+        except Exception:
+            continue
+        for task_dir in task_dirs:
+            task_id = _worktree_task_id_from_artifact_dir(task_dir.name)
+            if not task_id:
+                continue
+            try:
+                attempt_dirs = [candidate for candidate in task_dir.iterdir() if candidate.is_dir() and candidate.name.startswith("attempt_")]
+            except Exception:
+                continue
+            for attempt_dir in attempt_dirs:
+                validation_path = attempt_dir / "validation.json"
+                dependency_path = attempt_dir / "DEPENDENCY_REQUIRED.md"
+                if validation_path.exists() or dependency_path.exists():
+                    continue
+                reason = "missing validation artifact"
+                attempts.append(
+                    {
+                        "path": attempt_dir.resolve().as_posix(),
+                        "run_dir": run_dir.resolve().as_posix(),
+                        "owning_run": run_dir.name,
+                        "run_id": run_dir.name,
+                        "task_id": task_id,
+                        "attempt": _worktree_attempt_number(attempt_dir.name),
+                        "status": "interrupted",
+                        "reason": reason,
+                        "categories": ["stale"],
+                        **_worktree_age_fields(_worktree_attempt_mtime(attempt_dir)),
+                    }
+                )
+    return attempts
+
+
 def _worktree_pending_stale_reason(payload: dict[str, object], pending_path: Path) -> str:
     run_dir_value = _worktree_text_path(payload.get("run_dir") or payload.get("runDir"))
     patch_path = _worktree_text_path(payload.get("patch_path") or payload.get("patchPath") or payload.get("patch"))
@@ -2290,6 +2497,8 @@ def _worktree_filter_diagnostics_result(
     pending_markers = [dict(item) for item in diagnostics.get("pending_markers", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
     cleanup_failed = [dict(item) for item in diagnostics.get("cleanup_failed", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
     generated_worktrees = [dict(item) for item in diagnostics.get("generated_worktrees", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
+    stale_task_branches = [dict(item) for item in diagnostics.get("stale_task_branches", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
+    interrupted_attempts = [dict(item) for item in diagnostics.get("interrupted_attempts", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
     issues = [dict(item) for item in diagnostics.get("issues", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
     issues_sorted = sorted(
         issues,
@@ -2315,9 +2524,11 @@ def _worktree_filter_diagnostics_result(
             "cleanup_failed": len(cleanup_failed),
             "generated_worktrees": len(generated_worktrees),
             "orphaned_worktrees": sum(1 for worktree in generated_worktrees if "orphaned" in _worktree_normalize_diagnostic_categories(worktree.get("categories"))),
+            "stale_task_branches": len(stale_task_branches),
+            "interrupted_attempts": len(interrupted_attempts),
             "issue_count": len(issues_sorted),
             "healthy": not issues_sorted,
-            "category_counts": _worktree_diagnostic_category_counts(pending_markers, cleanup_failed, generated_worktrees, issues_sorted),
+            "category_counts": _worktree_diagnostic_category_counts(pending_markers, cleanup_failed, generated_worktrees, stale_task_branches, interrupted_attempts, issues_sorted),
         }
     )
     summary["categoryCounts"] = summary["category_counts"]
@@ -2329,6 +2540,8 @@ def _worktree_filter_diagnostics_result(
         "pending_markers": pending_markers,
         "cleanup_failed": cleanup_failed,
         "generated_worktrees": generated_worktrees,
+        "stale_task_branches": stale_task_branches,
+        "interrupted_attempts": interrupted_attempts,
         "filters": {
             "categories": selected_categories,
             "available_categories": list(WORKTREE_DIAGNOSTIC_CATEGORY_ORDER),
@@ -2365,6 +2578,137 @@ def _path_exists_safely(path_text: str) -> bool:
         return Path(text).expanduser().exists()
     except Exception:
         return False
+
+
+def _pending_marker_reconciliation_artifact_path(pending_path: Path) -> Path:
+    target = pending_path.with_name(WORKTREE_MERGE_PENDING_RECONCILED)
+    if not target.exists():
+        return target
+    suffix = hashlib.sha256(f"{pending_path.as_posix()}:{now_iso()}".encode("utf-8")).hexdigest()[:8]
+    return pending_path.with_name(f"WORKTREE_MERGE_PENDING_RECONCILED_{_safe_ts()}_{suffix}.json")
+
+
+def _pending_marker_source_contains_head(repo: Path, marker: dict[str, object], source_head: str) -> tuple[bool, str, str]:
+    head_ref = str(marker.get("head_ref") or marker.get("headRef") or "").strip()
+    base_ref = str(marker.get("base_ref") or marker.get("baseRef") or marker.get("expected_head") or marker.get("expectedHead") or "").strip()
+    if not head_ref or not source_head or head_ref == base_ref:
+        return False, source_head, head_ref
+    source_repo_text = _worktree_text_path(marker.get("source_repo") or marker.get("sourceRepo")) or repo.as_posix()
+    try:
+        source_repo = Path(source_repo_text).expanduser().resolve()
+    except Exception:
+        source_repo = repo
+    marker_source_head = source_head if source_repo == repo else git_head(source_repo)
+    if not marker_source_head:
+        return False, marker_source_head, head_ref
+    return bool(head_ref == marker_source_head or _git_is_ancestor(source_repo, head_ref, marker_source_head)), marker_source_head, head_ref
+
+
+def _pending_marker_reconciliation_reason(repo: Path, marker: dict[str, object], source_head: str) -> tuple[str, dict[str, object]]:
+    reason_text = str(marker.get("reason") or "").strip().lower()
+    patch_path = _worktree_text_path(marker.get("patch_path") or marker.get("patchPath") or marker.get("patch"))
+    worktree_dir = _worktree_text_path(marker.get("worktree_dir") or marker.get("worktreeDir") or marker.get("worktree"))
+    is_stale = bool(marker.get("stale")) or str(marker.get("status") or "").strip().lower() == "stale"
+    patch_missing = bool(is_stale and patch_path and not _path_exists_safely(patch_path))
+    worktree_missing = bool(is_stale and worktree_dir and not _path_exists_safely(worktree_dir))
+    if patch_missing or "patch path is missing" in reason_text:
+        return "missing_patch", {"patch_path": patch_path}
+    if worktree_missing or "worktree directory is missing" in reason_text:
+        return "missing_worktree", {"worktree_dir": worktree_dir}
+    source_contains, marker_source_head, head_ref = _pending_marker_source_contains_head(repo, marker, source_head)
+    if source_contains:
+        return "source_head_contains_pending_head", {"source_head": marker_source_head, "head_ref": head_ref}
+    return "", {}
+
+
+def reconcile_stale_pending_worktree_markers(
+    repo: Path,
+    *,
+    diagnostics: dict[str, object] | None = None,
+    source_head: str = "",
+) -> list[dict[str, object]]:
+    """Clear pending merge markers that diagnostics prove are no longer actionable.
+
+    This is intentionally separate from ``scan_worktree_diagnostics`` so normal
+    doctor/API reads stay read-only. Startup readiness calls this after scanning
+    and records an audit artifact beside each removed marker.
+    """
+
+    repo_resolved = repo.expanduser().resolve()
+    scan = diagnostics if isinstance(diagnostics, dict) else scan_worktree_diagnostics(repo_resolved)
+    source_head_text = str(source_head or git_head(repo_resolved) or "").strip()
+    pending_markers = scan.get("pending_markers") if isinstance(scan.get("pending_markers"), list) else []
+    reconciled: list[dict[str, object]] = []
+    seen_paths: set[str] = set()
+
+    for raw_marker in pending_markers:
+        if not isinstance(raw_marker, dict):
+            continue
+        marker = dict(raw_marker)
+        marker_path_text = _worktree_text_path(marker.get("path"))
+        if not marker_path_text or marker_path_text in seen_paths:
+            continue
+        marker_path = Path(marker_path_text)
+        if not marker_path.exists():
+            continue
+        reason, reason_details = _pending_marker_reconciliation_reason(repo_resolved, marker, source_head_text)
+        if not reason:
+            continue
+        try:
+            payload = _read_json_payload(marker_path)
+        except Exception as ex:
+            payload = {"read_error": str(ex).strip() or ex.__class__.__name__}
+
+        companion_paths = _pending_companion_paths(payload if isinstance(payload, dict) else {}, marker_path)
+        removed_paths: list[str] = []
+        artifact_paths: list[str] = []
+        reconciled_at = now_iso()
+        for companion in companion_paths:
+            companion_key = companion.resolve().as_posix() if companion.exists() else companion.as_posix()
+            seen_paths.add(companion_key)
+            if not companion.exists():
+                continue
+            audit_payload = {
+                "schema_version": 1,
+                "status": "reconciled",
+                "reconciled_at": reconciled_at,
+                "reconciliation_reason": reason,
+                "reason": reason,
+                "reason_details": dict(reason_details),
+                "source_repo": repo_resolved.as_posix(),
+                "source_head": source_head_text,
+                "pending_marker_path": companion.resolve().as_posix(),
+                "removed_pending_paths": [path.as_posix() for path in companion_paths],
+                "original_pending_payload": dict(payload) if isinstance(payload, dict) else {},
+            }
+            artifact_path = _pending_marker_reconciliation_artifact_path(companion)
+            safe_write_text(artifact_path, json.dumps(audit_payload, ensure_ascii=False, indent=2) + "\n")
+            artifact_paths.append(artifact_path.resolve().as_posix())
+            removed_paths.append(companion.resolve().as_posix())
+            try:
+                companion.unlink()
+            except Exception:
+                pass
+
+        if removed_paths:
+            reconciled.append(
+                {
+                    "status": "reconciled",
+                    "reason": reason,
+                    "reason_details": dict(reason_details),
+                    "marker_path": marker_path_text,
+                    "removed_paths": removed_paths,
+                    "artifact_paths": artifact_paths,
+                    "source_head": source_head_text,
+                    "head_ref": str(marker.get("head_ref") or "").strip(),
+                    "run_dir": str(marker.get("run_dir") or "").strip(),
+                    "worktree_dir": str(marker.get("worktree_dir") or "").strip(),
+                    "patch_path": str(marker.get("patch_path") or "").strip(),
+                    "reconciled_at": reconciled_at,
+                }
+            )
+
+    return reconciled
 
 
 def _cleanup_failed_reconciliation_state(
@@ -2516,6 +2860,8 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
     generated_worktrees: list[dict[str, object]] = []
     pending_markers: list[dict[str, object]] = []
     cleanup_failed: list[dict[str, object]] = []
+    stale_task_branches: list[dict[str, object]] = []
+    interrupted_attempts: list[dict[str, object]] = []
     issues: list[dict[str, object]] = []
     referenced_worktrees: set[str] = set()
     seen_missing_patch_paths: set[str] = set()
@@ -2936,6 +3282,48 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
                 },
             )
 
+    current_source_head = git_head(repo_resolved)
+    for branch in _worktree_stale_task_branches(repo_resolved, run_dirs, current_source_head):
+        stale_task_branches.append(branch)
+        add_issue(
+            "stale_task_branch",
+            f"Stale task branch {branch.get('branch')}: {branch.get('reason')}",
+            severity="warn",
+            categories=["stale"],
+            details={
+                "branch": branch.get("branch"),
+                "age": branch.get("age"),
+                "age_seconds": branch.get("age_seconds"),
+                "status": branch.get("status"),
+                "reason": branch.get("reason"),
+                "owning_run": branch.get("owning_run"),
+                "owning_run_dir": branch.get("owning_run_dir"),
+                "task_id": branch.get("task_id"),
+                "head_ref": branch.get("head_ref"),
+                "source_head": branch.get("source_head"),
+            },
+        )
+
+    for attempt in _worktree_interrupted_attempt_dirs(run_dirs):
+        interrupted_attempts.append(attempt)
+        add_issue(
+            "interrupted_attempt_directory",
+            f"Interrupted attempt directory {attempt.get('path')}: {attempt.get('reason')}",
+            severity="warn",
+            path=str(attempt.get("path") or ""),
+            categories=["stale"],
+            details={
+                "age": attempt.get("age"),
+                "age_seconds": attempt.get("age_seconds"),
+                "status": attempt.get("status"),
+                "reason": attempt.get("reason"),
+                "owning_run": attempt.get("owning_run"),
+                "run_dir": attempt.get("run_dir"),
+                "task_id": attempt.get("task_id"),
+                "attempt": attempt.get("attempt"),
+            },
+        )
+
     issues_sorted = sorted(
         issues,
         key=lambda item: (
@@ -2960,9 +3348,11 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
         "cleanup_failed": len(cleanup_failed),
         "generated_worktrees": len(generated_worktrees),
         "orphaned_worktrees": sum(1 for worktree in generated_worktrees if worktree.get("orphaned")),
+        "stale_task_branches": len(stale_task_branches),
+        "interrupted_attempts": len(interrupted_attempts),
         "issue_count": len(issues_sorted),
         "healthy": not issues_sorted,
-        "category_counts": _worktree_diagnostic_category_counts(pending_markers, cleanup_failed, generated_worktrees, issues_sorted),
+        "category_counts": _worktree_diagnostic_category_counts(pending_markers, cleanup_failed, generated_worktrees, stale_task_branches, interrupted_attempts, issues_sorted),
     }
     summary["categoryCounts"] = summary["category_counts"]
 
@@ -2979,6 +3369,8 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
             "pending_markers": pending_markers,
             "cleanup_failed": cleanup_failed,
             "generated_worktrees": generated_worktrees,
+            "stale_task_branches": stale_task_branches,
+            "interrupted_attempts": interrupted_attempts,
         },
         categories=categories,
     )

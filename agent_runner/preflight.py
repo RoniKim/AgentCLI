@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .gitops import scan_worktree_diagnostics
+from .gitops import reconcile_stale_pending_worktree_markers, scan_worktree_diagnostics
 from .stop_progress import FINAL_STOP_PHASES, STOP_RECONCILIATION_FILE, read_stop_progress
 from .utils import now_iso, run_cmd
 
@@ -286,8 +286,15 @@ def check_runner_start_readiness(repo: Path | str, run_dir: Path | str, *, stop_
             )
         )
 
-    worktree_diagnostics = scan_worktree_diagnostics(repo_path, categories=["stale", "orphaned"])
     current_head = _git_head(repo_path) if git_rc == 0 else ""
+    worktree_diagnostics = scan_worktree_diagnostics(repo_path)
+    pending_marker_reconciliations = reconcile_stale_pending_worktree_markers(
+        repo_path,
+        diagnostics=worktree_diagnostics,
+        source_head=current_head,
+    )
+    if pending_marker_reconciliations:
+        worktree_diagnostics = scan_worktree_diagnostics(repo_path)
     merged_warning_paths: set[str] = set()
     for worktree in worktree_diagnostics.get("generated_worktrees", []):
         if not isinstance(worktree, dict) or not bool(worktree.get("orphaned")):
@@ -360,6 +367,39 @@ def check_runner_start_readiness(repo: Path | str, run_dir: Path | str, *, stop_
                     details={"issue": dict(issue)},
                 )
             )
+        elif kind == "stale_task_branch":
+            details = issue.get("details") if isinstance(issue.get("details"), dict) else {}
+            warnings.append(
+                _readiness_issue(
+                    "stale_task_branch",
+                    (
+                        "Stale task branch listed before cleanup: "
+                        f"age={details.get('age') or '0s'} "
+                        f"status={details.get('status') or 'unknown'} "
+                        f"reason={details.get('reason') or 'unknown'} "
+                        f"owning_run={details.get('owning_run') or 'unknown'}"
+                    ),
+                    severity="warning",
+                    details={"issue": dict(issue), "branch": details.get("branch")},
+                )
+            )
+        elif kind == "interrupted_attempt_directory":
+            details = issue.get("details") if isinstance(issue.get("details"), dict) else {}
+            warnings.append(
+                _readiness_issue(
+                    "interrupted_attempt_directory",
+                    (
+                        "Interrupted attempt directory listed before cleanup: "
+                        f"age={details.get('age') or '0s'} "
+                        f"status={details.get('status') or 'unknown'} "
+                        f"reason={details.get('reason') or 'unknown'} "
+                        f"owning_run={details.get('owning_run') or 'unknown'}"
+                    ),
+                    severity="warning",
+                    path=path_text,
+                    details={"issue": dict(issue)},
+                )
+            )
 
     report = {
         "schema_version": READINESS_SCHEMA_VERSION,
@@ -376,6 +416,10 @@ def check_runner_start_readiness(repo: Path | str, run_dir: Path | str, *, stop_
             "issues": [dict(item) for item in worktree_diagnostics.get("issues", []) if isinstance(item, dict)],
             "pending_markers": [dict(item) for item in worktree_diagnostics.get("pending_markers", []) if isinstance(item, dict)],
             "generated_worktrees": [dict(item) for item in worktree_diagnostics.get("generated_worktrees", []) if isinstance(item, dict)],
+            "cleanup_failed": [dict(item) for item in worktree_diagnostics.get("cleanup_failed", []) if isinstance(item, dict)],
+            "stale_task_branches": [dict(item) for item in worktree_diagnostics.get("stale_task_branches", []) if isinstance(item, dict)],
+            "interrupted_attempts": [dict(item) for item in worktree_diagnostics.get("interrupted_attempts", []) if isinstance(item, dict)],
+            "pending_marker_reconciliations": [dict(item) for item in pending_marker_reconciliations if isinstance(item, dict)],
         },
         "blockers": blockers,
         "warnings": warnings,
