@@ -60,6 +60,13 @@ class PipelineManager:
             cls._invalidate_session_tasks(session)
         return bool(session.ensure_tasks_loaded())
 
+    @staticmethod
+    def _consume_session_stage_effects(session: PipelineSession) -> frozenset[str]:
+        consume = getattr(session, "consume_stage_effects", None)
+        if callable(consume):
+            return StageOutcome.ok(effects=consume() or ()).effects
+        return frozenset()
+
     async def run_cycle(self, session: PipelineSession, cycle_idx: int, *, continuous: bool) -> CycleResult:
         if session.has_stop():
             return CycleResult(rc=0, reason="stop_file", done_delta=0, stages=[])
@@ -110,6 +117,8 @@ class PipelineManager:
             except Exception as exc:
                 stage_results.append({"name": getattr(stage, "name", "") or stage.__class__.__name__, "status": "fail", "rc": 1, "reason": f"stage_exception: {exc}"})
                 return CycleResult(rc=1, reason="stage_exception", done_delta=getattr(session, 'done_delta', 0), stages=stage_results)
+            session_effects = self._consume_session_stage_effects(session)
+            combined_effects = out.effects | session_effects
             stage_results.append(
                 {
                     "name": getattr(stage, "name", "") or stage.__class__.__name__,
@@ -119,7 +128,7 @@ class PipelineManager:
                 }
             )
 
-            if out.has_effect(STAGE_EFFECT_BACKLOG_WRITTEN) or out.has_effect(STAGE_EFFECT_TASKS_RELOAD_REQUIRED):
+            if STAGE_EFFECT_BACKLOG_WRITTEN in combined_effects or STAGE_EFFECT_TASKS_RELOAD_REQUIRED in combined_effects:
                 self._invalidate_session_tasks(session)
                 tasks_checked = False
                 tasks_reload_required = True

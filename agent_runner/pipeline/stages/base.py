@@ -7,7 +7,8 @@ from typing import Any, Iterable
 _VALID_STATUSES = frozenset({"ok", "skip", "stop", "fail"})
 STAGE_EFFECT_BACKLOG_WRITTEN = "backlog_written"
 STAGE_EFFECT_TASKS_RELOAD_REQUIRED = "tasks_reload_required"
-_VALID_EFFECTS = frozenset({STAGE_EFFECT_BACKLOG_WRITTEN, STAGE_EFFECT_TASKS_RELOAD_REQUIRED})
+STAGE_EFFECTS_BACKLOG_MUTATION = frozenset({STAGE_EFFECT_BACKLOG_WRITTEN, STAGE_EFFECT_TASKS_RELOAD_REQUIRED})
+_VALID_EFFECTS = STAGE_EFFECTS_BACKLOG_MUTATION
 
 
 def _normalize_effects(effects: Iterable[str] | None) -> frozenset[str]:
