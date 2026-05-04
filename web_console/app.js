@@ -856,6 +856,14 @@
         discardSummary: 'Confirm discard to remove the pending state for {worktreeDir} without touching {sourceRepo}.',
         actionFailedHttp: 'Worktree action failed (HTTP {status}).',
         noPatchPathAvailable: 'No patch path is available.',
+        recentContext: 'Recent worktree context',
+        recentContextClosed: 'Historical apply/discard records are hidden until opened.',
+        recentContextOpen: 'Read-only historical worktree artifacts.',
+        showRecentContext: 'Show recent context',
+        hideRecentContext: 'Hide recent context',
+        noRecentContext: 'No recent worktree artifacts.',
+        historicalArtifact: 'Historical artifact',
+        historicalNoActions: 'Historical artifacts are read-only and cannot enable merge or discard.',
       },
       logs: {
         title: 'Logs',
@@ -6075,6 +6083,27 @@
       ''
     );
     const applyCheck = normalizeWorktreeApplyCheck(raw.applyCheck || raw.apply_check || preflight.applyCheck);
+    const historicalArtifacts = toArray(
+      raw.historicalArtifacts || raw.historical_artifacts || raw.recentArtifacts || raw.recent_artifacts
+    ).map((item) => {
+      const nested = normalizeWorktreeState({
+        ...toObject(item),
+        historicalArtifacts: [],
+        historical_artifacts: [],
+        recentArtifacts: [],
+        recent_artifacts: [],
+      });
+      return {
+        ...nested,
+        current: false,
+        historical: true,
+        isHistorical: true,
+        mutatingActionsEnabled: false,
+      };
+    });
+    const historical = Boolean(raw.historical ?? raw.isHistorical ?? raw.is_historical);
+    const current = Boolean(raw.current ?? !historical);
+    const mutatingActionsEnabled = Boolean(raw.mutatingActionsEnabled ?? raw.mutating_actions_enabled ?? false);
     return {
       status,
       mode: toText(raw.mode, 'manual'),
@@ -6131,6 +6160,14 @@
       applyCheck,
       apply_check: applyCheck,
       checklist,
+      historicalArtifacts,
+      historical_artifacts: historicalArtifacts,
+      recentArtifacts: historicalArtifacts,
+      recent_artifacts: historicalArtifacts,
+      current,
+      historical,
+      isHistorical: historical,
+      mutatingActionsEnabled,
       runDir,
       runnerRc,
       lastRc: runnerRc,
@@ -6615,6 +6652,16 @@
     state.worktreeDiagnosticsFilter = normalizeWorktreeDiagnosticsFilter({ categories: next });
     renderShell({ preserveScroll: true });
     return true;
+  }
+
+  function setWorktreeHistoricalOpen(open = true) {
+    state.worktreeHistoricalOpen = Boolean(open);
+    renderShell({ preserveScroll: true });
+    return state.worktreeHistoricalOpen;
+  }
+
+  function toggleWorktreeHistoricalOpen() {
+    return setWorktreeHistoricalOpen(!state.worktreeHistoricalOpen);
   }
 
   function normalizeMetrics(metrics) {
@@ -8548,6 +8595,14 @@
         dirty_patch_applied: null,
         pendingMarkerPath: '',
         pending_marker_path: '',
+        historicalArtifacts: [],
+        historical_artifacts: [],
+        recentArtifacts: [],
+        recent_artifacts: [],
+        current: true,
+        historical: false,
+        isHistorical: false,
+        mutatingActionsEnabled: false,
         checklist: [
           t('worktree.checklistInspectPatchHunks'),
           t('worktree.checklistVerifyNoSecretLeakage'),
@@ -8560,6 +8615,7 @@
         lastRc: 0,
       },
       worktreeAction: null,
+      worktreeHistoricalOpen: false,
       history: [],
       historySummary: { runs: 0, successes: 0, failures: 0, stopped: 0, tasksDone: 0, tasksTotal: 0 },
       experience: adaptExperience({
@@ -9011,6 +9067,14 @@
         dirty_patch_applied: null,
         pendingMarkerPath: '',
         pending_marker_path: '',
+        historicalArtifacts: [],
+        historical_artifacts: [],
+        recentArtifacts: [],
+        recent_artifacts: [],
+        current: true,
+        historical: false,
+        isHistorical: false,
+        mutatingActionsEnabled: false,
         checklist: [
           t('worktree.checklistInspectPatchHunks'),
           t('worktree.checklistVerifyNoSecretLeakage'),
@@ -9025,6 +9089,7 @@
       worktreeDiagnostics: normalizeWorktreeDiagnostics({}),
       worktreeDiagnosticsFilter: normalizeWorktreeDiagnosticsFilter({}),
       worktreeAction: null,
+      worktreeHistoricalOpen: false,
       history: [
         {
           id: 'run_offline_20260425_223000',
@@ -9236,6 +9301,8 @@
     setWorktreeDiagnosticsFilter,
     clearWorktreeDiagnosticsFilter,
     toggleWorktreeDiagnosticsFilter,
+    setWorktreeHistoricalOpen,
+    toggleWorktreeHistoricalOpen,
     isLiveTailPaused,
     setLiveTailPaused,
     resetServerLogTailState,
@@ -14096,6 +14163,9 @@
     const data = toObject(review);
     const status = toText(data.status, 'none');
     const cleanupState = toText(data.cleanupState, 'none');
+    if (data.historical || data.isHistorical || data.current === false) {
+      return false;
+    }
     if (status !== 'pending review' && status !== 'pending') {
       return false;
     }
@@ -14120,6 +14190,9 @@
     const data = toObject(review);
     const status = toText(data.status, 'none');
     const cleanupState = toText(data.cleanupState, 'none');
+    if (data.historical || data.isHistorical || data.current === false) {
+      return t('worktree.historicalNoActions');
+    }
     if (status === 'none') {
       return t('worktree.noPendingMerge');
     }
@@ -17925,6 +17998,8 @@
   function renderWorktree() {
     const review = state.worktreeMerge;
     const status = toText(review.status, 'none');
+    const historicalArtifacts = toArray(review.historicalArtifacts || review.historical_artifacts || review.recentArtifacts || review.recent_artifacts);
+    const historicalOpen = Boolean(state.worktreeHistoricalOpen);
     const cleanupState = toText(review.cleanupState, 'none');
     const cleanupDetails = toObject(review.cleanupDetails || review.cleanup_details);
     const resolutionActions = normalizeWorktreeResolutionActions(review.resolutionActions || review.resolution_actions);
@@ -17958,8 +18033,8 @@
         </div>
       `
       : `<div class="summary-note">${escapeHTML(t('worktree.noChangedFiles'))}</div>`;
-    const statusLabel = (() => {
-      const normalized = status.toLowerCase();
+    const worktreeStatusLabel = (value) => {
+      const normalized = toText(value, 'none').toLowerCase();
       if (normalized === 'none') return t('common.none');
       if (normalized === 'pending review' || normalized === 'pending') return t('worktree.reviewRequired');
       if (normalized === 'applied') return t('worktree.patchApplied');
@@ -17969,8 +18044,9 @@
       if (normalized === 'applied_cleanup_failed') return t('worktree.mergeRecordedCleanupFailed');
       if (normalized === 'discard_cleanup_failed') return t('worktree.discardRecordedCleanupFailed');
       if (normalized === 'error') return t('common.failed');
-      return status;
-    })();
+      return toText(value, 'none');
+    };
+    const statusLabel = worktreeStatusLabel(status);
     const cleanupStateLabel = (() => {
       const normalized = cleanupState.toLowerCase();
       if (normalized === 'none') return t('common.none');
@@ -18110,6 +18186,53 @@
         `
       )
       .join('');
+    const historicalToggle = historicalArtifacts.length
+      ? `<button type="button" class="button button--quiet" data-worktree-history-toggle="${historicalOpen ? 'closed' : 'open'}">${escapeHTML(historicalOpen ? t('worktree.hideRecentContext') : t('worktree.showRecentContext'))}</button>`
+      : '';
+    const historicalContextBody = historicalOpen && historicalArtifacts.length
+      ? `
+        <div class="compact-list" data-worktree-history-context="open">
+          ${historicalArtifacts.map((item) => {
+            const itemStatus = toText(item.status, 'none');
+            const itemStatusFile = toText(item.statusFile || item.status_file, '');
+            const itemPatchPath = toText(item.patchPath || item.patch_path || item.patch, '');
+            const itemRunDir = toText(item.runDir || item.run_dir, '');
+            const itemCleanupState = toText(item.cleanupState || item.cleanup_state, 'none');
+            const bodyText = [worktreeStatusLabel(itemStatus), itemStatusFile || itemPatchPath || itemRunDir || t('common.unavailable')]
+              .filter(Boolean)
+              .join(' | ');
+            const metaText = [
+              t('worktree.historicalArtifact'),
+              itemCleanupState !== 'none' ? `${t('worktree.cleanupState')} ${itemCleanupState}` : '',
+              t('worktree.readOnly'),
+            ].filter(Boolean).join(' | ');
+            return `
+              <div class="compact-list__item" data-worktree-history-artifact="${escapeHTML(itemStatus)}">
+                <span class="compact-list__bullet"></span>
+                <div>
+                  <div class="compact-list__body">${escapeHTML(bodyText)}</div>
+                  <div class="compact-list__meta">${escapeHTML(metaText)}</div>
+                  ${itemStatus !== 'none' ? renderWorktreePreflightBlock(item) : ''}
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+        <div class="summary-note" style="margin-top:12px;">${escapeHTML(t('worktree.historicalNoActions'))}</div>
+      `
+      : `<div class="summary-note" data-worktree-history-context="closed">${escapeHTML(historicalArtifacts.length ? t('worktree.recentContextClosed') : t('worktree.noRecentContext'))}</div>`;
+    const historicalContextHTML = historicalArtifacts.length
+      ? panel(
+          t('worktree.recentContext'),
+          historicalOpen ? t('worktree.recentContextOpen') : `${historicalArtifacts.length} ${t('common.recent')}`,
+          `
+            <div class="modal-actions" style="margin-bottom:12px;">
+              ${historicalToggle}
+            </div>
+            ${historicalContextBody}
+          `
+        )
+      : '';
 
     const body = `
       <div class="review-layout">
@@ -18159,6 +18282,8 @@
             `${escapeHTML(review.changedFiles.length)} ${escapeHTML(t('common.files'))}`,
             changedFilesHTML
           )}
+
+          ${historicalContextHTML}
         </div>
 
         <div class="view-grid">
@@ -21161,6 +21286,12 @@
       } else {
         toggleWorktreeDiagnosticsFilter(value);
       }
+      return;
+    }
+
+    const worktreeHistoryToggle = event.target.closest('[data-worktree-history-toggle]');
+    if (worktreeHistoryToggle) {
+      setWorktreeHistoricalOpen(worktreeHistoryToggle.dataset.worktreeHistoryToggle === 'open');
       return;
     }
 

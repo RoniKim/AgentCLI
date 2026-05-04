@@ -1179,6 +1179,7 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
     _worktree_status_payload = web._worktree_status_payload
     _worktree_status_artifacts = web._worktree_status_artifacts
     _worktree_select_artifact = web._worktree_select_artifact
+    WORKTREE_FINALIZED_HISTORY_STATUSES = web.WORKTREE_FINALIZED_HISTORY_STATUSES
     summarize_worktree_diff = web.summarize_worktree_diff
     git_show_toplevel = web.git_show_toplevel
     summarize_worktree_preflight = web.summarize_worktree_preflight
@@ -1186,6 +1187,77 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
     repo_root = _repo_root(repo)
     run_dir_value = run_dir.as_posix() if run_dir else ""
     source_branch = branch or "HEAD"
+
+    def _artifact_mtime_ns(item: tuple[str, Path]) -> int:
+        try:
+            return item[1].stat().st_mtime_ns
+        except OSError:
+            return 0
+
+    def _attach_recent_artifacts(payload: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+        recent = [dict(item) for item in artifacts]
+        payload["historicalArtifacts"] = recent
+        payload["historical_artifacts"] = recent
+        payload["recentArtifacts"] = recent
+        payload["recent_artifacts"] = recent
+        payload["current"] = True
+        payload["historical"] = False
+        payload["isHistorical"] = False
+        payload["mutatingActionsEnabled"] = bool(
+            payload.get("status") in {"pending", "pending review"}
+            and payload.get("cleanupState") == "pending"
+            and payload.get("reviewRequired")
+        )
+        return payload
+
+    def _finalized_artifact_payload(artifact_status: str, artifact_path: Path) -> dict[str, Any] | None:
+        if artifact_status not in WORKTREE_FINALIZED_HISTORY_STATUSES:
+            return None
+        payload = _safe_json(artifact_path, {})
+        if not isinstance(payload, dict):
+            payload = {}
+        artifact = _worktree_status_payload(
+            repo_root,
+            run_dir,
+            branch,
+            status=artifact_status,
+            artifact_path=artifact_path,
+            payload=payload,
+            pending_path=None,
+        )
+        artifact["historicalArtifacts"] = []
+        artifact["historical_artifacts"] = []
+        artifact["recentArtifacts"] = []
+        artifact["recent_artifacts"] = []
+        artifact["current"] = False
+        artifact["historical"] = True
+        artifact["isHistorical"] = True
+        artifact["mutatingActionsEnabled"] = False
+        return artifact
+
+    def _recent_finalized_artifacts(candidates: list[tuple[str, Path]]) -> list[dict[str, Any]]:
+        recent: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for artifact_status, artifact_path in sorted(candidates, key=_artifact_mtime_ns, reverse=True):
+            artifact = _finalized_artifact_payload(artifact_status, artifact_path)
+            if artifact is None:
+                continue
+            key = artifact_path.resolve().as_posix() if artifact_path.exists() else artifact_path.as_posix()
+            if key in seen:
+                continue
+            seen.add(key)
+            recent.append(artifact)
+            if len(recent) >= 12:
+                break
+        return recent
+
+    artifact_candidates = [
+        (artifact_status, artifact_path)
+        for artifact_status, artifact_path in _worktree_status_artifacts(repo_root, run_dir)
+        if artifact_status != "pending" and artifact_path.exists()
+    ]
+    recent_finalized_artifacts = _recent_finalized_artifacts(artifact_candidates)
+
     pending_path = find_pending_worktree_merge(repo_root, run_dir)
     if pending_path is not None:
         try:
@@ -1254,7 +1326,7 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
                     "lastRc": 0,
                 }
             )
-            return invalid
+            return _attach_recent_artifacts(invalid, recent_finalized_artifacts)
 
         payload = raw_payload
         stale_reason = _worktree_pending_is_stale(payload, pending_path)
@@ -1311,9 +1383,9 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
                     "lastRc": 0,
                 }
             )
-            return invalid
+            return _attach_recent_artifacts(invalid, recent_finalized_artifacts)
 
-        return _worktree_status_payload(
+        return _attach_recent_artifacts(_worktree_status_payload(
             repo_root,
             run_dir,
             branch,
@@ -1321,21 +1393,21 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
             artifact_path=pending_path,
             payload=payload,
             pending_path=pending_path,
-        )
+        ), recent_finalized_artifacts)
 
-    artifact_candidates = [
+    current_artifact_candidates = [
         (artifact_status, artifact_path)
-        for artifact_status, artifact_path in _worktree_status_artifacts(repo_root, run_dir)
-        if artifact_status != "pending" and artifact_path.exists()
+        for artifact_status, artifact_path in artifact_candidates
+        if artifact_status not in WORKTREE_FINALIZED_HISTORY_STATUSES
     ]
-    selected_artifact = _worktree_select_artifact(artifact_candidates)
+    selected_artifact = _worktree_select_artifact(current_artifact_candidates)
     if selected_artifact is not None:
         artifact_status, artifact_path = selected_artifact
-        if artifact_status in {"applied", "discarded", "applied_cleanup_failed", "discard_cleanup_failed"}:
+        if artifact_status in {"applied_cleanup_failed", "discard_cleanup_failed"}:
             payload = _safe_json(artifact_path, {})
             if not isinstance(payload, dict):
                 payload = {}
-            return _worktree_status_payload(
+            return _attach_recent_artifacts(_worktree_status_payload(
                 repo_root,
                 run_dir,
                 branch,
@@ -1343,7 +1415,7 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
                 artifact_path=artifact_path,
                 payload=payload,
                 pending_path=artifact_path.with_name("WORKTREE_MERGE_PENDING.json"),
-            )
+            ), recent_finalized_artifacts)
         if artifact_status in {"apply_failed", "patch_not_applied", "not_applied"}:
             artifact_patch_path = (run_dir / "worktree.patch") if run_dir is not None else None
             artifact_patch_text = (
@@ -1408,9 +1480,9 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
                     "runDir": run_dir.as_posix() if run_dir else "",
                 }
             )
-            return payload
+            return _attach_recent_artifacts(payload, recent_finalized_artifacts)
 
-    return _worktree_default_payload(repo_root, run_dir, branch)
+    return _attach_recent_artifacts(_worktree_default_payload(repo_root, run_dir, branch), recent_finalized_artifacts)
 
 
 def build_snapshot(

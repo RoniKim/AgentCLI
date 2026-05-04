@@ -385,6 +385,7 @@ WORKTREE_STATUS_PRIORITY = {
     "patch_not_applied": 1,
     "not_applied": 1,
 }
+WORKTREE_FINALIZED_HISTORY_STATUSES = {"applied", "discarded"}
 
 
 def _worktree_artifact_sort_key(status: str, path: Path) -> tuple[int, int]:
@@ -460,6 +461,14 @@ def _worktree_default_payload(repo_root: Path, run_dir: Path | None, branch: str
         "dirty_patch_applied": None,
         "pendingMarkerPath": "",
         "pending_marker_path": "",
+        "historicalArtifacts": [],
+        "historical_artifacts": [],
+        "recentArtifacts": [],
+        "recent_artifacts": [],
+        "current": True,
+        "historical": False,
+        "isHistorical": False,
+        "mutatingActionsEnabled": False,
         "checklist": list(WORKTREE_REVIEW_CHECKLIST),
         "runDir": run_dir_value,
         "runnerRc": 0,
