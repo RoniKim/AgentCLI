@@ -4,6 +4,7 @@ from collections.abc import Mapping, MutableMapping, MutableSequence, Sequence
 from typing import Any
 
 from .failure_policy import build_failure_entry, should_preserve_for_review
+from .state import save_state
 
 
 def build_task_failure_state_entry(
@@ -28,6 +29,7 @@ def build_task_failure_state_entry(
 def record_task_failure_state(
     state: MutableMapping[str, Any],
     *,
+    state_path: Any = None,
     bucket: str = "failed",
     task_id: str,
     reason: str,
@@ -51,6 +53,8 @@ def record_task_failure_state(
         items = []
         state[bucket] = items
     items.append(entry)
+    if state_path is not None:
+        save_state(state_path, state)  # type: ignore[arg-type]
     return entry
 
 

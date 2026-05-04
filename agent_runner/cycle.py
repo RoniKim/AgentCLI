@@ -108,6 +108,8 @@ from .state import (
     parse_backlog_md,
     load_state,
     save_state,
+    append_state_warning,
+    mark_state_task_done,
     task_scheduling_snapshot,
     mark_backlog_done,
     write_default_p0_backlog,
@@ -1905,6 +1907,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 ) -> dict[str, Any] | None:
                     return record_task_failure_state(
                         state,
+                        state_path=state_path,
                         task_id=next_task.id,
                         reason=reason,
                         task_status=task_status,
@@ -1925,6 +1928,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     outcome_status = _task_failure_status(reason, detail=detail) if not task_status else task_status
                     record_task_failure_state(
                         state,
+                        state_path=state_path,
                         bucket="pending_review",
                         task_id=next_task.id,
                         reason=reason,
@@ -2147,7 +2151,8 @@ async def main_async(args: argparse.Namespace) -> int:
                         return
                     task_stop_recorded = True
                     detail = "Stop requested; partial task artifacts and worktree state were preserved."
-                    state.setdefault("warnings", []).append(
+                    append_state_warning(
+                        state_path,
                         {
                             "task": next_task.id,
                             "reason": STOP_REASON_STOP_FILE,
@@ -2155,9 +2160,9 @@ async def main_async(args: argparse.Namespace) -> int:
                             "cycle": cycle_idx,
                             "step": step,
                             "attempt": attempt_num,
-                        }
+                        },
+                        state=state,
                     )
-                    save_state(state_path, state)
                     task_results.append(
                         {
                             "id": next_task.id,
@@ -2372,10 +2377,11 @@ async def main_async(args: argparse.Namespace) -> int:
                         metrics.event("budget_exceeded", cycle=cycle_idx, step=step, task_id=next_task.id, reason=str(dev_exc))
                         return 1, "budget_exceeded", 0, (len(done_set) > before_done)
                     if dev_quota_exhausted:
-                        state.setdefault("warnings", []).append(
-                            {"task": next_task.id, "reason": STOP_REASON_QUOTA, "detail": str(dev_exc) if dev_exc else "usage limit"}
+                        append_state_warning(
+                            state_path,
+                            {"task": next_task.id, "reason": STOP_REASON_QUOTA, "detail": str(dev_exc) if dev_exc else "usage limit"},
+                            state=state,
                         )
-                        save_state(state_path, state)
                         metrics.event("runner_stop", cycle=cycle_idx, step=step, task_id=next_task.id, reason=STOP_REASON_QUOTA)
                         try:
                             stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
@@ -2438,8 +2444,11 @@ async def main_async(args: argparse.Namespace) -> int:
                         return 1, "dev_exception", 0, (len(done_set) > before_done)
                     # Max-turns exceptions are recoverable: continue to diff/build gates.
                     if dev_exc and dev_is_max_turns:
-                        state.setdefault("warnings", []).append({"task": next_task.id, "reason": "max_turns_exceeded", "detail": str(dev_exc)})
-                        save_state(state_path, state)
+                        append_state_warning(
+                            state_path,
+                            {"task": next_task.id, "reason": "max_turns_exceeded", "detail": str(dev_exc)},
+                            state=state,
+                        )
                         metrics.event("task_warn", cycle=cycle_idx, step=step, task_id=next_task.id, reason="max_turns_exceeded")
 
                     after = git_porcelain(repo)
@@ -3505,12 +3514,9 @@ async def main_async(args: argparse.Namespace) -> int:
                         continue
                     break
                 # Mark done only after gates AND commit verification
-                done_set.add(next_task.id)
-                # Clean up previous failure entries for this task (e.g. from earlier cycles)
-                if state.get("failed"):
-                    state["failed"] = [f for f in state["failed"] if f.get("task") != next_task.id]
-                state["done"] = sorted(list(done_set))
-                save_state(state_path, state)
+                mark_state_task_done(state_path, next_task.id, state=state)
+                done_set.clear()
+                done_set.update(state.get("done", []))
                 mark_backlog_done(backlog_md, next_task.id)
                 _record_history(next_task.id, next_task.title, "done", files=next_task.files, cycle=cycle_idx, task_status=TASK_STATUS_COMPLETED)
                 record_completed_task_experience(

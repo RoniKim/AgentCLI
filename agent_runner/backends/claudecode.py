@@ -121,6 +121,8 @@ from ..state import (
     parse_backlog_md,
     load_state,
     save_state,
+    append_state_warning,
+    mark_state_task_done,
     task_scheduling_snapshot,
     write_backlog_files,
     mark_backlog_done,
@@ -2023,6 +2025,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             ) -> dict[str, Any] | None:
                 return record_task_failure_state(
                     state,
+                    state_path=state_path,
                     task_id=next_task.id,
                     reason=reason,
                     task_status=task_status,
@@ -2043,6 +2046,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 outcome_status = task_status or _task_failure_status(reason, detail=detail)
                 record_task_failure_state(
                     state,
+                    state_path=state_path,
                     bucket="pending_review",
                     task_id=next_task.id,
                     reason=reason,
@@ -2266,7 +2270,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     return
                 task_stop_recorded = True
                 detail = "Stop requested; partial task artifacts and worktree state were preserved."
-                state.setdefault("warnings", []).append(
+                append_state_warning(
+                    state_path,
                     {
                         "task": next_task.id,
                         "reason": STOP_REASON_STOP_FILE,
@@ -2274,9 +2279,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         "cycle": cycle_idx,
                         "step": step,
                         "attempt": attempt_num,
-                    }
+                    },
+                    state=state,
                 )
-                save_state(state_path, state)
                 task_results.append(
                     {
                         "id": next_task.id,
@@ -2451,8 +2456,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     metrics.event("budget_exceeded", cycle=cycle_idx, step=step, task_id=next_task.id, reason=str(dev_exc))
                     return 1, "budget_exceeded", 0, (len(done_set) > before_done)
                 if dev_quota_exhausted:
-                    state.setdefault("warnings", []).append({"task": next_task.id, "reason": STOP_REASON_QUOTA, "detail": str(dev_exc) if dev_exc else "usage limit"})
-                    save_state(state_path, state)
+                    append_state_warning(
+                        state_path,
+                        {"task": next_task.id, "reason": STOP_REASON_QUOTA, "detail": str(dev_exc) if dev_exc else "usage limit"},
+                        state=state,
+                    )
                     metrics.event("runner_stop", cycle=cycle_idx, step=step, task_id=next_task.id, reason=STOP_REASON_QUOTA)
                     try:
                         stop_path.write_text("quota exhausted\n", encoding="utf-8", errors="replace")
@@ -2493,8 +2501,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         return 1, "dev_exception", 0, (len(done_set) > before_done)
 
                 if dev_exc and dev_is_max_turns:
-                    state.setdefault("warnings", []).append({"task": next_task.id, "reason": "max_turns_exceeded", "detail": str(dev_exc)})
-                    save_state(state_path, state)
+                    append_state_warning(
+                        state_path,
+                        {"task": next_task.id, "reason": "max_turns_exceeded", "detail": str(dev_exc)},
+                        state=state,
+                    )
                     metrics.event("task_warn", cycle=cycle_idx, step=step, task_id=next_task.id, reason="max_turns_exceeded")
 
                 # Check for explicit dependency requirement signal
@@ -3239,12 +3250,9 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 logger.task_end(task_id=next_task.id, success=False, reason="no_commits", task_status=task_status)
                 skipped_set.add(next_task.id)
                 continue
-            done_set.add(next_task.id)
-            # Clean up previous failure entries for this task (e.g. from earlier cycles)
-            if state.get("failed"):
-                state["failed"] = [f for f in state["failed"] if f.get("task") != next_task.id]
-            state["done"] = sorted(list(done_set))
-            save_state(state_path, state)
+            mark_state_task_done(state_path, next_task.id, state=state)
+            done_set.clear()
+            done_set.update(state.get("done", []))
             mark_backlog_done(backlog_md_path, next_task.id)
             _record_history(next_task.id, next_task.title, "done", files=next_task.files, cycle=cycle_idx, task_status=TASK_STATUS_COMPLETED)
             task_results.append({

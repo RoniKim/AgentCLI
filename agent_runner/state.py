@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import threading
+import time
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List
+from typing import Any, Callable, List, Mapping
 
 from .utils import now_iso, atomic_write_json, atomic_write_text, safe_write_text, eprint
 
@@ -515,48 +521,407 @@ def parse_backlog_md(path: Path) -> list[TaskItem]:
 
 
 def load_state(path: Path) -> dict[str, Any]:
-    if path.exists():
-        try:
-            state = json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
-            if not isinstance(state, dict):
-                state = {"done": [], "failed": []}
-            # Normalize null/non-list → [] to prevent TypeError/AttributeError at call sites
-            for key in ("done", "failed", "warnings"):
-                if not isinstance(state.get(key), list):
-                    state[key] = []
-            return state
-        except (json.JSONDecodeError, ValueError) as exc:
-            eprint(f"[WARN] STATE.json is corrupt ({exc}); backing up and resetting.")
-            try:
-                corrupt_path = path.with_suffix(".json.corrupt")
-                import shutil
-                shutil.copy2(path, corrupt_path)
-            except Exception:
-                pass
-    return {"done": [], "failed": [], "warnings": []}
+    state, origin = _read_state_unlocked(Path(path))
+    return _StateSnapshot(state, origin=origin)
 
 
 _MAX_FAILED_ENTRIES = 200
 _MAX_WARNING_ENTRIES = 200
+_STATE_LOCK_TIMEOUT_SEC = 30.0
+_STATE_LOCK_POLL_SEC = 0.05
+_STATE_LIST_KEYS = ("done", "failed", "warnings", "pending_review")
+_STATE_THREAD_LOCKS: dict[str, threading.RLock] = {}
+_STATE_THREAD_LOCKS_GUARD = threading.Lock()
 
 
-def save_state(path: Path, state: dict[str, Any]) -> None:
-    # Cap failed/warnings lists to prevent unbounded growth in long-running sessions
-    state = dict(state)
-    # Defensive: normalize null/non-list fields before length checks
+class _StateSnapshot(dict):
+    """dict-compatible state snapshot with enough origin data for merge-on-save."""
+
+    _state_origin: dict[str, Any]
+
+    def __init__(self, payload: Mapping[str, Any], *, origin: Mapping[str, Any] | None = None) -> None:
+        super().__init__(payload)
+        self._state_origin = _copy_state_payload(origin if origin is not None else payload)
+
+
+def _copy_state_payload(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    try:
+        return deepcopy(dict(payload or {}))
+    except Exception:
+        return dict(payload or {})
+
+
+def _state_lock_path(path: Path) -> Path:
+    return path.with_name(path.name + ".lock")
+
+
+def _state_thread_lock(lock_path: Path) -> threading.RLock:
+    key = lock_path.expanduser().resolve().as_posix()
+    with _STATE_THREAD_LOCKS_GUARD:
+        lock = _STATE_THREAD_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _STATE_THREAD_LOCKS[key] = lock
+        return lock
+
+
+def _prepare_state_lock_handle(handle: Any) -> None:
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"0")
+        handle.flush()
+    handle.seek(0)
+
+
+def _try_acquire_state_file_lock(handle: Any) -> bool:
+    _prepare_state_lock_handle(handle)
+    if os.name == "nt":
+        import msvcrt
+
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+    import fcntl
+
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+
+
+def _release_state_file_lock(handle: Any) -> None:
+    _prepare_state_lock_handle(handle)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _state_write_lock(path: Path):
+    state_path = Path(path).expanduser()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _state_lock_path(state_path)
+    lock = _state_thread_lock(lock_path)
+    started = time.monotonic()
+    with lock, lock_path.open("a+b") as handle:
+        while True:
+            if _try_acquire_state_file_lock(handle):
+                break
+            if (time.monotonic() - started) >= _STATE_LOCK_TIMEOUT_SEC:
+                raise RuntimeError(f"Timed out acquiring STATE.json lock: {lock_path}")
+            time.sleep(_STATE_LOCK_POLL_SEC)
+        try:
+            yield
+        finally:
+            _release_state_file_lock(handle)
+
+
+def _default_state() -> dict[str, Any]:
+    return {"done": [], "failed": [], "warnings": []}
+
+
+def _normalize_state_payload(state: Mapping[str, Any] | None) -> dict[str, Any]:
+    payload = dict(state or {}) if isinstance(state, Mapping) else {}
+    for key in _STATE_LIST_KEYS:
+        if key in payload and not isinstance(payload.get(key), list):
+            payload[key] = []
     for key in ("done", "failed", "warnings"):
-        if not isinstance(state.get(key), list):
-            state[key] = []
+        if not isinstance(payload.get(key), list):
+            payload[key] = []
+    return payload
+
+
+def _state_recovery_warning(path: Path, reason: str, detail: str) -> dict[str, Any]:
+    return {
+        "task": "__state__",
+        "reason": "state_recovered",
+        "kind": "state_recovered",
+        "source": "STATE.json",
+        "path": path.as_posix(),
+        "recovery_reason": reason,
+        "detail": detail,
+    }
+
+
+def _backup_corrupt_state(path: Path) -> None:
+    try:
+        if path.exists():
+            shutil.copy2(path, path.with_suffix(".json.corrupt"))
+    except Exception:
+        pass
+
+
+def _read_state_unlocked(path: Path, *, recovery_warning: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+    if path.exists():
+        try:
+            raw = path.read_text(encoding="utf-8-sig", errors="replace")
+            if not raw.strip():
+                _backup_corrupt_state(path)
+                state = _default_state()
+                if recovery_warning:
+                    state["warnings"].append(
+                        _state_recovery_warning(
+                            path,
+                            "empty",
+                            "STATE.json was empty; recovered with a default state before applying the mutation.",
+                        )
+                    )
+                return state, _default_state()
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                data = _default_state()
+                if recovery_warning:
+                    data["warnings"].append(
+                        _state_recovery_warning(
+                            path,
+                            "non_object",
+                            "STATE.json did not contain a JSON object; recovered with a default state before applying the mutation.",
+                        )
+                    )
+                return _normalize_state_payload(data), _default_state()
+            state = _normalize_state_payload(data)
+            return state, _copy_state_payload(state)
+        except (json.JSONDecodeError, ValueError) as exc:
+            eprint(f"[WARN] STATE.json is corrupt ({exc}); backing up and resetting.")
+            _backup_corrupt_state(path)
+            state = _default_state()
+            if recovery_warning:
+                state["warnings"].append(
+                    _state_recovery_warning(
+                        path,
+                        "corrupt",
+                        f"STATE.json was corrupt; recovered with a default state before applying the mutation: {exc}",
+                    )
+                )
+            return state, _default_state()
+    return _default_state(), _default_state()
+
+
+def _state_entry_fingerprint(entry: Any) -> str:
+    try:
+        return json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        return repr(entry)
+
+
+def _merge_state_entry_list(latest: list[Any], requested: list[Any], origin: list[Any] | None) -> list[Any]:
+    origin_items = origin if isinstance(origin, list) else []
+    origin_fps = {_state_entry_fingerprint(item) for item in origin_items}
+    requested_fps = {_state_entry_fingerprint(item) for item in requested}
+    removed_fps = origin_fps - requested_fps
+    additions = [item for item in requested if _state_entry_fingerprint(item) not in origin_fps]
+
+    merged: list[Any] = []
+    seen: set[str] = set()
+    for item in [*latest, *additions]:
+        fp = _state_entry_fingerprint(item)
+        if fp in removed_fps or fp in seen:
+            continue
+        seen.add(fp)
+        merged.append(item)
+    return merged
+
+
+def _state_entry_task_id(entry: Any) -> str:
+    return _task_id_text(entry)
+
+
+def _cap_state_lists(state: dict[str, Any]) -> dict[str, Any]:
+    state = _normalize_state_payload(state)
     if len(state["failed"]) > _MAX_FAILED_ENTRIES:
         state["failed"] = state["failed"][-_MAX_FAILED_ENTRIES:]
     if len(state["warnings"]) > _MAX_WARNING_ENTRIES:
         state["warnings"] = state["warnings"][-_MAX_WARNING_ENTRIES:]
+    return state
+
+
+def _sync_state_mapping(target: Any, source: Mapping[str, Any]) -> None:
+    if not isinstance(target, dict):
+        return
+    target.clear()
+    target.update(_copy_state_payload(source))
+    if isinstance(target, _StateSnapshot):
+        target._state_origin = _copy_state_payload(source)
+
+
+def _merge_state_payload(
+    latest: Mapping[str, Any],
+    requested: Mapping[str, Any],
+    origin: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    latest_state = _normalize_state_payload(latest)
+    requested_state = _normalize_state_payload(requested)
+    origin_state = _normalize_state_payload(origin or {})
+
+    merged = dict(latest_state)
+    for key, value in requested_state.items():
+        if key not in _STATE_LIST_KEYS:
+            merged[key] = value
+
+    latest_done = [str(item).strip() for item in latest_state.get("done", []) if str(item).strip()]
+    requested_done = [str(item).strip() for item in requested_state.get("done", []) if str(item).strip()]
+    origin_done = [str(item).strip() for item in origin_state.get("done", []) if str(item).strip()]
+    removed_done = set(origin_done) - set(requested_done)
+
+    done: list[str] = []
+    seen_done: set[str] = set()
+    for task_id in [*latest_done, *requested_done]:
+        if task_id in removed_done or task_id in seen_done:
+            continue
+        seen_done.add(task_id)
+        done.append(task_id)
+    merged["done"] = sorted(done)
+    done_ids = set(merged["done"])
+
+    merged["failed"] = [
+        item
+        for item in _merge_state_entry_list(
+            list(latest_state.get("failed") or []),
+            list(requested_state.get("failed") or []),
+            list(origin_state.get("failed") or []),
+        )
+        if _state_entry_task_id(item) not in done_ids
+    ]
+    merged["warnings"] = _merge_state_entry_list(
+        list(latest_state.get("warnings") or []),
+        list(requested_state.get("warnings") or []),
+        list(origin_state.get("warnings") or []),
+    )
+    if "pending_review" in latest_state or "pending_review" in requested_state or "pending_review" in origin_state:
+        merged["pending_review"] = _merge_state_entry_list(
+            list(latest_state.get("pending_review") or []),
+            list(requested_state.get("pending_review") or []),
+            list(origin_state.get("pending_review") or []),
+        )
+    return _cap_state_lists(merged)
+
+
+def _write_state_unlocked(path: Path, state: dict[str, Any]) -> None:
+    state = _cap_state_lists(state)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         atomic_write_json(path, state)
     except Exception as ex:
         eprint(f"[WARN] Failed to write state atomically: {ex}")
         safe_write_text(path, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+
+
+def save_state(path: Path, state: dict[str, Any]) -> None:
+    origin = getattr(state, "_state_origin", None)
+    with _state_write_lock(Path(path)):
+        latest, _latest_origin = _read_state_unlocked(Path(path), recovery_warning=True)
+        merged = _merge_state_payload(latest, state, origin if isinstance(origin, Mapping) else None)
+        _write_state_unlocked(Path(path), merged)
+        _sync_state_mapping(state, merged)
+
+
+def mutate_state(path: Path, mutator: Callable[[dict[str, Any]], dict[str, Any] | None]) -> dict[str, Any]:
+    """Read, mutate, merge, and write STATE.json under the shared state lock."""
+    with _state_write_lock(Path(path)):
+        latest, origin = _read_state_unlocked(Path(path), recovery_warning=True)
+        working = _StateSnapshot(latest, origin=origin)
+        result = mutator(working)
+        requested = result if isinstance(result, Mapping) else working
+        merged = _merge_state_payload(latest, requested, origin)
+        _write_state_unlocked(Path(path), merged)
+        return _StateSnapshot(merged, origin=merged)
+
+
+def append_state_entry(
+    path: Path,
+    bucket: str,
+    entry: Mapping[str, Any] | Any,
+    *,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    bucket_name = str(bucket or "").strip() or "warnings"
+
+    def _mutate(current: dict[str, Any]) -> dict[str, Any]:
+        items = current.setdefault(bucket_name, [])
+        if not isinstance(items, list):
+            items = []
+            current[bucket_name] = items
+        items.append(dict(entry) if isinstance(entry, Mapping) else entry)
+        return current
+
+    updated = mutate_state(path, _mutate)
+    if state is not None:
+        _sync_state_mapping(state, updated)
+    return updated
+
+
+def append_state_warning(
+    path: Path,
+    warning: Mapping[str, Any] | Any,
+    *,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return append_state_entry(path, "warnings", warning, state=state)
+
+
+def append_state_failure(
+    path: Path,
+    entry: Mapping[str, Any],
+    *,
+    bucket: str = "failed",
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return append_state_entry(path, bucket, entry, state=state)
+
+
+def mark_state_task_done(
+    path: Path,
+    task_id: str,
+    *,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    task_id_text = str(task_id or "").strip()
+
+    def _mutate(current: dict[str, Any]) -> dict[str, Any]:
+        done = [str(item).strip() for item in current.get("done", []) if str(item).strip()]
+        if task_id_text and task_id_text not in done:
+            done.append(task_id_text)
+        current["done"] = sorted(done)
+        if task_id_text:
+            current["failed"] = [
+                item for item in current.get("failed", []) if _state_entry_task_id(item) != task_id_text
+            ]
+        return current
+
+    updated = mutate_state(path, _mutate)
+    if state is not None:
+        _sync_state_mapping(state, updated)
+    return updated
+
+
+def clear_state_done_ids(
+    path: Path,
+    task_ids: set[str] | list[str] | tuple[str, ...],
+    *,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    remove_ids = {str(task_id).strip() for task_id in task_ids if str(task_id).strip()}
+
+    def _mutate(current: dict[str, Any]) -> dict[str, Any]:
+        current["done"] = [
+            str(item).strip()
+            for item in current.get("done", [])
+            if str(item).strip() and str(item).strip() not in remove_ids
+        ]
+        return current
+
+    updated = mutate_state(path, _mutate)
+    if state is not None:
+        _sync_state_mapping(state, updated)
+    return updated
 
 
 def _task_id_text(value: Any) -> str:

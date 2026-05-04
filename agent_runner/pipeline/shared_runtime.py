@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from ..scan import collect_scan_files
 from ..task_status import TASK_STATUS_REVIEW_REQUIRED
+from ..task_failures import record_task_failure_state
 from ..state import (
     normalize_task_scheduling_metadata,
     task_effort_rank,
@@ -1086,12 +1087,12 @@ def select_next_task_with_dependency_checks(
                 logger.skip_event(t.id, f"failed {consec} times consecutively (>= {max_consecutive_failures})")
                 skipped_set.add(t.id)
                 processed.add(t.id)
-                state.setdefault("failed", []).append(
-                    {
-                        "task": t.id,
-                        "reason": "persistent_failure",
-                        "detail": f"Failed {consec} consecutive times across runs",
-                    }
+                record_task_failure_state(
+                    state,
+                    state_path=state_path,
+                    task_id=t.id,
+                    reason="persistent_failure",
+                    detail=f"Failed {consec} consecutive times across runs",
                 )
                 save_state_fn(state_path, state)
                 record_history_fn(
@@ -1149,21 +1150,21 @@ def select_next_task_with_dependency_checks(
                     eprint_fn(f"[SKIP] Task {t.id} depends on unresolvable tasks {permanently_blocked}; skipping.")
                     skipped_set.add(t.id)
                     processed.add(t.id)
-                    state.setdefault("failed", []).append(
-                        {
-                            "task": t.id,
-                            "reason": reason,
-                            "status": TASK_STATUS_REVIEW_REQUIRED,
-                            "task_status": TASK_STATUS_REVIEW_REQUIRED,
-                            "taskStatus": TASK_STATUS_REVIEW_REQUIRED,
-                            "detail": detail,
+                    record_task_failure_state(
+                        state,
+                        state_path=state_path,
+                        task_id=t.id,
+                        reason=reason,
+                        task_status=TASK_STATUS_REVIEW_REQUIRED,
+                        detail=detail,
+                        extra={
                             "blocked_dependencies": blockers,
                             "blockedDependencies": blockers,
                             "blocking_dependencies": blockers,
                             "blockingDependencies": blockers,
                             "next_action": "Resolve blocking upstream tasks before retrying this task.",
                             "nextAction": "Resolve blocking upstream tasks before retrying this task.",
-                        }
+                        },
                     )
                     save_state_fn(state_path, state)
                     record_history_fn(
