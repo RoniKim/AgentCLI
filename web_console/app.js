@@ -337,7 +337,7 @@
         currentStageOutput: 'Current stage output',
         stageGuardrails: 'Stage guardrails',
         liveTokens: 'Live tokens',
-        pmDevQaFlow: 'PM -> Dev -> QA',
+        pmDevQaFlow: 'PM -> PL -> Dev -> QA',
         readOnlyShell: 'Read-only shell by default. Stop, merge, and discard are not auto-applied here.',
         manualConfirmation: 'Current run uses manual stop confirmation and a local review workflow.',
         devStage: 'Dev stage',
@@ -900,7 +900,7 @@
         marketingShell: 'marketing shell',
         directionAChip: 'Direction A',
         headline: 'Leave it running.<br>Wake up to a PR.',
-        copy: 'CLI-first multi-agent runner with a PM -> Dev -> QA pipeline, local-safe worktree review, and a compact production shell.',
+        copy: 'CLI-first multi-agent runner with a PM -> PL -> Dev -> QA pipeline, local-safe worktree review, and a compact production shell.',
         openDashboard: 'Open Dashboard',
         copyRunCommand: 'Copy run command',
         productionNotes: 'Production notes',
@@ -910,7 +910,7 @@
         desktopShellRecovery: 'Desktop shell recovery',
         openMobile: 'Open Mobile',
         directionAMarketingShell: 'Direction A marketing shell',
-        pmDevQaFlowTitle: 'PM -> Dev -> QA',
+        pmDevQaFlowTitle: 'PM -> PL -> Dev -> QA',
         pmDevQaFlowCopy: 'Structured backlog emission and stage handoff with live run feedback.',
         readOnlyFirstPassTitle: 'Read-only first pass',
         readOnlyFirstPassCopy: 'Status, logs, and review surfaces without destructive browser-side controls.',
@@ -1536,7 +1536,7 @@
         marketingShell: '마케팅 쉘',
         directionAChip: 'Direction A',
         headline: '그대로 실행해 두세요.<br>PR로 깨어나세요.',
-        copy: 'PM -> Dev -> QA 파이프라인, 로컬 안전 워크트리 검토, 컴팩트한 프로덕션 쉘을 갖춘 CLI 우선 멀티 에이전트 러너입니다.',
+        copy: 'PM -> PL -> Dev -> QA 파이프라인, 로컬 안전 워크트리 검토, 컴팩트한 프로덕션 쉘을 갖춘 CLI 우선 멀티 에이전트 러너입니다.',
         openDashboard: '대시보드 열기',
         copyRunCommand: '실행 명령 복사',
         productionNotes: '프로덕션 메모',
@@ -1546,7 +1546,7 @@
         desktopShellRecovery: '데스크톱 쉘 복구',
         openMobile: '모바일 열기',
         directionAMarketingShell: 'Direction A 마케팅 쉘',
-        pmDevQaFlowTitle: 'PM -> Dev -> QA',
+        pmDevQaFlowTitle: 'PM -> PL -> Dev -> QA',
         pmDevQaFlowCopy: '실시간 실행 피드백과 함께 구조화된 백로그 발행 및 단계 인계를 제공합니다.',
         readOnlyFirstPassTitle: '읽기 전용 우선 통과',
         readOnlyFirstPassCopy: '파괴적인 브라우저 측 제어 없이 상태, 로그, 검토 화면을 제공합니다.',
@@ -1741,7 +1741,7 @@
   Object.assign(LOCALE_TEXT.ko.pipeline, {
     started: '시작',
     ended: '종료',
-    pmDevQaFlow: 'PM -> Dev -> QA',
+    pmDevQaFlow: 'PM -> PL -> Dev -> QA',
   });
   Object.assign(LOCALE_TEXT.ko.config, {
     description: '설명',
@@ -2785,7 +2785,7 @@
     const inputValue = fmtList(items);
     const placeholder = optionValues.length
       ? `${optionValues.join(', ')}, pkg.mod:Class`
-      : 'PM, Security, Dev, QA, pkg.mod:Class';
+      : 'PM, PL, Security, Dev, QA, pkg.mod:Class';
     const chipsHTML = items.length
       ? items
         .map((item, index) => {
@@ -3299,10 +3299,11 @@
   const STAGE_INDEX = {
     idle: 0,
     pm: 0,
-    security: 1,
-    dev: 2,
-    qa: 3,
-    reporter: 4,
+    pl: 1,
+    security: 2,
+    dev: 3,
+    qa: 4,
+    reporter: 5,
   };
 
   function toText(value, fallback = '') {
@@ -7694,7 +7695,7 @@
 
   function createBlankModel() {
     const DEFAULT_ROLE_SPECS = ['PM', 'Dev', 'QA'];
-    const BUILTIN_ROLE_OPTIONS = ['PM', 'Security', 'Dev', 'QA'];
+    const BUILTIN_ROLE_OPTIONS = ['PM', 'PL', 'Security', 'Dev', 'QA'];
     const CODEX_DEV_MODEL_LADDER = ['gpt-5.4-mini', 'gpt-5.4', 'gpt-5.5'];
     const CODEX_MODEL_DEFAULTS = {
       pm_model: 'gpt-5.5',
@@ -7845,7 +7846,7 @@
         options: BUILTIN_ROLE_OPTIONS,
         restart: false,
         desc: 'Stages enabled in the pipeline.',
-        hint: 'Built-in order: PM, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.',
+        hint: 'Built-in order: PM, PL, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.',
       },
       'security.enabled': {
         kind: 'bool',
@@ -7862,7 +7863,7 @@
       continuous: {
         kind: 'bool',
         restart: false,
-        desc: 'Run PM -> Dev -> QA without stopping.',
+        desc: 'Run PM -> PL -> Dev -> QA without stopping.',
         hint: 'Pair with autopilot=true for unattended runs.',
       },
       iterations: {
@@ -7871,7 +7872,7 @@
         max: 20,
         restart: false,
         desc: 'Max number of run iterations.',
-        hint: 'One iteration equals one full PM -> Dev -> QA cycle.',
+        hint: 'One iteration equals one full PM -> PL -> Dev -> QA cycle.',
       },
       max_turns_per_task: {
         kind: 'number',

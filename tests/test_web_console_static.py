@@ -32,6 +32,33 @@ class WebConsoleStaticTests(unittest.TestCase):
         self.assertNotIn("docs/design/project", lowered)
         self.assertNotIn("text/babel", lowered)
 
+    def test_role_metadata_and_pipeline_contract_cover_pl_and_plugin_specs(self) -> None:
+        expected_tokens = [
+            "const BUILTIN_ROLE_OPTIONS = ['PM', 'PL', 'Security', 'Dev', 'QA'];",
+            "pmDevQaFlow: 'PM -> PL -> Dev -> QA'",
+            "pmDevQaFlowTitle: 'PM -> PL -> Dev -> QA'",
+            "CLI-first multi-agent runner with a PM -> PL -> Dev -> QA pipeline",
+            "PM -> PL -> Dev -> QA 파이프라인",
+            "PM, PL, Security, Dev, QA, pkg.mod:Class",
+            "hint: 'Built-in order: PM, PL, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.'",
+            "desc: 'Run PM -> PL -> Dev -> QA without stopping.'",
+            "hint: 'One iteration equals one full PM -> PL -> Dev -> QA cycle.'",
+            "pl: 1,",
+            "security: 2,",
+            "dev: 3,",
+            "qa: 4,",
+            "reporter: 5,",
+            "const id = toText(raw.id || raw.label || raw.name, '');",
+            "label: toText(raw.label || raw.id || raw.name, id),",
+            "title: toText(raw.title || raw.taskTitle || raw.task_title || raw.name, toText(raw.label || raw.id || raw.name, id)),",
+        ]
+
+        for token in expected_tokens:
+            self.assertIn(token, self.app_js)
+
+        self.assertNotIn("Built-in order: PM, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.", self.app_js)
+        self.assertNotIn("PM, Security, Dev, QA, pkg.mod:Class", self.app_js)
+
     def test_styles_lock_direction_a_shell_geometry(self) -> None:
         required_tokens = [
             "--topbar-h: 44px",

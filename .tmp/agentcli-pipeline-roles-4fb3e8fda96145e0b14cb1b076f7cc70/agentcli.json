@@ -1,0 +1,8 @@
+{
+  "repo": "C:/Dev/.agentcli_worktrees/AgentCLI/20260504-111441/.tmp/agentcli-pipeline-roles-4fb3e8fda96145e0b14cb1b076f7cc70",
+  "roles": [
+    "PM",
+    "pkg.mod:Class",
+    "QA"
+  ]
+}

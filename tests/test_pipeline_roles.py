@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
+from pathlib import Path
 import unittest
 import types
+from uuid import uuid4
 
+from agent_runner import web as web_module
 from agent_runner.config import builtin_roles, normalize_roles_value, validate_roles_value
 from agent_runner.pipeline import PipelineManager, make_stages, parse_roles
 from agent_runner.pipeline.stages.base import Stage, StageOutcome
-from agent_runner.runtime_contract import BUILTIN_ROLE_SPECS, CODEX_MODEL_DEFAULTS, DEFAULT_ROLE_SPECS
+from agent_runner.runtime_contract import BUILTIN_ROLE_SPECS, CODEX_MODEL_DEFAULTS, DEFAULT_ROLE_SPECS, PIPELINE_ROLE_FIELD_SPEC
 from agent_runner.shared import coerce_roles_arg
+from agent_runner.web_config import _build_config_contract, _config_save_changes, _normalize_config_for_launch
+from agent_runner.web_payloads import build_stage_payload
 
 
 class PipelineRolesTests(unittest.TestCase):
@@ -87,6 +93,67 @@ class PipelineRolesTests(unittest.TestCase):
         stages = make_stages("PM,PL,Dev,QA", plugins_enabled=False, plugins_allowlist=[], plugins_strict=True)
 
         self.assertEqual(["PM", "PL", "Dev", "QA"], [stage.name for stage in stages])
+
+    def test_web_config_roles_round_trip_plugin_specs_through_save_and_launch_normalization(self) -> None:
+        repo_root = Path.cwd() / ".tmp" / f"agentcli-pipeline-roles-{uuid4().hex}"
+        repo_root.mkdir(parents=True, exist_ok=True)
+        cfg_path = repo_root / "agentcli.json"
+        cfg_path.write_text(
+            json.dumps({"repo": repo_root.as_posix(), "roles": "PM,Dev,QA"}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        save_result, save_error = _config_save_changes(
+            cfg_path,
+            [{"path": "roles", "value": ["PM", "pkg.mod:Class", "QA"]}],
+            schema={"roles": dict(PIPELINE_ROLE_FIELD_SPEC)},
+            restart_required_paths=[],
+        )
+
+        self.assertIsNone(save_error)
+        self.assertIsNotNone(save_result)
+
+        saved_raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+        self.assertEqual(["PM", "pkg.mod:Class", "QA"], saved_raw["roles"])
+        self.assertEqual("PM,pkg.mod:Class,QA", _normalize_config_for_launch(saved_raw)["roles"])
+
+        contract = _build_config_contract(
+            repo_root,
+            saved_raw,
+            cfg_path,
+            "unit-test",
+            repo_root / "prompts",
+        )
+        self.assertEqual(["PM", "pkg.mod:Class", "QA"], contract["values"]["roles"])
+
+    def test_build_stage_payload_preserves_pl_and_plugin_stage_records(self) -> None:
+        stages = build_stage_payload(
+            web_module,
+            Path.cwd(),
+            {"status": "done"},
+            {},
+            {},
+            run_summary={
+                "cycles": [
+                    {
+                        "cycle": 2,
+                        "stages": [
+                            {"name": "PM", "status": "ok", "rc": 0, "reason": "pm_ready", "cycle": 2},
+                            {"name": "PL", "status": "ok", "rc": 0, "reason": "backlog_refined", "cycle": 2},
+                            {"name": "pkg.mod:Class", "status": "ok", "rc": 0, "reason": "plugin_ok", "cycle": 2},
+                            {"name": "QA", "status": "ok", "rc": 0, "reason": "qa_verified", "cycle": 2},
+                        ],
+                    }
+                ]
+            },
+            events=[],
+        )
+
+        self.assertEqual(["PM", "PL", "pkg.mod:Class", "QA"], [stage["id"] for stage in stages])
+        self.assertEqual(["PM", "PL", "pkg.mod:Class", "QA"], [stage["label"] for stage in stages])
+        self.assertEqual("Backlog refinement", stages[1]["title"])
+        self.assertEqual("pkg.mod:Class", stages[2]["title"])
+        self.assertEqual("done", stages[2]["status"])
 
     def test_empty_pipeline_stage_list_fails_instead_of_succeeding(self) -> None:
         class Session:

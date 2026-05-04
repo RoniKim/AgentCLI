@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .runtime_contract import PIPELINE_STAGE_ORDER
+
 
 def build_live_state_payload(
     web: Any,
@@ -156,14 +158,43 @@ def build_stage_payload(
 
     stage_titles = {
         "PM": "Backlog planning",
+        "PL": "Backlog refinement",
+        "Security": "Security",
         "Dev": "Implementation",
         "QA": "Verification",
+        "Reporter": "Close-out reporting",
     }
     stage_model_defaults = {
         "PM": str(config.get("pm_model") or "gpt-5.5"),
+        "PL": "",
+        "Security": "",
         "Dev": str(config.get("dev_model") or "gpt-5.4-mini"),
         "QA": str(config.get("qa_model") or "gpt-5.5"),
+        "Reporter": str(config.get("reporter_model") or "gpt-5.4-mini"),
     }
+    summary_stage_order: list[str] = []
+    observed_builtin_stage_names: set[str] = set()
+    observed_custom_stage_names: list[str] = []
+
+    def _observe_stage_name(stage_name: str, *, summary_order: bool = False) -> None:
+        if not stage_name:
+            return
+        if summary_order and stage_name not in summary_stage_order:
+            summary_stage_order.append(stage_name)
+        if stage_name in PIPELINE_STAGE_ORDER:
+            observed_builtin_stage_names.add(stage_name)
+        elif stage_name not in observed_custom_stage_names:
+            observed_custom_stage_names.append(stage_name)
+
+    def _ordered_stage_names() -> list[str]:
+        ordered = list(summary_stage_order)
+        for stage_name in PIPELINE_STAGE_ORDER:
+            if stage_name in observed_builtin_stage_names and stage_name not in ordered:
+                ordered.append(stage_name)
+        for stage_name in observed_custom_stage_names:
+            if stage_name not in ordered:
+                ordered.append(stage_name)
+        return ordered
 
     active_status = str(active_run.get("status") or progress.get("run_status") or "idle").strip().lower()
     current_stage = _normalize_stage_name(
@@ -253,9 +284,13 @@ def build_stage_payload(
     for raw_stage in target_cycle_entry.get("stages") if isinstance(target_cycle_entry.get("stages"), list) else []:
         if not isinstance(raw_stage, dict):
             continue
-        stage_name = _normalize_stage_name(raw_stage.get("name"))
-        if stage_name in stage_titles:
-            stage_summary_map[stage_name] = raw_stage
+        stage_name = _normalize_stage_name(
+            _pick_value(raw_stage.get("name"), raw_stage.get("id"), raw_stage.get("label"))
+        )
+        if not stage_name:
+            continue
+        stage_summary_map[stage_name] = raw_stage
+        _observe_stage_name(stage_name, summary_order=True)
 
     running_stage_name = current_stage if active_status == "running" else ""
     relevant_events = [
@@ -273,7 +308,11 @@ def build_stage_payload(
             stage_name = "PM"
         elif not stage_name and (event_type.startswith("qa_") or event_type.startswith("qa_stage_")):
             stage_name = "QA"
-        if stage_name not in {"PM", "QA"}:
+        elif not stage_name and event_type.startswith("security_"):
+            stage_name = "Security"
+        elif not stage_name and event_type.startswith("reporter_"):
+            stage_name = "Reporter"
+        if not stage_name:
             continue
         if event_type not in {
             "pm_start",
@@ -284,9 +323,13 @@ def build_stage_payload(
             "qa_end",
             "qa_stage_start",
             "qa_stage_end",
+            "security_start",
+            "security_end",
+            "security_skipped",
             "stage_event",
         }:
             continue
+        _observe_stage_name(stage_name)
         entry = stage_event_map.setdefault(
             stage_name,
             {
@@ -358,6 +401,8 @@ def build_stage_payload(
                 entry["status"] = _normalize_lifecycle_status(reason, reason=reason, default="done")
             elif not entry["status"]:
                 entry["status"] = "done"
+        elif event_type.endswith("skipped"):
+            entry["status"] = "skipped"
         elif event_type == "stage_event":
             if inner_event in {"error", "quota_exhausted"} or reason in {"error", "quota_exhausted"}:
                 entry["status"] = "failed"
@@ -393,8 +438,14 @@ def build_stage_payload(
         else:
             latest_task_runtime = max(cycle_task_runtimes, key=_runtime_key)
 
+    if latest_task_runtime:
+        _observe_stage_name("Dev")
+    if running_stage_name:
+        _observe_stage_name(running_stage_name)
+
+    stage_names = _ordered_stage_names()
     records: list[dict[str, Any]] = []
-    for stage_name in ("PM", "Dev", "QA"):
+    for stage_name in stage_names:
         summary = stage_summary_map.get(stage_name, {})
         stage_runtime = latest_task_runtime if stage_name == "Dev" else stage_event_map.get(stage_name, {})
 
@@ -433,7 +484,7 @@ def build_stage_payload(
                 summary.get("attempt"),
                 summary.get("currentAttempt"),
                 stage_runtime.get("attempt"),
-                current_attempt if stage_name in {"Dev", "PM", "QA"} else None,
+                current_attempt if stage_name in {"Dev", "PM", "QA"} or stage_name == running_stage_name else None,
             )
         )
         model = _pick_text(

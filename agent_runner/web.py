@@ -75,7 +75,7 @@ from .remote.controller import (
     read_runner_control_event,
     write_runner_control_event,
 )
-from .runtime_contract import CODEX_MODEL_FIELD_SPECS, PIPELINE_ROLE_FIELD_SPEC, PIPELINE_STAGE_ORDER
+from .runtime_contract import CODEX_MODEL_FIELD_SPECS, PIPELINE_ROLE_FIELD_SPEC, PIPELINE_STAGE_ORDER, ROLE_SPEC_CANONICALS
 from .stop_progress import normalize_stop_progress_payload, summarize_stop_progress_liveness
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, load_state, parse_backlog_md
 from .failure_policy import (
@@ -3795,16 +3795,28 @@ def _event_message(event: dict[str, Any]) -> str:
 
 
 def _normalize_stage_name(value: Any) -> str:
-    raw = _pick_text(value).strip().lower()
-    if not raw:
+    raw_text = _pick_text(value).strip()
+    if not raw_text:
         return ""
+    raw = raw_text.lower()
+    if raw in {"idle", "boot", "pending", "unknown", "none", "unavailable"}:
+        return ""
+    builtin = ROLE_SPEC_CANONICALS.get(raw)
+    if builtin:
+        return builtin
     if raw.startswith("pm") or raw in {"planner", "planning", "pm_stage"}:
         return "PM"
+    if raw in {"pl_stage", "backlog_refiner_stage", "backlog_refinement"}:
+        return "PL"
     if raw.startswith("dev") or raw.startswith("task") or raw.startswith("build") or raw.startswith("test") or raw in {"implementation"}:
         return "Dev"
     if raw.startswith("qa") or raw in {"verification", "qa_stage"}:
         return "QA"
-    return ""
+    if raw.startswith("security") or raw in {"security_stage"}:
+        return "Security"
+    if raw.startswith("reporter") or raw in {"reporting", "report"}:
+        return "Reporter"
+    return raw_text
 
 
 def _normalize_lifecycle_status(
@@ -4030,6 +4042,21 @@ def _task_output_candidates(
             [
                 run_dir / f"pm_final_output_cycle_{cycle_i:03d}.txt",
                 run_dir / "NOTES_PM.md",
+            ]
+        )
+        if include_summary_artifacts:
+            candidates.extend(
+                [
+                    run_dir / "cycle_summary.log",
+                    run_dir / f"run_summary_cycle_{cycle_i:03d}.json",
+                ]
+            )
+    elif stage_key == "PL" and cycle_i is not None:
+        candidates.extend(
+            [
+                run_dir / f"PL_OUTPUT_cycle_{cycle_i:03d}.json",
+                run_dir / f"BACKLOG_REFINEMENT_cycle_{cycle_i:03d}.json",
+                run_dir / "NOTES_PL.md",
             ]
         )
         if include_summary_artifacts:
