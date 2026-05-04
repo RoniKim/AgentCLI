@@ -862,6 +862,43 @@ def abandon_task_branch(repo: Path, tb: TaskBranch) -> str:
     return tb.branch_name
 
 
+def preserve_task_branch_and_advance_head(repo: Path, tb: TaskBranch) -> str:
+    """Preserve a task branch and advance the current checkout to its commit.
+
+    This is used by isolated generated worktrees. The source repository remains
+    untouched, but the worktree HEAD accumulates completed task results so the
+    next task starts from the previous task's output instead of the original
+    source HEAD.
+    """
+    check_and_remove_stale_git_lock(repo)
+
+    porcelain = git_porcelain(repo)
+    if porcelain.strip():
+        rc, out = run_cmd(["git", "add", "-A"], cwd=repo, timeout_sec=120)
+        if rc != 0:
+            raise RuntimeError(f"Failed to stage changes before preserving {tb.branch_name}: {out}")
+        subject, body = format_task_commit_message(tb, action="preserved")
+        commit_cmd = ["git", "commit", "--no-verify", "-m", subject]
+        if body:
+            commit_cmd.extend(["-m", body])
+        rc, out = run_cmd(commit_cmd, cwd=repo, timeout_sec=120)
+        if rc != 0:
+            raise RuntimeError(f"Failed to commit changes before preserving {tb.branch_name}: {out}")
+
+    checkout_target = tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit
+    rc, out = run_cmd(["git", "checkout", checkout_target], cwd=repo, timeout_sec=30)
+    if rc != 0:
+        raise RuntimeError(f"Failed to checkout {checkout_target} before preserving {tb.branch_name}: {out}")
+
+    rc, out = run_cmd(["git", "merge", "--ff-only", tb.branch_name], cwd=repo, timeout_sec=120)
+    if rc != 0:
+        raise RuntimeError(f"Failed to advance worktree HEAD to {tb.branch_name}: {out}")
+
+    advanced_head = git_head(repo)
+    eprint(f"[INFO] Preserved task branch {tb.branch_name}; worktree HEAD advanced to {advanced_head[:8]}")
+    return advanced_head
+
+
 def _cleanup_pytest_cache_tempdirs(
     repo: Path,
     *,

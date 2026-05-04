@@ -29,6 +29,7 @@ from agent_runner.gitops import (
     git_head,
     git_repo_state,
     _git_data_lines,
+    preserve_task_branch_and_advance_head,
     create_worktree,
     default_worktree_dir,
     remove_worktree,
@@ -209,6 +210,36 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertEqual(tb.branch_name, pending_reviews[0]["branch"])
         self.assertEqual((self.run_dir / "validation.log").as_posix(), pending_reviews[0]["validation_artifact"])
         remove_worktree(self.repo, self.worktree)
+
+    def test_preserve_task_branch_advances_generated_worktree_for_next_task(self) -> None:
+        source_head = self._init_repo()
+        create_worktree(self.repo, self.worktree, run_dir=self.run_dir)
+
+        try:
+            tb1 = create_task_branch(self.worktree, "T1", task_title="First task")
+            (self.worktree / "first.txt").write_text("first task\n", encoding="utf-8")
+            head1 = preserve_task_branch_and_advance_head(self.worktree, tb1)
+
+            self.assertEqual(source_head, git_head(self.repo))
+            self.assertEqual(head1, git_head(self.worktree))
+            self.assertEqual(head1, self._git("rev-parse", tb1.branch_name, cwd=self.worktree).strip())
+            self.assertEqual("first task\n", (self.worktree / "first.txt").read_text(encoding="utf-8"))
+
+            tb2 = create_task_branch(self.worktree, "T2", task_title="Second task")
+            self.assertEqual(head1, tb2.base_commit)
+            self.assertEqual("first task\n", (self.worktree / "first.txt").read_text(encoding="utf-8"))
+
+            (self.worktree / "second.txt").write_text("second task\n", encoding="utf-8")
+            head2 = preserve_task_branch_and_advance_head(self.worktree, tb2)
+
+            self.assertEqual(source_head, git_head(self.repo))
+            self.assertNotEqual(head1, head2)
+            self.assertEqual(head2, git_head(self.worktree))
+            self.assertEqual(head2, self._git("rev-parse", tb2.branch_name, cwd=self.worktree).strip())
+            changed_files = set(self._git("diff", "--name-only", source_head, head2, cwd=self.repo).splitlines())
+            self.assertEqual({"first.txt", "second.txt"}, changed_files)
+        finally:
+            remove_worktree(self.repo, self.worktree)
 
     def test_dispatch_task_branch_disposition_abandons_non_preserve_branch(self) -> None:
         self._init_repo()

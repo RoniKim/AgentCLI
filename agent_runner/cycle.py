@@ -50,6 +50,7 @@ from .gitops import (
     format_task_commit_message,
     merge_task_branch,
     abandon_task_branch,
+    preserve_task_branch_and_advance_head,
     reset_task_branch,
     default_worktree_dir,
     create_worktree,
@@ -3201,9 +3202,9 @@ async def main_async(args: argparse.Namespace) -> int:
                 if task_completed and tb:
                     if worktree_dir is not None:
                         try:
-                            abandon_task_branch(repo, tb)
+                            branch_head = preserve_task_branch_and_advance_head(repo, tb)
                         except Exception as _ab_ex:
-                            eprint(f"[WARN] abandon_task_branch failed for preserved worktree task {tb.branch_name}: {_ab_ex}")
+                            eprint(f"[WARN] preserve_task_branch_and_advance_head failed for worktree task {tb.branch_name}: {_ab_ex}")
                             metrics.event(
                                 "task_branch_preserve_failed",
                                 cycle=cycle_idx,
@@ -3216,7 +3217,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 error=str(_ab_ex),
                             )
                         else:
-                            branch_head = git_rev_parse_ref(repo, tb.branch_name) or ""
+                            branch_head = branch_head or git_rev_parse_ref(repo, tb.branch_name) or ""
                             completed_task_branch_ref = tb.branch_name
                             completed_task_head_ref = branch_head
                             completed_task_base_ref = tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit
@@ -3225,7 +3226,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 tb.branch_name,
                                 task_head_before,
                             )
-                            source_head_after = git_head(repo)
+                            source_head_after = git_head(source_repo)
                             completed_task_changed_files = git_changed_files(source_repo, tb.base_commit, branch_head)
                             try:
                                 packet_result = queue_review_packet(
