@@ -345,6 +345,21 @@ class WebConsoleStaticTests(unittest.TestCase):
             self.assertNotIn("126, 227, 138", value)
             self.assertNotIn("#7ee38a", value.lower())
 
+    def test_mobile_navigation_styles_wrap_shell_routes_without_hidden_overflow(self) -> None:
+        required_style_snippets = [
+            ".mobile-workflow__route-grid {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));",
+            ".mobile-workflow__action-grid,\n.mobile-workflow__confirm-grid {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(min(138px, 100%), 1fr));",
+            ".mobile-workflow .runner-control__buttons {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(min(120px, 100%), 1fr));",
+            ".sidebar {\n    grid-column: 1;\n    border-right: 0;\n    border-bottom: 1px solid var(--border);\n    max-height: none;\n    overflow-x: hidden;\n    overflow-y: auto;\n  }",
+            ".sidebar__inner {\n    display: flex;\n    flex-wrap: wrap;\n    align-items: stretch;\n    align-content: flex-start;\n    gap: 8px;\n    padding: 8px 12px;\n    width: 100%;\n    min-width: 0;\n  }",
+            ".nav-group {\n    display: flex;\n    flex: 1 1 100%;\n    flex-wrap: wrap;\n    align-items: stretch;\n    gap: 4px;\n    margin: 0;\n    min-width: 0;\n  }",
+            ".nav-item {\n    width: auto;\n    min-height: 34px;\n    min-width: 0;\n    max-width: 100%;\n    padding: 8px 10px;\n    border-left: 0;\n    border-bottom: 2px solid transparent;\n    flex: 1 1 116px;\n  }",
+        ]
+
+        for snippet in required_style_snippets:
+            self.assertIn(snippet, self.styles_css)
+        self.assertIn('data-shell-nav-container', self.app_js)
+
     def test_app_js_defines_required_shell_views_and_keyboard_flows(self) -> None:
         required_views = [
             "Dashboard",

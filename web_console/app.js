@@ -14655,7 +14655,7 @@
       .join('');
 
     return `
-      <div class="sidebar__inner">
+      <div class="sidebar__inner" data-shell-nav-container>
         ${groupsHTML}
         <div class="sidebar-card">
           <div class="sidebar-card__title">
@@ -19714,7 +19714,7 @@
 
   const APP_BOOTSTRAP = `
     <div class="topbar" id="topbar"></div>
-    <aside class="sidebar" id="sidebar"><div class="sidebar__inner"></div></aside>
+    <aside class="sidebar" id="sidebar"><div class="sidebar__inner" data-shell-nav-container></div></aside>
     <main class="main" id="main"></main>
     <div class="overlay-root" id="overlay-root" aria-live="polite"></div>
   `;
