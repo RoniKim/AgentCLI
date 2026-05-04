@@ -4655,7 +4655,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIn("Artifact writer", live_state_html[1])
         self.assertIn("Alive", live_state_html[1])
         self.assertIn("Flushing", live_state_html[1])
-        self.assertIn("unavailable", live_state_html[2])
+        self.assertIn("Unavailable", live_state_html[2])
 
     def test_api_status_live_state_contract_keeps_runner_backend_children_and_artifact_states_separate(self) -> None:
         from agent_runner.web import _build_live_state_payload
@@ -4674,6 +4674,12 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             {**base_controller_status, "running": False},
             progress={"run_status": "running"},
             active_run={"status": "running"},
+            controller_available=True,
+        )
+        runner_only = _build_live_state_payload(
+            {**base_controller_status, "running": True},
+            progress={"run_status": "stopped"},
+            active_run={"status": "stopped"},
             controller_available=True,
         )
         child_only = _build_live_state_payload(
@@ -4724,14 +4730,19 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("unavailable", backend_only["trackedChildren"]["status"])
         self.assertEqual("unavailable", backend_only["artifactWriter"]["status"])
 
+        self.assertEqual("alive", runner_only["runnerProcess"]["status"])
+        self.assertEqual("stopped", runner_only["taskBackend"]["status"])
+        self.assertEqual("unavailable", runner_only["trackedChildren"]["status"])
+        self.assertEqual("unavailable", runner_only["artifactWriter"]["status"])
+
         self.assertEqual("stopped", child_only["runnerProcess"]["status"])
-        self.assertEqual("idle", child_only["taskBackend"]["status"])
+        self.assertEqual("stopped", child_only["taskBackend"]["status"])
         self.assertEqual("alive", child_only["trackedChildren"]["status"])
         self.assertEqual("idle", child_only["artifactWriter"]["status"])
 
         self.assertEqual("alive", artifact_flushing["runnerProcess"]["status"])
         self.assertEqual("alive", artifact_flushing["taskBackend"]["status"])
-        self.assertEqual("stopped", artifact_flushing["trackedChildren"]["status"])
+        self.assertEqual("idle", artifact_flushing["trackedChildren"]["status"])
         self.assertEqual("flushing", artifact_flushing["artifactWriter"]["status"])
 
         raw_legacy_live_state = {
@@ -4808,46 +4819,80 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         results = _run_adapter_harness(
             [
                 {"kind": "call", "name": "normalizeLiveState", "args": [raw_legacy_live_state]},
+                {"kind": "call", "name": "runnerControlStateInfo", "args": [make_control(backend_only, running=False, run_status="running")]},
+                {"kind": "call", "name": "runnerControlStateInfo", "args": [make_control(runner_only, running=True, run_status="stopped")]},
+                {"kind": "call", "name": "runnerControlStateInfo", "args": [make_control(child_only, running=False, run_status="idle")]},
+                {"kind": "call", "name": "runnerControlStateInfo", "args": [make_control(artifact_flushing, running=True, run_status="running")]},
                 {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(no_run, running=False, run_status="idle", controller_available=False), {"chipTone": "paused", "label": "Unavailable"}]},
                 {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(backend_only, running=False, run_status="running"), {"chipTone": "running", "label": "Running"}]},
+                {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(runner_only, running=True, run_status="stopped"), {"chipTone": "warn", "label": "Task backend: Stopped"}]},
                 {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(child_only, running=False, run_status="idle"), {"chipTone": "idle", "label": "Idle"}]},
                 {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(artifact_flushing, running=True, run_status="running"), {"chipTone": "loading", "label": "Flushing"}]},
             ]
         )
 
         normalized_legacy = results[0]
-        self.assertEqual("unavailable", normalized_legacy["runnerProcess"]["status"])
-        self.assertEqual("unavailable", normalized_legacy["runnerProcess"]["statusLabel"])
-        self.assertEqual("unavailable", normalized_legacy["taskBackend"]["status"])
-        self.assertEqual("unavailable", normalized_legacy["taskBackend"]["statusLabel"])
-        self.assertEqual("unavailable", normalized_legacy["trackedChildren"]["status"])
-        self.assertEqual("unavailable", normalized_legacy["trackedChildren"]["statusLabel"])
-        self.assertEqual("unavailable", normalized_legacy["artifactWriter"]["status"])
-        self.assertEqual("unavailable", normalized_legacy["artifactWriter"]["statusLabel"])
+        self.assertTrue(normalized_legacy["available"])
+        self.assertEqual("alive", normalized_legacy["runnerProcess"]["status"])
+        self.assertEqual("Alive", normalized_legacy["runnerProcess"]["statusLabel"])
+        self.assertEqual("alive", normalized_legacy["taskBackend"]["status"])
+        self.assertEqual("Alive", normalized_legacy["taskBackend"]["statusLabel"])
+        self.assertEqual("alive", normalized_legacy["trackedChildren"]["status"])
+        self.assertEqual("Alive", normalized_legacy["trackedChildren"]["statusLabel"])
+        self.assertEqual("flushing", normalized_legacy["artifactWriter"]["status"])
+        self.assertEqual("Flushing", normalized_legacy["artifactWriter"]["statusLabel"])
 
-        no_run_rows = {row["label"]: row["value"] for row in results[1]}
-        self.assertEqual("unavailable", no_run_rows["Runner process"])
-        self.assertEqual("unavailable", no_run_rows["Task backend"])
-        self.assertEqual("unavailable", no_run_rows["Tracked children"])
-        self.assertEqual("unavailable", no_run_rows["Artifact writer"])
+        backend_summary = results[1]
+        self.assertEqual("Task backend: Alive", backend_summary["label"])
+        self.assertEqual("Live states", backend_summary["title"])
+        self.assertIn("Runner process: Stopped", backend_summary["copy"])
+        self.assertIn("Task backend: Alive", backend_summary["copy"])
 
-        backend_rows = {row["label"]: row["value"] for row in results[2]}
+        runner_summary = results[2]
+        self.assertEqual("Task backend: Stopped", runner_summary["label"])
+        self.assertEqual("Live states", runner_summary["title"])
+        self.assertIn("Runner process: Alive", runner_summary["copy"])
+        self.assertIn("Task backend: Stopped", runner_summary["copy"])
+
+        child_summary = results[3]
+        self.assertEqual("Tracked children: Alive (1/1)", child_summary["label"])
+        self.assertEqual("Live states", child_summary["title"])
+        self.assertIn("Tracked children: Alive (1/1)", child_summary["copy"])
+
+        artifact_summary = results[4]
+        self.assertEqual("Artifact writer: Flushing (final artifact collection)", artifact_summary["label"])
+        self.assertEqual("Live states", artifact_summary["title"])
+        self.assertIn("Artifact writer: Flushing (final artifact collection)", artifact_summary["copy"])
+
+        no_run_rows = {row["label"]: row["value"] for row in results[5]}
+        self.assertEqual("Unavailable", no_run_rows["Runner process"])
+        self.assertEqual("Unavailable", no_run_rows["Task backend"])
+        self.assertEqual("Unavailable", no_run_rows["Tracked children"])
+        self.assertEqual("Unavailable", no_run_rows["Artifact writer"])
+
+        backend_rows = {row["label"]: row["value"] for row in results[6]}
         self.assertEqual("Stopped", backend_rows["Runner process"])
         self.assertEqual("Alive", backend_rows["Task backend"])
-        self.assertEqual("unavailable", backend_rows["Tracked children"])
-        self.assertEqual("unavailable", backend_rows["Artifact writer"])
+        self.assertEqual("Unavailable", backend_rows["Tracked children"])
+        self.assertEqual("Unavailable", backend_rows["Artifact writer"])
 
-        child_rows = {row["label"]: row["value"] for row in results[3]}
+        runner_rows = {row["label"]: row["value"] for row in results[7]}
+        self.assertEqual("Alive", runner_rows["Runner process"])
+        self.assertEqual("Stopped", runner_rows["Task backend"])
+        self.assertEqual("Unavailable", runner_rows["Tracked children"])
+        self.assertEqual("Unavailable", runner_rows["Artifact writer"])
+
+        child_rows = {row["label"]: row["value"] for row in results[8]}
         self.assertEqual("Stopped", child_rows["Runner process"])
-        self.assertEqual("Idle", child_rows["Task backend"])
-        self.assertEqual("Alive", child_rows["Tracked children"])
+        self.assertEqual("Stopped", child_rows["Task backend"])
+        self.assertEqual("Alive (1/1)", child_rows["Tracked children"])
         self.assertEqual("Idle", child_rows["Artifact writer"])
 
-        artifact_rows = {row["label"]: row["value"] for row in results[4]}
+        artifact_rows = {row["label"]: row["value"] for row in results[9]}
         self.assertEqual("Alive", artifact_rows["Runner process"])
         self.assertEqual("Alive", artifact_rows["Task backend"])
-        self.assertEqual("Stopped", artifact_rows["Tracked children"])
-        self.assertEqual("Flushing", artifact_rows["Artifact writer"])
+        self.assertEqual("Idle", artifact_rows["Tracked children"])
+        self.assertEqual("Flushing (final artifact collection)", artifact_rows["Artifact writer"])
 
     def test_api_status_prefers_active_run_quota_over_metrics_when_both_are_real(self) -> None:
         from agent_runner import web as web_module

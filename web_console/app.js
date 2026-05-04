@@ -3840,6 +3840,7 @@
   function runnerControlStateInfo(control = currentLiveRunRunnerControl()) {
     const current = toObject(control);
     const status = toObject(current.status);
+    const liveState = normalizeLiveState(current.liveState || current.live_state || status.liveState || status.live_state);
     const webInstance = normalizeWebInstance(current.webInstance || current.web_instance);
     const statusReason = toText(status.reason, '');
     const statusReasonText = redactionAwareText(statusReason, '');
@@ -3934,6 +3935,10 @@
         copy: currentMessageText || lastMessageText,
       };
     }
+    const liveStateSummary = runnerControlLiveStateSummary(liveState);
+    if (liveStateSummary) {
+      return liveStateSummary;
+    }
     if (status.running) {
       return {
         chipTone: 'running',
@@ -3956,7 +3961,7 @@
     const current = normalizeLiveState(liveState);
     const chips = toArray(current.items)
       .map((entry) => {
-        const label = `${entry.label}: ${entry.statusLabel}`;
+        const label = liveStateFactText(entry);
         return chip(label, liveStateToneClass(entry.kind, entry.status, entry.available));
       })
       .join('');
@@ -3970,7 +3975,7 @@
     const current = normalizeLiveState(liveState);
     return toArray(current.items).map((entry) => ({
       label: entry.label,
-      value: entry.statusLabel,
+      value: liveStateFactValue(entry),
       className: liveStateToneClass(entry.kind, entry.status, entry.available),
     }));
   }
@@ -3994,10 +3999,12 @@
     const stateInfo = display || runnerControlStateInfo(current);
     const status = toObject(current.status);
     const stopProgress = normalizeStopProgress(status.stopProgress);
-    const liveStateRows = runnerControlLiveStateRows(current.liveState || current.live_state || status.liveState || status.live_state);
+    const liveState = normalizeLiveState(current.liveState || current.live_state || status.liveState || status.live_state);
+    const liveStateRows = runnerControlLiveStateRows(liveState);
     const statusConfigPath = redactionAwareText(status.configPath, t('common.unknown'));
     const sourceValue = current.source && current.source !== 'default' ? current.source : t('common.unknown');
-    const runStatusValue = current.runStatus
+    const liveStateRunStatus = liveStateRunStatusLabel(liveState);
+    const runStatusValue = liveStateRunStatus || (current.runStatus
       ? (String(current.runStatus).toLowerCase() === 'running'
         ? t('runner.running')
         : String(current.runStatus).toLowerCase() === 'idle'
@@ -4005,11 +4012,11 @@
           : String(current.runStatus).toLowerCase() === 'loading'
             ? t('common.loading')
             : String(current.runStatus).toLowerCase() === 'ready'
-              ? t('runner.ready')
-              : String(current.runStatus).toLowerCase() === 'stopped'
+            ? t('runner.ready')
+            : String(current.runStatus).toLowerCase() === 'stopped'
                 ? t('runner.stopped')
                 : current.runStatus)
-      : (status.running ? t('runner.running') : t('runner.idle'));
+      : (status.running ? t('runner.running') : t('runner.idle')));
     const lastActionValue = current.lastAction
       ? (String(current.lastAction).toLowerCase() === 'start'
         ? t('runner.start')
@@ -4644,7 +4651,99 @@
     if (normalized === 'stopped') {
       return t('runner.stopped');
     }
+    if (normalized === 'unavailable') {
+      return t('runner.unavailable');
+    }
     return t('common.unavailable');
+  }
+
+  function liveStateRunStatusLabel(liveState = currentLiveRunLiveState()) {
+    const current = normalizeLiveState(liveState);
+    const status = toText(current.taskBackend?.status, '').trim().toLowerCase();
+    if (status === 'alive') {
+      return t('runner.running');
+    }
+    if (status === 'stopped') {
+      return t('runner.stopped');
+    }
+    if (status === 'idle') {
+      return t('runner.idle');
+    }
+    return '';
+  }
+
+  function liveStateFactValue(rawEntry) {
+    const entry = normalizeLiveStateEntry(rawEntry);
+    if (!entry.available) {
+      return toText(entry.statusLabel, t('common.unavailable'));
+    }
+    const statusLabel = toText(entry.statusLabel, liveStateStatusLabel(entry.status));
+    const kind = normalizeLiveStateKey(entry.kind);
+    if (kind === 'trackedChildren') {
+      const count = toMaybeNumber(entry.count);
+      const aliveCount = toMaybeNumber(entry.aliveCount);
+      if (count != null && count > 0 && aliveCount != null) {
+        return `${statusLabel} (${aliveCount}/${count})`;
+      }
+    }
+    if (kind === 'artifactWriter') {
+      const phase = toText(entry.phase, '').replace(/[_-]+/g, ' ').trim();
+      if (phase && entry.status === 'flushing') {
+        return `${statusLabel} (${phase})`;
+      }
+    }
+    return statusLabel;
+  }
+
+  function liveStateFactText(rawEntry) {
+    const entry = normalizeLiveStateEntry(rawEntry);
+    return `${entry.label}: ${liveStateFactValue(entry)}`;
+  }
+
+  function runnerControlLiveStateSummary(liveState = currentLiveRunLiveState()) {
+    const current = normalizeLiveState(liveState);
+    const facts = toArray(current.items).map((entry) => liveStateFactText(entry)).join(' | ');
+    const runnerProcess = normalizeLiveStateEntry(current.runnerProcess, 'runnerProcess');
+    const taskBackend = normalizeLiveStateEntry(current.taskBackend, 'taskBackend');
+    const trackedChildren = normalizeLiveStateEntry(current.trackedChildren, 'trackedChildren');
+    const artifactWriter = normalizeLiveStateEntry(current.artifactWriter, 'artifactWriter');
+
+    if (artifactWriter.available && artifactWriter.status === 'flushing') {
+      return {
+        chipTone: 'warn',
+        bannerTone: 'warn',
+        label: liveStateFactText(artifactWriter),
+        title: t('runner.liveStates'),
+        copy: facts,
+      };
+    }
+    if (trackedChildren.available && trackedChildren.status === 'alive') {
+      return {
+        chipTone: 'warn',
+        bannerTone: 'warn',
+        label: liveStateFactText(trackedChildren),
+        title: t('runner.liveStates'),
+        copy: facts,
+      };
+    }
+    if (
+      runnerProcess.available
+      && taskBackend.available
+      && runnerProcess.status
+      && taskBackend.status
+      && runnerProcess.status !== taskBackend.status
+    ) {
+      const primary = taskBackend.status === 'alive' || taskBackend.status === 'stopped' ? taskBackend : runnerProcess;
+      const backendAlive = taskBackend.status === 'alive';
+      return {
+        chipTone: backendAlive ? 'running' : 'warn',
+        bannerTone: backendAlive ? 'info' : 'warn',
+        label: liveStateFactText(primary),
+        title: t('runner.liveStates'),
+        copy: facts,
+      };
+    }
+    return null;
   }
 
   function liveStateToneClass(kind, status, available) {
@@ -4667,12 +4766,26 @@
     const availableValue = item.available ?? item.present ?? item.known;
     const aliveValue = item.alive ?? item.running ?? item.active;
     const flushingValue = item.flushing ?? item.writing;
-    const statusText = toText(item.status, '').trim().toLowerCase();
-    const statusLabelText = toText(item.statusLabel || item.status_label, '').trim();
-    const status = statusText || toText(statusLabelText, '').trim().toLowerCase() || 'unavailable';
-    const available = availableValue == null ? status !== 'unavailable' : Boolean(availableValue);
     const count = toMaybeNumber(item.count ?? item.total ?? item.trackedCount ?? item.tracked_count);
     const aliveCount = toMaybeNumber(item.aliveCount ?? item.alive_count);
+    const statusText = toText(item.status, '').trim().toLowerCase();
+    const statusLabelText = toText(item.statusLabel || item.status_label, '').trim();
+    let status = statusText || toText(statusLabelText, '').trim().toLowerCase();
+    if (!status) {
+      if (flushingValue === true) {
+        status = 'flushing';
+      } else if (aliveValue === true) {
+        status = 'alive';
+      } else if (availableValue === true) {
+        status = canonicalKind === 'artifactWriter'
+          ? 'idle'
+          : (count != null && count <= 0 ? 'idle' : 'stopped');
+      } else if (availableValue === false) {
+        status = 'unavailable';
+      }
+    }
+    status = status || 'unavailable';
+    const available = availableValue == null ? status !== 'unavailable' : Boolean(availableValue);
     const normalized = {
       kind: canonicalKind || normalizeLiveStateKey(kind) || 'unknown',
       label: liveStateKindLabel(canonicalKind || kind),
@@ -4688,7 +4801,7 @@
     };
     if (!normalized.available) {
       normalized.status = 'unavailable';
-      normalized.statusLabel = t('common.unavailable');
+      normalized.statusLabel = liveStateStatusLabel('unavailable');
       normalized.alive = null;
       normalized.flushing = null;
     }
@@ -4723,9 +4836,10 @@
       'artifactWriter'
     );
     const items = [runnerProcess, taskBackend, trackedChildren, artifactWriter];
+    const available = item.available == null ? items.some((entry) => entry.available) : Boolean(item.available);
     const normalized = {
-      available: Boolean(item.available),
-      source: toText(item.source, Boolean(item.available) ? 'api' : 'unavailable'),
+      available,
+      source: toText(item.source, available ? 'api' : 'unavailable'),
       runnerProcess,
       runner_process: runnerProcess,
       taskBackend,
@@ -9001,10 +9115,14 @@
     normalizeLiveStateKey,
     liveStateKindLabel,
     liveStateStatusLabel,
+    liveStateRunStatusLabel,
+    liveStateFactValue,
+    liveStateFactText,
     liveStateToneClass,
     normalizeLiveStateEntry,
     normalizeLiveState,
     runnerControlLiveStateChips,
+    runnerControlLiveStateSummary,
     runnerControlStateInfo,
     runnerControlDetailRows,
     runnerControlActionPresentation,
@@ -14409,7 +14527,8 @@
     const display = runnerControlStateInfo(control);
     const messageTone = display.bannerTone;
     const busyAction = runnerControlBusyAction(control);
-    const statusSummaryRunStatus = control.runStatus || liveStatus.run || liveProcess.running
+    const liveStateRunStatus = liveStateRunStatusLabel(liveState);
+    const statusSummaryRunStatus = liveStateRunStatus || (control.runStatus || liveStatus.run || liveProcess.running
       ? (String(control.runStatus || liveStatus.run || '').toLowerCase() === 'running'
         ? t('runner.running')
         : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'idle'
@@ -14417,11 +14536,11 @@
           : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'loading'
             ? t('common.loading')
             : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'ready'
-              ? t('runner.ready')
-              : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'stopped'
+            ? t('runner.ready')
+            : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'stopped'
                 ? t('runner.stopped')
                 : control.runStatus || liveStatus.run || (liveProcess.running ? t('runner.running') : t('runner.idle')))
-      : (control.status.running || liveProcess.running ? t('runner.running') : t('runner.idle'));
+      : (control.status.running || liveProcess.running ? t('runner.running') : t('runner.idle')));
     const statusSummary = [
       display.label.toLowerCase(),
       liveProcess.runnerMode || control.status.runnerMode || t('common.unknown'),

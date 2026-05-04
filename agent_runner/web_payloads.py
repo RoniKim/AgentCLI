@@ -42,11 +42,37 @@ def build_live_state_payload(
         active.get("executionStatus"),
         active.get("execution_status"),
     ).strip().lower()
+    backend_alive_states = {"running", "stopping"}
+    backend_stopped_states = {
+        "stopped",
+        "completed",
+        "complete",
+        "success",
+        "done",
+        "failed",
+        "error",
+        "aborted",
+        "cancelled",
+        "canceled",
+        "interrupted",
+        "timeout",
+    }
     backend_available = controller_live_available and bool(
-        run_status or active.get("status") or active.get("executionStatus") or active.get("execution_status")
+        run_status
+        or active.get("status")
+        or active.get("executionStatus")
+        or active.get("execution_status")
+        or stop_progress
     )
-    backend_alive = backend_available and run_status == "running"
-    backend_status = "unavailable" if not backend_available else ("alive" if backend_alive else "idle")
+    backend_status = "unavailable"
+    if backend_available:
+        if run_status in backend_alive_states:
+            backend_status = "alive"
+        elif run_status in backend_stopped_states or bool(stop_progress_liveness["phase"]):
+            backend_status = "stopped"
+        else:
+            backend_status = "idle"
+    backend_alive = backend_status == "alive"
 
     tracked_child_processes = stop_progress_liveness["tracked_child_processes"]
     tracked_child_pids = stop_progress_liveness["tracked_child_pids"]
@@ -54,7 +80,14 @@ def build_live_state_payload(
     tracked_alive_count = int(stop_progress_liveness["tracked_alive_count"])
     tracked_count = int(stop_progress_liveness["tracked_count"])
     tracked_alive = tracked_available and tracked_alive_count > 0
-    tracked_status = "unavailable" if not tracked_available else ("alive" if tracked_alive else "stopped")
+    tracked_status = "unavailable"
+    if tracked_available:
+        if tracked_alive:
+            tracked_status = "alive"
+        elif tracked_count > 0:
+            tracked_status = "stopped"
+        else:
+            tracked_status = "idle"
 
     artifact_phase = stop_progress_liveness["artifact_phase"]
     artifact_available = controller_live_available and bool(stop_progress)
