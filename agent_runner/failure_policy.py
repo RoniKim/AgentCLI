@@ -19,8 +19,9 @@ from .task_status import (
 ACTION_AUTO_MERGE = "auto_merge"
 ACTION_RETRY = "retry"
 ACTION_PRESERVE_FOR_REVIEW = "preserve_for_review"
-ACTION_REGRESSION_FAILED = "regression_failed"
-ACTION_STOP = "stop"
+ACTION_ABANDON_BRANCH = "abandon_branch"
+ACTION_RESTORE_CHECKPOINT = "restore_checkpoint"
+ACTION_STOP_RUN = "stop_run"
 STATUS_GROUP_COMPLETED = "completed"
 STATUS_GROUP_BLOCKED_ENV = "blocked_env"
 STATUS_GROUP_REVIEW = "review"
@@ -40,6 +41,13 @@ REGRESSION_TASK_STATUSES = {
     TASK_STATUS_REGRESSION_FAILED,
     "failed",
 }
+STOP_RUN_REASONS = {
+    "abandon_failed",
+    "rollback_blocked",
+    "rollback_failed",
+    "budget_exceeded",
+}
+FORCE_TERMINAL_DISPOSITION_REASONS = {"exhausted_attempts"}
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,8 @@ class FailureDisposition:
     action: str
     review_required: bool
     auto_merge_allowed: bool
+    retry_eligible: bool
+    retry_allowed_now: bool
     auto_retry_allowed: bool
     retry_budget_consumed: bool
     reason: str
@@ -68,6 +78,18 @@ def normalize_task_status(
     if status:
         return status
     return classify_task_failure(reason, validations=validations or [], detail=detail)
+
+
+def normalize_reason(reason: str) -> str:
+    return str(reason or "").strip().lower() or "unknown"
+
+
+def normalize_reason_set(reasons: set[str] | Sequence[str] | None) -> set[str]:
+    return {
+        normalize_reason(str(reason))
+        for reason in (reasons or [])
+        if str(reason or "").strip()
+    }
 
 
 def should_preserve_for_review(task_status: str) -> bool:
@@ -122,6 +144,45 @@ def should_count_cycle_failure_for_stop(
     return True
 
 
+def has_retry_budget(*, attempt: int, max_attempts: int) -> bool:
+    return (int(attempt) + 1) < max(int(max_attempts), 0)
+
+
+def terminal_failure_action(*, has_task_branch: bool, has_checkpoint: bool) -> str:
+    if has_task_branch:
+        return ACTION_ABANDON_BRANCH
+    if has_checkpoint:
+        return ACTION_RESTORE_CHECKPOINT
+    return ACTION_STOP_RUN
+
+
+def disposition_message(
+    action: str,
+    *,
+    task_status: str,
+    reason: str,
+) -> str:
+    if action == ACTION_AUTO_MERGE:
+        return "Task completed; strict gates may auto-merge."
+    if action == ACTION_RETRY:
+        return "Regression failure is eligible for an automated retry."
+    if action == ACTION_PRESERVE_FOR_REVIEW:
+        return "Work is preserved for manual review instead of auto-merge."
+    if action == ACTION_ABANDON_BRANCH:
+        if reason == "exhausted_attempts":
+            return "Retry budget is exhausted; abandon the task branch and queue review."
+        return "Failure is not retryable now; abandon the task branch and queue review."
+    if action == ACTION_RESTORE_CHECKPOINT:
+        if reason == "exhausted_attempts":
+            return "Retry budget is exhausted; restore the last checkpoint and queue review."
+        return "Failure is not retryable now; restore the last checkpoint and queue review."
+    if reason in STOP_RUN_REASONS:
+        return "Recovery flow failed; stop the run for operator review."
+    if task_status == TASK_STATUS_COMPLETED:
+        return "Failure disposition is not required for completed work."
+    return "Failure needs operator review."
+
+
 def decide_failure_disposition(
     reason: str,
     *,
@@ -132,6 +193,8 @@ def decide_failure_disposition(
     max_attempts: int = 1,
     dev_auto_escalate: bool = False,
     dev_escalate_on: set[str] | Sequence[str] | None = None,
+    has_task_branch: bool = False,
+    has_checkpoint: bool = False,
 ) -> FailureDisposition:
     status = normalize_task_status(
         reason,
@@ -139,35 +202,46 @@ def decide_failure_disposition(
         validations=validations,
         detail=detail,
     )
-    normalized_reason = str(reason or "").strip() or "unknown"
+    normalized_reason = normalize_reason(reason)
+    retry_eligible = is_auto_retry_allowed(status)
     can_retry = (
-        is_auto_retry_allowed(status)
+        retry_eligible
         and bool(dev_auto_escalate)
-        and (attempt + 1) < max_attempts
-        and normalized_reason in set(dev_escalate_on or [])
+        and has_retry_budget(attempt=attempt, max_attempts=max_attempts)
+        and normalized_reason in normalize_reason_set(dev_escalate_on)
     )
     if status == TASK_STATUS_COMPLETED:
         action = ACTION_AUTO_MERGE
-        message = "Task completed; strict gates may auto-merge."
+    elif normalized_reason in STOP_RUN_REASONS:
+        action = ACTION_STOP_RUN
     elif can_retry:
         action = ACTION_RETRY
-        message = "Regression failure is eligible for an automated retry."
+    elif normalized_reason in FORCE_TERMINAL_DISPOSITION_REASONS:
+        action = terminal_failure_action(
+            has_task_branch=has_task_branch,
+            has_checkpoint=has_checkpoint,
+        )
     elif should_preserve_for_review(status):
         action = ACTION_PRESERVE_FOR_REVIEW
-        message = "Work is preserved for manual review instead of auto-merge."
-    elif status == TASK_STATUS_REGRESSION_FAILED:
-        action = ACTION_REGRESSION_FAILED
-        message = "Likely product regression; auto-merge is blocked."
     else:
-        action = ACTION_STOP
-        message = "Failure needs operator review."
+        action = terminal_failure_action(
+            has_task_branch=has_task_branch,
+            has_checkpoint=has_checkpoint,
+        )
+    message = disposition_message(
+        action,
+        task_status=status,
+        reason=normalized_reason,
+    )
 
     return FailureDisposition(
         task_status=status,
         action=action,
         review_required=is_manual_review_required(status),
         auto_merge_allowed=is_auto_merge_allowed(status),
-        auto_retry_allowed=is_auto_retry_allowed(status),
+        retry_eligible=retry_eligible,
+        retry_allowed_now=can_retry,
+        auto_retry_allowed=retry_eligible,
         retry_budget_consumed=can_retry,
         reason=normalized_reason,
         message=message,
@@ -181,6 +255,12 @@ def build_failure_entry(
     task_status: str = "",
     validations: Sequence[dict[str, Any]] | None = None,
     detail: str = "",
+    attempt: int = 0,
+    max_attempts: int = 1,
+    dev_auto_escalate: bool = False,
+    dev_escalate_on: set[str] | Sequence[str] | None = None,
+    has_task_branch: bool = False,
+    has_checkpoint: bool = False,
     **extra: Any,
 ) -> dict[str, Any]:
     status = normalize_task_status(
@@ -194,10 +274,16 @@ def build_failure_entry(
         task_status=status,
         validations=validations,
         detail=detail,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        dev_auto_escalate=dev_auto_escalate,
+        dev_escalate_on=dev_escalate_on,
+        has_task_branch=has_task_branch,
+        has_checkpoint=has_checkpoint,
     )
     entry: dict[str, Any] = {
         "task": task_id,
-        "reason": str(reason or "unknown"),
+        "reason": normalize_reason(reason),
         "status": status,
         "task_status": status,
         "taskStatus": status,
@@ -207,8 +293,14 @@ def build_failure_entry(
         "reviewRequired": disposition.review_required,
         "auto_merge_allowed": disposition.auto_merge_allowed,
         "autoMergeAllowed": disposition.auto_merge_allowed,
+        "retry_eligible": disposition.retry_eligible,
+        "retryEligible": disposition.retry_eligible,
+        "retry_allowed_now": disposition.retry_allowed_now,
+        "retryAllowedNow": disposition.retry_allowed_now,
         "auto_retry_allowed": disposition.auto_retry_allowed,
         "autoRetryAllowed": disposition.auto_retry_allowed,
+        "retry_budget_consumed": disposition.retry_budget_consumed,
+        "retryBudgetConsumed": disposition.retry_budget_consumed,
         "disposition": disposition.action,
         "disposition_message": disposition.message,
         "dispositionMessage": disposition.message,
