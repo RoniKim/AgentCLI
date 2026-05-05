@@ -319,9 +319,9 @@
 - [ ] Shutdown reports and Web Console task counters split regression, review-needed, and blocked-env groups so environment failures do not look like code regressions.
 - [ ] Codex and Claude backends use the same failure disposition, validation artifact, local PR queue, and run report helpers so failover cannot produce mixed schemas.
 - [ ] PR queue packet and index writes are lock-protected and recoverable after interrupted packet or index updates.
-- [ ] `STATE.json` mutation helpers preserve concurrent done, failed, and warning updates across runner, controller, and future Web mutation paths.
-- [ ] GOALS auto-check writes atomically and detects operator edit conflicts instead of overwriting Web edits.
-- [ ] Attempt directories record `STARTED` and `FINISHED` markers, and preflight reports interrupted attempts before a new unattended run starts.
+- [x] `STATE.json` mutation helpers preserve concurrent done, failed, and warning updates across runner, controller, and future Web mutation paths.
+- [x] GOALS auto-check writes atomically and detects operator edit conflicts instead of overwriting Web edits.
+- [x] Attempt directories record `STARTED` and `FINISHED` markers, and preflight reports interrupted attempts before a new unattended run starts.
 - [ ] Preflight reports stale Git, web instance, and Telegram lock files with age, owner evidence when available, and safe operator guidance.
 - [ ] Runner subprocess launch paths explicitly close inherited file descriptors or document tested handle inheritance behavior on Windows.
 

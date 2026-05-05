@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import os
 import shutil
 import sys
 import threading
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -19,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+from agent_runner.config import default_config_path
 from agent_runner.gitops import (
     WORKTREE_CLEANUP_APPLIED,
     WORKTREE_CLEANUP_DRY_RUN,
@@ -1437,6 +1440,212 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertIn("git_safe_directory_required", blocker_codes)
         blocker = next(item for item in readiness["blockers"] if item["code"] == "git_safe_directory_required")
         self.assertEqual("C:/temp/repo", blocker["details"]["safe_directory_hint"])
+
+    def test_runner_start_readiness_reports_stale_git_lock_with_guidance(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
+        lock_path = self.repo / ".git" / "index.lock"
+        lock_path.write_text("stale git lock\n", encoding="utf-8")
+        old_time = time.time() - 900
+        os.utime(lock_path, (old_time, old_time))
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        blocker_codes = {item["code"] for item in readiness["blockers"]}
+        self.assertFalse(readiness["ok"])
+        self.assertIn("stale_git_index_lock", blocker_codes)
+        blocker = next(item for item in readiness["blockers"] if item["code"] == "stale_git_index_lock")
+        self.assertEqual(lock_path.resolve().as_posix(), blocker["path"])
+        self.assertEqual("stale", blocker["details"]["state"])
+        self.assertGreaterEqual(int(blocker["details"]["age_seconds"] or 0), 300)
+        self.assertIn("Confirm no Git process", blocker["details"]["guidance"][0])
+        self.assertEqual(1, readiness["lock_diagnostics"]["summary"]["stale"])
+
+    def test_runner_start_readiness_reports_stale_web_instance_lock_with_owner_evidence(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
+        lock_path = self.repo / ".AgentCLI" / "web_console.lock.json"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "repo_root": self.repo.as_posix(),
+                    "pid": 999999,
+                    "hostname": "stale-web-owner",
+                    "process_executable": (self.repo / "bin" / "web-console.exe").as_posix(),
+                    "host": "127.0.0.1",
+                    "port": 8123,
+                    "created_at": "2026-05-04T00:00:00Z",
+                    "runner_control_state": "enabled",
+                    "runner_control_enabled": True,
+                    "runner_control_requested": True,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        old_time = time.time() - 900
+        os.utime(lock_path, (old_time, old_time))
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        blocker_codes = {item["code"] for item in readiness["blockers"]}
+        self.assertFalse(readiness["ok"])
+        self.assertIn("stale_web_instance_lock", blocker_codes)
+        blocker = next(item for item in readiness["blockers"] if item["code"] == "stale_web_instance_lock")
+        self.assertEqual("stale", blocker["details"]["state"])
+        self.assertEqual(999999, blocker["details"]["owner"]["pid"])
+        self.assertEqual("stale-web-owner", blocker["details"]["owner"]["hostname"])
+        self.assertIn("restart the console", " ".join(blocker["details"]["guidance"]))
+
+    def test_runner_start_readiness_reports_stale_telegram_token_lock_with_fingerprint(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
+        home = self.fixture_root / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        temp_dir = self.fixture_root / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        token = "stale-telegram-token"
+        token_fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()[:10]
+        old_time = time.time() - 900
+
+        with (
+            patch.dict(os.environ, {"AGENTCLI_HOME": home.as_posix()}),
+            patch("agent_runner.preflight.tempfile.gettempdir", return_value=temp_dir.as_posix()),
+        ):
+            config_path = default_config_path(self.repo)
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "repo": self.repo.as_posix(),
+                        "telegram": {
+                            "enabled": True,
+                            "bot_token": token,
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            lock_path = temp_dir / f"agentcli_tg_{token_fingerprint}.lock"
+            lock_path.write_text(
+                json.dumps(
+                    {
+                        "pid": 999999,
+                        "instance": "stale-telegram",
+                        "repo": self.repo.as_posix(),
+                        "started_unix": old_time,
+                        "token_fingerprint": token_fingerprint,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            os.utime(lock_path, (old_time, old_time))
+            readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        blocker_codes = {item["code"] for item in readiness["blockers"]}
+        self.assertFalse(readiness["ok"])
+        self.assertIn("stale_telegram_token_lock", blocker_codes)
+        blocker = next(item for item in readiness["blockers"] if item["code"] == "stale_telegram_token_lock")
+        self.assertEqual("stale", blocker["details"]["state"])
+        self.assertEqual(999999, blocker["details"]["owner"]["pid"])
+        self.assertEqual("stale-telegram", blocker["details"]["owner"]["instance"])
+        self.assertEqual(token_fingerprint, blocker["details"]["owner"]["token_fingerprint"])
+        self.assertIn("token fingerprint", blocker["details"]["guidance"][0])
+
+    def test_runner_start_readiness_keeps_active_web_and_telegram_locks_non_blocking(self) -> None:
+        from agent_runner.process_guard import _pid_create_time_ticks, _pid_executable_path
+
+        self._init_repo()
+        self._ensure_source_venv()
+        home = self.fixture_root / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        temp_dir = self.fixture_root / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        token = "live-telegram-token"
+        token_fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()[:10]
+        current_pid = os.getpid()
+        current_executable = _pid_executable_path(current_pid) or sys.executable
+        current_create_time = _pid_create_time_ticks(current_pid)
+
+        with (
+            patch.dict(os.environ, {"AGENTCLI_HOME": home.as_posix()}),
+            patch("agent_runner.preflight.tempfile.gettempdir", return_value=temp_dir.as_posix()),
+        ):
+            config_path = default_config_path(self.repo)
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "repo": self.repo.as_posix(),
+                        "telegram": {
+                            "enabled": True,
+                            "bot_token": token,
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            web_lock_path = self.repo / ".AgentCLI" / "web_console.lock.json"
+            web_lock_path.parent.mkdir(parents=True, exist_ok=True)
+            web_lock_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "repo_root": self.repo.as_posix(),
+                        "pid": current_pid,
+                        "pid_create_time": current_create_time,
+                        "process_executable": current_executable,
+                        "hostname": "active-web-owner",
+                        "host": "127.0.0.1",
+                        "port": 8124,
+                        "created_at": "2026-05-04T00:00:00Z",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            telegram_lock_path = temp_dir / f"agentcli_tg_{token_fingerprint}.lock"
+            telegram_lock_path.write_text(
+                json.dumps(
+                    {
+                        "pid": current_pid,
+                        "instance": "active-telegram",
+                        "repo": self.repo.as_posix(),
+                        "started_unix": time.time(),
+                        "token_fingerprint": token_fingerprint,
+                        "process_executable": current_executable,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        self.assertTrue(readiness["ok"])
+        self.assertEqual([], readiness["blockers"])
+        self.assertEqual([], readiness["warnings"])
+        lock_summary = readiness["lock_diagnostics"]["summary"]
+        self.assertEqual(2, lock_summary["active"])
+        lock_codes = {item["code"] for item in readiness["lock_diagnostics"]["items"]}
+        self.assertIn("active_web_instance_lock", lock_codes)
+        self.assertIn("active_telegram_token_lock", lock_codes)
 
     def test_runner_start_readiness_reports_stale_stop_and_runner_wait_artifacts(self) -> None:
         self._init_repo()

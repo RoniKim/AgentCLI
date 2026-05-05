@@ -2035,6 +2035,87 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("readiness", event["phase"])
         self.assertEqual("runner_start_readiness_failed", event["result"]["error"]["code"])
 
+    def test_runner_start_response_surfaces_stale_telegram_lock_blocker(self) -> None:
+        import hashlib
+        import warnings
+        from fastapi.testclient import TestClient
+        import agent_runner.web as web_module
+        from agent_runner.remote.controller import RunnerController, read_runner_control_event
+
+        self._init_repo()
+        self._ensure_source_venv()
+        temp_dir = self._tmp / "telegram-locks"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        token = "stale-telegram-web-token"
+        token_fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()[:10]
+        lock_path = temp_dir / f"agentcli_tg_{token_fingerprint}.lock"
+        old_time = time.time() - 900
+        _write(
+            lock_path,
+            json.dumps(
+                {
+                    "pid": 999999,
+                    "instance": "web-stale-telegram",
+                    "repo": self.repo.as_posix(),
+                    "started_unix": old_time,
+                    "token_fingerprint": token_fingerprint,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        os.utime(lock_path, (old_time, old_time))
+        controller = RunnerController(
+            repo=self.repo,
+            base_args=SimpleNamespace(
+                config_path=self.config_path.as_posix(),
+                config=self.config_path.as_posix(),
+                stop_file="STOP",
+            ),
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)
+            with (
+                patch.object(web_module, "_build_runner_controller", return_value=controller),
+                patch.object(web_module, "init_process_guard"),
+                patch.object(web_module, "terminate_all_children"),
+                patch("agent_runner.preflight.tempfile.gettempdir", return_value=temp_dir.as_posix()),
+            ):
+                app = web_module.create_app(
+                    self.repo,
+                    web_dir=WEB_CONSOLE,
+                    enable_runner_controls=True,
+                    config_path=str(self.config_path),
+                )
+                with TestClient(app) as client:
+                    response = client.post(
+                        "/api/runner/start",
+                        json={
+                            "confirmation": "START RUNNER",
+                            "start_options": {
+                                "run_dir": self.run_dir.as_posix(),
+                            },
+                        },
+                    )
+
+        self.assertEqual(409, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("runner_start_readiness_failed", payload["error"]["code"])
+        readiness = payload["error"]["details"]["readiness"]
+        blocker_codes = {item["code"] for item in readiness["blockers"]}
+        self.assertIn("stale_telegram_token_lock", blocker_codes)
+        blocker = next(item for item in readiness["blockers"] if item["code"] == "stale_telegram_token_lock")
+        self.assertEqual(token_fingerprint, blocker["details"]["owner"]["token_fingerprint"])
+        self.assertEqual("web-stale-telegram", blocker["details"]["owner"]["instance"])
+
+        event = read_runner_control_event(self.run_dir)
+        self.assertEqual("error", event["status"])
+        self.assertEqual("readiness", event["phase"])
+        self.assertEqual("runner_start_readiness_failed", event["result"]["error"]["code"])
+
     def test_worktree_actions_require_opt_in_and_report_pending_state(self) -> None:
         from agent_runner.web import build_snapshot
 
