@@ -5463,6 +5463,22 @@
     };
   }
 
+  function backlogTaskGroupStatus(task) {
+    const raw = toObject(task);
+    const failure = toObject(raw.failure);
+    return normalizeBacklogStatus(
+      raw.taskStatus ||
+        raw.task_status ||
+        raw.outcomeStatus ||
+        raw.outcome_status ||
+        failure.taskStatus ||
+        failure.task_status ||
+        failure.status ||
+        raw.status,
+      normalizeBacklogStatus(raw.status, 'pending')
+    );
+  }
+
   function normalizeGoalBucket(bucket) {
     return toArray(bucket).map((goal) => ({
       done: Boolean(toObject(goal).done ?? toObject(goal).checked),
@@ -7096,16 +7112,22 @@
     const statusReviewCount = (statusCounts.review_required != null || statusCounts.test_contract_changed != null)
       ? toNumber(statusCounts.review_required, 0) + toNumber(statusCounts.test_contract_changed, 0)
       : undefined;
+    const groupStatusCounts = {
+      failed: items.filter((task) => ['failed', 'review_required', 'blocked_env', 'test_contract_changed', 'regression_failed'].includes(backlogTaskGroupStatus(task))).length,
+      blocked_env: items.filter((task) => backlogTaskGroupStatus(task) === 'blocked_env').length,
+      review: items.filter((task) => ['review_required', 'test_contract_changed'].includes(backlogTaskGroupStatus(task))).length,
+      regressed: items.filter((task) => ['failed', 'regression_failed'].includes(backlogTaskGroupStatus(task))).length,
+    };
     return {
       items,
       counts: {
         pending: toNumber(counts.pending || items.filter((task) => task.status === 'pending').length, 0),
         in_progress: toNumber(counts.in_progress || items.filter((task) => task.status === 'in_progress').length, 0),
         done: toNumber(counts.done || items.filter((task) => task.status === 'done').length, 0),
-        failed: toNumber(counts.failed || items.filter((task) => task.status === 'failed').length, 0),
-        blocked_env: toNumber(counts.blocked_env ?? counts.tasks_blocked_env ?? failureGroups.blocked_env ?? statusCounts.blocked_env ?? items.filter((task) => task.status === 'blocked_env').length, 0),
-        review: toNumber(counts.review ?? counts.tasks_review ?? failureGroups.review ?? statusReviewCount ?? items.filter((task) => ['review_required', 'test_contract_changed'].includes(task.status)).length, 0),
-        regressed: toNumber(counts.regressed ?? counts.tasks_regressed ?? failureGroups.regression ?? statusCounts.regression_failed ?? items.filter((task) => ['failed', 'regression_failed'].includes(task.status)).length, 0),
+        failed: toNumber(counts.failed ?? groupStatusCounts.failed, 0),
+        blocked_env: toNumber(counts.blocked_env ?? counts.tasks_blocked_env ?? failureGroups.blocked_env ?? statusCounts.blocked_env ?? groupStatusCounts.blocked_env, 0),
+        review: toNumber(counts.review ?? counts.tasks_review ?? failureGroups.review ?? statusReviewCount ?? groupStatusCounts.review, 0),
+        regressed: toNumber(counts.regressed ?? counts.tasks_regressed ?? failureGroups.regression ?? statusCounts.regression_failed ?? groupStatusCounts.regressed, 0),
       },
       status_counts: statusCounts,
       failure_group_counts: failureGroups,
@@ -16910,9 +16932,9 @@
                 ${kpiCard(t('backlog.pending'), String(toNumber(backlogCounts.pending ?? state.backlog.filter((task) => task.status === 'pending').length, 0)), t('backlog.queued'))}
                 ${kpiCard(t('backlog.inProgress'), String(toNumber(backlogCounts.in_progress ?? state.backlog.filter((task) => task.status === 'in_progress').length, 0)), t('backlog.active'), true)}
                 ${kpiCard(t('backlog.done'), String(toNumber(backlogCounts.done ?? state.backlog.filter((task) => task.status === 'done').length, 0)), t('backlog.completed'))}
-                ${kpiCard(t('backlog.environment'), String(toNumber(backlogCounts.blocked_env ?? state.backlog.filter((task) => task.status === 'blocked_env').length, 0)), t('backlog.blockedEnv'))}
-                ${kpiCard(t('backlog.contract'), String(toNumber(backlogCounts.review ?? state.backlog.filter((task) => ['review_required', 'test_contract_changed'].includes(task.status)).length, 0)), t('backlog.manualReview'))}
-                ${kpiCard(t('backlog.regression'), String(toNumber(backlogCounts.regressed ?? state.backlog.filter((task) => ['failed', 'regression_failed'].includes(task.status)).length, 0)), t('backlog.regressionFailed'))}
+                ${kpiCard(t('backlog.environment'), String(toNumber(backlogCounts.blocked_env ?? state.backlog.filter((task) => backlogTaskGroupStatus(task) === 'blocked_env').length, 0)), t('backlog.blockedEnv'))}
+                ${kpiCard(t('backlog.contract'), String(toNumber(backlogCounts.review ?? state.backlog.filter((task) => ['review_required', 'test_contract_changed'].includes(backlogTaskGroupStatus(task))).length, 0)), t('backlog.manualReview'))}
+                ${kpiCard(t('backlog.regression'), String(toNumber(backlogCounts.regressed ?? state.backlog.filter((task) => ['failed', 'regression_failed'].includes(backlogTaskGroupStatus(task))).length, 0)), t('backlog.regressionFailed'))}
               </div>
               <div style="margin-top:12px;">${detail}</div>
             `

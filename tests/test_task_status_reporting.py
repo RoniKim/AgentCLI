@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import agent_runner.web as web_module
-from agent_runner.reporting import build_cycle_change_summary, build_qa_validation_report, write_run_report_artifacts
+from agent_runner.reporting import build_cycle_change_summary, build_local_shutdown_report, build_qa_validation_report, write_run_report_artifacts
 from agent_runner.task_failures import record_task_failure_state
 from agent_runner.web_payloads import build_history_item
 from agent_runner.web import _load_backlog_payload
@@ -88,6 +88,26 @@ class TaskStatusReportingTests(unittest.TestCase):
         self.assertEqual(1, validation["failure_group_counts"]["blocked_env"])
         self.assertEqual(1, validation["failure_group_counts"]["review"])
         self.assertEqual(1, validation["failure_group_counts"]["regression"])
+
+    def test_shutdown_reports_split_failure_groups(self) -> None:
+        artifacts = self._write_reports(stop_reason="build_failed")
+        final_report = artifacts["final_run_report"]
+        operations_summary = self._read_operations_summary()
+        shutdown_report = build_local_shutdown_report(
+            repo=self.root,
+            run_dir=self.run_dir,
+            reason="build_failed",
+        )
+
+        self.assertEqual(1, final_report["tasks"]["tasks_blocked_env"])
+        self.assertEqual(1, final_report["tasks"]["tasks_review"])
+        self.assertEqual(1, final_report["tasks"]["tasks_regressed"])
+        self.assertEqual(1, operations_summary["counts"]["blocked_env"])
+        self.assertEqual(1, operations_summary["counts"]["review_required"])
+        self.assertEqual(1, operations_summary["counts"]["regression"])
+        self.assertIn("- blocked_env_count: 1", shutdown_report)
+        self.assertIn("- review_needed_count: 1", shutdown_report)
+        self.assertIn("- regression_count: 1", shutdown_report)
 
     def test_validation_reports_preserve_skip_statuses(self) -> None:
         task_specs = [

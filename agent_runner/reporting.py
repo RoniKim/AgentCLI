@@ -17,6 +17,7 @@ from .failure_policy import (
     STATUS_GROUP_REGRESSION,
     STATUS_GROUP_REVIEW,
     count_task_status_groups,
+    normalize_task_status_for_group,
 )
 from .todo import read_current_todo
 from .utils import atomic_write_json, now_iso, run_cmd, safe_write_text
@@ -537,8 +538,23 @@ def build_cycle_change_summary(
     ])
     failure_status_counts: dict[str, int] = {}
     failure_statuses: list[str] = []
+    state_failed_ids: set[str] = set()
     for item in state_failed_items:
-        status_key = _text(item.get("task_status") or item.get("taskStatus") or item.get("outcome_status") or item.get("status") or "failed").lower()
+        status_key = _group_task_status(item, default="failed")
+        failure_status_counts[status_key] = failure_status_counts.get(status_key, 0) + 1
+        failure_statuses.append(status_key)
+        task_id = _text(item.get("task") or item.get("task_id") or item.get("taskId"), "")
+        if task_id:
+            state_failed_ids.add(task_id)
+    for item in task_results_list:
+        status_text = _text(item.get("status"), "").lower()
+        task_status_text = _text(item.get("task_status") or item.get("taskStatus") or item.get("outcome_status") or item.get("outcomeStatus"), "").lower()
+        if status_text not in {"failed", "review_required", "blocked_env", "test_contract_changed", "regression_failed"} and task_status_text not in {"failed", "review_required", "blocked_env", "test_contract_changed", "regression_failed"}:
+            continue
+        task_id = _text(item.get("id") or item.get("task_id") or item.get("taskId") or item.get("task"), "")
+        if task_id and task_id in state_failed_ids:
+            continue
+        status_key = _group_task_status(item, default="failed")
         failure_status_counts[status_key] = failure_status_counts.get(status_key, 0) + 1
         failure_statuses.append(status_key)
     failure_group_counts = count_task_status_groups(failure_statuses)
@@ -1416,11 +1432,41 @@ def _state_status(entry: Any, default: str = "") -> str:
     ).lower()
 
 
+def _group_task_status(entry: Any, *, default: str = "failed") -> str:
+    if not isinstance(entry, dict):
+        return _text(default, "failed").lower()
+    return normalize_task_status_for_group(
+        reason=entry.get("reason") or entry.get("failure_reason") or entry.get("failureReason"),
+        task_status=entry.get("task_status") or entry.get("taskStatus"),
+        outcome_status=entry.get("outcome_status") or entry.get("outcomeStatus"),
+        status=entry.get("status"),
+        detail=_text(entry.get("detail") or entry.get("message"), ""),
+        default=default,
+    )
+
+
+def _failure_group_counts_from_entries(
+    entries: Sequence[Any],
+    *,
+    default: str = "failed",
+) -> tuple[dict[str, int], dict[str, int], list[str]]:
+    statuses: list[str] = []
+    status_counts: dict[str, int] = {}
+    for entry in entries:
+        status_key = _group_task_status(entry, default=default)
+        if not status_key:
+            continue
+        status_counts[status_key] = status_counts.get(status_key, 0) + 1
+        statuses.append(status_key)
+    return count_task_status_groups(statuses), status_counts, statuses
+
+
 def _summarize_state_entries(
     entries: Sequence[Any],
     backlog_by_id: dict[str, TaskItem],
     *,
     allowed_ids: set[str],
+    default_status: str = "",
 ) -> list[dict[str, Any]]:
     summarized: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1441,7 +1487,7 @@ def _summarize_state_entries(
                 "taskId": task_id,
                 "task_title": task.title if task else _text(raw.get("title") or raw.get("task_title") or raw.get("taskTitle"), ""),
                 "taskTitle": task.title if task else _text(raw.get("title") or raw.get("task_title") or raw.get("taskTitle"), ""),
-                "status": _state_status(raw),
+                "status": _state_status(raw, default=default_status),
                 "reason": _text(raw.get("reason"), ""),
                 "detail": _text(raw.get("detail"), ""),
                 "attempt": _int(raw.get("attempt"), 0),
@@ -1697,8 +1743,13 @@ def build_operations_summary(
     backlog_ids = set(backlog_by_id)
     done_ids = {_state_task_id(item) for item in _as_list(state.get("done")) if _state_task_id(item) in backlog_ids}
     warning_ids = {_state_task_id(item) for item in _as_list(state.get("warnings")) if _state_task_id(item) in backlog_ids}
-    failed_entries = _summarize_state_entries(_as_list(state.get("failed")), backlog_by_id, allowed_ids=backlog_ids)
-    pending_review_entries = _summarize_state_entries(_as_list(state.get("pending_review")), backlog_by_id, allowed_ids=backlog_ids)
+    failed_entries = _summarize_state_entries(_as_list(state.get("failed")), backlog_by_id, allowed_ids=backlog_ids, default_status="failed")
+    pending_review_entries = _summarize_state_entries(
+        _as_list(state.get("pending_review")),
+        backlog_by_id,
+        allowed_ids=backlog_ids,
+        default_status="review_required",
+    )
 
     combined_entries: dict[str, dict[str, Any]] = {}
     for entry in failed_entries:
@@ -1722,6 +1773,14 @@ def build_operations_summary(
         entry for entry in combined_entries.values()
         if _text(entry.get("status"), "").lower() == "blocked_env"
     ]
+    regression_tasks = [
+        entry for entry in combined_entries.values()
+        if _group_task_status(entry, default="failed") in {"failed", "regression_failed"}
+    ]
+    failure_group_counts, failure_status_counts, _failure_statuses = _failure_group_counts_from_entries(
+        list(combined_entries.values()),
+        default="failed",
+    )
 
     queued_count = len([task_id for task_id in backlog_ids if task_id not in attempted_ids])
     completed_count = len(done_ids)
@@ -1743,6 +1802,7 @@ def build_operations_summary(
     attention_required = bool(
         review_required_tasks
         or blocked_env_tasks
+        or regression_tasks
         or _int(stale_cleanup.get("warning_count"), 0) > 0
         or _int(handle_process_warnings.get("warning_count"), 0) > 0
     )
@@ -1752,6 +1812,7 @@ def build_operations_summary(
         f"queued={queued_count}",
         f"review_required={len(review_required_tasks)}",
         f"blocked_env={len(blocked_env_tasks)}",
+        f"regression={len(regression_tasks)}",
     ]
     stale_warning_count = _int(stale_cleanup.get("warning_count"), 0)
     if stale_warning_count > 0:
@@ -1777,15 +1838,25 @@ def build_operations_summary(
             "queued": queued_count,
             "review_required": len(review_required_tasks),
             "blocked_env": len(blocked_env_tasks),
+            "regression": len(regression_tasks),
+            "regressed": len(regression_tasks),
             "completedCount": completed_count,
             "queuedCount": queued_count,
             "reviewRequired": len(review_required_tasks),
             "blockedEnv": len(blocked_env_tasks),
+            "regressionCount": len(regression_tasks),
+            "regressedCount": len(regression_tasks),
         },
+        "failure_status_counts": failure_status_counts,
+        "failureStatusCounts": failure_status_counts,
+        "failure_group_counts": failure_group_counts,
+        "failureGroupCounts": failure_group_counts,
         "review_required_tasks": review_required_tasks[:5],
         "reviewRequiredTasks": review_required_tasks[:5],
         "blocked_env_tasks": blocked_env_tasks[:5],
         "blockedEnvTasks": blocked_env_tasks[:5],
+        "regression_tasks": regression_tasks[:5],
+        "regressionTasks": regression_tasks[:5],
         "stale_cleanup": stale_cleanup,
         "staleCleanup": stale_cleanup,
         "handle_process_warnings": handle_process_warnings,
@@ -1820,6 +1891,16 @@ def _build_final_run_report(repo: Path, run_dir: Path, *, stop_reason: str, qa_r
     tasks_pending = max(0, tasks_total - tasks_done - tasks_failed - tasks_skipped)
     completion = _build_goals_summary(repo, run_dir)
     failures = _build_run_failures(state, backlog)
+    backlog_ids = {task.id for task in backlog if task.id}
+    failure_entries_for_groups = [
+        entry
+        for entry in (_as_list(state.get("failed")) + _as_list(state.get("pending_review")))
+        if not backlog_ids or _state_task_id(entry) in backlog_ids
+    ]
+    failure_group_counts, failure_status_counts, _failure_statuses = _failure_group_counts_from_entries(
+        failure_entries_for_groups,
+        default="failed",
+    )
     validation_summary = {
         "status": _text(qa_report.get("status"), "missing"),
         "attempts": _int(qa_report.get("summary", {}).get("attempts"), 0),
@@ -1858,6 +1939,12 @@ def _build_final_run_report(repo: Path, run_dir: Path, *, stop_reason: str, qa_r
     ]
     if tasks_failed:
         summary_bits.append(f"{tasks_failed} failed task(s)")
+    if failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0):
+        summary_bits.append(f"{failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0)} blocked-env task(s)")
+    if failure_group_counts.get(STATUS_GROUP_REVIEW, 0):
+        summary_bits.append(f"{failure_group_counts.get(STATUS_GROUP_REVIEW, 0)} review-needed task(s)")
+    if failure_group_counts.get(STATUS_GROUP_REGRESSION, 0):
+        summary_bits.append(f"{failure_group_counts.get(STATUS_GROUP_REGRESSION, 0)} regression task(s)")
     if tasks_skipped:
         summary_bits.append(f"{tasks_skipped} skipped task(s)")
     if next_actions:
@@ -1880,6 +1967,16 @@ def _build_final_run_report(repo: Path, run_dir: Path, *, stop_reason: str, qa_r
             "failed": tasks_failed,
             "skipped": tasks_skipped,
             "pending": tasks_pending,
+            "regressed": failure_group_counts.get(STATUS_GROUP_REGRESSION, 0),
+            "review": failure_group_counts.get(STATUS_GROUP_REVIEW, 0),
+            "blocked_env": failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0),
+            "tasks_regressed": failure_group_counts.get(STATUS_GROUP_REGRESSION, 0),
+            "tasks_review": failure_group_counts.get(STATUS_GROUP_REVIEW, 0),
+            "tasks_blocked_env": failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0),
+            "failure_status_counts": failure_status_counts,
+            "failureStatusCounts": failure_status_counts,
+            "failure_group_counts": failure_group_counts,
+            "failureGroupCounts": failure_group_counts,
         },
         "goals": completion,
         "validation": validation_summary,
@@ -1970,6 +2067,9 @@ def _render_final_run_report_md(report: dict[str, Any]) -> str:
     lines.append(f"- total: {tasks.get('total', 0)}")
     lines.append(f"- done: {tasks.get('done', 0)}")
     lines.append(f"- failed: {tasks.get('failed', 0)}")
+    lines.append(f"- blocked_env: {tasks.get('blocked_env', tasks.get('tasks_blocked_env', 0))}")
+    lines.append(f"- review: {tasks.get('review', tasks.get('tasks_review', 0))}")
+    lines.append(f"- regression: {tasks.get('regressed', tasks.get('tasks_regressed', 0))}")
     lines.append(f"- skipped: {tasks.get('skipped', 0)}")
     lines.append(f"- pending: {tasks.get('pending', 0)}")
     lines.append("")
@@ -2030,6 +2130,7 @@ def _render_operations_summary_md(summary: dict[str, Any]) -> str:
     lines.append(f"- queued: {counts.get('queued', 0)}")
     lines.append(f"- review_required: {counts.get('review_required', 0)}")
     lines.append(f"- blocked_env: {counts.get('blocked_env', 0)}")
+    lines.append(f"- regression: {counts.get('regression', counts.get('regressed', 0))}")
     lines.append("")
     lines.append("## Stale Cleanup")
     lines.append("")
@@ -2235,6 +2336,7 @@ def build_local_shutdown_report(
     state_counts = ctx.get("state_counts") or {}
     try:
         failed = state.get("failed") or []
+        pending_review = state.get("pending_review") or []
         warnings = state.get("warnings") or []
         failed_count = state_counts.get("failed") if isinstance(state_counts, dict) else None
         if failed_count is None:
@@ -2242,7 +2344,14 @@ def build_local_shutdown_report(
         warnings_count = state_counts.get("warnings") if isinstance(state_counts, dict) else None
         if warnings_count is None:
             warnings_count = len(warnings)
+        failure_group_counts, _failure_status_counts, _failure_statuses = _failure_group_counts_from_entries(
+            _as_list(failed) + _as_list(pending_review),
+            default="failed",
+        )
         lines.append(f"- failed_count: {int(failed_count)}")
+        lines.append(f"- blocked_env_count: {failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0)}")
+        lines.append(f"- review_needed_count: {failure_group_counts.get(STATUS_GROUP_REVIEW, 0)}")
+        lines.append(f"- regression_count: {failure_group_counts.get(STATUS_GROUP_REGRESSION, 0)}")
         lines.append(f"- warnings_count: {int(warnings_count)}")
         if failed:
             lines.append("")

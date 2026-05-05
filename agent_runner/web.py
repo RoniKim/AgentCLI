@@ -84,6 +84,7 @@ from .failure_policy import (
     STATUS_GROUP_REGRESSION,
     STATUS_GROUP_REVIEW,
     count_task_status_groups,
+    normalize_task_status_for_group,
 )
 from .utils import atomic_write_json, atomic_write_text, now_iso, run_cmd, STOP_REASON_PROJECT_COMPLETE
 from . import web_payloads as _web_payloads
@@ -3665,21 +3666,36 @@ def _load_backlog_payload(
     tasks = _load_tasks(run_dir)
     done_ids = set(str(item) for item in (state.get("done") or []) if str(item).strip())
     failed_items = state.get("failed") if isinstance(state.get("failed"), list) else []
+    pending_review_items = state.get("pending_review") if isinstance(state.get("pending_review"), list) else []
     failed_lookup: dict[str, dict[str, Any]] = {}
-    for item in failed_items:
+    for bucket, item in [("failed", item) for item in failed_items] + [("pending_review", item) for item in pending_review_items]:
         if not isinstance(item, dict):
             continue
         task_id = _pick_text(item.get("task"), item.get("task_id"))
         if not task_id:
             continue
-        failure_status = _pick_text(item.get("status"), item.get("task_status"), item.get("outcome_status"))
+        failure_reason = _pick_text(item.get("reason"), item.get("failure_reason"), item.get("failureReason"))
+        failure_detail = _pick_text(item.get("detail"), item.get("message"))
+        task_status = normalize_task_status_for_group(
+            reason=failure_reason,
+            task_status=_pick_value(item.get("task_status"), item.get("taskStatus")),
+            outcome_status=_pick_value(item.get("outcome_status"), item.get("outcomeStatus")),
+            status=item.get("status"),
+            detail=failure_detail,
+            default="failed" if bucket == "failed" else "review_required",
+        )
+        failure_status = (
+            task_status
+            if task_status in {"blocked_env", "review_required", "test_contract_changed"}
+            else "failed"
+        )
         failed_lookup[task_id] = {
-            "reason": _pick_text(item.get("reason"), item.get("status")),
+            "reason": failure_reason,
             "status": failure_status,
-            "task_status": failure_status,
+            "task_status": task_status,
             "review_required": bool(item.get("review_required") or item.get("reviewRequired")),
             "auto_merge_allowed": bool(item.get("auto_merge_allowed") or item.get("autoMergeAllowed")),
-            "detail": _pick_text(item.get("detail"), item.get("message")),
+            "detail": failure_detail,
             "blocked_dependencies": item.get("blocked_dependencies") or item.get("blockedDependencies") or [],
             "next_action": _pick_text(item.get("next_action"), item.get("nextAction")),
             "attempt": _coerce_optional_int(item.get("attempt")),
@@ -3739,7 +3755,7 @@ def _load_backlog_payload(
         failure = failed_lookup.get(task.id, {})
         failure_reason = _pick_text(failure.get("reason"))
         failure_detail = _pick_text(failure.get("detail"))
-        if status == "failed":
+        if task.id in failed_lookup:
             if not failure_reason:
                 failure_reason = runtime_reason
             if not failure_detail:

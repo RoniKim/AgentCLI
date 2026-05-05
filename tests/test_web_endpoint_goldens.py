@@ -647,6 +647,49 @@ class WebEndpointGoldenTests(unittest.TestCase):
             projection,
         )
 
+    def test_progress_contract_splits_failure_groups(self) -> None:
+        self._write_goals()
+        run_dir = self._make_run_dir("20260503-010204")
+        self._write_backlog(
+            run_dir,
+            [
+                {"id": "T1", "title": "Install dependency", "prompt": "", "files": [], "done_when": "", "skills": [], "skills_rationale": "", "depends_on": []},
+                {"id": "T2", "title": "Review selector contract", "prompt": "", "files": [], "done_when": "", "skills": [], "skills_rationale": "", "depends_on": []},
+                {"id": "T3", "title": "Fix regression", "prompt": "", "files": [], "done_when": "", "skills": [], "skills_rationale": "", "depends_on": []},
+            ],
+        )
+        self._write_state(
+            run_dir,
+            {
+                "done": [],
+                "failed": [
+                    {"task": "T1", "reason": "build_failed", "task_status": "blocked_env"},
+                    {"task": "T2", "reason": "fast_regression_failed", "task_status": "test_contract_changed"},
+                    {"task": "T3", "reason": "build_failed", "task_status": "regression_failed"},
+                ],
+                "warnings": [],
+            },
+        )
+        client = self._create_client(
+            controller_status={
+                "run_dir": run_dir.as_posix(),
+                "running": False,
+                "exit_code": 1,
+                "reason": "build_failed",
+                "stage": "Dev",
+            }
+        )
+
+        payload = client.get("/api/progress").json()
+
+        self.assertEqual(3, payload["backlog"]["counts"]["failed"])
+        self.assertEqual(1, payload["backlog"]["counts"]["blocked_env"])
+        self.assertEqual(1, payload["backlog"]["counts"]["review"])
+        self.assertEqual(1, payload["backlog"]["counts"]["regressed"])
+        self.assertEqual(1, payload["backlog"]["failureGroupCounts"]["blocked_env"])
+        self.assertEqual(1, payload["backlog"]["failureGroupCounts"]["review"])
+        self.assertEqual(1, payload["backlog"]["failureGroupCounts"]["regression"])
+
     def test_progress_contract_preserves_goals_incomplete_completion_state(self) -> None:
         self._write_goals()
         run_dir = self._make_run_dir("20260503-020304")

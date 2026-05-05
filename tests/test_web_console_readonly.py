@@ -7380,6 +7380,31 @@ Another unsupported line.
             self.assertEqual("empty", fallback["sectionState"]["stages"]["status"])
             self.assertEqual("empty", fallback["sectionState"]["backlog"]["status"])
 
+    def test_adapter_backlog_counters_split_task_status_groups(self) -> None:
+        adapted = _run_adapter_harness(
+            [
+                {
+                    "kind": "call",
+                    "name": "adaptBacklog",
+                    "args": [
+                        {
+                            "items": [
+                                {"id": "T1", "title": "Install dependency", "status": "failed", "task_status": "blocked_env"},
+                                {"id": "T2", "title": "Review selector contract", "status": "failed", "task_status": "test_contract_changed"},
+                                {"id": "T3", "title": "Fix regression", "status": "failed", "task_status": "regression_failed"},
+                            ],
+                            "counts": {},
+                        }
+                    ],
+                }
+            ]
+        )[0]
+
+        self.assertEqual(3, adapted["counts"]["failed"])
+        self.assertEqual(1, adapted["counts"]["blocked_env"])
+        self.assertEqual(1, adapted["counts"]["review"])
+        self.assertEqual(1, adapted["counts"]["regressed"])
+
     def test_dashboard_active_task_prefers_live_runner_state(self) -> None:
         run_dir, controller_status = self._write_long_running_stage_bundle(
             run_name="20260428-dashboard-live-preferred",

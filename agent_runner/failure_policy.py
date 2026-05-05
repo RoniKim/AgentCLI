@@ -105,6 +105,60 @@ def normalize_reason_set(reasons: set[str] | Sequence[str] | None) -> set[str]:
     }
 
 
+def normalize_task_status_for_group(
+    *,
+    reason: Any = "",
+    task_status: Any = "",
+    status: Any = "",
+    outcome_status: Any = "",
+    validations: Sequence[dict[str, Any]] | None = None,
+    detail: str = "",
+    default: str = "failed",
+) -> str:
+    """Normalize mixed state/result status fields for shared group counters."""
+
+    aliases = {
+        "complete": TASK_STATUS_COMPLETED,
+        "completed": TASK_STATUS_COMPLETED,
+        "done": TASK_STATUS_COMPLETED,
+        "ok": TASK_STATUS_COMPLETED,
+        "success": TASK_STATUS_COMPLETED,
+        "review": TASK_STATUS_REVIEW_REQUIRED,
+        "pending_review": TASK_STATUS_REVIEW_REQUIRED,
+        "review_required": TASK_STATUS_REVIEW_REQUIRED,
+        "reviewrequired": TASK_STATUS_REVIEW_REQUIRED,
+        "environment_blocked": TASK_STATUS_BLOCKED_ENV,
+        "blocked_environment": TASK_STATUS_BLOCKED_ENV,
+        "blockedenvironment": TASK_STATUS_BLOCKED_ENV,
+        "blocked_env": TASK_STATUS_BLOCKED_ENV,
+        "test_contract_changed": TASK_STATUS_TEST_CONTRACT_CHANGED,
+        "testcontractchanged": TASK_STATUS_TEST_CONTRACT_CHANGED,
+        "regression_failed": TASK_STATUS_REGRESSION_FAILED,
+        "regressionfailed": TASK_STATUS_REGRESSION_FAILED,
+        "fail": "failed",
+        "failed": "failed",
+        "error": "failed",
+    }
+
+    for value in (task_status, outcome_status, status):
+        token = str(value or "").strip().lower()
+        if token:
+            return aliases.get(token, token)
+
+    reason_text = str(reason or "").strip()
+    if reason_text:
+        classified = normalize_task_status(
+            reason_text,
+            validations=validations or [],
+            detail=detail,
+        )
+        normalized_default = aliases.get(str(default or "").strip().lower(), str(default or "failed").strip().lower() or "failed")
+        if classified == TASK_STATUS_REGRESSION_FAILED and normalized_default in {"failed", TASK_STATUS_REVIEW_REQUIRED}:
+            return normalized_default
+        return classified
+    return aliases.get(str(default or "").strip().lower(), str(default or "failed").strip().lower() or "failed")
+
+
 def should_preserve_for_review(task_status: str) -> bool:
     return str(task_status or "").strip().lower() in PRESERVE_FOR_REVIEW_STATUSES
 
