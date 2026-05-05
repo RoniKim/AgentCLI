@@ -49,7 +49,11 @@ from agent_runner.pr_queue import (
 )
 from agent_runner.preflight import check_runner_start_readiness
 from agent_runner.remote.controller import read_runner_control_event
-from agent_runner.runtime_contract import dispatch_task_branch_disposition
+from agent_runner.runtime_contract import (
+    ATTEMPT_FINISHED_MARKER,
+    ATTEMPT_STARTED_MARKER,
+    dispatch_task_branch_disposition,
+)
 from agent_runner.shell import RunnerShell
 from agent_runner.stop_progress import read_stop_progress, write_stop_progress
 from agent_runner.utils import run_cmd
@@ -148,6 +152,35 @@ class WorktreeIsolationTests(unittest.TestCase):
         attempt_dir.mkdir(parents=True, exist_ok=True)
         (attempt_dir / "dev_output.txt").write_text(content, encoding="utf-8")
         return attempt_dir
+
+    def _write_attempt_marker(
+        self,
+        attempt_dir: Path,
+        *,
+        marker: str,
+        task_id: str,
+        attempt: int = 0,
+        timestamp: str = "2026-05-05T00:00:00",
+        status: str = "",
+        reason: str = "",
+    ) -> Path:
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "marker": marker,
+            "task_id": task_id,
+            "attempt": attempt,
+            "timestamp": timestamp,
+        }
+        if status:
+            payload["status"] = status
+        if reason:
+            payload["reason"] = reason
+        marker_path = attempt_dir / marker
+        marker_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return marker_path
 
     def _record_pending_review(self, sink: list[dict[str, object]]):
         def _record(
@@ -936,8 +969,11 @@ class WorktreeIsolationTests(unittest.TestCase):
         }
         (self.run_dir / "metrics.jsonl").write_text(json.dumps(metrics_event) + "\n", encoding="utf-8")
         attempt_dir = self.run_dir / "tasks" / "c001_s002_T-stale" / "attempt_00"
-        attempt_dir.mkdir(parents=True)
-        (attempt_dir / "dev_output.txt").write_text("interrupted\n", encoding="utf-8")
+        self._write_attempt_marker(
+            attempt_dir,
+            marker=ATTEMPT_STARTED_MARKER,
+            task_id="T-stale",
+        )
 
         readiness = check_runner_start_readiness(self.repo, self.run_dir)
 
@@ -953,7 +989,9 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertIn("source HEAD", branch["reason"])
         self.assertEqual(self.run_dir.name, attempt["owning_run"])
         self.assertEqual("interrupted", attempt["status"])
-        self.assertIn("missing validation", attempt["reason"])
+        self.assertIn(ATTEMPT_STARTED_MARKER, attempt["reason"])
+        self.assertIn(ATTEMPT_FINISHED_MARKER, attempt["reason"])
+        self.assertEqual(attempt_dir.resolve().as_posix(), attempt["path"])
         warning_codes = {item["code"] for item in readiness["warnings"]}
         self.assertIn("stale_task_branch", warning_codes)
         self.assertIn("interrupted_attempt_directory", warning_codes)
@@ -970,6 +1008,44 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertIn("status=", output)
         self.assertIn("reason=", output)
         self.assertIn(f"owning_run={self.run_dir.name}", output)
+
+    def test_scan_worktree_diagnostics_ignores_finished_attempt_markers(self) -> None:
+        self._init_repo()
+        attempt_dir = self.run_dir / "tasks" / "c001_s002_T-finished" / "attempt_00"
+        self._write_attempt_marker(
+            attempt_dir,
+            marker=ATTEMPT_STARTED_MARKER,
+            task_id="T-finished",
+        )
+        self._write_attempt_marker(
+            attempt_dir,
+            marker=ATTEMPT_FINISHED_MARKER,
+            task_id="T-finished",
+            status="completed",
+            reason="completed",
+        )
+
+        diagnostics = scan_worktree_diagnostics(self.repo)
+
+        self.assertEqual(0, diagnostics["summary"]["interrupted_attempts"])
+        self.assertEqual([], diagnostics["interrupted_attempts"])
+
+    def test_scan_worktree_diagnostics_reports_legacy_output_only_attempt_without_markers(self) -> None:
+        self._init_repo()
+        attempt_dir = self._write_interrupted_attempt(
+            self.run_dir,
+            task_dir_name="c001_s002_T-legacy",
+        )
+
+        diagnostics = scan_worktree_diagnostics(self.repo)
+
+        self.assertEqual(1, diagnostics["summary"]["interrupted_attempts"])
+        attempt = diagnostics["interrupted_attempts"][0]
+        self.assertEqual(attempt_dir.resolve().as_posix(), attempt["path"])
+        self.assertEqual("interrupted", attempt["status"])
+        self.assertIn("legacy attempt directory", attempt["reason"])
+        self.assertIn("age", attempt)
+        self.assertIn("path", attempt)
 
     def test_scan_worktree_diagnostics_reports_orphaned_generated_worktree(self) -> None:
         generated_worktree = self.fixture_root / ".agentcli_worktrees" / self.repo.name / "orphaned"

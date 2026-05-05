@@ -2248,6 +2248,22 @@ async def main_async(args: argparse.Namespace) -> int:
                     attempt_context = task_context.attempt_context(attempt)
                     attempt_dir = attempt_context.attempt_dir
                     attempt_dir.mkdir(parents=True, exist_ok=True)
+                    attempt_run_context = attempt_context.to_dict()
+                    attempt_run_context["model"] = model_name
+                    attempt_context.write_started_marker(
+                        started_at=now_iso(),
+                        run_context=attempt_run_context,
+                    )
+
+                    def _finish_attempt(status: str, reason: str, *, detail: str = "") -> None:
+                        attempt_context.write_finished_marker(
+                            finished_at=now_iso(),
+                            status=status,
+                            reason=reason,
+                            detail=detail,
+                            run_context=attempt_run_context,
+                        )
+
                     validation_records: list[dict[str, Any]] = []
 
                     before = git_porcelain(repo)
@@ -2369,12 +2385,14 @@ async def main_async(args: argparse.Namespace) -> int:
 
                     if stop_path.exists():
                         _record_task_stop("dev_attempt", attempt)
+                        _finish_attempt("stopped", STOP_REASON_STOP_FILE)
                         return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
 
                     # Quota/credits exhausted: graceful stop with artifacts preserved.
                     dev_quota_exhausted = dev_quota_exhausted or has_quota_text(dev_log)
                     if isinstance(dev_exc, BudgetExceeded):
                         metrics.event("budget_exceeded", cycle=cycle_idx, step=step, task_id=next_task.id, reason=str(dev_exc))
+                        _finish_attempt("stopped", "budget_exceeded", detail=str(dev_exc))
                         return 1, "budget_exceeded", 0, (len(done_set) > before_done)
                     if dev_quota_exhausted:
                         append_state_warning(
@@ -2391,6 +2409,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             await write_shutdown_report(STOP_REASON_QUOTA, cycle=cycle_idx, step=step, last_task_id=next_task.id)
                         except Exception:
                             pass
+                        _finish_attempt("stopped", STOP_REASON_QUOTA, detail=str(dev_exc) if dev_exc else "usage limit")
                         return 0, STOP_REASON_QUOTA, 0, (len(done_set) > before_done)
                     # Invalid/unknown model: allow escalation fallback when available.
                     _model_invalid = (dev_exc and is_model_invalid_exception(dev_exc)) or (
@@ -2400,6 +2419,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     if _model_invalid:
                         if (attempt + 1) < max_attempts:
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="model_invalid")
+                            _finish_attempt("retry", "model_invalid")
                             continue
 
                     # Non-max-turn exceptions are treated as fatal (rollback + stop)
@@ -2435,12 +2455,15 @@ async def main_async(args: argparse.Namespace) -> int:
                             ok, fail_reason = _isolate_or_stop("exception", task_status=task_status, detail=str(dev_exc))
                             if not ok:
                                 if not continuous:
+                                    _finish_attempt("failed", fail_reason, detail=str(dev_exc))
                                     return 1, fail_reason, 0, (len(done_set) > before_done)
                                 eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; skipping task.")
                         if continuous:
                             eprint(f"[SKIP] Dev exception for {next_task.id}; skipping to next task.")
                             skipped_set.add(next_task.id)
+                            _finish_attempt("failed", "exception", detail=str(dev_exc))
                             break
+                        _finish_attempt("failed", "exception", detail=str(dev_exc))
                         return 1, "dev_exception", 0, (len(done_set) > before_done)
                     # Max-turns exceptions are recoverable: continue to diff/build gates.
                     if dev_exc and dev_is_max_turns:
@@ -2502,6 +2525,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         except Exception:
                             pass
                         task_blocked = True
+                        _finish_attempt("blocked", "needs_dependency", detail=dep_detail)
                         break
 
                     # Escalate conditions: retry same task with a higher tier model.
@@ -2563,6 +2587,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             )
                             # Don't rollback for blocked tasks - continue to next task
                             task_blocked = True
+                            _finish_attempt("blocked", "blocked_dependency", detail=dev_log[:500])
                             break  # Exit retry loop
 
                         # Special case: if max_turns was hit and no diff, auto-retry instead of immediate failure
@@ -2570,9 +2595,11 @@ async def main_async(args: argparse.Namespace) -> int:
                         if dev_is_max_turns and dev_auto_escalate and (attempt + 1) < max_attempts:
                             logger.retry_event("dev", next_task.id, attempt=attempt, reason="max_turns_no_diff")
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="max_turns_no_diff")
+                            _finish_attempt("retry", "max_turns_no_diff")
                             continue
                         if dev_auto_escalate and (attempt + 1) < max_attempts and "no_diff" in dev_escalate_on:
                             metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="no_diff")
+                            _finish_attempt("retry", "no_diff")
                             continue
                         task_status = _task_failure_status("no_diff", detail=dev_log)
                         _record_failed_state("no_diff", detail=dev_log[:500], task_status=task_status)
@@ -2606,11 +2633,14 @@ async def main_async(args: argparse.Namespace) -> int:
                             ok, fail_reason = _isolate_or_stop("no_diff", task_status=task_status, detail=dev_log[:500])
                             if not ok:
                                 if not continuous:
+                                    _finish_attempt("failed", fail_reason, detail=dev_log[:500])
                                     return 1, fail_reason, 0, (len(done_set) > before_done)
                                 eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
                         if continuous:
                             skipped_set.add(next_task.id)
+                            _finish_attempt("failed", "no_diff", detail=dev_log[:500])
                             break
+                        _finish_attempt("failed", "no_diff", detail=dev_log[:500])
                         return 1, "no_diff", 0, (len(done_set) > before_done)
                     if build_enabled:
                         metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
@@ -2637,6 +2667,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         metrics.event("build_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
                         if stop_path.exists():
                             _record_task_stop("build_gate", attempt)
+                            _finish_attempt("stopped", STOP_REASON_STOP_FILE)
                             return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
                         if ok and tb:
                             # Auto-commit on task branch as incremental checkpoint
@@ -2719,6 +2750,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                     detail=build_detail,
                                 )
                                 metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="build_failed")
+                                _finish_attempt("retry", "build_failed", detail=build_detail)
                                 continue
                             _record_failed_state(
                                 "build_failed",
@@ -2754,11 +2786,14 @@ async def main_async(args: argparse.Namespace) -> int:
                                 )
                                 if not ok_restore:
                                     if not continuous:
+                                        _finish_attempt("failed", fail_reason, detail=build_detail)
                                         return 1, fail_reason, 0, (len(done_set) > before_done)
                                     eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
                             if continuous:
                                 skipped_set.add(next_task.id)
+                                _finish_attempt("failed", "build_failed", detail=build_detail)
                                 break
+                            _finish_attempt("failed", "build_failed", detail=build_detail)
                             return 1, "build_failed", 0, (len(done_set) > before_done)
                     if run_tests:
                         metrics.event("test_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)
@@ -2787,6 +2822,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         metrics.event("test_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0 if ok else 1)
                         if stop_path.exists():
                             _record_task_stop("test_gate", attempt)
+                            _finish_attempt("stopped", STOP_REASON_STOP_FILE)
                             return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
                         if not ok:
                             test_detail = str(test_validation.get("failure_summary") or test_validation.get("summary") or "")
@@ -2835,6 +2871,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                     detail=test_detail,
                                 )
                                 metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="test_failed")
+                                _finish_attempt("retry", "test_failed", detail=test_detail)
                                 continue
                             _record_failed_state(
                                 "test_failed",
@@ -2870,11 +2907,14 @@ async def main_async(args: argparse.Namespace) -> int:
                                 )
                                 if not ok_restore:
                                     if not continuous:
+                                        _finish_attempt("failed", fail_reason, detail=test_detail)
                                         return 1, fail_reason, 0, (len(done_set) > before_done)
                                     eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
                             if continuous:
                                 skipped_set.add(next_task.id)
+                                _finish_attempt("failed", "test_failed", detail=test_detail)
                                 break
+                            _finish_attempt("failed", "test_failed", detail=test_detail)
                             return 1, "test_failed", 0, (len(done_set) > before_done)
                     if policy_scan_enabled:
                         policy_scan_ignore_paths = list(scan_ignore_paths)
@@ -2959,11 +2999,14 @@ async def main_async(args: argparse.Namespace) -> int:
                                 ok_restore, fail_reason = _isolate_or_stop("policy_violation", task_status=task_status, detail=policy_detail)
                                 if not ok_restore:
                                     if not continuous:
+                                        _finish_attempt("failed", fail_reason, detail=policy_detail)
                                         return 1, fail_reason, 0, (len(done_set) > before_done)
                                     eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
                             if continuous:
                                 skipped_set.add(next_task.id)
+                                _finish_attempt("failed", "policy_violation", detail=policy_detail)
                                 break
+                            _finish_attempt("failed", "policy_violation", detail=policy_detail)
                             return 1, "policy_violation", 0, (len(done_set) > before_done)
                     fast_regression_files = list(next_task.files or [])
                     try:
@@ -3030,6 +3073,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         logger.gate_event("fast_regression", next_task.id, passed=fast_ok, commands=fast_command_count)
                         if stop_path.exists():
                             _record_task_stop("fast_regression_gate", attempt)
+                            _finish_attempt("stopped", STOP_REASON_STOP_FILE)
                             return 0, STOP_REASON_STOP_FILE, len(done_set.intersection(task_ids)) - before_done, (len(done_set) > before_done)
                         if not fast_ok:
                             failed_command = fast_regression.get("failed_command") or {}
@@ -3109,6 +3153,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                     outcome_action="retry_scheduled",
                                     detail=failed_summary,
                                 )
+                                _finish_attempt("retry", "fast_regression_failed", detail=failed_summary)
                                 continue
                             _record_failed_state(
                                 "fast_regression_failed",
@@ -3205,11 +3250,14 @@ async def main_async(args: argparse.Namespace) -> int:
                                 )
                                 if not ok_restore:
                                     if not continuous:
+                                        _finish_attempt("failed", fail_reason, detail=failed_summary)
                                         return 1, fail_reason, 0, (len(done_set) > before_done)
                                     eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
                             if continuous:
                                 skipped_set.add(next_task.id)
+                                _finish_attempt("failed", "fast_regression_failed", detail=failed_summary)
                                 break
+                            _finish_attempt("failed", "fast_regression_failed", detail=failed_summary)
                             return 1, "fast_regression_failed", 0, (len(done_set) > before_done)
                     # Success: exit attempt loop
                     metrics.event("dev_attempt_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0)
@@ -3244,6 +3292,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         reason="completed",
                         task_status=TASK_STATUS_COMPLETED,
                     )
+                    _finish_attempt("completed", "completed")
 
                 task_validation_artifacts: list[str] = []
                 task_validation_notes: list[str] = []

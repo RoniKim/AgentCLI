@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+from .runtime_contract import ATTEMPT_FINISHED_MARKER, ATTEMPT_STARTED_MARKER
 from .utils import run_cmd, now_iso, safe_write_text, eprint
 
 
@@ -2270,6 +2271,43 @@ def _worktree_attempt_mtime(attempt_dir: Path) -> float:
     return latest
 
 
+def _read_attempt_marker_file(path: Path) -> dict[str, object]:
+    try:
+        if not path.exists() or not path.is_file():
+            return {}
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _worktree_attempt_output_evidence(attempt_dir: Path) -> list[str]:
+    ignored = {
+        ATTEMPT_STARTED_MARKER,
+        ATTEMPT_FINISHED_MARKER,
+        "validation.json",
+        "DEPENDENCY_REQUIRED.md",
+    }
+    evidence: list[str] = []
+    try:
+        children = sorted(attempt_dir.iterdir(), key=lambda item: item.name.lower())
+    except Exception:
+        return evidence
+    for child in children:
+        if child.name in ignored:
+            continue
+        if child.is_file():
+            evidence.append(child.name)
+            continue
+        try:
+            has_entries = any(True for _ in child.iterdir())
+        except Exception:
+            has_entries = False
+        if has_entries:
+            evidence.append(child.name)
+    return evidence
+
+
 def _worktree_task_id_from_artifact_dir(name: str) -> str:
     match = re.match(r"^c\d+_s\d+_(?P<task_id>.+)$", str(name or ""))
     return str(match.group("task_id") if match else "").strip()
@@ -2417,11 +2455,40 @@ def _worktree_interrupted_attempt_dirs(run_dirs: Sequence[Path]) -> list[dict[st
             except Exception:
                 continue
             for attempt_dir in attempt_dirs:
-                validation_path = attempt_dir / "validation.json"
-                dependency_path = attempt_dir / "DEPENDENCY_REQUIRED.md"
-                if validation_path.exists() or dependency_path.exists():
+                started_path = attempt_dir / ATTEMPT_STARTED_MARKER
+                finished_path = attempt_dir / ATTEMPT_FINISHED_MARKER
+                if finished_path.exists():
                     continue
-                reason = "missing validation artifact"
+                started_payload = _read_attempt_marker_file(started_path)
+                if started_path.exists():
+                    reason = f"{ATTEMPT_STARTED_MARKER} marker exists without {ATTEMPT_FINISHED_MARKER}"
+                    attempts.append(
+                        {
+                            "path": attempt_dir.resolve().as_posix(),
+                            "run_dir": run_dir.resolve().as_posix(),
+                            "owning_run": run_dir.name,
+                            "run_id": run_dir.name,
+                            "task_id": task_id,
+                            "attempt": _worktree_attempt_number(attempt_dir.name),
+                            "status": "interrupted",
+                            "reason": reason,
+                            "marker_source": "markers",
+                            "started_marker_path": started_path.resolve().as_posix(),
+                            "finished_marker_path": finished_path.resolve().as_posix(),
+                            "started_at": str(
+                                started_payload.get("timestamp")
+                                or started_payload.get("started_at")
+                                or ""
+                            ).strip(),
+                            "categories": ["stale"],
+                            **_worktree_age_fields(started_path.stat().st_mtime),
+                        }
+                    )
+                    continue
+                evidence_files = _worktree_attempt_output_evidence(attempt_dir)
+                if not evidence_files:
+                    continue
+                reason = "legacy attempt directory has output evidence without lifecycle markers"
                 attempts.append(
                     {
                         "path": attempt_dir.resolve().as_posix(),
@@ -2432,6 +2499,8 @@ def _worktree_interrupted_attempt_dirs(run_dirs: Sequence[Path]) -> list[dict[st
                         "attempt": _worktree_attempt_number(attempt_dir.name),
                         "status": "interrupted",
                         "reason": reason,
+                        "marker_source": "legacy_output",
+                        "evidence_files": evidence_files,
                         "categories": ["stale"],
                         **_worktree_age_fields(_worktree_attempt_mtime(attempt_dir)),
                     }

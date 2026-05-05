@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import ntpath
 import posixpath
 import re
@@ -16,6 +17,8 @@ PIPELINE_STAGE_ORDER: tuple[str, ...] = ("PM", "PL", "Security", "Dev", "QA", "R
 BUILTIN_ROLE_SPECS: tuple[str, ...] = tuple(stage for stage in PIPELINE_STAGE_ORDER if stage != "Reporter")
 DEFAULT_ROLE_SPECS: tuple[str, ...] = ("PM", "Dev", "QA")
 ENTERPRISE_ROLE_SPECS: tuple[str, ...] = ("PM", "Security", "Dev", "QA")
+ATTEMPT_STARTED_MARKER = "STARTED"
+ATTEMPT_FINISHED_MARKER = "FINISHED"
 
 ROLE_SPEC_CANONICALS: dict[str, str] = {
     "pm": "PM",
@@ -524,6 +527,66 @@ class AttemptContext:
     @property
     def dependency_required_path(self) -> Path:
         return self.artifact_path("DEPENDENCY_REQUIRED.md")
+
+    @property
+    def started_marker_path(self) -> Path:
+        return self.artifact_path(ATTEMPT_STARTED_MARKER)
+
+    @property
+    def finished_marker_path(self) -> Path:
+        return self.artifact_path(ATTEMPT_FINISHED_MARKER)
+
+    def _write_marker(self, filename: str, payload: dict[str, Any]) -> Path:
+        marker_path = self.artifact_path(filename)
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+            errors="replace",
+        )
+        return marker_path
+
+    def write_started_marker(
+        self,
+        *,
+        started_at: str,
+        run_context: dict[str, Any] | None = None,
+    ) -> Path:
+        try:
+            self.finished_marker_path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        payload = {
+            "marker": ATTEMPT_STARTED_MARKER,
+            "task_id": self.task.task_id,
+            "attempt": self.attempt,
+            "timestamp": str(started_at or "").strip(),
+            "run_context": dict(run_context) if isinstance(run_context, dict) else self.to_dict(),
+        }
+        return self._write_marker(ATTEMPT_STARTED_MARKER, payload)
+
+    def write_finished_marker(
+        self,
+        *,
+        finished_at: str,
+        status: str,
+        reason: str,
+        detail: str = "",
+        run_context: dict[str, Any] | None = None,
+    ) -> Path:
+        payload = {
+            "marker": ATTEMPT_FINISHED_MARKER,
+            "task_id": self.task.task_id,
+            "attempt": self.attempt,
+            "timestamp": str(finished_at or "").strip(),
+            "status": str(status or "").strip(),
+            "reason": str(reason or "").strip(),
+            "detail": str(detail or "").strip(),
+            "run_context": dict(run_context) if isinstance(run_context, dict) else self.to_dict(),
+        }
+        return self._write_marker(ATTEMPT_FINISHED_MARKER, payload)
 
     def to_dict(self) -> dict[str, Any]:
         payload = self.task.to_dict()
