@@ -311,13 +311,13 @@
 ### P0-Y. Failure Disposition, Backend Parity, And State Integrity
 
 - [x] A `failure_policy` module decides task disposition (`retry`, `preserve_for_review`, `abandon_branch`, `restore_checkpoint`, `stop_run`) from reason, task status, and attempt budget so Codex and Claude share one policy.
-- [ ] `_isolate_or_stop` consumes a typed `FailureOutcome` so `blocked_env` and `test_contract_changed` tasks are preserved for human review instead of abandoned.
-- [ ] `backends/claudecode.py` records failures with the same task-status enriched schema as `cycle.py` so failover cannot produce mixed `STATE.json` schemas.
-- [ ] `task_status.py` classifier covers Java, Go, Rust, C/C++, Kotlin, Swift, Maven, Gradle, NuGet, Cargo, regression, and dependency-resolution patterns with multi-language tests.
+- [x] `_isolate_or_stop` consumes a typed `FailureOutcome` so `blocked_env` and `test_contract_changed` tasks are preserved for human review instead of abandoned.
+- [x] `backends/claudecode.py` records failures with the same task-status enriched schema as `cycle.py` so failover cannot produce mixed `STATE.json` schemas.
+- [x] `task_status.py` classifier covers Java, Go, Rust, C/C++, Kotlin, Swift, Maven, Gradle, NuGet, Cargo, regression, and dependency-resolution patterns with multi-language tests.
 - [ ] `task_history` SQLite stores `task_status` so PM failed-task context and consecutive-failure handling distinguish environment-blocked tasks from code regressions.
 - [ ] `needs_dependency` and `blocked_dependency` reasons are first-class `BLOCKED_ENV` mappings in `classify_task_failure` without relying on text-pattern inference.
 - [ ] Shutdown reports and Web Console task counters split regression, review-needed, and blocked-env groups so environment failures do not look like code regressions.
-- [ ] Codex and Claude backends use the same failure disposition, validation artifact, local PR queue, and run report helpers so failover cannot produce mixed schemas.
+- [x] Codex and Claude backends use the same failure disposition, validation artifact, local PR queue, and run report helpers so failover cannot produce mixed schemas.
 - [ ] PR queue packet and index writes are lock-protected and recoverable after interrupted packet or index updates.
 - [x] `STATE.json` mutation helpers preserve concurrent done, failed, and warning updates across runner, controller, and future Web mutation paths.
 - [x] GOALS auto-check writes atomically and detects operator edit conflicts instead of overwriting Web edits.

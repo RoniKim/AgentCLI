@@ -356,16 +356,22 @@ def _build_failed_task_item(
     if task_lookup and task_id:
         title = _text(task_lookup.get(task_id), title)
 
-    if not title and history_rows_by_task and task_id:
-        matching_rows = history_rows_by_task.get(task_id, [])
-        if matching_rows:
-            title = _text(matching_rows[0].get("title"), task_id)
+    matching_rows = []
+    if history_rows_by_task and task_id:
+        matching_rows = list(history_rows_by_task.get(task_id, []))
+    if not matching_rows and history_rows_by_title and title:
+        matching_rows = list(history_rows_by_title.get(title.lower(), []))
 
+    if not title and matching_rows:
+        title = _text(matching_rows[0].get("title"), task_id)
     if not title:
         title = task_id or _text(row.get("task_title") or row.get("taskTitle"), "unknown")
 
-    reason = _text(row.get("reason"), "unknown")
-    task_status = _text(row.get("task_status") or row.get("taskStatus") or row.get("outcome_status") or row.get("outcomeStatus") or row.get("status"), "")
+    reason = _text(row.get("reason"), "")
+    task_status = _text(
+        row.get("task_status") or row.get("taskStatus") or row.get("outcome_status") or row.get("outcomeStatus") or row.get("status"),
+        "",
+    )
     detail = _text(row.get("detail"), "", max_chars=_MAX_PROMPT_TEXT_LEN)
     current_attempt = _int(row.get("attempt"), 0)
     max_attempts = _int(row.get("max_attempts"), 0)
@@ -375,13 +381,17 @@ def _build_failed_task_item(
     run_id = _text(row.get("run_id"), "")
     backend = _text(row.get("backend"), "")
 
-    matching_rows = []
-    if history_rows_by_task and task_id:
-        matching_rows = list(history_rows_by_task.get(task_id, []))
-    if not matching_rows and history_rows_by_task and title:
-        matching_rows = list(history_rows_by_task.get(title.lower(), []))
     if not matching_rows and reason:
         matching_rows = [dict(row)]
+
+    if not reason and matching_rows:
+        reason = _text(matching_rows[0].get("reason"), "")
+    if not task_status and matching_rows:
+        task_status = _text(
+            matching_rows[0].get("task_status") or matching_rows[0].get("taskStatus") or matching_rows[0].get("status"),
+            "",
+        )
+    reason = reason or "unknown"
 
     if current_attempt <= 0 and matching_rows:
         current_attempt = _int(matching_rows[0].get("attempt"), current_attempt)
@@ -546,7 +556,17 @@ def render_failed_tasks_block(artifact: dict[str, Any]) -> str:
         items = artifact.get("items") if isinstance(artifact, dict) else None
         if not items:
             return "(none)"
-        return "```json\n" + json.dumps(artifact, ensure_ascii=False, indent=2, default=str) + "\n```"
+        prompt_safe_artifact = dict(artifact)
+        prompt_safe_items: list[dict[str, Any]] = []
+        for raw_item in items:
+            if not isinstance(raw_item, dict):
+                continue
+            item = dict(raw_item)
+            # PM only needs classification metadata here; raw failure output stays in artifacts.
+            item.pop("detail", None)
+            prompt_safe_items.append(item)
+        prompt_safe_artifact["items"] = prompt_safe_items
+        return "```json\n" + json.dumps(prompt_safe_artifact, ensure_ascii=False, indent=2, default=str) + "\n```"
     except Exception as exc:
         eprint(f"[WARN] task_history.render_failed_tasks_block failed: {exc}")
         return "(none)"
