@@ -67,6 +67,19 @@ class FailureDisposition:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class FailureOutcome:
+    reason: str
+    task_status: str
+    detail: str = ""
+    validation_artifact: str = ""
+    attempt: int = 0
+    max_attempts: int = 1
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def normalize_task_status(
     reason: str,
     *,
@@ -148,6 +161,33 @@ def has_retry_budget(*, attempt: int, max_attempts: int) -> bool:
     return (int(attempt) + 1) < max(int(max_attempts), 0)
 
 
+def build_failure_outcome(
+    reason: str,
+    *,
+    task_status: str = "",
+    validations: Sequence[dict[str, Any]] | None = None,
+    detail: str = "",
+    validation_artifact: str = "",
+    attempt: int = 0,
+    max_attempts: int = 1,
+) -> FailureOutcome:
+    normalized_reason = normalize_reason(reason)
+    status = normalize_task_status(
+        normalized_reason,
+        task_status=task_status,
+        validations=validations,
+        detail=detail,
+    )
+    return FailureOutcome(
+        reason=normalized_reason,
+        task_status=status,
+        detail=str(detail or ""),
+        validation_artifact=str(validation_artifact or ""),
+        attempt=int(attempt),
+        max_attempts=int(max_attempts),
+    )
+
+
 def terminal_failure_action(*, has_task_branch: bool, has_checkpoint: bool) -> str:
     if has_task_branch:
         return ACTION_ABANDON_BRANCH
@@ -186,6 +226,7 @@ def disposition_message(
 def decide_failure_disposition(
     reason: str,
     *,
+    failure_outcome: FailureOutcome | None = None,
     task_status: str = "",
     validations: Sequence[dict[str, Any]] | None = None,
     detail: str = "",
@@ -196,18 +237,21 @@ def decide_failure_disposition(
     has_task_branch: bool = False,
     has_checkpoint: bool = False,
 ) -> FailureDisposition:
-    status = normalize_task_status(
+    outcome = failure_outcome or build_failure_outcome(
         reason,
         task_status=task_status,
         validations=validations,
         detail=detail,
+        attempt=attempt,
+        max_attempts=max_attempts,
     )
-    normalized_reason = normalize_reason(reason)
+    status = outcome.task_status
+    normalized_reason = outcome.reason
     retry_eligible = is_auto_retry_allowed(status)
     can_retry = (
         retry_eligible
         and bool(dev_auto_escalate)
-        and has_retry_budget(attempt=attempt, max_attempts=max_attempts)
+        and has_retry_budget(attempt=outcome.attempt, max_attempts=outcome.max_attempts)
         and normalized_reason in normalize_reason_set(dev_escalate_on)
     )
     if status == TASK_STATUS_COMPLETED:
@@ -252,6 +296,7 @@ def build_failure_entry(
     *,
     task_id: str,
     reason: str,
+    failure_outcome: FailureOutcome | None = None,
     task_status: str = "",
     validations: Sequence[dict[str, Any]] | None = None,
     detail: str = "",
@@ -263,19 +308,18 @@ def build_failure_entry(
     has_checkpoint: bool = False,
     **extra: Any,
 ) -> dict[str, Any]:
-    status = normalize_task_status(
+    outcome = failure_outcome or build_failure_outcome(
         reason,
         task_status=task_status,
         validations=validations,
         detail=detail,
-    )
-    disposition = decide_failure_disposition(
-        reason,
-        task_status=status,
-        validations=validations,
-        detail=detail,
         attempt=attempt,
         max_attempts=max_attempts,
+    )
+    status = outcome.task_status
+    disposition = decide_failure_disposition(
+        outcome.reason,
+        failure_outcome=outcome,
         dev_auto_escalate=dev_auto_escalate,
         dev_escalate_on=dev_escalate_on,
         has_task_branch=has_task_branch,
@@ -283,7 +327,7 @@ def build_failure_entry(
     )
     entry: dict[str, Any] = {
         "task": task_id,
-        "reason": normalize_reason(reason),
+        "reason": outcome.reason,
         "status": status,
         "task_status": status,
         "taskStatus": status,
@@ -305,7 +349,7 @@ def build_failure_entry(
         "disposition_message": disposition.message,
         "dispositionMessage": disposition.message,
     }
-    if detail:
-        entry["detail"] = detail
+    if outcome.detail:
+        entry["detail"] = outcome.detail
     entry.update(extra)
     return entry

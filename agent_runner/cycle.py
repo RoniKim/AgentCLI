@@ -214,6 +214,8 @@ from .experience import (
 )
 from .failure_policy import (
     ACTION_RETRY,
+    FailureOutcome,
+    build_failure_outcome,
     count_task_status_groups,
     decide_failure_disposition,
     should_count_cycle_failure_for_stop,
@@ -2016,8 +2018,39 @@ async def main_async(args: argparse.Namespace) -> int:
                         detail=detail,
                     )
 
-                def _isolate_or_stop(reason: str, *, task_status: str = "", detail: str = "", validation_artifact: str = "") -> tuple[bool, str]:
+                def _build_failure_outcome(
+                    reason: str,
+                    *,
+                    task_status: str = "",
+                    validations: list[dict[str, Any]] | None = None,
+                    detail: str = "",
+                    validation_artifact: str = "",
+                ) -> FailureOutcome:
+                    return build_failure_outcome(
+                        reason,
+                        task_status=task_status,
+                        validations=validations,
+                        detail=detail,
+                        validation_artifact=validation_artifact,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                    )
+
+                def _isolate_or_stop(
+                    reason: str = "",
+                    *,
+                    failure_outcome: FailureOutcome | None = None,
+                    task_status: str = "",
+                    detail: str = "",
+                    validation_artifact: str = "",
+                ) -> tuple[bool, str]:
                     """Apply task-branch disposition while preserving the old event/state semantics."""
+                    outcome = failure_outcome or _build_failure_outcome(
+                        reason,
+                        task_status=task_status,
+                        detail=detail,
+                        validation_artifact=validation_artifact,
+                    )
 
                     def _on_branch_success(disposition: Any, branch_name: str) -> None:
                         metrics.event(
@@ -2025,7 +2058,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             cycle=cycle_idx,
                             step=step,
                             task_id=next_task.id,
-                            reason=reason,
+                            reason=outcome.reason,
                             branch=branch_name,
                             task_status=disposition.outcome_status,
                             preserved=disposition.preserve_for_review,
@@ -2061,7 +2094,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             cycle=cycle_idx,
                             step=step,
                             task_id=next_task.id,
-                            reason=reason,
+                            reason=outcome.reason,
                             detail=failure_detail,
                             goal_trace=task_goal_trace,
                             goal_ref=task_goal_ref,
@@ -2074,7 +2107,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             cycle=cycle_idx,
                             step=step,
                             task_id=next_task.id,
-                            reason=reason,
+                            reason=outcome.reason,
                             rescue_branch=rescue_branch,
                             goal_trace=task_goal_trace,
                             goal_ref=task_goal_ref,
@@ -2104,7 +2137,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             cycle=cycle_idx,
                             step=step,
                             task_id=next_task.id,
-                            reason=reason,
+                            reason=outcome.reason,
                             detail=failure_detail,
                             goal_trace=task_goal_trace,
                             goal_ref=task_goal_ref,
@@ -2113,10 +2146,8 @@ async def main_async(args: argparse.Namespace) -> int:
                         eprint(f"[STOP] Rollback {fail_reason}: {failure_detail}")
 
                     dispatch_result = dispatch_task_branch_disposition(
-                        reason,
-                        task_status=task_status,
-                        detail=detail,
-                        validation_artifact=validation_artifact,
+                        outcome.reason,
+                        failure_outcome=outcome,
                         has_task_branch=bool(tb),
                         has_checkpoint=bool(cp),
                         task_status_resolver=lambda failure_reason, failure_detail: _task_failure_status(
@@ -2425,6 +2456,11 @@ async def main_async(args: argparse.Namespace) -> int:
                     # Non-max-turn exceptions are treated as fatal (rollback + stop)
                     if dev_exc and not dev_is_max_turns:
                         task_status = _task_failure_status("exception", detail=str(dev_exc))
+                        failure_outcome = _build_failure_outcome(
+                            "exception",
+                            task_status=task_status,
+                            detail=str(dev_exc),
+                        )
                         _record_failed_state("exception", detail=str(dev_exc), task_status=task_status)
                         save_state(state_path, state)
                         _record_failed_task_result("exception", task_status=task_status, detail=str(dev_exc))
@@ -2452,7 +2488,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             goal_text=task_goal_text,
                         )
                         if tb or cp:
-                            ok, fail_reason = _isolate_or_stop("exception", task_status=task_status, detail=str(dev_exc))
+                            ok, fail_reason = _isolate_or_stop(failure_outcome=failure_outcome)
                             if not ok:
                                 if not continuous:
                                     _finish_attempt("failed", fail_reason, detail=str(dev_exc))
@@ -2602,6 +2638,11 @@ async def main_async(args: argparse.Namespace) -> int:
                             _finish_attempt("retry", "no_diff")
                             continue
                         task_status = _task_failure_status("no_diff", detail=dev_log)
+                        failure_outcome = _build_failure_outcome(
+                            "no_diff",
+                            task_status=task_status,
+                            detail=dev_log[:500],
+                        )
                         _record_failed_state("no_diff", detail=dev_log[:500], task_status=task_status)
                         save_state(state_path, state)
                         _record_failed_task_result("no_diff", task_status=task_status, detail=dev_log[:500])
@@ -2630,7 +2671,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         )
                         logger.skip_event(next_task.id, "no diff produced")
                         if tb or cp:
-                            ok, fail_reason = _isolate_or_stop("no_diff", task_status=task_status, detail=dev_log[:500])
+                            ok, fail_reason = _isolate_or_stop(failure_outcome=failure_outcome)
                             if not ok:
                                 if not continuous:
                                     _finish_attempt("failed", fail_reason, detail=dev_log[:500])
@@ -2703,13 +2744,15 @@ async def main_async(args: argparse.Namespace) -> int:
                         if not ok:
                             build_detail = str(build_validation.get("failure_summary") or build_validation.get("summary") or "")
                             task_status = _task_failure_status("build_failed", validations=validation_records, detail=build_detail)
-                            failure_disposition = decide_failure_disposition(
+                            failure_outcome = _build_failure_outcome(
                                 "build_failed",
                                 task_status=task_status,
-                                validations=validation_records,
                                 detail=build_detail,
-                                attempt=attempt,
-                                max_attempts=max_attempts,
+                                validation_artifact=str(attempt_context.validation_json_path),
+                            )
+                            failure_disposition = decide_failure_disposition(
+                                failure_outcome.reason,
+                                failure_outcome=failure_outcome,
                                 dev_auto_escalate=dev_auto_escalate,
                                 dev_escalate_on=dev_escalate_on,
                             )
@@ -2764,7 +2807,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 task_status=task_status,
                                 validations=validation_records,
                                 detail=build_detail,
-                                validation_artifact=str(attempt_context.validation_json_path),
+                                validation_artifact=failure_outcome.validation_artifact,
                             )
                             _record_history(next_task.id, next_task.title, "failed", reason="build_failed", detail=build_detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                             logger.gate_event("build", next_task.id, passed=False)
@@ -2778,12 +2821,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 task_status=task_status,
                             )
                             if tb or cp:
-                                ok_restore, fail_reason = _isolate_or_stop(
-                                    "build_failed",
-                                    task_status=task_status,
-                                    detail=build_detail,
-                                    validation_artifact=str(attempt_context.validation_json_path),
-                                )
+                                ok_restore, fail_reason = _isolate_or_stop(failure_outcome=failure_outcome)
                                 if not ok_restore:
                                     if not continuous:
                                         _finish_attempt("failed", fail_reason, detail=build_detail)
@@ -2827,13 +2865,15 @@ async def main_async(args: argparse.Namespace) -> int:
                         if not ok:
                             test_detail = str(test_validation.get("failure_summary") or test_validation.get("summary") or "")
                             task_status = _task_failure_status("test_failed", validations=validation_records, detail=test_detail)
-                            failure_disposition = decide_failure_disposition(
+                            failure_outcome = _build_failure_outcome(
                                 "test_failed",
                                 task_status=task_status,
-                                validations=validation_records,
                                 detail=test_detail,
-                                attempt=attempt,
-                                max_attempts=max_attempts,
+                                validation_artifact=str(attempt_context.validation_json_path),
+                            )
+                            failure_disposition = decide_failure_disposition(
+                                failure_outcome.reason,
+                                failure_outcome=failure_outcome,
                                 dev_auto_escalate=dev_auto_escalate,
                                 dev_escalate_on=dev_escalate_on,
                             )
@@ -2885,7 +2925,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 task_status=task_status,
                                 validations=validation_records,
                                 detail=test_detail,
-                                validation_artifact=str(attempt_context.validation_json_path),
+                                validation_artifact=failure_outcome.validation_artifact,
                             )
                             _record_history(next_task.id, next_task.title, "failed", reason="test_failed", detail=test_detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                             logger.gate_event("test", next_task.id, passed=False)
@@ -2899,12 +2939,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 task_status=task_status,
                             )
                             if tb or cp:
-                                ok_restore, fail_reason = _isolate_or_stop(
-                                    "test_failed",
-                                    task_status=task_status,
-                                    detail=test_detail,
-                                    validation_artifact=str(attempt_context.validation_json_path),
-                                )
+                                ok_restore, fail_reason = _isolate_or_stop(failure_outcome=failure_outcome)
                                 if not ok_restore:
                                     if not continuous:
                                         _finish_attempt("failed", fail_reason, detail=test_detail)
@@ -2972,13 +3007,19 @@ async def main_async(args: argparse.Namespace) -> int:
                         if not scan_result.get("ok", True):
                             policy_detail = json.dumps(scan_result.get("fail_violations", []), ensure_ascii=False, default=str)[:1000]
                             task_status = _task_failure_status("policy_violation", detail=policy_detail)
+                            failure_outcome = _build_failure_outcome(
+                                "policy_violation",
+                                task_status=task_status,
+                                detail=policy_detail,
+                                validation_artifact=str(attempt_dir / "policy_scan.json"),
+                            )
                             _record_failed_state("policy_violation", detail=policy_detail, task_status=task_status)
                             save_state(state_path, state)
                             _record_failed_task_result(
                                 "policy_violation",
                                 task_status=task_status,
                                 detail=policy_detail,
-                                validation_artifact=str(attempt_dir / "policy_scan.json"),
+                                validation_artifact=failure_outcome.validation_artifact,
                             )
                             _record_history(next_task.id, next_task.title, "failed", reason="policy_violation", detail=policy_detail, files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
                             logger.gate_event("policy", next_task.id, passed=False)
@@ -2996,7 +3037,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 goal_text=task_goal_text,
                             )
                             if tb or cp:
-                                ok_restore, fail_reason = _isolate_or_stop("policy_violation", task_status=task_status, detail=policy_detail)
+                                ok_restore, fail_reason = _isolate_or_stop(failure_outcome=failure_outcome)
                                 if not ok_restore:
                                     if not continuous:
                                         _finish_attempt("failed", fail_reason, detail=policy_detail)
@@ -3092,13 +3133,15 @@ async def main_async(args: argparse.Namespace) -> int:
                                 validations=validation_records,
                                 detail=failed_summary,
                             )
-                            failure_disposition = decide_failure_disposition(
+                            failure_outcome = _build_failure_outcome(
                                 "fast_regression_failed",
                                 task_status=task_status,
-                                validations=validation_records,
                                 detail=failed_summary,
-                                attempt=attempt,
-                                max_attempts=max_attempts,
+                                validation_artifact=str(attempt_context.validation_json_path),
+                            )
+                            failure_disposition = decide_failure_disposition(
+                                failure_outcome.reason,
+                                failure_outcome=failure_outcome,
                                 dev_auto_escalate=dev_auto_escalate,
                                 dev_escalate_on=dev_escalate_on,
                             )
@@ -3200,7 +3243,7 @@ async def main_async(args: argparse.Namespace) -> int:
                                 task_status=task_status,
                                 validations=validation_records,
                                 detail=failed_name,
-                                validation_artifact=str(attempt_dir / "validation.json"),
+                                validation_artifact=failure_outcome.validation_artifact,
                                 validation_status="failed",
                                 extra={
                                     "goal_trace": task_goal_trace,
@@ -3242,12 +3285,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             )
                             task_failure_reason = "fast_regression_failed"
                             if tb or cp:
-                                ok_restore, fail_reason = _isolate_or_stop(
-                                    "fast_regression_failed",
-                                    task_status=task_status,
-                                    detail=failed_summary,
-                                    validation_artifact=str(attempt_context.validation_json_path),
-                                )
+                                ok_restore, fail_reason = _isolate_or_stop(failure_outcome=failure_outcome)
                                 if not ok_restore:
                                     if not continuous:
                                         _finish_attempt("failed", fail_reason, detail=failed_summary)

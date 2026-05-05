@@ -42,7 +42,7 @@ from agent_runner.gitops import (
     restore_checkpoint,
     scan_worktree_diagnostics,
 )
-from agent_runner.failure_policy import should_preserve_for_review
+from agent_runner.failure_policy import build_failure_outcome, should_preserve_for_review
 from agent_runner.pr_queue import (
     load_branch_index,
     pr_branch_index_path,
@@ -59,6 +59,11 @@ from agent_runner.runtime_contract import (
 )
 from agent_runner.shell import RunnerShell
 from agent_runner.stop_progress import read_stop_progress, write_stop_progress
+from agent_runner.task_status import (
+    TASK_STATUS_BLOCKED_ENV,
+    TASK_STATUS_REGRESSION_FAILED,
+    TASK_STATUS_TEST_CONTRACT_CHANGED,
+)
 from agent_runner.utils import run_cmd
 
 
@@ -297,6 +302,54 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertEqual((self.run_dir / "validation.log").as_posix(), pending_reviews[0]["validation_artifact"])
         remove_worktree(self.repo, self.worktree)
 
+    def test_dispatch_task_branch_disposition_preserves_blocked_env_branch_for_review(self) -> None:
+        self._init_repo()
+        create_worktree(self.repo, self.worktree, run_dir=self.run_dir)
+        tb = create_task_branch(self.worktree, "T-blocked", task_title="Preserve blocked env branch")
+        (self.worktree / "feature.txt").write_text("reviewable\n", encoding="utf-8")
+        self._git("add", "feature.txt", cwd=self.worktree)
+        self._git("commit", "-m", "reviewable", cwd=self.worktree)
+        branch_head = self._git("rev-parse", "HEAD", cwd=self.worktree).strip()
+        pending_reviews: list[dict[str, object]] = []
+        branch_events: list[dict[str, object]] = []
+        persisted: list[str] = []
+        failure_outcome = build_failure_outcome(
+            "build_failed",
+            task_status=TASK_STATUS_BLOCKED_ENV,
+            detail="tooling unavailable",
+            validation_artifact=(self.run_dir / "validation.log").as_posix(),
+        )
+
+        result = dispatch_task_branch_disposition(
+            failure_outcome=failure_outcome,
+            has_task_branch=True,
+            abandon_branch=lambda: abandon_task_branch(self.worktree, tb),
+            record_pending_review=self._record_pending_review(pending_reviews),
+            persist_state=lambda: persisted.append("saved"),
+            on_branch_success=lambda disposition, branch_name: branch_events.append(
+                {
+                    "event": disposition.event_name,
+                    "branch": branch_name,
+                    "preserve": disposition.preserve_for_review,
+                    "task_status": disposition.outcome_status,
+                }
+            ),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual("", result.stop_reason)
+        self.assertTrue(result.disposition.preserve_for_review)
+        self.assertEqual(TASK_STATUS_BLOCKED_ENV, result.disposition.outcome_status)
+        self.assertEqual(tb.base_commit, self._git("rev-parse", "HEAD", cwd=self.worktree).strip())
+        self.assertEqual(branch_head, self._git("rev-parse", tb.branch_name, cwd=self.worktree).strip())
+        self.assertEqual(["saved"], persisted)
+        self.assertEqual("task_branch_preserved", branch_events[0]["event"])
+        self.assertEqual(tb.branch_name, branch_events[0]["branch"])
+        self.assertEqual(TASK_STATUS_BLOCKED_ENV, pending_reviews[0]["task_status"])
+        self.assertEqual(tb.branch_name, pending_reviews[0]["branch"])
+        self.assertEqual((self.run_dir / "validation.log").as_posix(), pending_reviews[0]["validation_artifact"])
+        remove_worktree(self.repo, self.worktree)
+
     def test_preserve_task_branch_advances_generated_worktree_for_next_task(self) -> None:
         source_head = self._init_repo()
         create_worktree(self.repo, self.worktree, run_dir=self.run_dir)
@@ -337,13 +390,15 @@ class WorktreeIsolationTests(unittest.TestCase):
         branch_head = self._git("rev-parse", "HEAD", cwd=self.worktree).strip()
         pending_reviews: list[dict[str, object]] = []
         branch_events: list[dict[str, object]] = []
+        failure_outcome = build_failure_outcome(
+            "test_failed",
+            task_status=TASK_STATUS_REGRESSION_FAILED,
+            detail="tests failed",
+        )
 
         result = dispatch_task_branch_disposition(
-            "regression_failed",
-            task_status="regression_failed",
-            detail="tests failed",
+            failure_outcome=failure_outcome,
             has_task_branch=True,
-            task_status_resolver=lambda reason, detail: reason,
             abandon_branch=lambda: abandon_task_branch(self.worktree, tb),
             record_pending_review=self._record_pending_review(pending_reviews),
             persist_state=lambda: None,
@@ -358,12 +413,92 @@ class WorktreeIsolationTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertFalse(result.disposition.preserve_for_review)
+        self.assertEqual(TASK_STATUS_REGRESSION_FAILED, result.disposition.outcome_status)
         self.assertEqual(tb.base_commit, self._git("rev-parse", "HEAD", cwd=self.worktree).strip())
         self.assertEqual(branch_head, self._git("rev-parse", tb.branch_name, cwd=self.worktree).strip())
         self.assertEqual([], pending_reviews)
         self.assertEqual("task_branch_abandoned", branch_events[0]["event"])
         self.assertEqual(tb.branch_name, branch_events[0]["branch"])
         remove_worktree(self.repo, self.worktree)
+
+    def test_dispatch_task_branch_disposition_restores_test_contract_changed_checkpoint_for_review(self) -> None:
+        self._init_repo()
+        checkpoint = create_checkpoint(self.repo, self.fixture_root / "checkpoint")
+        (self.repo / "README.md").write_text("mutated\n", encoding="utf-8")
+        (self.repo / "feature.txt").write_text("new work\n", encoding="utf-8")
+        pending_reviews: list[dict[str, object]] = []
+        rollback_events: list[dict[str, object]] = []
+        persisted: list[str] = []
+        failure_outcome = build_failure_outcome(
+            "test_failed",
+            task_status=TASK_STATUS_TEST_CONTRACT_CHANGED,
+            detail="locator drift",
+            validation_artifact=(self.run_dir / "validation.log").as_posix(),
+        )
+
+        result = dispatch_task_branch_disposition(
+            failure_outcome=failure_outcome,
+            has_checkpoint=True,
+            restore_checkpoint=lambda: restore_checkpoint(
+                self.repo,
+                checkpoint,
+                dangerous=True,
+                run_dir=self.run_dir,
+                stop_path=None,
+                task_id="T-contract-review",
+            ),
+            record_pending_review=self._record_pending_review(pending_reviews),
+            persist_state=lambda: persisted.append("saved"),
+            on_rollback_success=lambda disposition, rescue_branch: rollback_events.append(
+                {
+                    "action": disposition.action,
+                    "branch": rescue_branch,
+                    "task_status": disposition.outcome_status,
+                }
+            ),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual("", result.stop_reason)
+        self.assertTrue(result.disposition.preserve_for_review)
+        self.assertEqual(TASK_STATUS_TEST_CONTRACT_CHANGED, result.disposition.outcome_status)
+        self.assertEqual("base\n", (self.repo / "README.md").read_text(encoding="utf-8"))
+        self.assertFalse((self.repo / "feature.txt").exists())
+        self.assertEqual(["saved"], persisted)
+        self.assertEqual(1, len(pending_reviews))
+        self.assertEqual(TASK_STATUS_TEST_CONTRACT_CHANGED, pending_reviews[0]["task_status"])
+        self.assertEqual((self.run_dir / "validation.log").as_posix(), pending_reviews[0]["validation_artifact"])
+        self.assertEqual("restore_checkpoint", rollback_events[0]["action"])
+        self.assertEqual(TASK_STATUS_TEST_CONTRACT_CHANGED, rollback_events[0]["task_status"])
+        self.assertTrue(rollback_events[0]["branch"].startswith("rescue/T-contract-review_"))
+
+    def test_dispatch_task_branch_disposition_records_test_contract_changed_without_branch(self) -> None:
+        pending_reviews: list[dict[str, object]] = []
+        persisted: list[str] = []
+        failure_outcome = build_failure_outcome(
+            "test_failed",
+            task_status=TASK_STATUS_TEST_CONTRACT_CHANGED,
+            detail="snapshot drift",
+            validation_artifact=(self.run_dir / "validation.log").as_posix(),
+        )
+
+        result = dispatch_task_branch_disposition(
+            failure_outcome=failure_outcome,
+            record_pending_review=self._record_pending_review(pending_reviews),
+            persist_state=lambda: persisted.append("saved"),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual("", result.stop_reason)
+        self.assertTrue(result.disposition.preserve_for_review)
+        self.assertEqual("record_pending_review", result.disposition.action)
+        self.assertEqual(TASK_STATUS_TEST_CONTRACT_CHANGED, result.disposition.outcome_status)
+        self.assertEqual(["saved"], persisted)
+        self.assertEqual(1, len(pending_reviews))
+        self.assertEqual(TASK_STATUS_TEST_CONTRACT_CHANGED, pending_reviews[0]["task_status"])
+        self.assertEqual("", pending_reviews[0]["branch"])
+        self.assertEqual("", pending_reviews[0]["rescue_branch"])
+        self.assertEqual((self.run_dir / "validation.log").as_posix(), pending_reviews[0]["validation_artifact"])
 
     def test_dispatch_task_branch_disposition_restores_checkpoint_without_branch(self) -> None:
         self._init_repo()
@@ -373,13 +508,15 @@ class WorktreeIsolationTests(unittest.TestCase):
         pending_reviews: list[dict[str, object]] = []
         rollback_events: list[dict[str, object]] = []
         persisted: list[str] = []
+        failure_outcome = build_failure_outcome(
+            "test_failed",
+            task_status=TASK_STATUS_REGRESSION_FAILED,
+            detail="tests failed",
+        )
 
         result = dispatch_task_branch_disposition(
-            "test_failed",
-            task_status="regression_failed",
-            detail="tests failed",
+            failure_outcome=failure_outcome,
             has_checkpoint=True,
-            task_status_resolver=lambda reason, detail: reason,
             restore_checkpoint=lambda: restore_checkpoint(
                 self.repo,
                 checkpoint,

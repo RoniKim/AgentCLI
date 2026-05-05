@@ -6,13 +6,19 @@ from agent_runner.failure_policy import (
     ACTION_RESTORE_CHECKPOINT,
     ACTION_RETRY,
     ACTION_STOP_RUN,
+    build_failure_outcome,
     build_failure_entry,
     count_task_status_groups,
     decide_failure_disposition,
     should_count_cycle_failure_for_stop,
 )
 from agent_runner.task_failures import build_task_failure_result, record_task_failure_state
-from agent_runner.task_status import TASK_STATUS_BLOCKED_ENV, TASK_STATUS_REGRESSION_FAILED, TASK_STATUS_REVIEW_REQUIRED
+from agent_runner.task_status import (
+    TASK_STATUS_BLOCKED_ENV,
+    TASK_STATUS_REGRESSION_FAILED,
+    TASK_STATUS_REVIEW_REQUIRED,
+    TASK_STATUS_TEST_CONTRACT_CHANGED,
+)
 
 
 class FailurePolicyTests(unittest.TestCase):
@@ -32,6 +38,29 @@ class FailurePolicyTests(unittest.TestCase):
         self.assertFalse(disposition.retry_eligible)
         self.assertFalse(disposition.retry_allowed_now)
         self.assertFalse(disposition.retry_budget_consumed)
+
+    def test_typed_failure_outcome_preserves_test_contract_review_status(self) -> None:
+        outcome = build_failure_outcome(
+            "test_failed",
+            task_status=TASK_STATUS_TEST_CONTRACT_CHANGED,
+            detail="locator drift",
+            validation_artifact="C:/tmp/validation.json",
+            attempt=0,
+            max_attempts=3,
+        )
+
+        disposition = decide_failure_disposition(
+            outcome.reason,
+            failure_outcome=outcome,
+            dev_auto_escalate=True,
+            dev_escalate_on={"test_failed"},
+            has_checkpoint=True,
+        )
+
+        self.assertEqual(TASK_STATUS_TEST_CONTRACT_CHANGED, disposition.task_status)
+        self.assertEqual(ACTION_PRESERVE_FOR_REVIEW, disposition.action)
+        self.assertFalse(disposition.retry_eligible)
+        self.assertFalse(disposition.retry_allowed_now)
 
     def test_regression_can_retry_when_budget_and_reason_allow_it(self) -> None:
         disposition = decide_failure_disposition(

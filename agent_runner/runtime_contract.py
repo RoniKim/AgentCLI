@@ -10,7 +10,7 @@ from os import PathLike
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from .failure_policy import should_preserve_for_review
+from .failure_policy import FailureOutcome, build_failure_outcome, should_preserve_for_review
 
 
 PIPELINE_STAGE_ORDER: tuple[str, ...] = ("PM", "PL", "Security", "Dev", "QA", "Reporter")
@@ -632,15 +632,28 @@ class WorktreeCleanupDispatchResult:
 
 
 def decide_task_branch_disposition(
-    reason: str,
+    reason: str = "",
     *,
+    failure_outcome: FailureOutcome | None = None,
     task_status: str = "",
     detail: str = "",
     has_task_branch: bool = False,
     has_checkpoint: bool = False,
-    task_status_resolver: Callable[[str, str], str],
+    task_status_resolver: Callable[[str, str], str] | None = None,
 ) -> TaskBranchDispositionDecision:
-    outcome_status = str(task_status or "").strip() or task_status_resolver(reason, detail)
+    resolved_outcome = failure_outcome
+    if resolved_outcome is None:
+        outcome_status = str(task_status or "").strip()
+        if not outcome_status:
+            if task_status_resolver is None:
+                raise ValueError("task_status_resolver is required when failure_outcome and task_status are empty.")
+            outcome_status = task_status_resolver(reason, detail)
+        resolved_outcome = build_failure_outcome(
+            reason,
+            task_status=outcome_status,
+            detail=detail,
+        )
+    outcome_status = resolved_outcome.task_status
     preserve = should_preserve_for_review(outcome_status)
     if has_task_branch:
         return TaskBranchDispositionDecision(
@@ -663,14 +676,15 @@ def decide_task_branch_disposition(
 
 
 def dispatch_task_branch_disposition(
-    reason: str,
+    reason: str = "",
     *,
+    failure_outcome: FailureOutcome | None = None,
     task_status: str = "",
     detail: str = "",
     validation_artifact: str = "",
     has_task_branch: bool = False,
     has_checkpoint: bool = False,
-    task_status_resolver: Callable[[str, str], str],
+    task_status_resolver: Callable[[str, str], str] | None = None,
     abandon_branch: Callable[[], str] | None = None,
     restore_checkpoint: Callable[[], str | None] | None = None,
     record_pending_review: Callable[..., None],
@@ -680,13 +694,24 @@ def dispatch_task_branch_disposition(
     on_rollback_success: Callable[[TaskBranchDispositionDecision, str], None] | None = None,
     on_rollback_failed: Callable[[str, str], None] | None = None,
 ) -> TaskBranchDispositionDispatchResult:
+    resolved_outcome = failure_outcome
+    if resolved_outcome is None:
+        outcome_status = str(task_status or "").strip()
+        if not outcome_status:
+            if task_status_resolver is None:
+                raise ValueError("task_status_resolver is required when failure_outcome and task_status are empty.")
+            outcome_status = task_status_resolver(reason, detail)
+        resolved_outcome = build_failure_outcome(
+            reason,
+            task_status=outcome_status,
+            detail=detail,
+            validation_artifact=validation_artifact,
+        )
     disposition = decide_task_branch_disposition(
-        reason,
-        task_status=task_status,
-        detail=detail,
+        resolved_outcome.reason,
+        failure_outcome=resolved_outcome,
         has_task_branch=has_task_branch,
         has_checkpoint=has_checkpoint,
-        task_status_resolver=task_status_resolver,
     )
     if disposition.action == TASK_BRANCH_ACTION_ABANDON:
         if abandon_branch is None:
@@ -694,11 +719,11 @@ def dispatch_task_branch_disposition(
         try:
             branch_name = str(abandon_branch() or "")
             record_pending_review(
-                reason,
+                resolved_outcome.reason,
                 task_status=disposition.outcome_status,
-                detail=detail,
+                detail=resolved_outcome.detail,
                 branch=branch_name,
-                validation_artifact=validation_artifact,
+                validation_artifact=resolved_outcome.validation_artifact,
             )
             persist_state()
             if on_branch_success is not None:
@@ -711,10 +736,10 @@ def dispatch_task_branch_disposition(
 
     if disposition.action == TASK_BRANCH_ACTION_RECORD_PENDING:
         record_pending_review(
-            reason,
+            resolved_outcome.reason,
             task_status=disposition.outcome_status,
-            detail=detail,
-            validation_artifact=validation_artifact,
+            detail=resolved_outcome.detail,
+            validation_artifact=resolved_outcome.validation_artifact,
         )
         persist_state()
         return TaskBranchDispositionDispatchResult(ok=True, stop_reason="", disposition=disposition)
@@ -726,11 +751,11 @@ def dispatch_task_branch_disposition(
         if on_rollback_success is not None:
             on_rollback_success(disposition, rescue_branch)
         record_pending_review(
-            reason,
+            resolved_outcome.reason,
             task_status=disposition.outcome_status,
-            detail=detail,
+            detail=resolved_outcome.detail,
             rescue_branch=rescue_branch,
-            validation_artifact=validation_artifact,
+            validation_artifact=resolved_outcome.validation_artifact,
         )
         persist_state()
         return TaskBranchDispositionDispatchResult(ok=True, stop_reason="", disposition=disposition)

@@ -310,7 +310,7 @@
 
 ### P0-Y. Failure Disposition, Backend Parity, And State Integrity
 
-- [ ] A `failure_policy` module decides task disposition (`retry`, `preserve_for_review`, `abandon_branch`, `restore_checkpoint`, `stop_run`) from reason, task status, and attempt budget so Codex and Claude share one policy.
+- [x] A `failure_policy` module decides task disposition (`retry`, `preserve_for_review`, `abandon_branch`, `restore_checkpoint`, `stop_run`) from reason, task status, and attempt budget so Codex and Claude share one policy.
 - [ ] `_isolate_or_stop` consumes a typed `FailureOutcome` so `blocked_env` and `test_contract_changed` tasks are preserved for human review instead of abandoned.
 - [ ] `backends/claudecode.py` records failures with the same task-status enriched schema as `cycle.py` so failover cannot produce mixed `STATE.json` schemas.
 - [ ] `task_status.py` classifier covers Java, Go, Rust, C/C++, Kotlin, Swift, Maven, Gradle, NuGet, Cargo, regression, and dependency-resolution patterns with multi-language tests.
@@ -322,8 +322,8 @@
 - [x] `STATE.json` mutation helpers preserve concurrent done, failed, and warning updates across runner, controller, and future Web mutation paths.
 - [x] GOALS auto-check writes atomically and detects operator edit conflicts instead of overwriting Web edits.
 - [x] Attempt directories record `STARTED` and `FINISHED` markers, and preflight reports interrupted attempts before a new unattended run starts.
-- [ ] Preflight reports stale Git, web instance, and Telegram lock files with age, owner evidence when available, and safe operator guidance.
-- [ ] Runner subprocess launch paths explicitly close inherited file descriptors or document tested handle inheritance behavior on Windows.
+- [x] Preflight reports stale Git, web instance, and Telegram lock files with age, owner evidence when available, and safe operator guidance.
+- [x] Runner subprocess launch paths explicitly close inherited file descriptors or document tested handle inheritance behavior on Windows.
 
 ### P0-Z. Stage Effects And Backlog Refiner Runtime
 
