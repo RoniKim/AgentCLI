@@ -82,12 +82,20 @@ class _FakeProc:
 class CodexAppServerCleanupTests(unittest.TestCase):
     def _build_client(self, proc: _FakeProc, reader: _FakeReaderThread) -> _CodexAppServerClient:
         with (
-            patch("agent_runner.utils.subprocess.Popen", return_value=proc),
+            patch("agent_runner.utils.sys.platform", "win32"),
+            patch("agent_runner.utils.subprocess.CREATE_NO_WINDOW", 0x08000000, create=True),
+            patch("agent_runner.utils.subprocess.Popen", return_value=proc) as popen,
             patch("agent_runner.utils.threading.Thread", return_value=reader),
             patch("agent_runner.utils._CodexAppServerClient._initialize", return_value=None),
             patch("agent_runner.process_guard.register_pid") as register_pid,
         ):
             client = _CodexAppServerClient(codex_path="codex", timeout_s=0.1)
+        kwargs = popen.call_args.kwargs
+        self.assertTrue(bool(kwargs["close_fds"]))
+        self.assertEqual(0x08000000, int(kwargs["creationflags"]))
+        self.assertIs(kwargs["stdin"], subprocess.PIPE)
+        self.assertIs(kwargs["stdout"], subprocess.PIPE)
+        self.assertIs(kwargs["stderr"], subprocess.DEVNULL)
         register_pid.assert_called_once_with(proc.pid)
         return client
 

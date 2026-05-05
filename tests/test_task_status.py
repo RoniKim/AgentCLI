@@ -109,6 +109,20 @@ class MultiLanguageDependencyResolutionTests(unittest.TestCase):
         )
         self.assertEqual(TASK_STATUS_BLOCKED_ENV, status)
 
+    def test_gradle_configuration_resolution_failure_is_blocked_env(self) -> None:
+        status = classify_task_failure(
+            "build_failed",
+            validations=[
+                {
+                    "summary": (
+                        "Execution failed for task ':app:checkDebugAarMetadata'.\n"
+                        "> Could not resolve all files for configuration ':app:debugRuntimeClasspath'."
+                    )
+                }
+            ],
+        )
+        self.assertEqual(TASK_STATUS_BLOCKED_ENV, status)
+
     def test_nuget_missing_package_is_blocked_env(self) -> None:
         status = classify_task_failure(
             "build_failed",
@@ -123,10 +137,50 @@ class MultiLanguageDependencyResolutionTests(unittest.TestCase):
         )
         self.assertEqual(TASK_STATUS_BLOCKED_ENV, status)
 
+    def test_cargo_failed_to_get_dependency_is_blocked_env(self) -> None:
+        status = classify_task_failure(
+            "build_failed",
+            validations=[
+                {
+                    "summary": (
+                        "error: failed to get `serde` as a dependency of package `demo v0.1.0`\n"
+                        "Caused by:\n"
+                        "  download of config.json failed"
+                    )
+                }
+            ],
+        )
+        self.assertEqual(TASK_STATUS_BLOCKED_ENV, status)
+
     def test_go_modules_missing_package_is_blocked_env(self) -> None:
         status = classify_task_failure(
             "build_failed",
             validations=[{"summary": "cannot find module providing package github.com/example/foo"}],
+        )
+        self.assertEqual(TASK_STATUS_BLOCKED_ENV, status)
+
+    def test_go_module_version_lookup_failure_is_blocked_env(self) -> None:
+        status = classify_task_failure(
+            "build_failed",
+            validations=[
+                {
+                    "summary": 'go: github.com/example/foo@v1.2.3: no matching versions for query "latest"'
+                }
+            ],
+        )
+        self.assertEqual(TASK_STATUS_BLOCKED_ENV, status)
+
+    def test_cmake_missing_cxx_compiler_is_blocked_env(self) -> None:
+        status = classify_task_failure(
+            "build_failed",
+            validations=[
+                {
+                    "summary": (
+                        "CMake Error at CMakeLists.txt:2 (project):\n"
+                        "  No CMAKE_CXX_COMPILER could be found."
+                    )
+                }
+            ],
         )
         self.assertEqual(TASK_STATUS_BLOCKED_ENV, status)
 
@@ -177,6 +231,20 @@ class MultiLanguageRegressionPatternTests(unittest.TestCase):
         )
         self.assertEqual(TASK_STATUS_REGRESSION_FAILED, status)
 
+    def test_rust_mismatched_types_is_regression(self) -> None:
+        status = classify_task_failure(
+            "test_failed",
+            validations=[{"summary": "error[E0308]: mismatched types\n  expected `String`, found `&str`"}],
+        )
+        self.assertEqual(TASK_STATUS_REGRESSION_FAILED, status)
+
+    def test_cpp_linker_error_is_regression(self) -> None:
+        status = classify_task_failure(
+            "build_failed",
+            validations=[{"summary": "/usr/bin/ld: undefined reference to `Widget::run()`"}],
+        )
+        self.assertEqual(TASK_STATUS_REGRESSION_FAILED, status)
+
     def test_android_gradle_task_failed_is_regression(self) -> None:
         status = classify_task_failure(
             "build_failed",
@@ -209,6 +277,13 @@ class MultiLanguageRegressionPatternTests(unittest.TestCase):
         status = classify_task_failure(
             "build_failed",
             validations=[{"summary": "ContentView.swift:12:5: error: cannot find 'fooBarBaz' in scope"}],
+        )
+        self.assertEqual(TASK_STATUS_REGRESSION_FAILED, status)
+
+    def test_swift_fatal_error_is_regression(self) -> None:
+        status = classify_task_failure(
+            "test_failed",
+            validations=[{"summary": "Fatal error: Unexpectedly found nil while unwrapping an Optional value"}],
         )
         self.assertEqual(TASK_STATUS_REGRESSION_FAILED, status)
 

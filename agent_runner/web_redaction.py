@@ -121,6 +121,10 @@ def _redact_web_log_payload(payload: dict[str, Any]) -> dict[str, Any]:
     entries = redacted.get("entries")
     if isinstance(entries, list):
         redacted["entries"] = [_redact_web_log_entry(entry) if isinstance(entry, dict) else entry for entry in entries]
+    for key in ("last_line", "lastLine"):
+        last_line = redacted.get(key)
+        if isinstance(last_line, dict):
+            redacted[key] = _redact_web_log_entry(last_line)
     tail = redacted.get("tail")
     if tail not in (None, "", False):
         redacted["tail"] = REDACTED_VALUE
@@ -174,6 +178,16 @@ def _redact_web_log_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "entries.path",
         "entries.trace",
         "entries.stack",
+        "last_line.msg",
+        "last_line.message",
+        "last_line.raw",
+        "last_line.text",
+        "last_line.reason",
+        "lastLine.msg",
+        "lastLine.message",
+        "lastLine.raw",
+        "lastLine.text",
+        "lastLine.reason",
         "tail",
         *redaction_fields,
         "source.path",
@@ -319,7 +333,7 @@ def _redact_web_history_item(item: dict[str, Any]) -> dict[str, Any]:
         if redacted.get(key) not in (None, "", False):
             redacted[key] = REDACTED_VALUE
             redaction_fields.append(key)
-    for key in ("runSummary", "run_summary", "lastRunSummary", "last_run_summary", "cycleChangeSummary", "cycle_change_summary", "failedTasks", "failed_tasks"):
+    for key in ("runSummary", "run_summary", "lastRunSummary", "last_run_summary", "cycleChangeSummary", "cycle_change_summary", "operationsSummary", "operations_summary", "failedTasks", "failed_tasks"):
         summary = redacted.get(key)
         if isinstance(summary, dict):
             redacted[key] = _redact_web_history_summary(summary)

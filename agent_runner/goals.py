@@ -14,6 +14,7 @@ The user reviews/edits, and subsequent cycles converge toward those goals.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from pathlib import Path
@@ -23,6 +24,7 @@ from .utils import (
     STOP_REASON_PROJECT_COMPLETE,
     STOP_REASON_NO_TASKS,
     STOP_REASON_PM_REFRESH_NO_BACKLOG,
+    atomic_write_text,
 )
 
 from .utils import eprint, now_iso
@@ -963,6 +965,37 @@ def _parse_and_append_refreshed_goals_inner(repo: Path, llm_output: str) -> Dict
 # GOALS.md checkbox auto-update
 # ---------------------------------------------------------------------------
 
+
+def _read_goals_snapshot(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+    except Exception:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return None
+    try:
+        stat_result = path.stat()
+    except Exception:
+        return None
+    return {
+        "text": text,
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "mtime_ns": int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))),
+        "size": int(stat_result.st_size),
+    }
+
+
+def _goals_snapshot_matches(expected: Dict[str, Any], current: Dict[str, Any]) -> bool:
+    return (
+        str(expected.get("sha256") or "") == str(current.get("sha256") or "")
+        and int(expected.get("mtime_ns") or -1) == int(current.get("mtime_ns") or -1)
+        and int(expected.get("size") or -1) == int(current.get("size") or -1)
+    )
+
+
 def update_goals_checkboxes(
     repo: Path,
     done_task_titles: list[str],
@@ -976,16 +1009,35 @@ def update_goals_checkboxes(
       contains significant keywords from the goal text.
 
     Returns dict with:
-      updated: bool, checked_items: list[str], new_status: completion dict
+      updated: bool, checked_items: list[str], new_status: completion dict,
+      status: explicit write result
     """
     gp = goals_path(repo)
     if not gp.exists():
-        return {"updated": False, "checked_items": [], "new_status": {}}
+        return {
+            "updated": False,
+            "checked_items": [],
+            "matched_items": [],
+            "new_status": {},
+            "status": "missing_file",
+            "conflict": False,
+            "skipped": True,
+            "message": "GOALS.md was missing.",
+        }
 
-    try:
-        original = gp.read_text(encoding="utf-8-sig", errors="replace")
-    except Exception:
-        return {"updated": False, "checked_items": [], "new_status": {}}
+    original_snapshot = _read_goals_snapshot(gp)
+    if original_snapshot is None:
+        return {
+            "updated": False,
+            "checked_items": [],
+            "matched_items": [],
+            "new_status": {},
+            "status": "read_failed",
+            "conflict": False,
+            "skipped": True,
+            "message": "Failed to read GOALS.md.",
+        }
+    original = str(original_snapshot.get("text") or "")
 
     # Build search corpus from done tasks
     corpus_parts: list[str] = []
@@ -996,7 +1048,16 @@ def update_goals_checkboxes(
     corpus = " ||| ".join(corpus_parts)
 
     if not corpus.strip():
-        return {"updated": False, "checked_items": [], "new_status": {}}
+        return {
+            "updated": False,
+            "checked_items": [],
+            "matched_items": [],
+            "new_status": parse_goals_completion(original, completion_level=completion_level),
+            "status": "no_match",
+            "conflict": False,
+            "skipped": True,
+            "message": "No completed task text was available for GOALS auto-check.",
+        }
 
     lines = original.splitlines()
     new_lines: list[str] = []
@@ -1022,26 +1083,66 @@ def update_goals_checkboxes(
         return {
             "updated": False,
             "checked_items": [],
+            "matched_items": [],
             "new_status": parse_goals_completion(original, completion_level=completion_level),
+            "status": "no_match",
+            "conflict": False,
+            "skipped": True,
+            "message": "No GOALS checkbox matched the completed task text.",
         }
-
-    # Log with strategy detail for transparency
-    detail_parts = [f"{t}({s})" for t, s in checked_strategies]
-    eprint(f"[GOALS] Auto-checked {len(checked_items)} item(s): {', '.join(detail_parts)}")
 
     updated_text = "\n".join(new_lines)
     # Preserve trailing newline if original had one
     if original.endswith("\n") and not updated_text.endswith("\n"):
         updated_text += "\n"
 
+    current_snapshot = _read_goals_snapshot(gp)
+    if current_snapshot is None or not _goals_snapshot_matches(original_snapshot, current_snapshot):
+        current_text = str((current_snapshot or {}).get("text") or "")
+        eprint(
+            "[WARN] GOALS auto-check skipped due to concurrent edit conflict; "
+            "preserving the operator/Web version."
+        )
+        return {
+            "updated": False,
+            "checked_items": [],
+            "matched_items": list(checked_items),
+            "new_status": parse_goals_completion(current_text or original, completion_level=completion_level),
+            "status": "conflict",
+            "conflict": True,
+            "skipped": True,
+            "message": "GOALS.md changed after auto-check read; the atomic update was skipped.",
+        }
+
     try:
-        gp.write_text(updated_text, encoding="utf-8", errors="replace")
+        atomic_write_text(gp, updated_text)
     except Exception as exc:
         eprint(f"[WARN] Failed to update GOALS.md checkboxes: {exc}")
-        return {"updated": False, "checked_items": checked_items, "new_status": {}}
+        return {
+            "updated": False,
+            "checked_items": [],
+            "matched_items": list(checked_items),
+            "new_status": parse_goals_completion(original, completion_level=completion_level),
+            "status": "write_failed",
+            "conflict": False,
+            "skipped": True,
+            "message": f"Failed to write GOALS.md checkboxes: {exc}",
+        }
+
+    detail_parts = [f"{t}({s})" for t, s in checked_strategies]
+    eprint(f"[GOALS] Auto-checked {len(checked_items)} item(s): {', '.join(detail_parts)}")
 
     new_status = parse_goals_completion(updated_text, completion_level=completion_level)
-    return {"updated": True, "checked_items": checked_items, "new_status": new_status}
+    return {
+        "updated": True,
+        "checked_items": checked_items,
+        "matched_items": list(checked_items),
+        "new_status": new_status,
+        "status": "updated",
+        "conflict": False,
+        "skipped": False,
+        "message": f"Auto-checked {len(checked_items)} GOALS item(s).",
+    }
 
 
 def _goal_match_detail(goal_item: str, corpus: str) -> tuple[bool, str]:

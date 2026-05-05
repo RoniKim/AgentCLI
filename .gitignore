@@ -96,6 +96,7 @@ test_write.txt
 test_perl.pl
 test_script.py
 .tmp-tests/
+.tmp/
 .tmp-*/
 .test-scratch/
 .playwright-mcp/

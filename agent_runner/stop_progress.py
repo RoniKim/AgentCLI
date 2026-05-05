@@ -1,18 +1,28 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from .state import count_state_task_ids, load_backlog_task_ids, load_state
-from .utils import STOP_REASON_STOP_FILE, detect_stop_reason, now_iso
+from .utils import STOP_REASON_STOP_FILE, atomic_write_json, detect_stop_reason, now_iso, write_heartbeat
 
 STOP_PROGRESS_FILE = "STOP_PROGRESS.json"
 STOP_PROGRESS_LOG_FILE = "stop_progress.log"
 STOP_SNAPSHOT_FILE = "STOP_SNAPSHOT.json"
 STOP_SNAPSHOT_LOG_FILE = "STOP_SNAPSHOT.log"
+STOP_RECONCILIATION_FILE = "STOP_RECONCILIATION.json"
+STOP_RECONCILIATION_LOG_FILE = "STOP_RECONCILIATION.jsonl"
+DEFAULT_STALE_STOP_RECONCILE_STOP_AGE_SECONDS = 15 * 60
+DEFAULT_STALE_STOP_RECONCILE_HEARTBEAT_AGE_SECONDS = 15 * 60
+DEFAULT_STOP_AWARE_SLEEP_POLL_SECONDS = 1.0
+DEFAULT_STOP_AWARE_HEARTBEAT_INTERVAL_SECONDS = 30.0
+MAX_STOP_AWARE_SLEEP_POLL_SECONDS = 5.0
+MAX_STOP_AWARE_HEARTBEAT_INTERVAL_SECONDS = 300.0
 
 STOP_PROGRESS_PHASE_ALIASES = {
     "requested": "request",
@@ -39,6 +49,88 @@ STOP_PROGRESS_PHASE_LABELS = {
 }
 
 FINAL_STOP_PHASES = frozenset({"finalized", "timeout", "failed", "not_running"})
+
+
+@dataclass(frozen=True)
+class StopAwareSleepResult:
+    status: str
+    stop_reason: str = ""
+
+    @property
+    def stopped(self) -> bool:
+        return self.status == "stop"
+
+    @property
+    def timed_out(self) -> bool:
+        return self.status == "timeout"
+
+
+def _detect_stop_reason_for_wait(stop_paths: Sequence[Path]) -> str:
+    try:
+        reason = detect_stop_reason(stop_paths)
+    except Exception:
+        reason = ""
+    if reason:
+        return reason
+    for path in stop_paths:
+        try:
+            if path.exists():
+                return STOP_REASON_STOP_FILE
+        except Exception:
+            continue
+    return ""
+
+
+async def stop_aware_sleep(
+    seconds: float | int,
+    *,
+    run_dir: Path,
+    stop_paths: Sequence[Path] | None = None,
+    heartbeat_callback: Callable[[], None] | None = None,
+    poll_seconds: float = DEFAULT_STOP_AWARE_SLEEP_POLL_SECONDS,
+    heartbeat_interval_seconds: float = DEFAULT_STOP_AWARE_HEARTBEAT_INTERVAL_SECONDS,
+) -> StopAwareSleepResult:
+    """Sleep in bounded chunks while refreshing HEARTBEAT and honoring STOP."""
+
+    run_dir_path = Path(run_dir)
+    paths = tuple(stop_paths or [run_dir_path / "STOP"])
+    total = max(0.0, float(seconds or 0))
+    poll = max(0.1, min(float(poll_seconds or DEFAULT_STOP_AWARE_SLEEP_POLL_SECONDS), MAX_STOP_AWARE_SLEEP_POLL_SECONDS))
+    heartbeat_every = max(
+        poll,
+        min(
+            float(heartbeat_interval_seconds or DEFAULT_STOP_AWARE_HEARTBEAT_INTERVAL_SECONDS),
+            MAX_STOP_AWARE_HEARTBEAT_INTERVAL_SECONDS,
+        ),
+    )
+
+    stop_reason = _detect_stop_reason_for_wait(paths)
+    if stop_reason:
+        return StopAwareSleepResult(status="stop", stop_reason=stop_reason)
+    if total <= 0:
+        return StopAwareSleepResult(status="timeout")
+
+    deadline = time.monotonic() + total
+    next_heartbeat = 0.0
+    while True:
+        stop_reason = _detect_stop_reason_for_wait(paths)
+        if stop_reason:
+            return StopAwareSleepResult(status="stop", stop_reason=stop_reason)
+
+        now_value = time.monotonic()
+        if now_value >= next_heartbeat:
+            write_heartbeat(run_dir_path)
+            if heartbeat_callback is not None:
+                try:
+                    heartbeat_callback()
+                except Exception:
+                    pass
+            next_heartbeat = now_value + heartbeat_every
+
+        remaining = deadline - now_value
+        if remaining <= 0:
+            return StopAwareSleepResult(status="timeout")
+        await asyncio.sleep(min(poll, remaining))
 
 
 def _now_iso() -> str:
@@ -598,6 +690,223 @@ def clear_stop_progress(run_dir: Path | None) -> None:
             (run_dir / name).unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def _stop_reconcile_path_text(path: Path) -> str:
+    try:
+        return path.expanduser().resolve().as_posix()
+    except Exception:
+        return path.as_posix()
+
+
+def _stop_reconcile_age_seconds(path: Path, *, now_epoch: float) -> float | None:
+    try:
+        return max(0.0, float(now_epoch) - float(path.stat().st_mtime))
+    except Exception:
+        return None
+
+
+def _stop_reconcile_int_seconds(value: Any, fallback: int) -> int:
+    try:
+        return max(0, int(value))
+    except Exception:
+        return max(0, int(fallback))
+
+
+def _unique_stop_reconcile_paths(paths: Sequence[Path]) -> list[Path]:
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = _stop_reconcile_path_text(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _heartbeat_reconcile_details(heartbeat_path: Path, *, now_epoch: float, stale_age_seconds: int) -> dict[str, Any]:
+    age_seconds = _stop_reconcile_age_seconds(heartbeat_path, now_epoch=now_epoch) if heartbeat_path.exists() else None
+    state = "missing"
+    if heartbeat_path.exists():
+        state = "stale" if age_seconds is not None and age_seconds >= stale_age_seconds else "fresh"
+    return {
+        "path": _stop_reconcile_path_text(heartbeat_path),
+        "exists": heartbeat_path.exists(),
+        "age_seconds": round(float(age_seconds), 3) if age_seconds is not None else None,
+        "state": state,
+    }
+
+
+def _write_stop_reconciliation_audit(run_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    audit_path = run_dir / STOP_RECONCILIATION_FILE
+    audit_log_path = run_dir / STOP_RECONCILIATION_LOG_FILE
+    payload["audit_path"] = _stop_reconcile_path_text(audit_path)
+    payload["audit_log_path"] = _stop_reconcile_path_text(audit_log_path)
+    try:
+        atomic_write_json(audit_path, payload)
+    except Exception:
+        pass
+    try:
+        audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_log_path.open("a", encoding="utf-8", errors="replace") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
+    return payload
+
+
+def reconcile_stale_stop_files(
+    run_dir: Path | None,
+    *,
+    stop_file: str = "STOP",
+    heartbeat_file: str = "HEARTBEAT",
+    stop_stale_age_seconds: int = DEFAULT_STALE_STOP_RECONCILE_STOP_AGE_SECONDS,
+    heartbeat_stale_age_seconds: int = DEFAULT_STALE_STOP_RECONCILE_HEARTBEAT_AGE_SECONDS,
+    allow_missing_heartbeat: bool = False,
+    source: str = "",
+    now_epoch: float | None = None,
+) -> dict[str, Any]:
+    """Reconcile stale STOP artifacts before a new long-running launch.
+
+    A STOP file is only removed when it is old enough and the heartbeat is also
+    old enough.  Missing heartbeats are preserved unless an explicit caller opts
+    into missing-heartbeat reconciliation.
+    """
+    if run_dir is None:
+        return {"ok": True, "decision": "no_run_dir", "action_taken": "none", "message": ""}
+
+    run_dir_path = Path(run_dir).expanduser().resolve()
+    stop_file_name = str(stop_file or "STOP").strip() or "STOP"
+    heartbeat_file_name = str(heartbeat_file or "HEARTBEAT").strip() or "HEARTBEAT"
+    stop_threshold = _stop_reconcile_int_seconds(stop_stale_age_seconds, DEFAULT_STALE_STOP_RECONCILE_STOP_AGE_SECONDS)
+    heartbeat_threshold = _stop_reconcile_int_seconds(
+        heartbeat_stale_age_seconds,
+        DEFAULT_STALE_STOP_RECONCILE_HEARTBEAT_AGE_SECONDS,
+    )
+    now_value = float(now_epoch if now_epoch is not None else time.time())
+    stop_paths = _unique_stop_reconcile_paths([run_dir_path / stop_file_name, run_dir_path / "STOP"])
+    existing_stop_paths = [path for path in stop_paths if path.exists()]
+    heartbeat_path = run_dir_path / heartbeat_file_name
+
+    if not existing_stop_paths:
+        return {
+            "ok": True,
+            "decision": "no_stop_file",
+            "action_taken": "none",
+            "message": "",
+            "run_dir": _stop_reconcile_path_text(run_dir_path),
+            "stop_path": _stop_reconcile_path_text(stop_paths[0]),
+            "stop_paths": [_stop_reconcile_path_text(path) for path in stop_paths],
+            "heartbeat_path": _stop_reconcile_path_text(heartbeat_path),
+        }
+
+    stop_details: list[dict[str, Any]] = []
+    fresh_stop_paths: list[str] = []
+    for path in existing_stop_paths:
+        age_seconds = _stop_reconcile_age_seconds(path, now_epoch=now_value)
+        stale = bool(age_seconds is not None and age_seconds >= stop_threshold)
+        path_text = _stop_reconcile_path_text(path)
+        if not stale:
+            fresh_stop_paths.append(path_text)
+        stop_details.append(
+            {
+                "path": path_text,
+                "exists": True,
+                "age_seconds": round(float(age_seconds), 3) if age_seconds is not None else None,
+                "state": "stale" if stale else "fresh",
+            }
+        )
+
+    heartbeat = _heartbeat_reconcile_details(heartbeat_path, now_epoch=now_value, stale_age_seconds=heartbeat_threshold)
+    criteria = {
+        "stop_stale_age_seconds": stop_threshold,
+        "heartbeat_stale_age_seconds": heartbeat_threshold,
+        "allow_missing_heartbeat": bool(allow_missing_heartbeat),
+    }
+    primary_stop = existing_stop_paths[0]
+    primary_stop_detail = stop_details[0] if stop_details else {}
+    decision = "reconcile_stale_stop"
+    action_taken = "deleted_stop_files"
+    ok = True
+    message = "Stale STOP file reconciled before runner start."
+
+    if fresh_stop_paths:
+        decision = "block_fresh_stop"
+        action_taken = "preserved_stop_files"
+        ok = False
+        message = "Runner start blocked because a fresh STOP request is present."
+    elif heartbeat["state"] == "fresh":
+        decision = "block_active_heartbeat"
+        action_taken = "preserved_stop_files"
+        ok = False
+        message = "Runner start blocked because the STOP file is stale but HEARTBEAT is still fresh."
+    elif heartbeat["state"] == "missing" and not allow_missing_heartbeat:
+        decision = "block_missing_heartbeat"
+        action_taken = "preserved_stop_files"
+        ok = False
+        message = "Runner start blocked because a STOP file exists and HEARTBEAT is missing."
+    elif heartbeat["state"] == "missing":
+        decision = "reconcile_missing_heartbeat_explicit"
+        message = "Stale STOP file reconciled with explicit missing-heartbeat criteria."
+
+    deleted_paths: list[str] = []
+    if ok and action_taken == "deleted_stop_files":
+        for path in existing_stop_paths:
+            try:
+                path.unlink()
+                deleted_paths.append(_stop_reconcile_path_text(path))
+            except Exception:
+                ok = False
+                decision = "delete_failed"
+                action_taken = "preserved_stop_files"
+                message = "Runner start blocked because stale STOP reconciliation could not remove the STOP file."
+                break
+        if ok:
+            clear_stop_progress(run_dir_path)
+
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "event": "stale_stop_reconciliation",
+        "ts": now_iso(),
+        "source": str(source or "").strip(),
+        "ok": bool(ok),
+        "run_dir": _stop_reconcile_path_text(run_dir_path),
+        "stop_path": _stop_reconcile_path_text(primary_stop),
+        "stop_paths": [_stop_reconcile_path_text(path) for path in existing_stop_paths],
+        "stop_age_seconds": primary_stop_detail.get("age_seconds"),
+        "stop_file_state": primary_stop_detail.get("state") or "",
+        "stop_files": stop_details,
+        "heartbeat_path": str(heartbeat.get("path") or ""),
+        "heartbeat_age_seconds": heartbeat.get("age_seconds"),
+        "heartbeat_state": str(heartbeat.get("state") or ""),
+        "heartbeat": heartbeat,
+        "criteria": criteria,
+        "decision": decision,
+        "action_taken": action_taken,
+        "deleted_paths": deleted_paths,
+        "message": message,
+    }
+    return _write_stop_reconciliation_audit(run_dir_path, payload)
+
+
+def reconcile_stale_stop_files_for_args(run_dir: Path | None, args: Any, *, source: str = "") -> dict[str, Any]:
+    return reconcile_stale_stop_files(
+        run_dir,
+        stop_file=str(getattr(args, "stop_file", "STOP") or "STOP"),
+        stop_stale_age_seconds=getattr(
+            args,
+            "stale_stop_reconcile_stop_age_seconds",
+            DEFAULT_STALE_STOP_RECONCILE_STOP_AGE_SECONDS,
+        ),
+        heartbeat_stale_age_seconds=getattr(
+            args,
+            "stale_stop_reconcile_heartbeat_age_seconds",
+            DEFAULT_STALE_STOP_RECONCILE_HEARTBEAT_AGE_SECONDS,
+        ),
+        allow_missing_heartbeat=bool(getattr(args, "stale_stop_reconcile_allow_missing_heartbeat", False)),
+        source=source,
+    )
 
 
 def write_stop_progress(

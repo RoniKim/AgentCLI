@@ -264,6 +264,11 @@ def normalize_pm_output_dict(data: Any, *, kind_hint: str = "") -> Optional[dict
                 or t.get("skills_reason")
                 or t.get("skill_reason")
             )
+            touched_file_globs = (
+                t.get("touched_file_globs")
+                if t.get("touched_file_globs") is not None
+                else t.get("touchedFilesGlobs")
+            )
             tasks.append(
                 {
                     "id": tid,
@@ -273,6 +278,10 @@ def normalize_pm_output_dict(data: Any, *, kind_hint: str = "") -> Optional[dict
                     "done_when": done_when,
                     "skills": skills,
                     "skills_rationale": None if skills_rationale is None else str(skills_rationale),
+                    "depends_on": _as_str_list(t.get("depends_on") or t.get("dependsOn") or []),
+                    "effort": str(t.get("effort") or "").strip().upper() or None,
+                    "priority": str(t.get("priority") or "").strip().upper() or None,
+                    "touched_file_globs": _as_str_list(touched_file_globs or []),
                 }
             )
     out["tasks"] = tasks

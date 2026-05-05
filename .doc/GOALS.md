@@ -279,17 +279,17 @@
 - [ ] Backend adapter interfaces isolate model invocation, message streaming, model option construction, and quota probing from orchestration code.
 - [ ] Codex backend-specific code is limited to Codex CLI execution, Codex app-server integration, Codex quota probing, and Codex model options.
 - [ ] Claude backend-specific code is limited to Claude SDK/CLI execution, Claude streaming collection, Claude quota probing, and Claude model options.
-- [ ] Every decomposition PR is extraction-only with no product behavior changes, no endpoint contract changes, and no run artifact filename changes.
+- [x] Every decomposition PR is extraction-only with no product behavior changes, no endpoint contract changes, and no run artifact filename changes.
 
 ### P0-W. Web Operational UX Follow-Up
 
-- [ ] Dashboard stale snapshot badge only appears when the newest `/api/status` payload or selected run artifact is older than the configured freshness threshold.
-- [ ] Dashboard active task id, title, attempt, and branch are populated from live runner state, backlog state, task history, or latest task artifact instead of showing `task title unavailable`.
-- [ ] Runner liveness copy clearly separates shell runner process, task backend, tracked children, and artifact writer states without contradictory `running`/`stopped` wording.
-- [ ] Logs view renders structured `/api/logs` events immediately when `run.log` is sparse and labels structured events separately from live tail sources.
-- [ ] Log tail state leaves `loading` at EOF and shows last log line plus no-output warning when no new `run.log` lines arrive.
-- [ ] Worktree Review defaults to the active run's current pending/no-pending state and does not surface old applied/discarded artifacts unless the user opens historical context.
-- [ ] Mobile navigation confines overflow to an intentional visible horizontal scroll container or wraps route groups without hidden off-screen controls at 390px width.
+- [x] Dashboard stale snapshot badge only appears when the newest `/api/status` payload or selected run artifact is older than the configured freshness threshold.
+- [x] Dashboard active task id, title, attempt, and branch are populated from live runner state, backlog state, task history, or latest task artifact instead of showing `task title unavailable`.
+- [x] Runner liveness copy clearly separates shell runner process, task backend, tracked children, and artifact writer states without contradictory `running`/`stopped` wording.
+- [x] Logs view renders structured `/api/logs` events immediately when `run.log` is sparse and labels structured events separately from live tail sources.
+- [x] Log tail state leaves `loading` at EOF and shows last log line plus no-output warning when no new `run.log` lines arrive.
+- [x] Worktree Review defaults to the active run's current pending/no-pending state and does not surface old applied/discarded artifacts unless the user opens historical context.
+- [x] Mobile navigation confines overflow to an intentional visible horizontal scroll container or wraps route groups without hidden off-screen controls at 390px width.
 - [ ] Web snapshot polling uses route-appropriate payloads so Dashboard refresh does not require multi-megabyte `/api/status` responses containing full GOALS raw text/history data.
 - [ ] Web PR Queue route lists queued local PR packets with task id, GOALS refs, branch, changed files, validation status, QA notes, and merge preflight status.
 - [ ] Web PR Queue detail view shows per-file diff, validation logs, blockers, dependency detail, and explicit read-only vs mutating validate/merge/discard affordances.
@@ -299,39 +299,39 @@
 - [ ] Direct runner and resume entrypoints reconcile stale STOP files using heartbeat age and an audit event without deleting fresh operator STOP requests.
 - [ ] Long sleeps, quota waits, and loop idle waits refresh `HEARTBEAT` at bounded intervals while remaining STOP-aware.
 - [ ] Claude backend quota and wait paths use the shared STOP-aware sleep helper instead of raw long `asyncio.sleep` calls.
-- [ ] Startup readiness can auto-reconcile stale `WORKTREE_MERGE_PENDING.json` markers when the patch/worktree is missing or source `HEAD` already reflects the pending head, while preserving valid pending merges.
-- [ ] Stale task branches and attempt directories are listed by doctor/readiness with age, status, reason, and owning run before any cleanup is offered.
-- [ ] Stale branch, stale attempt, and old run cleanup require explicit operator approval and write dry-run plus applied cleanup artifacts.
-- [ ] An unattended preset documents or configures `goals_auto_refresh`, quota wait, loop, loop idle exit, iteration limits, diagnostics, and safe cleanup defaults as one operator-facing profile.
-- [ ] Backlog scheduling records task effort, priority, touched file globs, and dependencies before selection.
-- [ ] Backlog selection uses dependency-aware ordering plus remaining-window budget caps so overnight runs prefer small unblocked tasks before large risky tasks.
-- [ ] Overnight runs write a concise post-run operations summary covering completed, queued, review-required, blocked-env, stale-cleanup, handle/process warnings, and next operator actions.
-- [ ] Windows handle/process diagnostic collection is linked to run artifacts and flags process-count or handle-growth anomalies before Explorer/CMD instability recurs.
+- [x] Startup readiness can auto-reconcile stale `WORKTREE_MERGE_PENDING.json` markers when the patch/worktree is missing or source `HEAD` already reflects the pending head, while preserving valid pending merges.
+- [x] Stale task branches and attempt directories are listed by doctor/readiness with age, status, reason, and owning run before any cleanup is offered.
+- [x] Stale branch, stale attempt, and old run cleanup require explicit operator approval and write dry-run plus applied cleanup artifacts.
+- [x] An unattended preset documents or configures `goals_auto_refresh`, quota wait, loop, loop idle exit, iteration limits, diagnostics, and safe cleanup defaults as one operator-facing profile.
+- [x] Backlog scheduling records task effort, priority, touched file globs, and dependencies before selection.
+- [x] Backlog selection uses dependency-aware ordering plus remaining-window budget caps so overnight runs prefer small unblocked tasks before large risky tasks.
+- [x] Overnight runs write a concise post-run operations summary covering completed, queued, review-required, blocked-env, stale-cleanup, handle/process warnings, and next operator actions.
+- [x] Windows handle/process diagnostic collection is linked to run artifacts and flags process-count or handle-growth anomalies before Explorer/CMD instability recurs.
 
 ### P0-Y. Failure Disposition, Backend Parity, And State Integrity
 
-- [ ] A `failure_policy` module decides task disposition (`retry`, `preserve_for_review`, `abandon_branch`, `restore_checkpoint`, `stop_run`) from reason, task status, and attempt budget so Codex and Claude share one policy.
-- [ ] `_isolate_or_stop` consumes a typed `FailureOutcome` so `blocked_env` and `test_contract_changed` tasks are preserved for human review instead of abandoned.
-- [ ] `backends/claudecode.py` records failures with the same task-status enriched schema as `cycle.py` so failover cannot produce mixed `STATE.json` schemas.
-- [ ] `task_status.py` classifier covers Java, Go, Rust, C/C++, Kotlin, Swift, Maven, Gradle, NuGet, Cargo, regression, and dependency-resolution patterns with multi-language tests.
+- [x] A `failure_policy` module decides task disposition (`retry`, `preserve_for_review`, `abandon_branch`, `restore_checkpoint`, `stop_run`) from reason, task status, and attempt budget so Codex and Claude share one policy.
+- [x] `_isolate_or_stop` consumes a typed `FailureOutcome` so `blocked_env` and `test_contract_changed` tasks are preserved for human review instead of abandoned.
+- [x] `backends/claudecode.py` records failures with the same task-status enriched schema as `cycle.py` so failover cannot produce mixed `STATE.json` schemas.
+- [x] `task_status.py` classifier covers Java, Go, Rust, C/C++, Kotlin, Swift, Maven, Gradle, NuGet, Cargo, regression, and dependency-resolution patterns with multi-language tests.
 - [ ] `task_history` SQLite stores `task_status` so PM failed-task context and consecutive-failure handling distinguish environment-blocked tasks from code regressions.
 - [ ] `needs_dependency` and `blocked_dependency` reasons are first-class `BLOCKED_ENV` mappings in `classify_task_failure` without relying on text-pattern inference.
 - [ ] Shutdown reports and Web Console task counters split regression, review-needed, and blocked-env groups so environment failures do not look like code regressions.
-- [ ] Codex and Claude backends use the same failure disposition, validation artifact, local PR queue, and run report helpers so failover cannot produce mixed schemas.
+- [x] Codex and Claude backends use the same failure disposition, validation artifact, local PR queue, and run report helpers so failover cannot produce mixed schemas.
 - [ ] PR queue packet and index writes are lock-protected and recoverable after interrupted packet or index updates.
-- [ ] `STATE.json` mutation helpers preserve concurrent done, failed, and warning updates across runner, controller, and future Web mutation paths.
-- [ ] GOALS auto-check writes atomically and detects operator edit conflicts instead of overwriting Web edits.
-- [ ] Attempt directories record `STARTED` and `FINISHED` markers, and preflight reports interrupted attempts before a new unattended run starts.
-- [ ] Preflight reports stale Git, web instance, and Telegram lock files with age, owner evidence when available, and safe operator guidance.
-- [ ] Runner subprocess launch paths explicitly close inherited file descriptors or document tested handle inheritance behavior on Windows.
+- [x] `STATE.json` mutation helpers preserve concurrent done, failed, and warning updates across runner, controller, and future Web mutation paths.
+- [x] GOALS auto-check writes atomically and detects operator edit conflicts instead of overwriting Web edits.
+- [x] Attempt directories record `STARTED` and `FINISHED` markers, and preflight reports interrupted attempts before a new unattended run starts.
+- [x] Preflight reports stale Git, web instance, and Telegram lock files with age, owner evidence when available, and safe operator guidance.
+- [x] Runner subprocess launch paths explicitly close inherited file descriptors or document tested handle inheritance behavior on Windows.
 
 ### P0-Z. Stage Effects And Backlog Refiner Runtime
 
 - [ ] `StageOutcome` supports declared effects such as `backlog_written` and `tasks_reload_required` so `PipelineManager` can safely apply stage side effects.
-- [ ] `PipelineSession` exposes safe artifact and backlog write APIs for state-mutating stages.
+- [x] `PipelineSession` exposes safe artifact and backlog write APIs for state-mutating stages.
 - [ ] `PipelineManager` reloads task state after any stage declares backlog mutation.
-- [ ] A built-in PL/Backlog Refiner can run between PM and Dev and split oversized tasks while preserving GOALS trace and dependencies.
-- [ ] Web Config and Pipeline views support PL and plugin stages without dropping unknown role specs.
+- [x] A built-in PL/Backlog Refiner can run between PM and Dev and split oversized tasks while preserving GOALS trace and dependencies.
+- [x] Web Config and Pipeline views support PL and plugin stages without dropping unknown role specs.
 
 ## P1 (Should-Have)
 

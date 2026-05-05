@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import ctypes
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import shutil
 from types import SimpleNamespace
@@ -29,6 +31,135 @@ class ProcessGuardTests(unittest.TestCase):
         self.fixture_root = self.fixture_base / f"{self._testMethodName}-{uuid.uuid4().hex}"
         self.fixture_root.mkdir()
         self.addCleanup(lambda: shutil.rmtree(self.fixture_root, ignore_errors=True))
+
+    def _write_jsonl(self, path: Path, rows: list[object]) -> Path:
+        lines: list[str] = []
+        for row in rows:
+            if isinstance(row, str):
+                lines.append(row)
+            else:
+                lines.append(json.dumps(row))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def test_write_windows_handle_diagnostics_artifacts_links_run_artifacts_without_anomaly(self) -> None:
+        repo = self.fixture_root / "repo"
+        run_dir = repo / ".AgentCLI" / "agent_runs" / "20260505-000000"
+        source_path = repo / ".AgentCLI" / "diagnostics" / "windows-handle-diagnostics-20260505-000000.jsonl"
+        run_dir.mkdir(parents=True)
+        self._write_jsonl(
+            source_path,
+            [
+                {
+                    "sample": 0,
+                    "ts": "2026-05-05T00:00:00Z",
+                    "processTree": [{"pid": 10}, {"pid": 11}],
+                    "resourcePressure": {
+                        "systemHandleCount": 1000,
+                        "systemHandleLimit": 5000,
+                    },
+                },
+                {
+                    "sample": 1,
+                    "ts": "2026-05-05T00:01:00Z",
+                    "processTree": [{"pid": 10}, {"pid": 11}, {"pid": 12}],
+                    "resourcePressure": {
+                        "systemHandleCount": 1050,
+                        "systemHandleLimit": 5000,
+                    },
+                },
+            ],
+        )
+
+        with patch.object(process_guard.sys, "platform", "win32"):
+            payload = process_guard.write_windows_handle_diagnostics_artifacts(repo, run_dir)
+
+        summary_path = run_dir / "diagnostics" / "WINDOWS_HANDLE_DIAGNOSTICS.json"
+        normalized_jsonl_path = run_dir / "diagnostics" / "windows-handle-diagnostics.normalized.jsonl"
+        self.assertEqual("ok", payload["status"])
+        self.assertEqual([], payload["warnings"])
+        self.assertTrue(summary_path.exists())
+        self.assertTrue(normalized_jsonl_path.exists())
+        written = json.loads(summary_path.read_text(encoding="utf-8"))
+        self.assertTrue(written["summary"]["healthy"])
+        self.assertEqual(2, written["summary"]["snapshot_count"])
+        self.assertEqual(50, written["summary"]["latest_handle_growth"])
+
+    def test_read_windows_handle_diagnostics_jsonl_flags_process_count_anomaly(self) -> None:
+        path = self.fixture_root / "process-count.jsonl"
+        process_count = process_guard.DEFAULT_WINDOWS_PROCESS_COUNT_WARNING_THRESHOLD + 1
+        self._write_jsonl(
+            path,
+            [
+                {
+                    "sample": 0,
+                    "ts": "2026-05-05T00:00:00Z",
+                    "processTree": [{"pid": idx} for idx in range(process_count)],
+                    "resourcePressure": {
+                        "systemHandleCount": 1000,
+                        "systemHandleLimit": 5000,
+                    },
+                }
+            ],
+        )
+
+        payload = process_guard.read_windows_handle_diagnostics_jsonl(path)
+
+        self.assertEqual("ok", payload["status"])
+        self.assertEqual(["process_count_threshold"], payload["summary"]["warning_kinds"])
+        self.assertEqual(
+            "process_count_threshold",
+            payload["warnings"][0]["kind"],
+        )
+        self.assertEqual(process_count, payload["latest_snapshot"]["process_count"])
+
+    def test_read_windows_handle_diagnostics_jsonl_flags_handle_growth_anomaly(self) -> None:
+        path = self.fixture_root / "handle-growth.jsonl"
+        self._write_jsonl(
+            path,
+            [
+                {
+                    "sample": 0,
+                    "ts": "2026-05-05T00:00:00Z",
+                    "processTree": [{"pid": 10}],
+                    "resourcePressure": {
+                        "systemHandleCount": 1000,
+                        "systemHandleLimit": 5000,
+                    },
+                },
+                {
+                    "sample": 1,
+                    "ts": "2026-05-05T00:01:00Z",
+                    "processTree": [{"pid": 10}, {"pid": 11}],
+                    "resourcePressure": {
+                        "systemHandleCount": 1150,
+                        "systemHandleLimit": 5000,
+                    },
+                },
+            ],
+        )
+
+        payload = process_guard.read_windows_handle_diagnostics_jsonl(path)
+
+        self.assertEqual("ok", payload["status"])
+        self.assertIn("handle_growth", payload["summary"]["warning_kinds"])
+        self.assertEqual(150, payload["summary"]["latest_handle_growth"])
+        self.assertEqual("handle_growth", payload["warnings"][0]["kind"])
+
+    def test_read_windows_handle_diagnostics_jsonl_handles_missing_and_malformed_input(self) -> None:
+        missing_path = self.fixture_root / "missing.jsonl"
+        missing_payload = process_guard.read_windows_handle_diagnostics_jsonl(missing_path)
+        self.assertEqual("missing", missing_payload["status"])
+        self.assertEqual([], missing_payload["warnings"])
+
+        malformed_path = self.fixture_root / "malformed.jsonl"
+        self._write_jsonl(malformed_path, ["{not-json"])
+
+        malformed_payload = process_guard.read_windows_handle_diagnostics_jsonl(malformed_path)
+        self.assertEqual("malformed", malformed_payload["status"])
+        self.assertEqual([], malformed_payload["warnings"])
+        self.assertEqual(1, len(malformed_payload["errors"]))
 
     def test_descendant_pids_walks_nested_tree_without_self(self) -> None:
         child_map = {
@@ -380,6 +511,103 @@ class ProcessGuardTests(unittest.TestCase):
             patch.object(process_guard.sys, "executable", str(fake_python)),
         ):
             self.assertEqual(str(fake_pythonw), process_guard._watchdog_executable())
+
+    def test_runner_controller_subprocess_launch_uses_close_fds(self) -> None:
+        import agent_runner.remote.controller as controller_module
+        from agent_runner.remote.controller import RunnerController
+
+        repo = self.fixture_root / "repo"
+        run_dir = repo / ".AgentCLI" / "agent_runs" / "run"
+        run_dir.mkdir(parents=True)
+        args = argparse.Namespace(config_path="", run_dir=str(run_dir), stop_file="STOP")
+        controller = RunnerController(repo=repo, base_args=args, runner_mode="subprocess")
+        calls: list[dict[str, object]] = []
+
+        def _fake_popen(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append({"cmd": cmd, **kwargs})
+            return SimpleNamespace(pid=321)
+
+        with (
+            patch.object(controller_module.sys, "platform", "win32"),
+            patch.object(controller_module.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True),
+            patch("agent_runner.remote.controller.rotate_log_file"),
+            patch("agent_runner.remote.controller.register_pid"),
+            patch("agent_runner.remote.controller.subprocess.Popen", side_effect=_fake_popen),
+            patch.object(RunnerController, "_start_subprocess_watch"),
+        ):
+            controller._start_subprocess(args, run_dir)
+
+        if controller._runner_log_handle is not None:
+            self.addCleanup(controller._runner_log_handle.close)
+        self.assertEqual(1, len(calls))
+        call = calls[0]
+        self.assertTrue(bool(call["close_fds"]))
+        self.assertEqual(0x08000000, int(call["creationflags"]))
+        self.assertIs(call["stdin"], subprocess.DEVNULL)
+        self.assertIs(call["stderr"], subprocess.STDOUT)
+        self.assertEqual(str(repo.resolve()), str(call["cwd"]))
+
+    def test_codex_exec_async_launch_uses_close_fds(self) -> None:
+        from agent_runner import codex_exec as codex_exec_module
+
+        def _reader(data: bytes) -> asyncio.StreamReader:
+            reader = asyncio.StreamReader()
+            reader.feed_data(data)
+            reader.feed_eof()
+            return reader
+
+        class _FakeStdin:
+            def __init__(self) -> None:
+                self.closed = False
+                self.writes: list[bytes] = []
+
+            def write(self, data: bytes) -> None:
+                self.writes.append(data)
+
+            async def drain(self) -> None:
+                return None
+
+            def close(self) -> None:
+                self.closed = True
+
+        class _FakeProc:
+            def __init__(self) -> None:
+                self.pid: int | None = None
+                self.returncode: int | None = None
+                self.stdin = _FakeStdin()
+                self.stdout = _reader(b"")
+                self.stderr = _reader(b"")
+
+            async def wait(self) -> int:
+                self.returncode = 0
+                return 0
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+        calls: list[dict[str, object]] = []
+
+        async def _fake_create_subprocess_exec(*cmd: object, **kwargs: object) -> _FakeProc:
+            calls.append({"cmd": list(cmd), **kwargs})
+            return _FakeProc()
+
+        with (
+            patch.object(codex_exec_module, "_ALWAYS_USE_STDIN", True),
+            patch("agent_runner.utils.sys.platform", "win32"),
+            patch("agent_runner.utils.subprocess.CREATE_NO_WINDOW", 0x08000000, create=True),
+            patch("agent_runner.codex_exec.asyncio.create_subprocess_exec", side_effect=_fake_create_subprocess_exec),
+        ):
+            result = asyncio.run(codex_exec_module.codex_exec("ping", cwd=self.fixture_root))
+
+        self.assertEqual(0, result.exit_code)
+        self.assertEqual(1, len(calls))
+        call = calls[0]
+        self.assertTrue(bool(call["close_fds"]))
+        self.assertEqual(0x08000000, int(call["creationflags"]))
+        self.assertIs(call["stdout"], asyncio.subprocess.PIPE)
+        self.assertIs(call["stderr"], asyncio.subprocess.PIPE)
+        self.assertIs(call["stdin"], asyncio.subprocess.PIPE)
+        self.assertEqual(str(self.fixture_root), str(call["cwd"]))
 
     @unittest.skipUnless(sys.platform == "win32", "Windows process-tree smoke test")
     def test_run_cmd_async_cleans_inherited_stdout_child_process(self) -> None:

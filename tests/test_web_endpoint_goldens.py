@@ -119,6 +119,116 @@ class WebEndpointGoldenTests(unittest.TestCase):
     def _write_state(self, run_dir: Path, state: dict[str, object]) -> None:
         _write(run_dir / "STATE.json", json.dumps(state, ensure_ascii=False, indent=2) + "\n")
 
+    def test_status_dashboard_scope_excludes_heavy_snapshot_sections(self) -> None:
+        goal_marker = "GOALS-RAW-TEXT-MARKER"
+        history_marker = "HISTORY-RAW-MARKER"
+        old_log_marker = "OLD-LOG-LINE-MARKER"
+
+        _write(
+            self.repo / ".doc" / "GOALS.md",
+            f"""# Project Goals
+
+{goal_marker}
+
+## P0
+- [ ] Compact dashboard polling
+
+## P1
+- [x] Keep full snapshot routes
+""",
+        )
+        _write(self.repo / "prompts" / "agentcli" / "pm_prompt.md", "PM prompt inventory marker\n")
+        _write(self.repo / "prompts" / "agentcli" / "dev_prompt.md", "Dev prompt inventory marker\n")
+
+        run_dir = self._make_run_dir("20260504-120000")
+        self._write_backlog(
+            run_dir,
+            [
+                {
+                    "id": "T16",
+                    "title": "Compact dashboard polling",
+                    "status": "in_progress",
+                    "priority": "P0",
+                    "estimate": "M",
+                }
+            ],
+        )
+        self._write_state(run_dir, {"done": [], "failed": [], "warnings": []})
+        _write(
+            run_dir / "run_summary.json",
+            json.dumps(
+                {
+                    "branch": "main",
+                    "cycles": [{"summary": history_marker}],
+                    "final": {"rc": 0, "reason": ""},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        _write(
+            run_dir / "last_run_summary.json",
+            json.dumps(
+                {
+                    "status": "running",
+                    "total_tasks": 1,
+                    "skipped": 0,
+                    "duration_seconds": 45,
+                    "reason": history_marker,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        log_lines = [f"2026-05-04 12:00:{index:02d} [INFO] line {index}" for index in range(1, 16)]
+        log_lines.insert(0, f"2026-05-04 12:00:00 [INFO] {old_log_marker}")
+        _write(run_dir / "logs" / "run.log", "\n".join(log_lines) + "\n")
+
+        client = self._create_client(
+            controller_status={
+                "run_dir": run_dir.as_posix(),
+                "running": True,
+                "stage": "Dev",
+                "current_task_id": "T16",
+                "current_task_title": "Compact dashboard polling",
+                "runner_mode": "thread",
+            }
+        )
+
+        full_payload = client.get("/api/status").json()
+        dashboard_payload = client.get("/api/status", params={"scope": "dashboard"}).json()
+
+        self.assertIn(goal_marker, json.dumps(full_payload["goals"], ensure_ascii=False))
+        self.assertNotIn("raw_text", dashboard_payload["goals"])
+        self.assertNotIn("rawText", dashboard_payload["goals"])
+        self.assertNotIn(goal_marker, json.dumps(dashboard_payload["goals"], ensure_ascii=False))
+
+        self.assertTrue(full_payload["history"]["items"])
+        self.assertEqual([], dashboard_payload["history"]["items"])
+        self.assertNotIn(history_marker, json.dumps(dashboard_payload["history"], ensure_ascii=False))
+
+        self.assertTrue(full_payload["prompts"]["items"])
+        self.assertEqual([], dashboard_payload["prompts"]["items"])
+        self.assertTrue(full_payload["config_contract"]["schema"])
+        self.assertEqual({}, dashboard_payload["config_contract"]["schema"])
+        self.assertEqual({}, dashboard_payload["config_contract"]["values"])
+        self.assertEqual({}, dashboard_payload["config_contract"]["defaults"])
+
+        self.assertGreater(len(full_payload["logs"]["entries"]), 12)
+        self.assertLessEqual(len(dashboard_payload["logs"]["entries"]), 12)
+        self.assertNotIn(old_log_marker, json.dumps(dashboard_payload["logs"], ensure_ascii=False))
+        self.assertNotIn("tail", dashboard_payload["logs"])
+        self.assertNotIn("files", dashboard_payload["logs"])
+
+        for key in ("active_run", "progress", "runner_control", "liveRun", "sectionState", "snapshotRefresh"):
+            self.assertIn(key, dashboard_payload)
+        self.assertEqual(full_payload["active_run"]["id"], dashboard_payload["active_run"]["id"])
+        self.assertEqual(full_payload["progress"]["run_status"], dashboard_payload["progress"]["run_status"])
+        self.assertEqual(full_payload["runner_control"]["enabled"], dashboard_payload["runner_control"]["enabled"])
+        self.assertEqual(full_payload["snapshotRefresh"]["status"], dashboard_payload["snapshotRefresh"]["status"])
+
     def test_status_no_run_contract_sections_are_normalized(self) -> None:
         client = self._create_client(controller_status={})
 
@@ -537,6 +647,49 @@ class WebEndpointGoldenTests(unittest.TestCase):
             projection,
         )
 
+    def test_progress_contract_splits_failure_groups(self) -> None:
+        self._write_goals()
+        run_dir = self._make_run_dir("20260503-010204")
+        self._write_backlog(
+            run_dir,
+            [
+                {"id": "T1", "title": "Install dependency", "prompt": "", "files": [], "done_when": "", "skills": [], "skills_rationale": "", "depends_on": []},
+                {"id": "T2", "title": "Review selector contract", "prompt": "", "files": [], "done_when": "", "skills": [], "skills_rationale": "", "depends_on": []},
+                {"id": "T3", "title": "Fix regression", "prompt": "", "files": [], "done_when": "", "skills": [], "skills_rationale": "", "depends_on": []},
+            ],
+        )
+        self._write_state(
+            run_dir,
+            {
+                "done": [],
+                "failed": [
+                    {"task": "T1", "reason": "build_failed", "task_status": "blocked_env"},
+                    {"task": "T2", "reason": "fast_regression_failed", "task_status": "test_contract_changed"},
+                    {"task": "T3", "reason": "build_failed", "task_status": "regression_failed"},
+                ],
+                "warnings": [],
+            },
+        )
+        client = self._create_client(
+            controller_status={
+                "run_dir": run_dir.as_posix(),
+                "running": False,
+                "exit_code": 1,
+                "reason": "build_failed",
+                "stage": "Dev",
+            }
+        )
+
+        payload = client.get("/api/progress").json()
+
+        self.assertEqual(3, payload["backlog"]["counts"]["failed"])
+        self.assertEqual(1, payload["backlog"]["counts"]["blocked_env"])
+        self.assertEqual(1, payload["backlog"]["counts"]["review"])
+        self.assertEqual(1, payload["backlog"]["counts"]["regressed"])
+        self.assertEqual(1, payload["backlog"]["failureGroupCounts"]["blocked_env"])
+        self.assertEqual(1, payload["backlog"]["failureGroupCounts"]["review"])
+        self.assertEqual(1, payload["backlog"]["failureGroupCounts"]["regression"])
+
     def test_progress_contract_preserves_goals_incomplete_completion_state(self) -> None:
         self._write_goals()
         run_dir = self._make_run_dir("20260503-020304")
@@ -646,6 +799,345 @@ class WebEndpointGoldenTests(unittest.TestCase):
                     "tasks_regressed": 0,
                     "tasks_review": 0,
                     "tasks_blocked_env": 0,
+                },
+            },
+            projection,
+        )
+
+    def test_existing_status_progress_worktree_and_runner_contracts_stay_stable_for_failed_run(self) -> None:
+        self._write_goals()
+        run_dir = self._make_run_dir("20260503-030405")
+        self._write_backlog(
+            run_dir,
+            [
+                {
+                    "id": "T1",
+                    "title": "Done task",
+                    "prompt": "done",
+                    "files": ["done.py"],
+                    "done_when": "done",
+                    "skills": ["observability"],
+                    "skills_rationale": "Keep extracted payload builders stable.",
+                    "depends_on": [],
+                },
+                {
+                    "id": "T2",
+                    "title": "Failed task",
+                    "prompt": "failed",
+                    "files": ["failed.py"],
+                    "done_when": "failed",
+                    "skills": ["observability"],
+                    "skills_rationale": "Keep extracted payload builders stable.",
+                    "depends_on": ["T1"],
+                },
+                {
+                    "id": "T3",
+                    "title": "Pending task",
+                    "prompt": "pending",
+                    "files": ["pending.py"],
+                    "done_when": "pending",
+                    "skills": ["observability"],
+                    "skills_rationale": "Keep extracted payload builders stable.",
+                    "depends_on": ["T2"],
+                },
+            ],
+        )
+        self._write_state(
+            run_dir,
+            {
+                "done": ["T1"],
+                "failed": [
+                    {
+                        "task": "T2",
+                        "reason": "build_failed",
+                        "detail": "Failed build.",
+                        "attempt": 2,
+                        "cycle": 1,
+                        "step": 0,
+                        "rc": 1,
+                    }
+                ],
+                "warnings": [],
+            },
+        )
+
+        client = self._create_client(
+            controller_status={
+                "run_dir": run_dir.as_posix(),
+                "running": False,
+                "exit_code": 1,
+                "reason": "build_failed",
+                "stage": "Dev",
+                "done": 1,
+                "failed": 1,
+                "warnings": 0,
+                "runner_mode": "thread",
+            }
+        )
+
+        status_payload = client.get("/api/status").json()
+        progress_payload = client.get("/api/progress").json()
+        worktree_payload = client.get("/api/worktree").json()
+        runner_payload = client.get("/api/runner/status").json()
+        projection = {
+            "status": {
+                "active_run": {
+                    key: status_payload["active_run"][key]
+                    for key in (
+                        "id",
+                        "stage",
+                        "stageIndex",
+                        "runDir",
+                        "progressAvailable",
+                        "progress",
+                        "executionStatus",
+                        "completionStatus",
+                        "completionReason",
+                        "goalsComplete",
+                        "backlogComplete",
+                        "projectComplete",
+                        "projectStatus",
+                        "status",
+                        "task",
+                        "taskTitle",
+                        "finalReason",
+                    )
+                },
+                "progress": {
+                    key: status_payload["progress"][key]
+                    for key in (
+                        "run_status",
+                        "tasks_done",
+                        "tasks_total",
+                        "tasks_failed",
+                        "progress",
+                        "progress_available",
+                        "current_task_id",
+                        "current_task_title",
+                        "executionStatus",
+                        "completionStatus",
+                        "completionReason",
+                        "projectComplete",
+                        "projectStatus",
+                        "goalsComplete",
+                        "backlogComplete",
+                        "final_reason",
+                        "final_rc",
+                    )
+                },
+                "worktree": {
+                    key: status_payload["worktree"][key]
+                    for key in ("status", "summary", "risk", "runDir", "runnerRc", "lastRc")
+                },
+                "runner_control": {
+                    key: status_payload["runner_control"][key]
+                    for key in (
+                        "enabled",
+                        "controller_available",
+                        "busy",
+                        "run_status",
+                        "execution_status",
+                        "project_complete",
+                        "project_status",
+                        "goals_complete",
+                        "backlog_complete",
+                        "message",
+                    )
+                },
+            },
+            "progress": {
+                "top": {
+                    key: progress_payload[key]
+                    for key in (
+                        "run_status",
+                        "tasks_done",
+                        "tasks_total",
+                        "tasks_failed",
+                        "current_task_id",
+                        "current_task_title",
+                        "executionStatus",
+                        "completionStatus",
+                        "completionReason",
+                        "projectComplete",
+                        "projectStatus",
+                        "goalsComplete",
+                        "backlogComplete",
+                        "final_reason",
+                    )
+                },
+                "nested": {
+                    key: progress_payload["progress"][key]
+                    for key in (
+                        "run_status",
+                        "tasks_done",
+                        "tasks_total",
+                        "tasks_failed",
+                        "progress",
+                        "progress_available",
+                        "current_task_id",
+                        "current_task_title",
+                        "executionStatus",
+                        "completionStatus",
+                        "completionReason",
+                        "projectComplete",
+                        "projectStatus",
+                        "goalsComplete",
+                        "backlogComplete",
+                        "final_reason",
+                        "final_rc",
+                    )
+                },
+            },
+            "worktree": {
+                key: worktree_payload[key]
+                for key in ("status", "summary", "risk", "runDir", "runnerRc", "lastRc")
+            },
+            "runner": {
+                "top": {
+                    key: runner_payload[key]
+                    for key in (
+                        "enabled",
+                        "controller_available",
+                        "busy",
+                        "run_status",
+                        "executionStatus",
+                        "projectComplete",
+                        "projectStatus",
+                        "goalsComplete",
+                        "backlogComplete",
+                        "message",
+                    )
+                },
+                "status": {
+                    key: runner_payload["status"][key]
+                    for key in (
+                        "running",
+                        "runner_mode",
+                        "run_dir",
+                        "exit_code",
+                        "done",
+                        "failed",
+                        "warnings",
+                        "state_counts",
+                        "reason",
+                        "last_event",
+                        "event_count",
+                    )
+                },
+            },
+        }
+
+        expected_progress = {
+            "run_status": "failed",
+            "tasks_done": 1,
+            "tasks_total": 3,
+            "tasks_failed": 1,
+            "progress": None,
+            "progress_available": False,
+            "current_task_id": "T2",
+            "current_task_title": "Failed task",
+            "executionStatus": "failed",
+            "completionStatus": "",
+            "completionReason": "",
+            "projectComplete": False,
+            "projectStatus": "incomplete",
+            "goalsComplete": False,
+            "backlogComplete": False,
+            "final_reason": "build_failed",
+            "final_rc": 1,
+        }
+        expected_worktree = {
+            "status": "none",
+            "summary": "No pending worktree merge.",
+            "risk": "No isolated worktree patch is pending review.",
+            "runDir": run_dir.as_posix(),
+            "runnerRc": 0,
+            "lastRc": 0,
+        }
+
+        self.assertEqual(
+            {
+                "status": {
+                    "active_run": {
+                        "id": "20260503-030405",
+                        "stage": "Dev",
+                        "stageIndex": 3,
+                        "runDir": run_dir.as_posix(),
+                        "progressAvailable": False,
+                        "progress": None,
+                        "executionStatus": "failed",
+                        "completionStatus": "",
+                        "completionReason": "",
+                        "goalsComplete": False,
+                        "backlogComplete": False,
+                        "projectComplete": False,
+                        "projectStatus": "incomplete",
+                        "status": "failed",
+                        "task": "T2",
+                        "taskTitle": "Failed task",
+                        "finalReason": "build_failed",
+                    },
+                    "progress": expected_progress,
+                    "worktree": expected_worktree,
+                    "runner_control": {
+                        "enabled": False,
+                        "controller_available": True,
+                        "busy": False,
+                        "run_status": "failed",
+                        "execution_status": "failed",
+                        "project_complete": False,
+                        "project_status": "incomplete",
+                        "goals_complete": False,
+                        "backlog_complete": False,
+                        "message": "Runner controls are disabled until the server is started with AGENTCLI_WEB_RUNNER_CONTROLS=1 or --enable-runner-controls.",
+                },
+            },
+            "progress": {
+                "top": {
+                    "run_status": "failed",
+                    "tasks_done": 1,
+                    "tasks_total": 3,
+                    "tasks_failed": 1,
+                    "current_task_id": "T2",
+                    "current_task_title": "Failed task",
+                    "executionStatus": "failed",
+                    "completionStatus": "",
+                    "completionReason": "",
+                    "projectComplete": False,
+                    "projectStatus": "incomplete",
+                    "goalsComplete": False,
+                    "backlogComplete": False,
+                    "final_reason": "build_failed",
+                },
+                "nested": expected_progress,
+            },
+            "worktree": expected_worktree,
+            "runner": {
+                "top": {
+                    "enabled": False,
+                        "controller_available": True,
+                        "busy": False,
+                        "run_status": "failed",
+                        "executionStatus": "failed",
+                        "projectComplete": False,
+                        "projectStatus": "incomplete",
+                        "goalsComplete": False,
+                        "backlogComplete": False,
+                        "message": "Runner controls are disabled until the server is started with AGENTCLI_WEB_RUNNER_CONTROLS=1 or --enable-runner-controls.",
+                    },
+                    "status": {
+                        "running": False,
+                        "runner_mode": "thread",
+                        "run_dir": run_dir.as_posix(),
+                        "exit_code": 1,
+                        "done": 1,
+                        "failed": 1,
+                        "warnings": 0,
+                        "state_counts": {"done": 1, "failed": 1, "warnings": 0},
+                        "reason": "build_failed",
+                        "last_event": "",
+                        "event_count": 0,
+                    },
                 },
             },
             projection,

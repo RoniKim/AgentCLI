@@ -17,6 +17,7 @@ from .failure_policy import (
     STATUS_GROUP_REGRESSION,
     STATUS_GROUP_REVIEW,
     count_task_status_groups,
+    normalize_task_status_for_group,
 )
 from .todo import read_current_todo
 from .utils import atomic_write_json, now_iso, run_cmd, safe_write_text
@@ -216,6 +217,15 @@ def collect_shutdown_context(repo: Path, run_dir: Path) -> dict[str, Any]:
             ctx["last_run_summary"] = {}
     else:
         ctx["last_run_summary"] = {}
+
+    operations_summary_path = run_dir / "OPERATIONS_SUMMARY.json"
+    if operations_summary_path.exists():
+        try:
+            ctx["operations_summary"] = json.loads(operations_summary_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            ctx["operations_summary"] = {}
+    else:
+        ctx["operations_summary"] = {}
 
     policy_scan_path = run_dir / "policy_scan.json"
     policy_summary: dict[str, Any] = {}
@@ -528,8 +538,23 @@ def build_cycle_change_summary(
     ])
     failure_status_counts: dict[str, int] = {}
     failure_statuses: list[str] = []
+    state_failed_ids: set[str] = set()
     for item in state_failed_items:
-        status_key = _text(item.get("task_status") or item.get("taskStatus") or item.get("outcome_status") or item.get("status") or "failed").lower()
+        status_key = _group_task_status(item, default="failed")
+        failure_status_counts[status_key] = failure_status_counts.get(status_key, 0) + 1
+        failure_statuses.append(status_key)
+        task_id = _text(item.get("task") or item.get("task_id") or item.get("taskId"), "")
+        if task_id:
+            state_failed_ids.add(task_id)
+    for item in task_results_list:
+        status_text = _text(item.get("status"), "").lower()
+        task_status_text = _text(item.get("task_status") or item.get("taskStatus") or item.get("outcome_status") or item.get("outcomeStatus"), "").lower()
+        if status_text not in {"failed", "review_required", "blocked_env", "test_contract_changed", "regression_failed"} and task_status_text not in {"failed", "review_required", "blocked_env", "test_contract_changed", "regression_failed"}:
+            continue
+        task_id = _text(item.get("id") or item.get("task_id") or item.get("taskId") or item.get("task"), "")
+        if task_id and task_id in state_failed_ids:
+            continue
+        status_key = _group_task_status(item, default="failed")
         failure_status_counts[status_key] = failure_status_counts.get(status_key, 0) + 1
         failure_statuses.append(status_key)
     failure_group_counts = count_task_status_groups(failure_statuses)
@@ -1387,6 +1412,464 @@ def _build_next_actions(
     return deduped[:4]
 
 
+def _state_task_id(entry: Any) -> str:
+    if isinstance(entry, dict):
+        return _text(entry.get("task") or entry.get("task_id") or entry.get("taskId"), "")
+    return _text(entry, "")
+
+
+def _state_status(entry: Any, default: str = "") -> str:
+    if not isinstance(entry, dict):
+        return _text(default, "").lower()
+    return _text(
+        entry.get("task_status")
+        or entry.get("taskStatus")
+        or entry.get("outcome_status")
+        or entry.get("outcomeStatus")
+        or entry.get("status")
+        or default,
+        "",
+    ).lower()
+
+
+def _group_task_status(entry: Any, *, default: str = "failed") -> str:
+    if not isinstance(entry, dict):
+        return _text(default, "failed").lower()
+    return normalize_task_status_for_group(
+        reason=entry.get("reason") or entry.get("failure_reason") or entry.get("failureReason"),
+        task_status=entry.get("task_status") or entry.get("taskStatus"),
+        outcome_status=entry.get("outcome_status") or entry.get("outcomeStatus"),
+        status=entry.get("status"),
+        detail=_text(entry.get("detail") or entry.get("message"), ""),
+        default=default,
+    )
+
+
+def _failure_group_counts_from_entries(
+    entries: Sequence[Any],
+    *,
+    default: str = "failed",
+) -> tuple[dict[str, int], dict[str, int], list[str]]:
+    statuses: list[str] = []
+    status_counts: dict[str, int] = {}
+    for entry in entries:
+        status_key = _group_task_status(entry, default=default)
+        if not status_key:
+            continue
+        status_counts[status_key] = status_counts.get(status_key, 0) + 1
+        statuses.append(status_key)
+    return count_task_status_groups(statuses), status_counts, statuses
+
+
+def _summarize_state_entries(
+    entries: Sequence[Any],
+    backlog_by_id: dict[str, TaskItem],
+    *,
+    allowed_ids: set[str],
+    default_status: str = "",
+) -> list[dict[str, Any]]:
+    summarized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(entries):
+        if not isinstance(raw, dict):
+            continue
+        task_id = _state_task_id(raw)
+        if task_id and allowed_ids and task_id not in allowed_ids:
+            continue
+        key = task_id or f"entry:{index}"
+        if key in seen:
+            continue
+        seen.add(key)
+        task = backlog_by_id.get(task_id)
+        summarized.append(
+            {
+                "task_id": task_id,
+                "taskId": task_id,
+                "task_title": task.title if task else _text(raw.get("title") or raw.get("task_title") or raw.get("taskTitle"), ""),
+                "taskTitle": task.title if task else _text(raw.get("title") or raw.get("task_title") or raw.get("taskTitle"), ""),
+                "status": _state_status(raw, default=default_status),
+                "reason": _text(raw.get("reason"), ""),
+                "detail": _text(raw.get("detail"), ""),
+                "attempt": _int(raw.get("attempt"), 0),
+                "cycle": _int(raw.get("cycle"), 0),
+                "step": _int(raw.get("step"), 0),
+                "branch": _text(raw.get("branch"), ""),
+                "rescue_branch": _text(raw.get("rescue_branch") or raw.get("rescueBranch"), ""),
+                "validation_artifact": _text(raw.get("validation_artifact") or raw.get("validationArtifact"), ""),
+            }
+        )
+    return summarized
+
+
+def _read_json_dict(path: Path) -> dict[str, Any]:
+    payload = _json_file(path, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _build_stale_cleanup_summary(run_dir: Path) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+
+    stop_reconciliation_path = run_dir / "STOP_RECONCILIATION.json"
+    stop_reconciliation = _read_json_dict(stop_reconciliation_path)
+    if stop_reconciliation:
+        ok = bool(stop_reconciliation.get("ok"))
+        decision = _text(stop_reconciliation.get("decision"), "")
+        action_taken = _text(stop_reconciliation.get("action_taken") or stop_reconciliation.get("actionTaken"), "")
+        item_status = "warning" if not ok else ("reconciled" if decision.startswith("reconcile") else "ok")
+        items.append(
+            {
+                "kind": "stop_reconciliation",
+                "status": item_status,
+                "warning": not ok,
+                "message": _short_text(
+                    stop_reconciliation.get("message")
+                    or stop_reconciliation.get("summary")
+                    or "STOP reconciliation recorded.",
+                    max_chars=220,
+                ),
+                "artifact_path": stop_reconciliation_path.as_posix(),
+                "details": {
+                    "decision": decision,
+                    "action_taken": action_taken,
+                    "deleted_paths": _as_list(stop_reconciliation.get("deleted_paths")),
+                },
+            }
+        )
+
+    for path in sorted(run_dir.glob("WORKTREE_MERGE_PENDING_RECONCILED*.json"))[:10]:
+        payload = _read_json_dict(path)
+        if not payload:
+            continue
+        reason = _text(payload.get("reconciliation_reason") or payload.get("reason"), "unknown")
+        removed_paths = [item for item in _as_list(payload.get("removed_pending_paths")) if _text(item)]
+        items.append(
+            {
+                "kind": "pending_marker_reconciliation",
+                "status": "reconciled",
+                "warning": False,
+                "message": f"Pending worktree marker reconciled ({reason}).",
+                "artifact_path": path.as_posix(),
+                "details": {
+                    "reason": reason,
+                    "removed_paths": removed_paths,
+                },
+            }
+        )
+
+    for artifact_name, artifact_status in (
+        ("WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json", "applied_cleanup_failed"),
+        ("WORKTREE_MERGE_DISCARD_CLEANUP_FAILED.json", "discard_cleanup_failed"),
+    ):
+        artifact_path = run_dir / artifact_name
+        payload = _read_json_dict(artifact_path)
+        if not payload:
+            continue
+        reconciliation = payload.get("cleanup_reconciliation") if isinstance(payload.get("cleanup_reconciliation"), dict) else payload.get("cleanupReconciliation")
+        if not isinstance(reconciliation, dict):
+            reconciliation = {}
+        items.append(
+            {
+                "kind": "worktree_cleanup_failed",
+                "status": "warning",
+                "warning": True,
+                "message": _short_text(
+                    payload.get("cleanup_message")
+                    or payload.get("cleanupMessage")
+                    or payload.get("cleanup_error")
+                    or payload.get("cleanupError")
+                    or "Worktree cleanup failed.",
+                    max_chars=220,
+                ),
+                "artifact_path": artifact_path.as_posix(),
+                "details": {
+                    "artifact_status": artifact_status,
+                    "cleanup_path": _text(payload.get("cleanup_path") or payload.get("cleanupPath"), ""),
+                    "worktree_dir": _text(payload.get("worktree_dir") or payload.get("worktreeDir") or payload.get("worktree"), ""),
+                    "blocking_paths": [item for item in _as_list(reconciliation.get("blocking_paths")) if _text(item)],
+                    "residual_directory": bool(reconciliation.get("residual_directory")),
+                    "reconciled": bool(reconciliation.get("reconciled")),
+                },
+            }
+        )
+
+    for artifact_name in ("WORKTREE_MERGE_APPLIED.json", "WORKTREE_MERGE_DISCARDED.json"):
+        artifact_path = run_dir / artifact_name
+        payload = _read_json_dict(artifact_path)
+        if not payload:
+            continue
+        reconciliation = payload.get("cleanup_reconciliation") if isinstance(payload.get("cleanup_reconciliation"), dict) else payload.get("cleanupReconciliation")
+        if not isinstance(reconciliation, dict) or not reconciliation.get("reconciled"):
+            continue
+        reconciled_from = _text(payload.get("cleanup_reconciled_from") or reconciliation.get("reconciled_from") or reconciliation.get("reconciledFrom"), "cleanup_failed")
+        items.append(
+            {
+                "kind": "worktree_cleanup_reconciled",
+                "status": "reconciled",
+                "warning": False,
+                "message": f"Worktree cleanup reconciled from {reconciled_from}.",
+                "artifact_path": artifact_path.as_posix(),
+                "details": {
+                    "final_status": _text(payload.get("status"), ""),
+                    "reconciled_from": reconciled_from,
+                },
+            }
+        )
+
+    warning_count = len([item for item in items if item.get("warning")])
+    item_count = len(items)
+    status = "warning" if warning_count else ("ok" if item_count else "none")
+    return {
+        "status": status,
+        "warning_count": warning_count,
+        "warningCount": warning_count,
+        "item_count": item_count,
+        "itemCount": item_count,
+        "items": items,
+    }
+
+
+def _build_handle_process_warning_summary(run_dir: Path) -> dict[str, Any]:
+    artifact_path = run_dir / "diagnostics" / "WINDOWS_HANDLE_DIAGNOSTICS.json"
+    payload = _read_json_dict(artifact_path)
+    if not payload:
+        return {
+            "status": "missing",
+            "warning_count": 0,
+            "warningCount": 0,
+            "warning_kinds": [],
+            "warningKinds": [],
+            "artifact_path": artifact_path.as_posix(),
+            "source_path": "",
+            "items": [],
+        }
+
+    warnings = [dict(item) for item in _as_list(payload.get("warnings")) if isinstance(item, dict)]
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    warning_kinds = [str(item.get("kind") or "").strip() for item in warnings if str(item.get("kind") or "").strip()]
+    if not warning_kinds:
+        warning_kinds = [str(item).strip() for item in _as_list(summary.get("warning_kinds")) if str(item).strip()]
+    warning_count = len(warnings) if warnings else _int(summary.get("warning_count"), 0)
+    status = "warning" if warning_count else _text(payload.get("status"), "ok")
+    return {
+        "status": status,
+        "warning_count": warning_count,
+        "warningCount": warning_count,
+        "warning_kinds": warning_kinds,
+        "warningKinds": warning_kinds,
+        "artifact_path": _text(payload.get("artifact_path"), artifact_path.as_posix()),
+        "source_path": _text(payload.get("source_path"), ""),
+        "items": warnings[:10],
+        "latest_snapshot": dict(payload.get("latest_snapshot") or {}) if isinstance(payload.get("latest_snapshot"), dict) else {},
+    }
+
+
+def _task_label_for_action(tasks: Sequence[dict[str, Any]]) -> str:
+    task_list = [task for task in tasks if isinstance(task, dict)]
+    if not task_list:
+        return ""
+    first = task_list[0]
+    label = _text(first.get("task_title") or first.get("taskTitle") or first.get("task_id") or first.get("taskId"), "")
+    if not label:
+        return f"{len(task_list)} task(s)"
+    if len(task_list) == 1:
+        return label
+    return f"{label} and {len(task_list) - 1} other task(s)"
+
+
+def _build_operations_next_actions(
+    *,
+    stop_reason: str,
+    queued_count: int,
+    review_required_tasks: Sequence[dict[str, Any]],
+    blocked_env_tasks: Sequence[dict[str, Any]],
+    stale_cleanup: dict[str, Any],
+    handle_process_warnings: dict[str, Any],
+    pending_worktree: dict[str, Any],
+    failures: Sequence[dict[str, Any]],
+) -> list[str]:
+    actions: list[str] = []
+    pending_status = _text(pending_worktree.get("status"), "").lower()
+    if stop_reason == "stop_file":
+        actions.append("Remove the STOP file before starting the next unattended run.")
+    if pending_status in {"pending", "pending review"}:
+        actions.append("Review the pending worktree patch before applying or discarding it.")
+    if _int(stale_cleanup.get("warning_count"), 0) > 0:
+        actions.append("Clear the residual cleanup paths recorded in the stale cleanup artifacts before the next run.")
+    review_label = _task_label_for_action(review_required_tasks)
+    if review_label:
+        actions.append(f"Review preserved work for {review_label} before resuming.")
+    blocked_label = _task_label_for_action(blocked_env_tasks)
+    if blocked_label:
+        actions.append(f"Resolve blocked environment prerequisites for {blocked_label} before resuming.")
+    if _int(handle_process_warnings.get("warning_count"), 0) > 0:
+        actions.append("Inspect WINDOWS_HANDLE_DIAGNOSTICS.json for handle/process growth before the next unattended run.")
+    if queued_count > 0:
+        actions.append(
+            "Resume the remaining queued tasks with --resume-latest after the blockers above are resolved."
+            if actions
+            else "Resume the remaining queued tasks with --resume-latest."
+        )
+    if not actions and failures:
+        first_failure = failures[0] if isinstance(failures[0], dict) else {}
+        task_label = _text(first_failure.get("task_title") or first_failure.get("task_id"), "the failed task")
+        reason = _text(first_failure.get("reason"), "failure")
+        actions.append(f"Investigate {task_label} ({reason}) before rerunning.")
+    if not actions:
+        actions.append("No immediate operator action is required.")
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in actions:
+        text = _text(item, "")
+        if text and text not in seen:
+            seen.add(text)
+            deduped.append(text)
+    return deduped[:5]
+
+
+def build_operations_summary(
+    repo: Path,
+    run_dir: Path,
+    *,
+    stop_reason: str,
+    qa_report: dict[str, Any],
+) -> dict[str, Any]:
+    state = {}
+    try:
+        state = load_state(run_dir / "STATE.json")
+    except Exception:
+        state = {"done": [], "failed": [], "warnings": [], "pending_review": []}
+    backlog = _load_backlog_tasks(run_dir)
+    backlog_by_id = {task.id: task for task in backlog if task.id}
+    backlog_ids = set(backlog_by_id)
+    done_ids = {_state_task_id(item) for item in _as_list(state.get("done")) if _state_task_id(item) in backlog_ids}
+    warning_ids = {_state_task_id(item) for item in _as_list(state.get("warnings")) if _state_task_id(item) in backlog_ids}
+    failed_entries = _summarize_state_entries(_as_list(state.get("failed")), backlog_by_id, allowed_ids=backlog_ids, default_status="failed")
+    pending_review_entries = _summarize_state_entries(
+        _as_list(state.get("pending_review")),
+        backlog_by_id,
+        allowed_ids=backlog_ids,
+        default_status="review_required",
+    )
+
+    combined_entries: dict[str, dict[str, Any]] = {}
+    for entry in failed_entries:
+        task_id = _text(entry.get("task_id") or entry.get("taskId"), "")
+        combined_entries[task_id or f"failed:{len(combined_entries)}"] = dict(entry)
+    for entry in pending_review_entries:
+        task_id = _text(entry.get("task_id") or entry.get("taskId"), "")
+        combined_entries[task_id or f"pending_review:{len(combined_entries)}"] = dict(entry)
+    attempted_ids = set(done_ids).union(warning_ids)
+    attempted_ids.update(_text(entry.get("task_id") or entry.get("taskId"), "") for entry in failed_entries if _text(entry.get("task_id") or entry.get("taskId"), "") in backlog_ids)
+    attempted_ids.update(_text(entry.get("task_id") or entry.get("taskId"), "") for entry in pending_review_entries if _text(entry.get("task_id") or entry.get("taskId"), "") in backlog_ids)
+
+    review_required_tasks = [
+        entry for entry in combined_entries.values()
+        if _text(entry.get("status"), "").lower() in {
+            "review_required",
+            "test_contract_changed",
+        }
+    ]
+    blocked_env_tasks = [
+        entry for entry in combined_entries.values()
+        if _text(entry.get("status"), "").lower() == "blocked_env"
+    ]
+    regression_tasks = [
+        entry for entry in combined_entries.values()
+        if _group_task_status(entry, default="failed") in {"failed", "regression_failed"}
+    ]
+    failure_group_counts, failure_status_counts, _failure_statuses = _failure_group_counts_from_entries(
+        list(combined_entries.values()),
+        default="failed",
+    )
+
+    queued_count = len([task_id for task_id in backlog_ids if task_id not in attempted_ids])
+    completed_count = len(done_ids)
+    stale_cleanup = _build_stale_cleanup_summary(run_dir)
+    handle_process_warnings = _build_handle_process_warning_summary(run_dir)
+    failures = _build_run_failures(state if isinstance(state, dict) else {}, backlog)
+    pending_worktree = _summarize_pending_worktree(repo, run_dir)
+    next_operator_actions = _build_operations_next_actions(
+        stop_reason=stop_reason,
+        queued_count=queued_count,
+        review_required_tasks=review_required_tasks,
+        blocked_env_tasks=blocked_env_tasks,
+        stale_cleanup=stale_cleanup,
+        handle_process_warnings=handle_process_warnings,
+        pending_worktree=pending_worktree,
+        failures=failures,
+    )
+
+    attention_required = bool(
+        review_required_tasks
+        or blocked_env_tasks
+        or regression_tasks
+        or _int(stale_cleanup.get("warning_count"), 0) > 0
+        or _int(handle_process_warnings.get("warning_count"), 0) > 0
+    )
+    status = "needs_attention" if attention_required else ("queued" if queued_count > 0 else "ok")
+    summary_bits = [
+        f"completed={completed_count}",
+        f"queued={queued_count}",
+        f"review_required={len(review_required_tasks)}",
+        f"blocked_env={len(blocked_env_tasks)}",
+        f"regression={len(regression_tasks)}",
+    ]
+    stale_warning_count = _int(stale_cleanup.get("warning_count"), 0)
+    if stale_warning_count > 0:
+        summary_bits.append(f"stale_cleanup_warnings={stale_warning_count}")
+    handle_warning_count = _int(handle_process_warnings.get("warning_count"), 0)
+    if handle_warning_count > 0:
+        summary_bits.append(f"handle_process_warnings={handle_warning_count}")
+    if next_operator_actions:
+        summary_bits.append(f"next={next_operator_actions[0]}")
+
+    return {
+        "schema_version": 1,
+        "kind": "post_run_operations_summary",
+        "generated_at": now_iso(),
+        "repo": str(repo),
+        "run_dir": str(run_dir),
+        "run_id": run_dir.name,
+        "stop_reason": stop_reason,
+        "status": status,
+        "summary": "; ".join(summary_bits),
+        "counts": {
+            "completed": completed_count,
+            "queued": queued_count,
+            "review_required": len(review_required_tasks),
+            "blocked_env": len(blocked_env_tasks),
+            "regression": len(regression_tasks),
+            "regressed": len(regression_tasks),
+            "completedCount": completed_count,
+            "queuedCount": queued_count,
+            "reviewRequired": len(review_required_tasks),
+            "blockedEnv": len(blocked_env_tasks),
+            "regressionCount": len(regression_tasks),
+            "regressedCount": len(regression_tasks),
+        },
+        "failure_status_counts": failure_status_counts,
+        "failureStatusCounts": failure_status_counts,
+        "failure_group_counts": failure_group_counts,
+        "failureGroupCounts": failure_group_counts,
+        "review_required_tasks": review_required_tasks[:5],
+        "reviewRequiredTasks": review_required_tasks[:5],
+        "blocked_env_tasks": blocked_env_tasks[:5],
+        "blockedEnvTasks": blocked_env_tasks[:5],
+        "regression_tasks": regression_tasks[:5],
+        "regressionTasks": regression_tasks[:5],
+        "stale_cleanup": stale_cleanup,
+        "staleCleanup": stale_cleanup,
+        "handle_process_warnings": handle_process_warnings,
+        "handleProcessWarnings": handle_process_warnings,
+        "next_operator_actions": next_operator_actions,
+        "nextOperatorActions": next_operator_actions,
+        "artifacts": {
+            "json": (run_dir / "OPERATIONS_SUMMARY.json").as_posix(),
+            "markdown": (run_dir / "OPERATIONS_SUMMARY.md").as_posix(),
+        },
+    }
+
+
 def _build_final_run_report(repo: Path, run_dir: Path, *, stop_reason: str, qa_report: dict[str, Any]) -> dict[str, Any]:
     state = {}
     try:
@@ -1408,6 +1891,16 @@ def _build_final_run_report(repo: Path, run_dir: Path, *, stop_reason: str, qa_r
     tasks_pending = max(0, tasks_total - tasks_done - tasks_failed - tasks_skipped)
     completion = _build_goals_summary(repo, run_dir)
     failures = _build_run_failures(state, backlog)
+    backlog_ids = {task.id for task in backlog if task.id}
+    failure_entries_for_groups = [
+        entry
+        for entry in (_as_list(state.get("failed")) + _as_list(state.get("pending_review")))
+        if not backlog_ids or _state_task_id(entry) in backlog_ids
+    ]
+    failure_group_counts, failure_status_counts, _failure_statuses = _failure_group_counts_from_entries(
+        failure_entries_for_groups,
+        default="failed",
+    )
     validation_summary = {
         "status": _text(qa_report.get("status"), "missing"),
         "attempts": _int(qa_report.get("summary", {}).get("attempts"), 0),
@@ -1446,6 +1939,12 @@ def _build_final_run_report(repo: Path, run_dir: Path, *, stop_reason: str, qa_r
     ]
     if tasks_failed:
         summary_bits.append(f"{tasks_failed} failed task(s)")
+    if failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0):
+        summary_bits.append(f"{failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0)} blocked-env task(s)")
+    if failure_group_counts.get(STATUS_GROUP_REVIEW, 0):
+        summary_bits.append(f"{failure_group_counts.get(STATUS_GROUP_REVIEW, 0)} review-needed task(s)")
+    if failure_group_counts.get(STATUS_GROUP_REGRESSION, 0):
+        summary_bits.append(f"{failure_group_counts.get(STATUS_GROUP_REGRESSION, 0)} regression task(s)")
     if tasks_skipped:
         summary_bits.append(f"{tasks_skipped} skipped task(s)")
     if next_actions:
@@ -1468,6 +1967,16 @@ def _build_final_run_report(repo: Path, run_dir: Path, *, stop_reason: str, qa_r
             "failed": tasks_failed,
             "skipped": tasks_skipped,
             "pending": tasks_pending,
+            "regressed": failure_group_counts.get(STATUS_GROUP_REGRESSION, 0),
+            "review": failure_group_counts.get(STATUS_GROUP_REVIEW, 0),
+            "blocked_env": failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0),
+            "tasks_regressed": failure_group_counts.get(STATUS_GROUP_REGRESSION, 0),
+            "tasks_review": failure_group_counts.get(STATUS_GROUP_REVIEW, 0),
+            "tasks_blocked_env": failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0),
+            "failure_status_counts": failure_status_counts,
+            "failureStatusCounts": failure_status_counts,
+            "failure_group_counts": failure_group_counts,
+            "failureGroupCounts": failure_group_counts,
         },
         "goals": completion,
         "validation": validation_summary,
@@ -1558,6 +2067,9 @@ def _render_final_run_report_md(report: dict[str, Any]) -> str:
     lines.append(f"- total: {tasks.get('total', 0)}")
     lines.append(f"- done: {tasks.get('done', 0)}")
     lines.append(f"- failed: {tasks.get('failed', 0)}")
+    lines.append(f"- blocked_env: {tasks.get('blocked_env', tasks.get('tasks_blocked_env', 0))}")
+    lines.append(f"- review: {tasks.get('review', tasks.get('tasks_review', 0))}")
+    lines.append(f"- regression: {tasks.get('regressed', tasks.get('tasks_regressed', 0))}")
     lines.append(f"- skipped: {tasks.get('skipped', 0)}")
     lines.append(f"- pending: {tasks.get('pending', 0)}")
     lines.append("")
@@ -1600,6 +2112,56 @@ def _render_final_run_report_md(report: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _render_operations_summary_md(summary: dict[str, Any]) -> str:
+    counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
+    stale_cleanup = summary.get("stale_cleanup") if isinstance(summary.get("stale_cleanup"), dict) else {}
+    handle_warnings = summary.get("handle_process_warnings") if isinstance(summary.get("handle_process_warnings"), dict) else {}
+    lines: list[str] = []
+    lines.append("# Operations Summary")
+    lines.append("")
+    lines.append(f"- run_id: {summary.get('run_id')}")
+    lines.append(f"- status: {summary.get('status')}")
+    lines.append(f"- stop_reason: {summary.get('stop_reason')}")
+    lines.append(f"- summary: {summary.get('summary')}")
+    lines.append("")
+    lines.append("## Counts")
+    lines.append("")
+    lines.append(f"- completed: {counts.get('completed', 0)}")
+    lines.append(f"- queued: {counts.get('queued', 0)}")
+    lines.append(f"- review_required: {counts.get('review_required', 0)}")
+    lines.append(f"- blocked_env: {counts.get('blocked_env', 0)}")
+    lines.append(f"- regression: {counts.get('regression', counts.get('regressed', 0))}")
+    lines.append("")
+    lines.append("## Stale Cleanup")
+    lines.append("")
+    lines.append(f"- status: {stale_cleanup.get('status', 'none')}")
+    lines.append(f"- warning_count: {stale_cleanup.get('warning_count', 0)}")
+    for item in _as_list(stale_cleanup.get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        lines.append(f"- {item.get('kind')}: {item.get('message')}")
+    lines.append("")
+    lines.append("## Handle And Process Warnings")
+    lines.append("")
+    lines.append(f"- status: {handle_warnings.get('status', 'missing')}")
+    lines.append(f"- warning_count: {handle_warnings.get('warning_count', 0)}")
+    for item in _as_list(handle_warnings.get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        lines.append(f"- {item.get('kind')}: {item.get('message')}")
+    lines.append("")
+    lines.append("## Next Operator Actions")
+    lines.append("")
+    actions = _as_list(summary.get("next_operator_actions") or summary.get("nextOperatorActions") or [])
+    if actions:
+        for action in actions:
+            lines.append(f"- {action}")
+    else:
+        lines.append("- No immediate operator action is required.")
+    lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def write_run_report_artifacts(
     *,
     repo: Path,
@@ -1610,6 +2172,12 @@ def write_run_report_artifacts(
     """Write QA and final run reports for browser consumption."""
     qa_report = build_qa_validation_report(repo, run_dir)
     final_report = _build_final_run_report(repo, run_dir, stop_reason=stop_reason, qa_report=qa_report)
+    operations_summary = build_operations_summary(
+        repo,
+        run_dir,
+        stop_reason=stop_reason,
+        qa_report=qa_report,
+    )
     analyzer_result: dict[str, Any] = {}
     if last_task_id:
         final_report["last_task_id"] = last_task_id
@@ -1621,6 +2189,16 @@ def write_run_report_artifacts(
     qa_md = run_dir / "QA_VALIDATION_REPORT.md"
     final_json = run_dir / "FINAL_RUN_REPORT.json"
     final_md = run_dir / "FINAL_RUN_REPORT.md"
+    operations_json = run_dir / "OPERATIONS_SUMMARY.json"
+    operations_md = run_dir / "OPERATIONS_SUMMARY.md"
+    final_artifacts = final_report.get("artifacts") if isinstance(final_report.get("artifacts"), dict) else {}
+    final_artifacts.update(
+        {
+            "operations_summary_json": operations_json.as_posix(),
+            "operations_summary_markdown": operations_md.as_posix(),
+        }
+    )
+    final_report["artifacts"] = final_artifacts
     try:
         atomic_write_json(qa_json, qa_report)
     except Exception:
@@ -1638,18 +2216,29 @@ def write_run_report_artifacts(
     except Exception:
         pass
     try:
+        atomic_write_json(operations_json, operations_summary)
+    except Exception:
+        safe_write_text(operations_json, json.dumps(operations_summary, ensure_ascii=False, indent=2, default=str) + "\n")
+    try:
+        safe_write_text(operations_md, _render_operations_summary_md(operations_summary))
+    except Exception:
+        pass
+    try:
         analyzer_result = write_analyzer_artifacts(repo, run_dir)
     except Exception:
         analyzer_result = {}
     return {
         "qa_validation_report": qa_report,
         "final_run_report": final_report,
+        "operations_summary": operations_summary,
         "analyzer_summary": analyzer_result.get("summary") if isinstance(analyzer_result, dict) else None,
         "artifacts": {
             "qa_validation_json": qa_json.as_posix(),
             "qa_validation_markdown": qa_md.as_posix(),
             "final_run_json": final_json.as_posix(),
             "final_run_markdown": final_md.as_posix(),
+            "operations_summary_json": operations_json.as_posix(),
+            "operations_summary_markdown": operations_md.as_posix(),
             "analyzer_summary_json": str(
                 (
                     (analyzer_result.get("artifacts") or {}).get("summary_json")
@@ -1747,6 +2336,7 @@ def build_local_shutdown_report(
     state_counts = ctx.get("state_counts") or {}
     try:
         failed = state.get("failed") or []
+        pending_review = state.get("pending_review") or []
         warnings = state.get("warnings") or []
         failed_count = state_counts.get("failed") if isinstance(state_counts, dict) else None
         if failed_count is None:
@@ -1754,7 +2344,14 @@ def build_local_shutdown_report(
         warnings_count = state_counts.get("warnings") if isinstance(state_counts, dict) else None
         if warnings_count is None:
             warnings_count = len(warnings)
+        failure_group_counts, _failure_status_counts, _failure_statuses = _failure_group_counts_from_entries(
+            _as_list(failed) + _as_list(pending_review),
+            default="failed",
+        )
         lines.append(f"- failed_count: {int(failed_count)}")
+        lines.append(f"- blocked_env_count: {failure_group_counts.get(STATUS_GROUP_BLOCKED_ENV, 0)}")
+        lines.append(f"- review_needed_count: {failure_group_counts.get(STATUS_GROUP_REVIEW, 0)}")
+        lines.append(f"- regression_count: {failure_group_counts.get(STATUS_GROUP_REGRESSION, 0)}")
         lines.append(f"- warnings_count: {int(warnings_count)}")
         if failed:
             lines.append("")

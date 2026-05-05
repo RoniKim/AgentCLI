@@ -2814,6 +2814,26 @@ def _run_log_tail_session_harness(steps, fetch_responses=None):
     return json.loads(completed.stdout)
 
 
+class WebConsoleStatusPollingScopeTests(unittest.TestCase):
+    def test_dashboard_refresh_uses_compact_status_scope(self) -> None:
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "refreshSnapshot", "args": []},
+            ]
+        )
+
+        self.assertEqual(["/api/status?scope=dashboard"], shell["fetchCalls"])
+
+    def test_switching_to_history_requests_explicit_full_status_snapshot(self) -> None:
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "setView", "args": ["history"]},
+            ]
+        )
+
+        self.assertEqual(["/api/status?scope=full"], shell["fetchCalls"])
+
+
 class WebConsoleRedactionHelperTests(unittest.TestCase):
     def test_web_redaction_helpers_are_reexported_from_web(self) -> None:
         import agent_runner.web as web_module
@@ -2841,6 +2861,10 @@ class WebConsoleRedactionHelperTests(unittest.TestCase):
                     "raw": "Task build output with secret token=abc123",
                 }
             ],
+            "last_line": {
+                "msg": "Last line with secret token=abc123",
+                "raw": "Last line with secret token=abc123",
+            },
             "tail": "cycle summary token=abc123",
             "files": {
                 "cycle_summary": "D:/runs/latest/cycle_summary.log",
@@ -2871,6 +2895,8 @@ class WebConsoleRedactionHelperTests(unittest.TestCase):
         redacted = _redact_web_log_payload(payload)
         self.assertEqual("[redacted]", redacted["entries"][0]["msg"])
         self.assertEqual("[redacted]", redacted["entries"][0]["raw"])
+        self.assertEqual("[redacted]", redacted["last_line"]["msg"])
+        self.assertEqual("[redacted]", redacted["last_line"]["raw"])
         self.assertEqual("[redacted]", redacted["tail"])
         self.assertEqual("[redacted]", redacted["files"]["cycle_summary"])
         self.assertEqual("[redacted]", redacted["files"]["run_log"])
@@ -4237,6 +4263,110 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             self.assertIn(backend_phrase, html)
             self.assertIn(warning_text, html)
 
+    def test_api_status_fresh_live_snapshot_does_not_render_stale_badge(self) -> None:
+        payload = self.client.get("/api/status").json()
+        self.assertGreater(payload["snapshotRefresh"]["lastUpdatedAt"], 0)
+
+        normalized = _run_adapter_harness([{"kind": "call", "name": "normalizeSnapshot", "args": [payload]}])[0]
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+                {"kind": "call", "name": "snapshotRefreshDisplay", "args": []},
+                {"kind": "call", "name": "renderTopbar", "args": []},
+            ]
+        )
+
+        display = shell["results"][1]
+        topbar = shell["results"][2]
+        self.assertEqual("ready", display["status"])
+        self.assertFalse(display["stale"])
+        self.assertNotIn("status-chip--stale", topbar)
+
+    def test_api_status_stale_live_snapshot_renders_stale_badge_from_artifact_age(self) -> None:
+        stale_repo = self._tmp / "stale-live-snapshot-repo"
+        stale_repo.mkdir(parents=True, exist_ok=True)
+        stale_config_path = stale_repo / "config" / "agentcli.json"
+        _write_config(stale_config_path, stale_repo)
+
+        run_dir = stale_repo / ".AgentCLI" / "agent_runs" / "20260426-120000"
+        _write_run_bundle(run_dir, status="running", final_rc=0, final_reason="")
+
+        stale_stamp = (datetime.now(timezone.utc) - timedelta(minutes=5)).timestamp()
+        for path in sorted(run_dir.rglob("*")):
+            os.utime(path, (stale_stamp, stale_stamp))
+        os.utime(run_dir, (stale_stamp, stale_stamp))
+
+        controller_status = self._controller_status(
+            run_dir,
+            repo=stale_repo.as_posix(),
+            config_path=stale_config_path.as_posix(),
+            startedAt=int((datetime.now(timezone.utc) - timedelta(minutes=6)).timestamp() * 1000),
+            elapsedSec=360,
+            last_event="2026-04-26T12:00:00 stage_event",
+        )
+        payload = self._api_status(stale_repo, controller_status)
+        self.assertLess(payload["snapshotRefresh"]["lastUpdatedAt"], int((datetime.now(timezone.utc) - timedelta(minutes=4)).timestamp() * 1000))
+
+        normalized = _run_adapter_harness([{"kind": "call", "name": "normalizeSnapshot", "args": [payload]}])[0]
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+                {"kind": "call", "name": "snapshotRefreshDisplay", "args": []},
+                {"kind": "call", "name": "renderTopbar", "args": []},
+            ]
+        )
+
+        display = shell["results"][1]
+        topbar = shell["results"][2]
+        self.assertEqual("stale", display["status"])
+        self.assertTrue(display["stale"])
+        self.assertIn("status-chip--stale", topbar)
+
+    def test_history_view_uses_selected_run_artifact_freshness_for_stale_badge(self) -> None:
+        history_repo = self._tmp / "stale-history-snapshot-repo"
+        history_repo.mkdir(parents=True, exist_ok=True)
+        history_config_path = history_repo / "config" / "agentcli.json"
+        _write_config(history_config_path, history_repo)
+
+        live_run_dir = history_repo / ".AgentCLI" / "agent_runs" / "20260426-130000"
+        _write_run_bundle(live_run_dir, status="running", final_rc=0, final_reason="")
+        stale_run_dir = history_repo / ".AgentCLI" / "agent_runs" / "20260426-120000"
+        _write_run_bundle(stale_run_dir, status="success", final_rc=0, final_reason="project_complete")
+
+        stale_stamp = (datetime.now(timezone.utc) - timedelta(minutes=5)).timestamp()
+        for path in sorted(stale_run_dir.rglob("*")):
+            os.utime(path, (stale_stamp, stale_stamp))
+        os.utime(stale_run_dir, (stale_stamp, stale_stamp))
+
+        controller_status = self._controller_status(
+            live_run_dir,
+            repo=history_repo.as_posix(),
+            config_path=history_config_path.as_posix(),
+            startedAt=int((datetime.now(timezone.utc) - timedelta(seconds=10)).timestamp() * 1000),
+            elapsedSec=10,
+            last_event="2026-04-26T13:00:00 stage_event",
+        )
+        payload = self._api_status(history_repo, controller_status)
+        stale_history = next(item for item in payload["history"]["items"] if item["runDir"] == stale_run_dir.as_posix())
+        self.assertGreater(stale_history["freshnessTimestamp"], 0)
+
+        normalized = _run_adapter_harness([{"kind": "call", "name": "normalizeSnapshot", "args": [payload]}])[0]
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+                {"kind": "call", "name": "setView", "args": ["history"]},
+                {"kind": "call", "name": "setHistorySelection", "args": [stale_history["id"]]},
+                {"kind": "call", "name": "snapshotRefreshDisplay", "args": []},
+                {"kind": "call", "name": "renderTopbar", "args": []},
+            ]
+        )
+
+        display = shell["results"][3]
+        topbar = shell["results"][4]
+        self.assertEqual("stale", display["status"])
+        self.assertTrue(display["stale"])
+        self.assertIn("status-chip--stale", topbar)
+
     def test_api_status_long_running_stage_summary_redacts_secret_signals(self) -> None:
         secret = "token=abc123"
         _, controller_status = self._write_long_running_stage_bundle(
@@ -4551,7 +4681,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIn("Artifact writer", live_state_html[1])
         self.assertIn("Alive", live_state_html[1])
         self.assertIn("Flushing", live_state_html[1])
-        self.assertIn("unavailable", live_state_html[2])
+        self.assertIn("Unavailable", live_state_html[2])
 
     def test_api_status_live_state_contract_keeps_runner_backend_children_and_artifact_states_separate(self) -> None:
         from agent_runner.web import _build_live_state_payload
@@ -4570,6 +4700,12 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             {**base_controller_status, "running": False},
             progress={"run_status": "running"},
             active_run={"status": "running"},
+            controller_available=True,
+        )
+        runner_only = _build_live_state_payload(
+            {**base_controller_status, "running": True},
+            progress={"run_status": "stopped"},
+            active_run={"status": "stopped"},
             controller_available=True,
         )
         child_only = _build_live_state_payload(
@@ -4620,14 +4756,19 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("unavailable", backend_only["trackedChildren"]["status"])
         self.assertEqual("unavailable", backend_only["artifactWriter"]["status"])
 
+        self.assertEqual("alive", runner_only["runnerProcess"]["status"])
+        self.assertEqual("stopped", runner_only["taskBackend"]["status"])
+        self.assertEqual("unavailable", runner_only["trackedChildren"]["status"])
+        self.assertEqual("unavailable", runner_only["artifactWriter"]["status"])
+
         self.assertEqual("stopped", child_only["runnerProcess"]["status"])
-        self.assertEqual("idle", child_only["taskBackend"]["status"])
+        self.assertEqual("stopped", child_only["taskBackend"]["status"])
         self.assertEqual("alive", child_only["trackedChildren"]["status"])
         self.assertEqual("idle", child_only["artifactWriter"]["status"])
 
         self.assertEqual("alive", artifact_flushing["runnerProcess"]["status"])
         self.assertEqual("alive", artifact_flushing["taskBackend"]["status"])
-        self.assertEqual("stopped", artifact_flushing["trackedChildren"]["status"])
+        self.assertEqual("idle", artifact_flushing["trackedChildren"]["status"])
         self.assertEqual("flushing", artifact_flushing["artifactWriter"]["status"])
 
         raw_legacy_live_state = {
@@ -4704,46 +4845,80 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         results = _run_adapter_harness(
             [
                 {"kind": "call", "name": "normalizeLiveState", "args": [raw_legacy_live_state]},
+                {"kind": "call", "name": "runnerControlStateInfo", "args": [make_control(backend_only, running=False, run_status="running")]},
+                {"kind": "call", "name": "runnerControlStateInfo", "args": [make_control(runner_only, running=True, run_status="stopped")]},
+                {"kind": "call", "name": "runnerControlStateInfo", "args": [make_control(child_only, running=False, run_status="idle")]},
+                {"kind": "call", "name": "runnerControlStateInfo", "args": [make_control(artifact_flushing, running=True, run_status="running")]},
                 {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(no_run, running=False, run_status="idle", controller_available=False), {"chipTone": "paused", "label": "Unavailable"}]},
                 {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(backend_only, running=False, run_status="running"), {"chipTone": "running", "label": "Running"}]},
+                {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(runner_only, running=True, run_status="stopped"), {"chipTone": "warn", "label": "Task backend: Stopped"}]},
                 {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(child_only, running=False, run_status="idle"), {"chipTone": "idle", "label": "Idle"}]},
                 {"kind": "call", "name": "runnerControlDetailRows", "args": [make_control(artifact_flushing, running=True, run_status="running"), {"chipTone": "loading", "label": "Flushing"}]},
             ]
         )
 
         normalized_legacy = results[0]
-        self.assertEqual("unavailable", normalized_legacy["runnerProcess"]["status"])
-        self.assertEqual("unavailable", normalized_legacy["runnerProcess"]["statusLabel"])
-        self.assertEqual("unavailable", normalized_legacy["taskBackend"]["status"])
-        self.assertEqual("unavailable", normalized_legacy["taskBackend"]["statusLabel"])
-        self.assertEqual("unavailable", normalized_legacy["trackedChildren"]["status"])
-        self.assertEqual("unavailable", normalized_legacy["trackedChildren"]["statusLabel"])
-        self.assertEqual("unavailable", normalized_legacy["artifactWriter"]["status"])
-        self.assertEqual("unavailable", normalized_legacy["artifactWriter"]["statusLabel"])
+        self.assertTrue(normalized_legacy["available"])
+        self.assertEqual("alive", normalized_legacy["runnerProcess"]["status"])
+        self.assertEqual("Alive", normalized_legacy["runnerProcess"]["statusLabel"])
+        self.assertEqual("alive", normalized_legacy["taskBackend"]["status"])
+        self.assertEqual("Alive", normalized_legacy["taskBackend"]["statusLabel"])
+        self.assertEqual("alive", normalized_legacy["trackedChildren"]["status"])
+        self.assertEqual("Alive", normalized_legacy["trackedChildren"]["statusLabel"])
+        self.assertEqual("flushing", normalized_legacy["artifactWriter"]["status"])
+        self.assertEqual("Flushing", normalized_legacy["artifactWriter"]["statusLabel"])
 
-        no_run_rows = {row["label"]: row["value"] for row in results[1]}
-        self.assertEqual("unavailable", no_run_rows["Runner process"])
-        self.assertEqual("unavailable", no_run_rows["Task backend"])
-        self.assertEqual("unavailable", no_run_rows["Tracked children"])
-        self.assertEqual("unavailable", no_run_rows["Artifact writer"])
+        backend_summary = results[1]
+        self.assertEqual("Task backend: Alive", backend_summary["label"])
+        self.assertEqual("Live states", backend_summary["title"])
+        self.assertIn("Runner process: Stopped", backend_summary["copy"])
+        self.assertIn("Task backend: Alive", backend_summary["copy"])
 
-        backend_rows = {row["label"]: row["value"] for row in results[2]}
+        runner_summary = results[2]
+        self.assertEqual("Task backend: Stopped", runner_summary["label"])
+        self.assertEqual("Live states", runner_summary["title"])
+        self.assertIn("Runner process: Alive", runner_summary["copy"])
+        self.assertIn("Task backend: Stopped", runner_summary["copy"])
+
+        child_summary = results[3]
+        self.assertEqual("Tracked children: Alive (1/1)", child_summary["label"])
+        self.assertEqual("Live states", child_summary["title"])
+        self.assertIn("Tracked children: Alive (1/1)", child_summary["copy"])
+
+        artifact_summary = results[4]
+        self.assertEqual("Artifact writer: Flushing (final artifact collection)", artifact_summary["label"])
+        self.assertEqual("Live states", artifact_summary["title"])
+        self.assertIn("Artifact writer: Flushing (final artifact collection)", artifact_summary["copy"])
+
+        no_run_rows = {row["label"]: row["value"] for row in results[5]}
+        self.assertEqual("Unavailable", no_run_rows["Runner process"])
+        self.assertEqual("Unavailable", no_run_rows["Task backend"])
+        self.assertEqual("Unavailable", no_run_rows["Tracked children"])
+        self.assertEqual("Unavailable", no_run_rows["Artifact writer"])
+
+        backend_rows = {row["label"]: row["value"] for row in results[6]}
         self.assertEqual("Stopped", backend_rows["Runner process"])
         self.assertEqual("Alive", backend_rows["Task backend"])
-        self.assertEqual("unavailable", backend_rows["Tracked children"])
-        self.assertEqual("unavailable", backend_rows["Artifact writer"])
+        self.assertEqual("Unavailable", backend_rows["Tracked children"])
+        self.assertEqual("Unavailable", backend_rows["Artifact writer"])
 
-        child_rows = {row["label"]: row["value"] for row in results[3]}
+        runner_rows = {row["label"]: row["value"] for row in results[7]}
+        self.assertEqual("Alive", runner_rows["Runner process"])
+        self.assertEqual("Stopped", runner_rows["Task backend"])
+        self.assertEqual("Unavailable", runner_rows["Tracked children"])
+        self.assertEqual("Unavailable", runner_rows["Artifact writer"])
+
+        child_rows = {row["label"]: row["value"] for row in results[8]}
         self.assertEqual("Stopped", child_rows["Runner process"])
-        self.assertEqual("Idle", child_rows["Task backend"])
-        self.assertEqual("Alive", child_rows["Tracked children"])
+        self.assertEqual("Stopped", child_rows["Task backend"])
+        self.assertEqual("Alive (1/1)", child_rows["Tracked children"])
         self.assertEqual("Idle", child_rows["Artifact writer"])
 
-        artifact_rows = {row["label"]: row["value"] for row in results[4]}
+        artifact_rows = {row["label"]: row["value"] for row in results[9]}
         self.assertEqual("Alive", artifact_rows["Runner process"])
         self.assertEqual("Alive", artifact_rows["Task backend"])
-        self.assertEqual("Stopped", artifact_rows["Tracked children"])
-        self.assertEqual("Flushing", artifact_rows["Artifact writer"])
+        self.assertEqual("Idle", artifact_rows["Tracked children"])
+        self.assertEqual("Flushing (final artifact collection)", artifact_rows["Artifact writer"])
 
     def test_api_status_prefers_active_run_quota_over_metrics_when_both_are_real(self) -> None:
         from agent_runner import web as web_module
@@ -5623,7 +5798,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertTrue(config["schema"]["repo"]["restart"])
         self.assertEqual(self.repo.as_posix(), config["values"]["repo"])
         self.assertEqual(list(BUILTIN_ROLE_SPECS), config["schema"]["roles"]["options"])
-        self.assertEqual("Built-in order: PM, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.", config["schema"]["roles"]["hint"])
+        self.assertEqual("Built-in order: PM, PL, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.", config["schema"]["roles"]["hint"])
         self.assertIn("security.enabled", config["schema"])
         self.assertEqual("Security enabled", config["schema"]["security.enabled"]["label"])
         self.assertEqual("project", config["schema"]["security.enabled"]["group"])
@@ -5925,19 +6100,27 @@ class WebConsoleReadonlyTests(unittest.TestCase):
                     },
                 )
                 worktree = self.client.get("/api/worktree").json()
-                self.assertEqual(status_name, worktree["status"])
+                self.assertEqual("none", worktree["status"])
                 self.assertFalse(worktree["reviewRequired"])
-                self.assertEqual(self.run_dir / artifact_name, Path(worktree["statusFile"]))
-                self.assertEqual(expected_cleanup_state, worktree["cleanupState"])
-                self.assertEqual(self.repo / "worktree", Path(worktree["cleanupPath"]))
-                self.assertTrue(worktree["changedFiles"])
-                self.assertEqual("agent_runner/web.py", worktree["changedFiles"][0]["path"])
-                self.assertIn(status_name.split("_")[0], worktree["summary"].lower())
+                self.assertEqual("", worktree["statusFile"])
+                self.assertEqual("none", worktree["cleanupState"])
+                self.assertEqual([], worktree["changedFiles"])
                 self.assertEqual("", worktree["fastForwardRef"])
                 self.assertEqual("", worktree["dirtyPatchPath"])
                 self.assertEqual("", worktree["dirtyPatchHash"])
                 self.assertIsNone(worktree["dirtyPatchCheck"])
                 self.assertIsNone(worktree["dirtyPatchApplied"])
+                historical = worktree["historicalArtifacts"]
+                self.assertEqual(1, len(historical))
+                self.assertEqual(status_name, historical[0]["status"])
+                self.assertFalse(historical[0]["reviewRequired"])
+                self.assertEqual(self.run_dir / artifact_name, Path(historical[0]["statusFile"]))
+                self.assertEqual(expected_cleanup_state, historical[0]["cleanupState"])
+                self.assertEqual(self.repo / "worktree", Path(historical[0]["cleanupPath"]))
+                self.assertTrue(historical[0]["changedFiles"])
+                self.assertEqual("agent_runner/web.py", historical[0]["changedFiles"][0]["path"])
+                self.assertIn(status_name.split("_")[0], historical[0]["summary"].lower())
+                self.assertFalse(historical[0]["mutatingActionsEnabled"])
 
         with self.subTest("split-merge-recovery"):
             self._clear_worktree_artifacts()
@@ -5996,18 +6179,24 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             )
 
             worktree = self.client.get("/api/worktree").json()
-            self.assertEqual("applied", worktree["status"])
+            self.assertEqual("none", worktree["status"])
             self.assertFalse(worktree["reviewRequired"])
-            self.assertEqual("fedcba98", worktree["fastForwardRef"])
-            self.assertEqual("fedcba98", worktree["fast_forward_ref"])
-            self.assertEqual(split_patch_path.as_posix(), worktree["dirtyPatchPath"])
-            self.assertEqual(split_patch_path.as_posix(), worktree["dirty_patch_path"])
-            self.assertEqual(split_hash, worktree["dirtyPatchHash"])
-            self.assertEqual(split_hash, worktree["dirty_patch_hash"])
-            self.assertTrue(worktree["dirtyPatchApplied"])
-            self.assertTrue(worktree["dirty_patch_applied"])
-            self.assertEqual("ok", worktree["dirtyPatchCheck"]["status"])
-            self.assertEqual("ok", worktree["dirty_patch_check"]["status"])
+            historical = worktree["historicalArtifacts"]
+            self.assertEqual(1, len(historical))
+            artifact = historical[0]
+            self.assertEqual("applied", artifact["status"])
+            self.assertFalse(artifact["reviewRequired"])
+            self.assertEqual("fedcba98", artifact["fastForwardRef"])
+            self.assertEqual("fedcba98", artifact["fast_forward_ref"])
+            self.assertEqual(split_patch_path.as_posix(), artifact["dirtyPatchPath"])
+            self.assertEqual(split_patch_path.as_posix(), artifact["dirty_patch_path"])
+            self.assertEqual(split_hash, artifact["dirtyPatchHash"])
+            self.assertEqual(split_hash, artifact["dirty_patch_hash"])
+            self.assertTrue(artifact["dirtyPatchApplied"])
+            self.assertTrue(artifact["dirty_patch_applied"])
+            self.assertEqual("ok", artifact["dirtyPatchCheck"]["status"])
+            self.assertEqual("ok", artifact["dirty_patch_check"]["status"])
+            self.assertFalse(artifact["mutatingActionsEnabled"])
 
         for status_name, artifact_name in [
             ("applied_cleanup_failed", "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json"),
@@ -6105,14 +6294,21 @@ class WebConsoleReadonlyTests(unittest.TestCase):
                     },
                 )
                 worktree = self.client.get("/api/worktree").json()
-                self.assertEqual(final_status, worktree["status"])
+                self.assertEqual("none", worktree["status"])
                 self.assertFalse(worktree["reviewRequired"])
-                self.assertEqual(self.run_dir / final_artifact, Path(worktree["statusFile"]))
-                self.assertEqual("done", worktree["cleanupState"])
-                self.assertTrue(worktree["cleanupReconciliation"]["reconciled"])
-                self.assertEqual(failed_status, worktree["cleanupReconciliation"]["reconciled_from"])
-                self.assertEqual("cleanup_failed_reconcile", worktree["resolutionActions"][-1]["kind"])
-                self.assertEqual("done", worktree["resolutionActions"][-1]["status"])
+                self.assertEqual("", worktree["statusFile"])
+                self.assertEqual("none", worktree["cleanupState"])
+                historical = worktree["historicalArtifacts"]
+                self.assertEqual(1, len(historical))
+                artifact = historical[0]
+                self.assertEqual(final_status, artifact["status"])
+                self.assertEqual(self.run_dir / final_artifact, Path(artifact["statusFile"]))
+                self.assertEqual("done", artifact["cleanupState"])
+                self.assertTrue(artifact["cleanupReconciliation"]["reconciled"])
+                self.assertEqual(failed_status, artifact["cleanupReconciliation"]["reconciled_from"])
+                self.assertEqual("cleanup_failed_reconcile", artifact["resolutionActions"][-1]["kind"])
+                self.assertEqual("done", artifact["resolutionActions"][-1]["status"])
+                self.assertFalse(artifact["mutatingActionsEnabled"])
                 self.assertFalse((self.run_dir / failed_artifact).exists())
                 self.assertTrue((self.run_dir / final_artifact).exists())
 
@@ -6810,6 +7006,31 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("error_log", payload["source_id"])
         self.assertTrue(payload["source"]["available"])
 
+    def test_api_logs_tail_reports_eof_last_line_and_no_output_for_stalled_run_log(self) -> None:
+        from agent_runner import web as web_module
+        from fastapi.testclient import TestClient
+
+        stale_at = datetime.now(timezone.utc) - timedelta(minutes=20)
+        _write(
+            self.run_dir / "logs" / "run.log",
+            f"{stale_at.strftime('%Y-%m-%d %H:%M:%S')} [INFO] stalled but visible line\n",
+        )
+        controller_status = self._controller_status(self.run_dir, running=True, stage="Dev")
+        with patch.object(web_module, "_build_runner_controller", return_value=FakeRunnerController(controller_status)):
+            client = TestClient(self._create_app(self.repo))
+
+        payload = client.get("/api/logs/tail", params={"source": "run_log", "cursor": 1, "max_lines": 5}).json()
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual("eof", payload["state"])
+        self.assertTrue(payload["eof"])
+        self.assertEqual([], payload["entries"])
+        self.assertEqual(1, payload["next_cursor"])
+        self.assertEqual("stalled but visible line", payload["last_line"]["msg"])
+        self.assertTrue(payload["output_stalled"])
+        self.assertIsInstance(payload["no_output_minutes"], int)
+        self.assertGreaterEqual(payload["no_output_minutes"], 19)
+
     def test_api_logs_tail_reports_read_errors(self) -> None:
         with patch.object(Path, "open", side_effect=OSError("simulated read failure")):
             payload = self._api_log_tail(source="events_jsonl", max_lines=1)
@@ -7159,6 +7380,144 @@ Another unsupported line.
             self.assertEqual("empty", fallback["sectionState"]["stages"]["status"])
             self.assertEqual("empty", fallback["sectionState"]["backlog"]["status"])
 
+    def test_adapter_backlog_counters_split_task_status_groups(self) -> None:
+        adapted = _run_adapter_harness(
+            [
+                {
+                    "kind": "call",
+                    "name": "adaptBacklog",
+                    "args": [
+                        {
+                            "items": [
+                                {"id": "T1", "title": "Install dependency", "status": "failed", "task_status": "blocked_env"},
+                                {"id": "T2", "title": "Review selector contract", "status": "failed", "task_status": "test_contract_changed"},
+                                {"id": "T3", "title": "Fix regression", "status": "failed", "task_status": "regression_failed"},
+                            ],
+                            "counts": {},
+                        }
+                    ],
+                }
+            ]
+        )[0]
+
+        self.assertEqual(3, adapted["counts"]["failed"])
+        self.assertEqual(1, adapted["counts"]["blocked_env"])
+        self.assertEqual(1, adapted["counts"]["review"])
+        self.assertEqual(1, adapted["counts"]["regressed"])
+
+    def test_dashboard_active_task_prefers_live_runner_state(self) -> None:
+        run_dir, controller_status = self._write_long_running_stage_bundle(
+            run_name="20260428-dashboard-live-preferred",
+            active_stage="Dev",
+            elapsed_minutes=18,
+            log_minutes_ago=2,
+            backend_minutes_ago=1,
+        )
+        controller_status["current_task_id"] = "T-LIVE-77"
+        controller_status["current_task_title"] = "Live runner task"
+        controller_status["attempt"] = 7
+        controller_status["branch"] = "live/branch"
+
+        payload = self._api_status(self.repo, controller_status)
+
+        self.assertEqual("T-LIVE-77", payload["active_run"]["task"])
+        self.assertEqual("Live runner task", payload["active_run"]["taskTitle"])
+        self.assertEqual(7, payload["active_run"]["attempt"])
+        self.assertEqual("live/branch", payload["active_run"]["branch"])
+        self.assertEqual("T-LIVE-77", payload["progress"]["current_task_id"])
+        self.assertEqual("Live runner task", payload["progress"]["current_task_title"])
+        self.assertEqual(7, payload["progress"]["attempt"])
+        self.assertEqual("live/branch", payload["progress"]["branch"])
+        self.assertEqual("T-LIVE-77", payload["liveRun"]["currentTask"]["id"])
+        self.assertEqual("Live runner task", payload["liveRun"]["currentTask"]["title"])
+        self.assertEqual(7, payload["liveRun"]["currentTask"]["attempt"])
+        self.assertEqual("live/branch", payload["liveRun"]["identity"]["branch"])
+
+        _normalized, dashboard_html, _pipeline_html = self._render_snapshot_views(payload)
+        self.assertIn("Live runner task", dashboard_html)
+        self.assertIn("T-LIVE-77", dashboard_html)
+        self.assertNotIn("task title unavailable", dashboard_html)
+
+    def test_dashboard_active_task_falls_back_to_backlog_state(self) -> None:
+        _run_dir, controller_status = self._write_long_running_stage_bundle(
+            run_name="20260428-dashboard-backlog-fallback",
+            active_stage="Dev",
+            elapsed_minutes=18,
+            log_minutes_ago=2,
+            backend_minutes_ago=1,
+        )
+        controller_status["current_task_id"] = ""
+        controller_status["current_task_title"] = ""
+        controller_status["attempt"] = None
+        controller_status["branch"] = ""
+
+        payload = self._api_status(self.repo, controller_status)
+
+        self.assertEqual("T-020", payload["active_run"]["task"])
+        self.assertEqual("API-backed observation path", payload["active_run"]["taskTitle"])
+        self.assertEqual(2, payload["active_run"]["attempt"])
+        self.assertEqual("main", payload["active_run"]["branch"])
+        self.assertEqual("T-020", payload["progress"]["current_task_id"])
+        self.assertEqual("API-backed observation path", payload["progress"]["current_task_title"])
+        self.assertEqual(2, payload["progress"]["attempt"])
+        self.assertEqual("main", payload["progress"]["branch"])
+        self.assertEqual("T-020", payload["liveRun"]["currentTask"]["id"])
+        self.assertEqual("API-backed observation path", payload["liveRun"]["currentTask"]["title"])
+        self.assertEqual(2, payload["liveRun"]["currentTask"]["attempt"])
+
+        _normalized, dashboard_html, _pipeline_html = self._render_snapshot_views(payload)
+        self.assertIn("API-backed observation path", dashboard_html)
+        self.assertIn("T-020", dashboard_html)
+        self.assertNotIn("task title unavailable", dashboard_html)
+
+    def test_dashboard_active_task_falls_back_to_latest_task_artifact(self) -> None:
+        run_dir = self._make_live_run_dir("20260428-dashboard-artifact-fallback")
+        _write_run_bundle(
+            run_dir,
+            task_id="T-ART-12",
+            task_title="Artifact fallback task",
+            branch="release/artifact",
+            status="success",
+            final_reason="ok",
+        )
+        (run_dir / "BACKLOG.json").unlink()
+        (run_dir / "STATE.json").unlink()
+
+        payload = self._api_status(self.repo, None)
+
+        self.assertEqual(run_dir.resolve().as_posix(), payload["latest_run_dir"])
+        self.assertEqual("T-ART-12", payload["active_run"]["task"])
+        self.assertEqual("Artifact fallback task", payload["active_run"]["taskTitle"])
+        self.assertEqual(2, payload["active_run"]["attempt"])
+        self.assertEqual("release/artifact", payload["active_run"]["branch"])
+        self.assertEqual("T-ART-12", payload["progress"]["current_task_id"])
+        self.assertEqual("Artifact fallback task", payload["progress"]["current_task_title"])
+        self.assertEqual(2, payload["progress"]["attempt"])
+        self.assertEqual("release/artifact", payload["progress"]["branch"])
+        self.assertEqual("T-ART-12", payload["liveRun"]["currentTask"]["id"])
+        self.assertEqual("Artifact fallback task", payload["liveRun"]["currentTask"]["title"])
+        self.assertEqual(2, payload["liveRun"]["currentTask"]["attempt"])
+        self.assertEqual("release/artifact", payload["liveRun"]["identity"]["branch"])
+
+        _normalized, dashboard_html, _pipeline_html = self._render_snapshot_views(payload)
+        self.assertIn("Artifact fallback task", dashboard_html)
+        self.assertIn("T-ART-12", dashboard_html)
+        self.assertNotIn("task title unavailable", dashboard_html)
+
+    def test_dashboard_active_task_keeps_explicit_unavailable_state_when_sources_are_empty(self) -> None:
+        payload = self._api_status(self.empty_repo, None)
+
+        self.assertEqual("", payload["active_run"]["task"])
+        self.assertEqual("", payload["active_run"]["taskTitle"])
+        self.assertEqual("", payload["progress"]["current_task_id"])
+        self.assertEqual("", payload["progress"]["current_task_title"])
+        self.assertEqual("", payload["liveRun"]["currentTask"]["id"])
+        self.assertEqual("", payload["liveRun"]["currentTask"]["title"])
+
+        _normalized, dashboard_html, _pipeline_html = self._render_snapshot_views(payload)
+        self.assertIn("Unavailable", dashboard_html)
+        self.assertNotIn("task title unavailable", dashboard_html)
+
     def test_log_tail_helpers_build_queries_and_cursor_updates(self) -> None:
         blank = _run_log_tail_harness([{"kind": "state"}])[0]
         query_result = _run_log_tail_harness(
@@ -7344,6 +7703,101 @@ Another unsupported line.
         self.assertEqual("agentcli-run_20260426_120000-logs.txt", download["filename"])
         self.assertIn("# Filters: level=warn | stage=Dev | task_id=T-020 | search=error path", download["text"])
         self.assertIn("fresh warning line", download["text"])
+
+    def test_log_tail_refresh_clears_loading_at_eof_and_preserves_last_line(self) -> None:
+        source_payload = {
+            "id": "run_log",
+            "label": "run.log",
+            "path": "C:/runs/run.log",
+            "name": "run.log",
+            "exists": True,
+            "available": True,
+            "selected": True,
+            "kind": "log",
+            "unavailableReason": "",
+        }
+        session = _run_log_tail_session_harness(
+            [
+                {
+                    "kind": "call",
+                    "name": "seedLogTailState",
+                    "args": [
+                        {
+                            "activeView": "logs",
+                            "sourceMode": "api",
+                            "logTail": {
+                                "status": "loading",
+                                "loading": False,
+                                "paused": False,
+                                "entries": [
+                                    {
+                                        "cursor": 1,
+                                        "line_number": 1,
+                                        "t": "12:00:00",
+                                        "stage": "boot",
+                                        "lvl": "info",
+                                        "msg": "stalled but visible line",
+                                    }
+                                ],
+                                "cursor": 1,
+                                "nextCursor": 1,
+                                "sourceId": "run_log",
+                                "source": source_payload,
+                                "sources": [source_payload],
+                            },
+                        }
+                    ],
+                },
+                {
+                    "kind": "call",
+                    "name": "refreshServerLogTail",
+                    "args": [{"silent": True}],
+                },
+                {
+                    "kind": "call",
+                    "name": "inspectLogTailState",
+                    "args": [],
+                },
+            ],
+            fetch_responses=[
+                {
+                    "ok": True,
+                    "body": {
+                        "ok": True,
+                        "state": "eof",
+                        "eof": True,
+                        "entries": [],
+                        "next_cursor": 1,
+                        "cursor": 1,
+                        "last_line": {
+                            "cursor": 1,
+                            "line_number": 1,
+                            "t": "12:00:00",
+                            "stage": "boot",
+                            "lvl": "info",
+                            "msg": "stalled but visible line",
+                        },
+                        "output_stalled": True,
+                        "no_output_minutes": 12,
+                        "source_id": "run_log",
+                        "selected_source_id": "run_log",
+                        "source": source_payload,
+                        "sources": [source_payload],
+                    },
+                }
+            ],
+        )
+
+        state = session["results"][2]
+        self.assertEqual("/api/logs/tail?max_lines=120&cursor=1&source=run_log", session["fetchCalls"][0])
+        self.assertFalse(state["loading"])
+        self.assertEqual("eof", state["status"])
+        self.assertTrue(state["eof"])
+        self.assertEqual(1, len(state["entries"]))
+        self.assertEqual("stalled but visible line", state["entries"][0]["msg"])
+        self.assertEqual("stalled but visible line", state["lastLine"]["msg"])
+        self.assertTrue(state["outputStalled"])
+        self.assertEqual(12, state["noOutputMinutes"])
 
     def test_log_tail_live_polling_advances_cursor_and_stops_when_paused(self) -> None:
         session = _run_log_tail_session_harness(
@@ -7918,6 +8372,148 @@ Another unsupported line.
         self.assertIn("status-chip--running", live_banner["filters"])
         self.assertIn("button--quiet", live_banner["filters"])
         self.assertIn('aria-pressed="false"', live_banner["filters"])
+
+    def test_logs_view_renders_structured_entries_before_live_tail_for_sparse_run_log(self) -> None:
+        _write(
+            self.run_dir / "logs" / "run.log",
+            "2026-04-26 12:02:00 [INFO] sparse live tail line\n",
+        )
+        status_payload = self.client.get("/api/status").json()
+        self.assertEqual("structured", status_payload["logs"]["entries_source_kind"])
+        normalized = _run_adapter_harness([{"kind": "call", "name": "normalizeSnapshot", "args": [status_payload]}])[0]
+
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+                {
+                    "kind": "call",
+                    "name": "seedLogTailState",
+                    "args": [
+                        {
+                            "activeView": "logs",
+                            "sourceMode": "api",
+                            "logTail": {
+                                "status": "loading",
+                                "paused": False,
+                                "entries": [
+                                    {
+                                        "cursor": 1,
+                                        "line_number": 1,
+                                        "t": "12:02:00",
+                                        "stage": "boot",
+                                        "lvl": "info",
+                                        "msg": "sparse live tail line",
+                                    }
+                                ],
+                                "cursor": 1,
+                                "nextCursor": 1,
+                                "sourceId": "run_log",
+                                "source": {
+                                    "id": "run_log",
+                                    "label": "run.log",
+                                    "path": "C:/runs/run.log",
+                                    "name": "run.log",
+                                    "exists": True,
+                                    "available": True,
+                                    "selected": True,
+                                    "kind": "log",
+                                    "unavailableReason": "",
+                                },
+                                "sources": [
+                                    {
+                                        "id": "run_log",
+                                        "label": "run.log",
+                                        "path": "C:/runs/run.log",
+                                        "name": "run.log",
+                                        "exists": True,
+                                        "available": True,
+                                        "selected": True,
+                                        "kind": "log",
+                                        "unavailableReason": "",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+                {"kind": "call", "name": "renderShell", "args": [{"force": True, "preserveScroll": True}]},
+            ]
+        )
+
+        main_html = shell["roots"]["main"]
+        self.assertEqual("logs", shell["roots"]["view"])
+        self.assertIn("/api/logs structured events", main_html)
+        self.assertIn("Live tail / run.log", main_html)
+        self.assertLess(main_html.index("retry after build failure"), main_html.index("sparse live tail line"))
+
+    def test_logs_view_shows_no_output_warning_and_last_line_without_loading_state(self) -> None:
+        shell = _run_shell_harness(
+            [
+                {
+                    "kind": "call",
+                    "name": "seedLogTailState",
+                    "args": [
+                        {
+                            "activeView": "logs",
+                            "sourceMode": "api",
+                            "logTail": {
+                                "status": "eof",
+                                "loading": False,
+                                "paused": False,
+                                "entries": [],
+                                "cursor": 1,
+                                "nextCursor": 1,
+                                "eof": True,
+                                "lastLine": {
+                                    "cursor": 1,
+                                    "line_number": 1,
+                                    "t": "12:00:00",
+                                    "stage": "boot",
+                                    "lvl": "info",
+                                    "msg": "stalled but visible line",
+                                },
+                                "outputStalled": True,
+                                "noOutputMinutes": 12,
+                                "sourceId": "run_log",
+                                "source": {
+                                    "id": "run_log",
+                                    "label": "run.log",
+                                    "path": "C:/runs/run.log",
+                                    "name": "run.log",
+                                    "exists": True,
+                                    "available": True,
+                                    "selected": True,
+                                    "kind": "log",
+                                    "unavailableReason": "",
+                                },
+                                "sources": [
+                                    {
+                                        "id": "run_log",
+                                        "label": "run.log",
+                                        "path": "C:/runs/run.log",
+                                        "name": "run.log",
+                                        "exists": True,
+                                        "available": True,
+                                        "selected": True,
+                                        "kind": "log",
+                                        "unavailableReason": "",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+                {"kind": "call", "name": "renderShell", "args": [{"force": True, "preserveScroll": True}]},
+            ]
+        )
+
+        main_html = shell["roots"]["main"]
+        self.assertEqual("logs", shell["roots"]["view"])
+        self.assertIn("No output for 12 minutes.", main_html)
+        self.assertIn("Latest log line: stalled but visible line", main_html)
+        self.assertIn("Live tail / run.log", main_html)
+        self.assertNotIn("button--loading", main_html)
+        self.assertNotIn("Loading active run log", main_html)
 
     def test_adapter_normalizes_history_and_notification_contracts(self) -> None:
         populated_snapshot = self.client.get("/api/status").json()

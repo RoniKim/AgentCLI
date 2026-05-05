@@ -26,10 +26,18 @@ from ..stop_progress import (
     file_write_signal,
     normalize_stop_progress_payload,
     read_stop_progress,
+    reconcile_stale_stop_files,
     record_stop_progress,
 )
 from ..state import count_state_task_ids, load_backlog_task_ids, load_state
-from ..utils import STOP_REASON_STOP_FILE, atomic_write_json, detect_stop_reason, now_iso, rotate_log_file
+from ..utils import (
+    STOP_REASON_STOP_FILE,
+    atomic_write_json,
+    detect_stop_reason,
+    now_iso,
+    rotate_log_file,
+    subprocess_close_fds_kwargs,
+)
 
 
 RUNNER_START_MODE_CHOICES = ("one-shot", "continuous", "loop")
@@ -1359,7 +1367,7 @@ class RunnerController:
                 stdin=subprocess.DEVNULL,
                 stdout=self._runner_log_handle,
                 stderr=subprocess.STDOUT,
-                **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
+                **subprocess_close_fds_kwargs(),
             )
             if self._runner_process.pid:
                 try:
@@ -1443,6 +1451,18 @@ class RunnerController:
             self.run_dir = run_dir
             eff["run_dir"] = run_dir.as_posix()
 
+            stop_reconciliation = reconcile_stale_stop_files(
+                run_dir,
+                stop_file=self._stop_file_name(),
+                stop_stale_age_seconds=eff.get("stale_stop_reconcile_stop_age_seconds")
+                or DEFAULTS.get("stale_stop_reconcile_stop_age_seconds")
+                or 900,
+                heartbeat_stale_age_seconds=eff.get("stale_stop_reconcile_heartbeat_age_seconds")
+                or DEFAULTS.get("stale_stop_reconcile_heartbeat_age_seconds")
+                or 900,
+                allow_missing_heartbeat=bool(eff.get("stale_stop_reconcile_allow_missing_heartbeat", False)),
+                source="controller",
+            )
             readiness = check_runner_start_readiness(
                 self.repo,
                 run_dir,
@@ -1464,14 +1484,15 @@ class RunnerController:
                     ok=False,
                     running=False,
                     phase="readiness",
-                    details={"readiness": readiness},
-                    result={"ok": False, "message": message, "readiness": readiness},
+                    details={"readiness": readiness, "stop_reconciliation": stop_reconciliation},
+                    result={"ok": False, "message": message, "readiness": readiness, "stop_reconciliation": stop_reconciliation},
                 )
                 return {
                     "ok": False,
                     "message": message,
                     "error": error,
                     "readiness": readiness,
+                    "stop_reconciliation": stop_reconciliation,
                     "run_dir": run_dir.as_posix(),
                     **context,
                 }
@@ -1485,6 +1506,7 @@ class RunnerController:
                 ok=False,
                 running=False,
                 phase="request",
+                details={"stop_reconciliation": stop_reconciliation},
             )
 
             stop_paths = {run_dir / self._stop_file_name(), run_dir / "STOP"}

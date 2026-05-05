@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -10,6 +11,13 @@ from typing import Any, Awaitable, Callable, Optional
 
 from ..scan import collect_scan_files
 from ..task_status import TASK_STATUS_REVIEW_REQUIRED
+from ..task_failures import record_task_failure_state
+from ..state import (
+    normalize_task_scheduling_metadata,
+    task_effort_rank,
+    task_priority_rank,
+    task_scheduling_snapshot,
+)
 from .session import PipelineSession
 from .stages.base import StageOutcome
 
@@ -200,10 +208,333 @@ def merge_pm_tasks_with_existing_pending(
                     "skills": t.skills or [],
                     "skills_rationale": t.skills_rationale,
                     "depends_on": t.depends_on,
+                    "effort": getattr(t, "effort", ""),
+                    "priority": getattr(t, "priority", ""),
+                    "touched_file_globs": getattr(t, "touched_file_globs", []),
                     "goal_trace": [dict(trace) for trace in (t.goal_trace or []) if isinstance(trace, dict)],
                 }
             )
     return merged_tasks
+
+
+_PL_LARGE_FILES = frozenset(
+    {
+        "agent_runner/web.py",
+        "agent_runner/cycle.py",
+        "agent_runner/backends/claudecode.py",
+        "web_console/app.js",
+    }
+)
+_PL_DISPLAY_OBLIGATIONS = frozenset({"list", "detail", "logs", "preflight", "blocking", "blockers", "notes", "diff"})
+_PL_MUTATING_TERMS = frozenset({"write", "writes", "save", "saved", "update", "updates", "create", "delete", "merge", "mutating"})
+_PL_READONLY_TERMS = frozenset({"read-only", "readonly", "display", "show", "shows", "render", "renders", "list", "detail"})
+_PL_CHILD_SUFFIXES = "abcdefghijklmnopqrstuvwxyz"
+
+
+@dataclass(frozen=True)
+class BacklogRefinementResult:
+    mutated: bool
+    tasks: list[dict[str, Any]]
+    decisions: list[dict[str, Any]]
+
+
+def _clean_task_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_items = [part.strip() for part in value.split(",")]
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = []
+    return [str(item).strip() for item in raw_items if str(item).strip()]
+
+
+def _clean_task_goal_trace(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [dict(trace) for trace in value if isinstance(trace, dict)]
+
+
+def _task_to_backlog_dict(task: Any) -> dict[str, Any]:
+    if isinstance(task, dict):
+        raw = dict(task)
+    else:
+        raw = {
+            "id": getattr(task, "id", ""),
+            "title": getattr(task, "title", ""),
+            "prompt": getattr(task, "prompt", ""),
+            "files": getattr(task, "files", []),
+            "done_when": getattr(task, "done_when", ""),
+            "skills": getattr(task, "skills", []),
+            "skills_rationale": getattr(task, "skills_rationale", None),
+            "depends_on": getattr(task, "depends_on", []),
+            "effort": getattr(task, "effort", None),
+            "priority": getattr(task, "priority", None),
+            "touched_file_globs": getattr(task, "touched_file_globs", []),
+            "goal_trace": getattr(task, "goal_trace", []),
+        }
+        for key in ("parent_task_id", "split_from_task_id", "split_reason", "split_index", "split_count"):
+            if hasattr(task, key):
+                raw[key] = getattr(task, key)
+
+    task_id = str(raw.get("id") or "").strip()
+    title = str(raw.get("title") or task_id).strip() or task_id
+    prompt = str(raw.get("prompt") or "").strip() or f"Implement {task_id}: {title}"
+    scheduling = normalize_task_scheduling_metadata(
+        title=title,
+        prompt=prompt,
+        done_when=str(raw.get("done_when") or "Git diff exists and build passes.").strip(),
+        files=raw.get("files"),
+        depends_on=raw.get("depends_on"),
+        effort=raw.get("effort"),
+        priority=raw.get("priority"),
+        touched_file_globs=raw.get("touched_file_globs"),
+    )
+    out: dict[str, Any] = {
+        "id": task_id,
+        "title": title,
+        "prompt": prompt,
+        "files": scheduling["files"],
+        "done_when": str(raw.get("done_when") or "Git diff exists and build passes.").strip(),
+        "skills": _clean_task_string_list(raw.get("skills")),
+        "skills_rationale": None if raw.get("skills_rationale") is None else str(raw.get("skills_rationale")),
+        "depends_on": scheduling["depends_on"],
+        "effort": scheduling["effort"],
+        "priority": scheduling["priority"],
+        "touched_file_globs": scheduling["touched_file_globs"],
+    }
+    goal_trace = _clean_task_goal_trace(raw.get("goal_trace"))
+    if goal_trace:
+        out["goal_trace"] = goal_trace
+    for key in ("parent_task_id", "split_from_task_id", "split_reason", "split_index", "split_count"):
+        if key in raw:
+            out[key] = raw[key]
+    return out
+
+
+def _task_file_category(path: str) -> str:
+    clean = str(path or "").replace("\\", "/").strip().lower()
+    if clean.startswith("tests/"):
+        return "e2e" if "playwright" in clean or "smoke" in clean else "tests"
+    if clean.startswith("web_console/") or clean.endswith((".razor", ".xaml", ".css", ".js", ".ts", ".tsx")):
+        return "frontend"
+    if clean.startswith("agent_runner/") or clean.endswith(".py"):
+        return "backend"
+    return "other"
+
+
+def _task_file_groups(files: list[str]) -> list[tuple[str, str, list[str]]]:
+    grouped: dict[str, list[str]] = {"backend": [], "frontend": [], "tests": [], "e2e": [], "other": []}
+    for path in files:
+        grouped.setdefault(_task_file_category(path), []).append(path)
+    labels = {
+        "backend": "Backend/API",
+        "frontend": "Frontend/UI",
+        "tests": "Focused tests",
+        "e2e": "Playwright smoke",
+        "other": "Supporting files",
+    }
+    groups = [(key, labels[key], paths) for key, paths in grouped.items() if paths]
+    if len(groups) > 1:
+        return groups
+    if len(files) >= 4:
+        chunks: list[tuple[str, str, list[str]]] = []
+        for idx in range(0, len(files), 2):
+            chunk = files[idx : idx + 2]
+            chunks.append((f"slice{len(chunks) + 1}", f"File slice {len(chunks) + 1}", chunk))
+        return chunks
+    return groups
+
+
+def _done_when_condition_count(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    parts = [part.strip(" .:-") for part in re.split(r"(?:\n+|;|\band\b|\bor\b|,)", text, flags=re.IGNORECASE) if part.strip(" .:-")]
+    return max(1, len(parts))
+
+
+def _oversized_task_reason(task: dict[str, Any]) -> str:
+    files = _clean_task_string_list(task.get("files"))
+    categories = {_task_file_category(path) for path in files}
+    text = " ".join(
+        [
+            str(task.get("title") or ""),
+            str(task.get("prompt") or ""),
+            str(task.get("done_when") or ""),
+            " ".join(files),
+        ]
+    ).lower()
+    triggers: list[str] = []
+    if len(files) >= 4:
+        triggers.append(f"touches {len(files)} files")
+    if "backend" in categories and "frontend" in categories and categories.intersection({"tests", "e2e"}):
+        triggers.append("couples backend, frontend, and tests")
+    if ("api" in text or "serializer" in text or "agent_runner/web.py" in text) and (
+        "ui" in text or "web_console" in text or "frontend" in text
+    ) and categories.intersection({"tests", "e2e"}):
+        triggers.append("couples API, UI, and tests")
+    condition_count = _done_when_condition_count(task.get("done_when"))
+    if condition_count >= 5:
+        triggers.append(f"has {condition_count} acceptance conditions")
+    obligation_count = len([term for term in _PL_DISPLAY_OBLIGATIONS if term in text])
+    if obligation_count >= 4:
+        triggers.append("mixes multiple display obligations")
+    if any(term in text for term in _PL_MUTATING_TERMS) and any(term in text for term in _PL_READONLY_TERMS):
+        triggers.append("mixes mutating behavior and read-only UI")
+    normalized_files = {path.replace("\\", "/").lower() for path in files}
+    if normalized_files.intersection(_PL_LARGE_FILES) and categories.intersection({"tests", "e2e"}):
+        triggers.append("touches large runtime/UI files plus tests")
+    return "; ".join(dict.fromkeys(triggers))
+
+
+def _ordered_unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def _remap_dependencies(dependencies: Any, replacement_ids: dict[str, str]) -> list[str]:
+    return _ordered_unique([replacement_ids.get(dep, dep) for dep in _clean_task_string_list(dependencies)])
+
+
+def _child_task_id(parent_id: str, index: int, used_ids: set[str]) -> str:
+    if re.match(r"^T[1-9]\d*$", parent_id):
+        base = f"{parent_id}{_PL_CHILD_SUFFIXES[index]}" if index < len(_PL_CHILD_SUFFIXES) else f"{parent_id}_{index + 1}"
+    else:
+        base = f"{parent_id}_{index + 1}"
+    candidate = re.sub(r"[^A-Za-z0-9_-]", "_", base).strip("_") or f"T{index + 1}"
+    suffix = 1
+    unique = candidate
+    while unique in used_ids:
+        suffix += 1
+        unique = f"{candidate}_{suffix}"
+    used_ids.add(unique)
+    return unique
+
+
+def _child_title(parent_title: str, label: str) -> str:
+    title = " ".join(str(parent_title or "").split())
+    if not title:
+        return label
+    return f"{label}: {title}"
+
+
+def _build_child_task(
+    parent: dict[str, Any],
+    *,
+    child_id: str,
+    label: str,
+    files: list[str],
+    depends_on: list[str],
+    reason: str,
+    index: int,
+    count: int,
+) -> dict[str, Any]:
+    parent_id = str(parent.get("id") or "").strip()
+    prompt = str(parent.get("prompt") or "").strip()
+    done_when = str(parent.get("done_when") or "").strip()
+    child: dict[str, Any] = {
+        "id": child_id,
+        "title": _child_title(str(parent.get("title") or parent_id), label),
+        "prompt": (
+            f"Split from {parent_id}. Implement only the {label.lower()} slice while preserving the original intent."
+            + (f"\n\nOriginal prompt:\n{prompt}" if prompt else "")
+        ),
+        "files": list(files),
+        "done_when": (
+            f"{label} slice is complete."
+            + (f" Original acceptance remains traceable: {done_when}" if done_when else "")
+        ),
+        "skills": list(parent.get("skills") or []),
+        "skills_rationale": parent.get("skills_rationale"),
+        "depends_on": _ordered_unique(depends_on),
+        "parent_task_id": parent_id,
+        "split_from_task_id": parent_id,
+        "split_reason": reason,
+        "split_index": index + 1,
+        "split_count": count,
+    }
+    scheduling = normalize_task_scheduling_metadata(
+        title=str(child.get("title") or child_id),
+        prompt=str(child.get("prompt") or ""),
+        done_when=str(child.get("done_when") or ""),
+        files=child.get("files"),
+        depends_on=child.get("depends_on"),
+        effort=None,
+        priority=parent.get("priority"),
+        touched_file_globs=files or parent.get("touched_file_globs") or parent.get("files"),
+    )
+    child["files"] = scheduling["files"]
+    child["depends_on"] = scheduling["depends_on"]
+    child["effort"] = scheduling["effort"]
+    child["priority"] = scheduling["priority"]
+    child["touched_file_globs"] = scheduling["touched_file_globs"]
+    goal_trace = _clean_task_goal_trace(parent.get("goal_trace"))
+    if goal_trace:
+        child["goal_trace"] = goal_trace
+    return child
+
+
+def refine_backlog_tasks_for_pl(tasks: list[Any]) -> BacklogRefinementResult:
+    """Deterministically split oversized backlog tasks for the built-in PL stage."""
+
+    original_tasks = [_task_to_backlog_dict(task) for task in tasks]
+    used_ids = {str(task.get("id") or "").strip() for task in original_tasks if str(task.get("id") or "").strip()}
+    replacement_ids: dict[str, str] = {}
+    refined: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
+
+    for task in original_tasks:
+        task_id = str(task.get("id") or "").strip()
+        reason = _oversized_task_reason(task)
+        groups = _task_file_groups(_clean_task_string_list(task.get("files"))) if reason else []
+        if reason and len(groups) < 2:
+            groups = [("implementation", "Implementation", []), ("validation", "Validation", [])]
+
+        if reason and len(groups) >= 2:
+            child_ids = [_child_task_id(task_id, idx, used_ids) for idx in range(len(groups))]
+            original_deps = _remap_dependencies(task.get("depends_on"), replacement_ids)
+            for idx, (_key, label, files) in enumerate(groups):
+                child_deps = original_deps if idx == 0 else [child_ids[idx - 1]]
+                refined.append(
+                    _build_child_task(
+                        task,
+                        child_id=child_ids[idx],
+                        label=label,
+                        files=files,
+                        depends_on=child_deps,
+                        reason=reason,
+                        index=idx,
+                        count=len(groups),
+                    )
+                )
+            replacement_ids[task_id] = child_ids[-1]
+            decisions.append(
+                {
+                    "task_id": task_id,
+                    "decision": "split",
+                    "reason": reason,
+                    "children": child_ids,
+                }
+            )
+            continue
+
+        next_task = dict(task)
+        next_task["depends_on"] = _remap_dependencies(next_task.get("depends_on"), replacement_ids)
+        refined.append(next_task)
+
+    if replacement_ids:
+        for task in refined:
+            task["depends_on"] = _remap_dependencies(task.get("depends_on"), replacement_ids)
+
+    return BacklogRefinementResult(mutated=bool(decisions), tasks=refined, decisions=decisions)
 
 
 def write_pm_output_artifacts(
@@ -628,6 +959,92 @@ def _dependency_blocked_detail(blockers: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _dependency_reverse_graph(tasks: list[Any]) -> dict[str, set[str]]:
+    reverse: dict[str, set[str]] = {}
+    valid_ids = {
+        str(getattr(task, "id", "") or "").strip()
+        for task in tasks
+        if str(getattr(task, "id", "") or "").strip()
+    }
+    for task in tasks:
+        task_id = str(getattr(task, "id", "") or "").strip()
+        if not task_id:
+            continue
+        depends_on = getattr(task, "depends_on", []) or []
+        for dep in depends_on:
+            dep_id = str(dep or "").strip()
+            if dep_id and dep_id in valid_ids:
+                reverse.setdefault(dep_id, set()).add(task_id)
+    return reverse
+
+
+def _transitive_unblocks_count(
+    task_id: str,
+    reverse_graph: dict[str, set[str]],
+    *,
+    processed: set[str],
+) -> int:
+    stack = list(reverse_graph.get(task_id, set()))
+    visited: set[str] = set()
+    while stack:
+        current = str(stack.pop() or "").strip()
+        if not current or current in visited or current in processed:
+            continue
+        visited.add(current)
+        stack.extend(reverse_graph.get(current, set()))
+    return len(visited)
+
+
+def _remaining_window_effort_cap(remaining_window_budget: int | None) -> str:
+    if remaining_window_budget is None:
+        return ""
+    if remaining_window_budget <= 1:
+        return "S"
+    if remaining_window_budget == 2:
+        return "M"
+    return ""
+
+
+def _select_ready_task(
+    *,
+    ready_candidates: list[dict[str, Any]],
+    remaining_window_budget: int | None,
+) -> tuple[Any, list[dict[str, Any]], str]:
+    if not ready_candidates:
+        raise ValueError("ready_candidates must not be empty")
+
+    top_priority_rank = min(int(candidate["priority_rank"]) for candidate in ready_candidates)
+    effort_cap = _remaining_window_effort_cap(remaining_window_budget)
+    effort_cap_rank = task_effort_rank(effort_cap) if effort_cap else None
+    has_budget_preferred_ready = bool(
+        effort_cap
+        and any(
+            int(candidate["priority_rank"]) == top_priority_rank
+            and int(candidate["effort_rank"]) <= int(effort_cap_rank or 0)
+            for candidate in ready_candidates
+        )
+    )
+
+    ordered = sorted(
+        ready_candidates,
+        key=lambda candidate: (
+            int(candidate["priority_rank"]),
+            1
+            if (
+                has_budget_preferred_ready
+                and int(candidate["priority_rank"]) == top_priority_rank
+                and int(candidate["effort_rank"]) > int(effort_cap_rank or 0)
+            )
+            else 0,
+            -int(candidate["unblocks_count"]),
+            int(candidate["effort_rank"]),
+            int(candidate["risk_rank"]),
+            int(candidate["index"]),
+        ),
+    )
+    return ordered[0]["task"], ordered, effort_cap
+
+
 def select_next_task_with_dependency_checks(
     *,
     tasks: list[Any],
@@ -646,10 +1063,21 @@ def select_next_task_with_dependency_checks(
     eprint_fn: Callable[[str], None],
     task_results: list[dict[str, Any]],
     step_idx: int = 0,
+    total_iterations: int = 0,
+    remaining_window_budget: int | None = None,
     record_task_experience_fn: Callable[..., None] | None = None,
 ) -> Optional[Any]:
     processed = done_set | skipped_set
-    for t in tasks:
+    reverse_graph = _dependency_reverse_graph(tasks)
+    ready_candidates: list[dict[str, Any]] = []
+    window_budget = (
+        remaining_window_budget
+        if remaining_window_budget is not None
+        else max(0, int(total_iterations or 0) - int(step_idx or 0))
+        if int(total_iterations or 0) > 0
+        else None
+    )
+    for index, t in enumerate(tasks):
         if t.id in processed:
             continue
 
@@ -658,12 +1086,13 @@ def select_next_task_with_dependency_checks(
             if consec >= max_consecutive_failures:
                 logger.skip_event(t.id, f"failed {consec} times consecutively (>= {max_consecutive_failures})")
                 skipped_set.add(t.id)
-                state.setdefault("failed", []).append(
-                    {
-                        "task": t.id,
-                        "reason": "persistent_failure",
-                        "detail": f"Failed {consec} consecutive times across runs",
-                    }
+                processed.add(t.id)
+                record_task_failure_state(
+                    state,
+                    state_path=state_path,
+                    task_id=t.id,
+                    reason="persistent_failure",
+                    detail=f"Failed {consec} consecutive times across runs",
                 )
                 save_state_fn(state_path, state)
                 record_history_fn(
@@ -720,21 +1149,22 @@ def select_next_task_with_dependency_checks(
                     detail = _dependency_blocked_detail(blockers)
                     eprint_fn(f"[SKIP] Task {t.id} depends on unresolvable tasks {permanently_blocked}; skipping.")
                     skipped_set.add(t.id)
-                    state.setdefault("failed", []).append(
-                        {
-                            "task": t.id,
-                            "reason": reason,
-                            "status": TASK_STATUS_REVIEW_REQUIRED,
-                            "task_status": TASK_STATUS_REVIEW_REQUIRED,
-                            "taskStatus": TASK_STATUS_REVIEW_REQUIRED,
-                            "detail": detail,
+                    processed.add(t.id)
+                    record_task_failure_state(
+                        state,
+                        state_path=state_path,
+                        task_id=t.id,
+                        reason=reason,
+                        task_status=TASK_STATUS_REVIEW_REQUIRED,
+                        detail=detail,
+                        extra={
                             "blocked_dependencies": blockers,
                             "blockedDependencies": blockers,
                             "blocking_dependencies": blockers,
                             "blockingDependencies": blockers,
                             "next_action": "Resolve blocking upstream tasks before retrying this task.",
                             "nextAction": "Resolve blocking upstream tasks before retrying this task.",
-                        }
+                        },
                     )
                     save_state_fn(state_path, state)
                     record_history_fn(
@@ -776,7 +1206,68 @@ def select_next_task_with_dependency_checks(
                     continue
                 continue
 
-        return t
+        scheduling = task_scheduling_snapshot(t)
+        ready_candidates.append(
+            {
+                "task": t,
+                "index": index,
+                "priority": scheduling["priority"],
+                "priority_rank": task_priority_rank(scheduling["priority"]),
+                "effort": scheduling["effort"],
+                "effort_rank": task_effort_rank(scheduling["effort"]),
+                "touched_file_globs": scheduling["touched_file_globs"],
+                "depends_on": scheduling["depends_on"],
+                "risk": scheduling["risk"],
+                "risk_rank": scheduling["risk_rank"],
+                "unblocks_count": _transitive_unblocks_count(
+                    t.id,
+                    reverse_graph,
+                    processed=processed,
+                ),
+            }
+        )
+
+    if ready_candidates:
+        selected_task, ordered_candidates, effort_cap = _select_ready_task(
+            ready_candidates=ready_candidates,
+            remaining_window_budget=window_budget,
+        )
+        metrics.event(
+            "task_selection",
+            cycle=cycle_idx,
+            step=step_idx,
+            selected_task_id=selected_task.id,
+            selected_priority=getattr(selected_task, "priority", ""),
+            selected_effort=getattr(selected_task, "effort", ""),
+            remaining_window_budget=window_budget,
+            effort_cap=effort_cap,
+            ready_candidates=[
+                {
+                    "task_id": str(candidate["task"].id or "").strip(),
+                    "priority": candidate["priority"],
+                    "effort": candidate["effort"],
+                    "risk": candidate["risk"],
+                    "depends_on": list(candidate["depends_on"]),
+                    "touched_file_globs": list(candidate["touched_file_globs"]),
+                    "unblocks_count": int(candidate["unblocks_count"]),
+                    "index": int(candidate["index"]),
+                }
+                for candidate in ordered_candidates[:20]
+            ],
+        )
+        return selected_task
+
+    metrics.event(
+        "task_selection",
+        cycle=cycle_idx,
+        step=step_idx,
+        selected_task_id="",
+        selected_priority="",
+        selected_effort="",
+        remaining_window_budget=window_budget,
+        effort_cap=_remaining_window_effort_cap(window_budget),
+        ready_candidates=[],
+    )
 
     return None
 

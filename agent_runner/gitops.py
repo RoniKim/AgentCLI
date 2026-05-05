@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+from .runtime_contract import ATTEMPT_FINISHED_MARKER, ATTEMPT_STARTED_MARKER
 from .utils import run_cmd, now_iso, safe_write_text, eprint
 
 
@@ -1309,6 +1310,54 @@ def allocate_temporary_worktree_dir(repo: Path, *, prefix: str = "pr-queue-valid
     raise RuntimeError("Unable to allocate a unique temporary worktree path.")
 
 
+def generated_worktree_path_state(
+    repo: Path,
+    *,
+    run_dir: Path | None = None,
+    worktree_dir: str = "",
+) -> dict[str, object]:
+    repo_resolved = Path(repo).expanduser().resolve()
+    run_dir_resolved: Path | None = None
+    if run_dir is not None:
+        try:
+            run_dir_resolved = Path(run_dir).expanduser().resolve()
+        except Exception:
+            run_dir_resolved = Path(run_dir).expanduser()
+
+    worktree_text = str(worktree_dir or "").strip()
+    candidate: Path | None = None
+    derived_from = ""
+    if worktree_text:
+        try:
+            candidate = Path(worktree_text).expanduser().resolve()
+        except Exception:
+            candidate = Path(worktree_text).expanduser()
+        derived_from = "explicit"
+    elif run_dir_resolved is not None:
+        candidate = default_worktree_dir(repo_resolved, run_dir_resolved)
+        derived_from = "default"
+
+    if candidate is None:
+        return {
+            "path": "",
+            "exists": False,
+            "state": "not_requested",
+            "generated": False,
+            "derived_from": "",
+        }
+
+    generated_root = _generated_worktree_home(repo_resolved)
+    generated = candidate == generated_root or _path_is_relative_to(candidate, generated_root)
+    exists = candidate.exists()
+    return {
+        "path": candidate.as_posix(),
+        "exists": exists,
+        "state": "present" if exists else "deleted",
+        "generated": generated,
+        "derived_from": derived_from,
+    }
+
+
 def _worktree_validation_error(repo: Path, worktree_dir: Path) -> str | None:
     repo_resolved = repo.expanduser().resolve()
     worktree_resolved = worktree_dir.expanduser().resolve()
@@ -1635,7 +1684,11 @@ def _git_worktree_registration_state(repo: Path, worktree_dir: Path) -> dict[str
 
 WORKTREE_MERGE_PENDING = "WORKTREE_MERGE_PENDING.json"
 WORKTREE_MERGE_PENDING_MD = "WORKTREE_MERGE_PENDING.md"
+WORKTREE_MERGE_PENDING_RECONCILED = "WORKTREE_MERGE_PENDING_RECONCILED.json"
 WORKTREE_REUSE_CONTRACT = "WORKTREE_REUSE_CONTRACT.json"
+WORKTREE_CLEANUP_DRY_RUN = "WORKTREE_CLEANUP_DRY_RUN.json"
+WORKTREE_CLEANUP_APPLIED = "WORKTREE_CLEANUP_APPLIED.json"
+WORKTREE_CLEANUP_APPROVAL_PREFIX = "APPLY WORKTREE CLEANUP"
 
 
 def _payload_text(payload: dict[str, object], *keys: str) -> str:
@@ -2181,6 +2234,848 @@ def _worktree_run_dirs(repo: Path) -> list[Path]:
         return []
 
 
+def _worktree_format_age(seconds: int | float) -> str:
+    age_seconds = max(0, int(seconds or 0))
+    if age_seconds < 60:
+        return f"{age_seconds}s"
+    minutes = age_seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def _worktree_age_fields(timestamp: int | float) -> dict[str, object]:
+    if not timestamp:
+        return {"age_seconds": 0, "age": "0s"}
+    age_seconds = max(0, int(time.time() - float(timestamp)))
+    return {"age_seconds": age_seconds, "age": _worktree_format_age(age_seconds)}
+
+
+def _worktree_attempt_mtime(attempt_dir: Path) -> float:
+    latest = 0.0
+    try:
+        latest = max(latest, attempt_dir.stat().st_mtime)
+    except Exception:
+        pass
+    try:
+        for child in attempt_dir.iterdir():
+            try:
+                latest = max(latest, child.stat().st_mtime)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return latest
+
+
+def _read_attempt_marker_file(path: Path) -> dict[str, object]:
+    try:
+        if not path.exists() or not path.is_file():
+            return {}
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _worktree_attempt_output_evidence(attempt_dir: Path) -> list[str]:
+    ignored = {
+        ATTEMPT_STARTED_MARKER,
+        ATTEMPT_FINISHED_MARKER,
+        "validation.json",
+        "DEPENDENCY_REQUIRED.md",
+    }
+    evidence: list[str] = []
+    try:
+        children = sorted(attempt_dir.iterdir(), key=lambda item: item.name.lower())
+    except Exception:
+        return evidence
+    for child in children:
+        if child.name in ignored:
+            continue
+        if child.is_file():
+            evidence.append(child.name)
+            continue
+        try:
+            has_entries = any(True for _ in child.iterdir())
+        except Exception:
+            has_entries = False
+        if has_entries:
+            evidence.append(child.name)
+    return evidence
+
+
+def _worktree_task_id_from_artifact_dir(name: str) -> str:
+    match = re.match(r"^c\d+_s\d+_(?P<task_id>.+)$", str(name or ""))
+    return str(match.group("task_id") if match else "").strip()
+
+
+def _worktree_attempt_number(name: str) -> int:
+    match = re.match(r"^attempt_(?P<attempt>\d+)$", str(name or ""))
+    if not match:
+        return -1
+    try:
+        return int(match.group("attempt"))
+    except Exception:
+        return -1
+
+
+def _worktree_task_id_from_branch(branch: str) -> str:
+    text = str(branch or "").strip()
+    if text.startswith("task/"):
+        text = text[len("task/") :]
+    if "_" in text:
+        return text.rsplit("_", 1)[0]
+    return text
+
+
+def _worktree_branch_owners(run_dirs: Sequence[Path]) -> dict[str, dict[str, object]]:
+    owners: dict[str, dict[str, object]] = {}
+
+    def remember(branch: str, run_dir: Path, *, source: str, payload: dict[str, object] | None = None) -> None:
+        branch_text = str(branch or "").strip()
+        if not branch_text or not branch_text.startswith("task/"):
+            return
+        data = dict(payload or {})
+        owners[branch_text] = {
+            "owning_run": run_dir.name,
+            "owning_run_dir": run_dir.resolve().as_posix(),
+            "run_id": run_dir.name,
+            "source": source,
+            "task_id": str(data.get("task_id") or data.get("taskId") or "").strip(),
+            "cycle": data.get("cycle"),
+            "step": data.get("step"),
+            "event": str(data.get("event") or data.get("type") or "").strip(),
+        }
+
+    for run_dir in run_dirs:
+        metrics_path = run_dir / "metrics.jsonl"
+        if metrics_path.exists():
+            try:
+                for raw_line in metrics_path.read_text(encoding="utf-8", errors="replace").splitlines()[-1000:]:
+                    try:
+                        event = json.loads(raw_line)
+                    except Exception:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                    branch = str(event.get("branch") or payload.get("branch") or "").strip()
+                    remember(branch, run_dir, source="metrics", payload={**dict(payload), **event})
+            except Exception:
+                pass
+
+        state_path = run_dir / "STATE.json"
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                state = {}
+            if isinstance(state, dict):
+                for bucket in ("pending_review", "failed", "completed"):
+                    rows = state.get(bucket)
+                    if not isinstance(rows, list):
+                        continue
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        remember(str(row.get("branch") or row.get("rescue_branch") or ""), run_dir, source=f"state.{bucket}", payload=row)
+
+    return owners
+
+
+def _worktree_stale_task_branches(repo: Path, run_dirs: Sequence[Path], source_head: str) -> list[dict[str, object]]:
+    owners = _worktree_branch_owners(run_dirs)
+    code, out = run_cmd(
+        ["git", "for-each-ref", "--format=%(refname:short)%09%(objectname)%09%(committerdate:unix)", "refs/heads/task"],
+        cwd=repo,
+        timeout_sec=60,
+    )
+    if code != 0:
+        return []
+
+    branches: list[dict[str, object]] = []
+    for raw_line in (out or "").splitlines():
+        parts = raw_line.split("\t")
+        if len(parts) < 2:
+            continue
+        branch_name = parts[0].strip()
+        head_ref = parts[1].strip()
+        if not branch_name.startswith("task/") or not head_ref:
+            continue
+        try:
+            commit_ts = float(parts[2]) if len(parts) > 2 and parts[2].strip() else 0.0
+        except Exception:
+            commit_ts = 0.0
+        head_in_source = bool(source_head and (head_ref == source_head or _git_is_ancestor(repo, head_ref, source_head)))
+        if not head_in_source:
+            continue
+        owner = owners.get(branch_name, {})
+        task_id = str(owner.get("task_id") or _worktree_task_id_from_branch(branch_name)).strip()
+        reason = "branch head is already contained in source HEAD"
+        branches.append(
+            {
+                "branch": branch_name,
+                "path": branch_name,
+                "head_ref": head_ref,
+                "source_head": source_head,
+                "status": "merged",
+                "reason": reason,
+                "task_id": task_id,
+                "owning_run": str(owner.get("owning_run") or "unknown"),
+                "owning_run_dir": str(owner.get("owning_run_dir") or ""),
+                "run_id": str(owner.get("run_id") or owner.get("owning_run") or "unknown"),
+                "owner_source": str(owner.get("source") or ""),
+                "categories": ["stale"],
+                **_worktree_age_fields(commit_ts),
+            }
+        )
+    return branches
+
+
+def _worktree_interrupted_attempt_dirs(run_dirs: Sequence[Path]) -> list[dict[str, object]]:
+    attempts: list[dict[str, object]] = []
+    for run_dir in run_dirs:
+        tasks_root = run_dir / "tasks"
+        if not tasks_root.exists():
+            continue
+        try:
+            task_dirs = [candidate for candidate in tasks_root.iterdir() if candidate.is_dir()]
+        except Exception:
+            continue
+        for task_dir in task_dirs:
+            task_id = _worktree_task_id_from_artifact_dir(task_dir.name)
+            if not task_id:
+                continue
+            try:
+                attempt_dirs = [candidate for candidate in task_dir.iterdir() if candidate.is_dir() and candidate.name.startswith("attempt_")]
+            except Exception:
+                continue
+            for attempt_dir in attempt_dirs:
+                started_path = attempt_dir / ATTEMPT_STARTED_MARKER
+                finished_path = attempt_dir / ATTEMPT_FINISHED_MARKER
+                if finished_path.exists():
+                    continue
+                started_payload = _read_attempt_marker_file(started_path)
+                if started_path.exists():
+                    reason = f"{ATTEMPT_STARTED_MARKER} marker exists without {ATTEMPT_FINISHED_MARKER}"
+                    attempts.append(
+                        {
+                            "path": attempt_dir.resolve().as_posix(),
+                            "run_dir": run_dir.resolve().as_posix(),
+                            "owning_run": run_dir.name,
+                            "run_id": run_dir.name,
+                            "task_id": task_id,
+                            "attempt": _worktree_attempt_number(attempt_dir.name),
+                            "status": "interrupted",
+                            "reason": reason,
+                            "marker_source": "markers",
+                            "started_marker_path": started_path.resolve().as_posix(),
+                            "finished_marker_path": finished_path.resolve().as_posix(),
+                            "started_at": str(
+                                started_payload.get("timestamp")
+                                or started_payload.get("started_at")
+                                or ""
+                            ).strip(),
+                            "categories": ["stale"],
+                            **_worktree_age_fields(started_path.stat().st_mtime),
+                        }
+                    )
+                    continue
+                evidence_files = _worktree_attempt_output_evidence(attempt_dir)
+                if not evidence_files:
+                    continue
+                reason = "legacy attempt directory has output evidence without lifecycle markers"
+                attempts.append(
+                    {
+                        "path": attempt_dir.resolve().as_posix(),
+                        "run_dir": run_dir.resolve().as_posix(),
+                        "owning_run": run_dir.name,
+                        "run_id": run_dir.name,
+                        "task_id": task_id,
+                        "attempt": _worktree_attempt_number(attempt_dir.name),
+                        "status": "interrupted",
+                        "reason": reason,
+                        "marker_source": "legacy_output",
+                        "evidence_files": evidence_files,
+                        "categories": ["stale"],
+                        **_worktree_age_fields(_worktree_attempt_mtime(attempt_dir)),
+                    }
+                )
+    return attempts
+
+
+def _cleanup_plan_artifact_path(run_dir: Path) -> Path:
+    return run_dir / WORKTREE_CLEANUP_DRY_RUN
+
+
+def _cleanup_applied_artifact_path(run_dir: Path) -> Path:
+    return run_dir / WORKTREE_CLEANUP_APPLIED
+
+
+def _cleanup_candidate_id(kind: str, value: str) -> str:
+    return f"{str(kind or '').strip()}:{str(value or '').strip()}"
+
+
+def _cleanup_run_state(run_dir: Path) -> dict[str, object]:
+    state_path = run_dir / "STATE.json"
+    if not state_path.exists():
+        return {}
+    try:
+        return _read_json_payload(state_path)
+    except Exception:
+        return {}
+
+
+def _cleanup_review_packets_by_run(repo: Path) -> dict[str, list[dict[str, object]]]:
+    try:
+        from .pr_queue import list_review_packets, pr_packet_path
+    except Exception:
+        return {}
+
+    try:
+        listing = list_review_packets(repo)
+    except Exception:
+        return {}
+    items = listing.get("items") if isinstance(listing.get("items"), list) else []
+    by_run: dict[str, list[dict[str, object]]] = {}
+    for raw_item in items:
+        if not isinstance(raw_item, dict):
+            continue
+        run_id = str(raw_item.get("run_id") or "").strip()
+        if not run_id:
+            continue
+        status = str(raw_item.get("status") or "").strip().lower()
+        if status in {"approved", "discarded", "merged", "closed"}:
+            continue
+        packet_id = str(raw_item.get("id") or "").strip()
+        by_run.setdefault(run_id, []).append(
+            {
+                "kind": "review_packet",
+                "path": pr_packet_path(repo, packet_id).as_posix() if packet_id else "",
+                "packet_id": packet_id,
+                "need": str(raw_item.get("need") or "").strip(),
+                "status": status or "pr_queued",
+            }
+        )
+    return by_run
+
+
+def _cleanup_pending_review_evidence(
+    repo: Path,
+    run_dir: Path,
+    *,
+    review_packets_by_run: dict[str, list[dict[str, object]]] | None = None,
+) -> list[dict[str, object]]:
+    evidence: list[dict[str, object]] = []
+    state = _cleanup_run_state(run_dir)
+    pending_review = state.get("pending_review") if isinstance(state.get("pending_review"), list) else []
+    state_path = run_dir / "STATE.json"
+    for row in pending_review:
+        if not isinstance(row, dict):
+            continue
+        evidence.append(
+            {
+                "kind": "pending_review_state",
+                "path": state_path.as_posix(),
+                "task_id": str(row.get("task") or row.get("task_id") or row.get("taskId") or "").strip(),
+                "branch": str(row.get("branch") or "").strip(),
+                "rescue_branch": str(row.get("rescue_branch") or row.get("rescueBranch") or "").strip(),
+                "validation_artifact": str(
+                    row.get("validation_artifact") or row.get("validationArtifact") or ""
+                ).strip(),
+                "status": str(row.get("task_status") or row.get("status") or "").strip().lower(),
+            }
+        )
+
+    for item in (review_packets_by_run or {}).get(run_dir.name, []):
+        if not isinstance(item, dict):
+            continue
+        evidence.append(
+            {
+                "kind": "review_packet",
+                "path": str(item.get("path") or "").strip(),
+                "packet_id": str(item.get("packet_id") or "").strip(),
+                "need": str(item.get("need") or "").strip(),
+                "status": str(item.get("status") or "").strip().lower(),
+            }
+        )
+    return evidence
+
+
+def _cleanup_run_protections(
+    repo: Path,
+    run_dir: Path,
+    *,
+    review_packets_by_run: dict[str, list[dict[str, object]]] | None = None,
+) -> list[dict[str, object]]:
+    protections = _cleanup_pending_review_evidence(
+        repo,
+        run_dir,
+        review_packets_by_run=review_packets_by_run,
+    )
+    pending_path = run_dir / WORKTREE_MERGE_PENDING
+    if pending_path.exists():
+        protections.append(
+            {
+                "kind": "pending_worktree_merge",
+                "path": pending_path.as_posix(),
+                "detail": "run directory still holds a pending worktree merge marker",
+            }
+        )
+    for artifact_name in (
+        WORKTREE_CLEANUP_FAILED_STATUS_MAP["applied_cleanup_failed"]["artifact_name"],
+        WORKTREE_CLEANUP_FAILED_STATUS_MAP["discard_cleanup_failed"]["artifact_name"],
+    ):
+        artifact_path = run_dir / artifact_name
+        if not artifact_path.exists():
+            continue
+        protections.append(
+            {
+                "kind": "cleanup_failed_artifact",
+                "path": artifact_path.as_posix(),
+                "detail": "run directory still holds a cleanup-failed worktree artifact",
+            }
+        )
+    return protections
+
+
+def _cleanup_branch_protections(
+    branch: dict[str, object],
+    protections: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    branch_name = str(branch.get("branch") or branch.get("path") or "").strip()
+    task_id = str(branch.get("task_id") or "").strip()
+    matched: list[dict[str, object]] = []
+    for raw_item in protections:
+        item = dict(raw_item)
+        evidence_branch = str(item.get("branch") or item.get("rescue_branch") or "").strip()
+        evidence_task_id = str(item.get("task_id") or "").strip()
+        if branch_name and evidence_branch == branch_name:
+            matched.append(item)
+            continue
+        if task_id and evidence_task_id == task_id:
+            matched.append(item)
+    return matched
+
+
+def _cleanup_attempt_protections(
+    attempt: dict[str, object],
+    protections: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    task_id = str(attempt.get("task_id") or "").strip()
+    attempt_path = str(attempt.get("path") or "").strip()
+    matched: list[dict[str, object]] = []
+    for raw_item in protections:
+        item = dict(raw_item)
+        evidence_task_id = str(item.get("task_id") or "").strip()
+        validation_artifact = str(item.get("validation_artifact") or "").strip()
+        if task_id and evidence_task_id == task_id:
+            matched.append(item)
+            continue
+        if attempt_path and validation_artifact and validation_artifact.startswith(attempt_path):
+            matched.append(item)
+            continue
+        if str(item.get("kind") or "").strip() in {"review_packet", "pending_worktree_merge", "cleanup_failed_artifact"}:
+            matched.append(item)
+    return matched
+
+
+def _cleanup_old_run_age_fields(run_dir: Path) -> dict[str, object]:
+    try:
+        return _worktree_age_fields(run_dir.stat().st_mtime)
+    except Exception:
+        return {"age_seconds": 0, "age": "0s"}
+
+
+def _cleanup_confirmation_phrase(run_dir: Path, candidates: Sequence[dict[str, object]]) -> str:
+    seed = json.dumps(
+        {
+            "run_id": run_dir.name,
+            "candidates": [
+                {
+                    "candidate_id": str(item.get("candidate_id") or "").strip(),
+                    "action": str(item.get("action") or "").strip(),
+                    "path": str(item.get("path") or "").strip(),
+                }
+                for item in candidates
+                if isinstance(item, dict)
+            ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    token = hashlib.sha256(seed.encode("utf-8", errors="replace")).hexdigest()[:8].upper()
+    return f"{WORKTREE_CLEANUP_APPROVAL_PREFIX} {run_dir.name} {token}"
+
+
+def _cleanup_candidate_summary(candidates: Sequence[dict[str, object]]) -> dict[str, object]:
+    actions: dict[str, int] = {}
+    protected = 0
+    mutating = 0
+    for candidate in candidates:
+        action = str(candidate.get("action") or "").strip() or "unknown"
+        actions[action] = actions.get(action, 0) + 1
+        if bool(candidate.get("protected")):
+            protected += 1
+        if action not in {"preserve_pending_review_evidence", "remove_with_run_directory"}:
+            if action:
+                mutating += 1
+        elif action == "remove_with_run_directory":
+            mutating += 1
+    return {
+        "total": len(list(candidates)),
+        "protected": protected,
+        "mutating_candidates": mutating,
+        "actions": actions,
+    }
+
+
+def collect_worktree_cleanup_candidates(repo: Path, *, run_dir: Path) -> list[dict[str, object]]:
+    repo_resolved = repo.expanduser().resolve()
+    plan_run_dir = run_dir.expanduser().resolve()
+    run_dirs = _worktree_run_dirs(repo_resolved)
+    review_packets_by_run = _cleanup_review_packets_by_run(repo_resolved)
+    run_protections = {
+        candidate.name: _cleanup_run_protections(
+            repo_resolved,
+            candidate,
+            review_packets_by_run=review_packets_by_run,
+        )
+        for candidate in run_dirs
+    }
+    old_run_candidates: dict[str, dict[str, object]] = {}
+    candidates: list[dict[str, object]] = []
+
+    for candidate_run_dir in run_dirs:
+        if candidate_run_dir.resolve() == plan_run_dir:
+            continue
+        if candidate_run_dir.name >= plan_run_dir.name:
+            continue
+        protections = [dict(item) for item in run_protections.get(candidate_run_dir.name, [])]
+        protected = bool(protections)
+        action = "preserve_pending_review_evidence" if protected else "remove_run_directory"
+        exact_action = (
+            f"Preserve run directory at {candidate_run_dir.as_posix()} because review evidence is still present."
+            if protected
+            else f"Remove run directory tree at {candidate_run_dir.as_posix()}."
+        )
+        old_candidate = {
+            "candidate_id": _cleanup_candidate_id("old_run_directory", candidate_run_dir.name),
+            "kind": "old_run_directory",
+            "path": candidate_run_dir.as_posix(),
+            "owning_run": candidate_run_dir.name,
+            "owning_run_dir": candidate_run_dir.as_posix(),
+            "reason": f"run directory is older than active run {plan_run_dir.name}",
+            "protected": protected,
+            "pending_review_evidence": protections,
+            "action": action,
+            "exact_action": exact_action,
+            **_cleanup_old_run_age_fields(candidate_run_dir),
+        }
+        old_run_candidates[candidate_run_dir.as_posix()] = old_candidate
+
+    current_source_head = git_head(repo_resolved)
+    for branch in _worktree_stale_task_branches(repo_resolved, run_dirs, current_source_head):
+        owning_run = str(branch.get("owning_run") or "").strip()
+        protections = _cleanup_branch_protections(branch, run_protections.get(owning_run, []))
+        protected = bool(protections)
+        branch_name = str(branch.get("branch") or branch.get("path") or "").strip()
+        candidates.append(
+            {
+                "candidate_id": _cleanup_candidate_id("stale_task_branch", branch_name),
+                "kind": "stale_task_branch",
+                "path": branch_name,
+                "branch": branch_name,
+                "head_ref": str(branch.get("head_ref") or "").strip(),
+                "task_id": str(branch.get("task_id") or "").strip(),
+                "owning_run": owning_run or "unknown",
+                "owning_run_dir": str(branch.get("owning_run_dir") or "").strip(),
+                "reason": str(branch.get("reason") or "branch head is already contained in source HEAD").strip(),
+                "protected": protected,
+                "pending_review_evidence": protections,
+                "action": "preserve_pending_review_evidence" if protected else "delete_branch",
+                "exact_action": (
+                    f"Preserve branch {branch_name} because pending review evidence still references it."
+                    if protected
+                    else f"git branch -D {branch_name}"
+                ),
+                "status": str(branch.get("status") or "").strip(),
+                "source_head": str(branch.get("source_head") or "").strip(),
+                "age": str(branch.get("age") or "0s"),
+                "age_seconds": int(branch.get("age_seconds") or 0),
+            }
+        )
+
+    for attempt in _worktree_interrupted_attempt_dirs(run_dirs):
+        owning_run_dir = str(attempt.get("run_dir") or "").strip()
+        parent_run_candidate = old_run_candidates.get(owning_run_dir, {})
+        protections = _cleanup_attempt_protections(
+            attempt,
+            run_protections.get(str(attempt.get("owning_run") or "").strip(), []),
+        )
+        protected = bool(protections)
+        if parent_run_candidate and str(parent_run_candidate.get("action") or "").strip() == "remove_run_directory":
+            action = "remove_with_run_directory"
+            exact_action = f"Remove with run directory {owning_run_dir}."
+            protected = False
+        elif protected or (parent_run_candidate and bool(parent_run_candidate.get("protected"))):
+            action = "preserve_pending_review_evidence"
+            exact_action = f"Preserve attempt directory at {attempt.get('path')} because pending review evidence is still present."
+        else:
+            action = "remove_directory"
+            exact_action = f"Remove attempt directory tree at {attempt.get('path')}."
+        candidates.append(
+            {
+                "candidate_id": _cleanup_candidate_id("interrupted_attempt_directory", str(attempt.get("path") or "")),
+                "kind": "interrupted_attempt_directory",
+                "path": str(attempt.get("path") or "").strip(),
+                "task_id": str(attempt.get("task_id") or "").strip(),
+                "attempt": int(attempt.get("attempt") or -1),
+                "owning_run": str(attempt.get("owning_run") or "").strip(),
+                "owning_run_dir": owning_run_dir,
+                "reason": str(attempt.get("reason") or "missing validation artifact").strip(),
+                "protected": protected or (parent_run_candidate and bool(parent_run_candidate.get("protected"))),
+                "pending_review_evidence": protections if protected else [dict(item) for item in parent_run_candidate.get("pending_review_evidence", [])] if parent_run_candidate and bool(parent_run_candidate.get("protected")) else [],
+                "action": action,
+                "covered_by": str(parent_run_candidate.get("candidate_id") or "").strip() if action == "remove_with_run_directory" else "",
+                "exact_action": exact_action,
+                "status": str(attempt.get("status") or "").strip(),
+                "age": str(attempt.get("age") or "0s"),
+                "age_seconds": int(attempt.get("age_seconds") or 0),
+            }
+        )
+
+    candidates.extend(old_run_candidates.values())
+    return sorted(
+        candidates,
+        key=lambda item: (
+            str(item.get("kind") or ""),
+            str(item.get("owning_run") or ""),
+            str(item.get("path") or item.get("branch") or ""),
+        ),
+    )
+
+
+def build_worktree_cleanup_dry_run(repo: Path, *, run_dir: Path) -> dict[str, object]:
+    repo_resolved = repo.expanduser().resolve()
+    run_dir_resolved = run_dir.expanduser().resolve()
+    candidates = collect_worktree_cleanup_candidates(repo_resolved, run_dir=run_dir_resolved)
+    payload = {
+        "schema_version": 1,
+        "status": "dry_run",
+        "created_at": now_iso(),
+        "source_repo": repo_resolved.as_posix(),
+        "run_dir": run_dir_resolved.as_posix(),
+        "approval_phrase": _cleanup_confirmation_phrase(run_dir_resolved, candidates),
+        "candidates": candidates,
+        "summary": _cleanup_candidate_summary(candidates),
+    }
+    safe_write_text(
+        _cleanup_plan_artifact_path(run_dir_resolved),
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
+    return payload
+
+
+def _cleanup_safe_directory_remove(target: Path, *, allowed_root: Path) -> str:
+    resolved_target = target.expanduser().resolve()
+    resolved_root = allowed_root.expanduser().resolve()
+    if not _path_is_relative_to(resolved_target, resolved_root):
+        raise RuntimeError(
+            f"refusing to remove cleanup target outside allowed root: target={resolved_target} allowed_root={resolved_root}"
+        )
+    if not resolved_target.exists():
+        return "already_absent"
+    shutil.rmtree(resolved_target)
+    return "deleted"
+
+
+def _cleanup_safe_branch_delete(repo: Path, branch_name: str) -> str:
+    branch_text = str(branch_name or "").strip()
+    if not branch_text.startswith("task/"):
+        raise RuntimeError(f"refusing to delete non-task branch: {branch_text}")
+    if git_current_branch(repo) == branch_text:
+        raise RuntimeError(f"refusing to delete checked-out branch: {branch_text}")
+    rc, out = run_cmd(["git", "branch", "-D", branch_text], cwd=repo, timeout_sec=60)
+    if rc != 0:
+        if "not found" in str(out or "").lower() or "not a valid branch" in str(out or "").lower():
+            return "already_absent"
+        raise RuntimeError(f"git branch -D failed for {branch_text}: {str(out or '').strip()}")
+    return "deleted"
+
+
+def _cleanup_applied_payload(
+    dry_run: dict[str, object],
+    *,
+    status: str,
+    approval_received: str,
+    results: Sequence[dict[str, object]],
+    failures: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "status": status,
+        "created_at": now_iso(),
+        "source_repo": str(dry_run.get("source_repo") or "").strip(),
+        "run_dir": str(dry_run.get("run_dir") or "").strip(),
+        "dry_run_artifact": _cleanup_plan_artifact_path(Path(str(dry_run.get("run_dir") or ""))).as_posix(),
+        "approval_phrase": str(dry_run.get("approval_phrase") or "").strip(),
+        "approval_received": str(approval_received or "").strip(),
+        "candidates": [dict(item) for item in dry_run.get("candidates", []) if isinstance(item, dict)],
+        "results": [dict(item) for item in results],
+        "failures": [dict(item) for item in failures],
+        "summary": {
+            "planned": len([item for item in dry_run.get("candidates", []) if isinstance(item, dict)]),
+            "results": len(list(results)),
+            "failures": len(list(failures)),
+            "deleted": len([item for item in results if str(item.get("result") or "") in {"deleted", "removed_with_parent"}]),
+            "preserved": len([item for item in results if str(item.get("result") or "") == "preserved"]),
+            "already_absent": len([item for item in results if str(item.get("result") or "") == "already_absent"]),
+        },
+    }
+
+
+def apply_worktree_cleanup(repo: Path, *, run_dir: Path, approval_phrase: str = "") -> dict[str, object]:
+    repo_resolved = repo.expanduser().resolve()
+    run_dir_resolved = run_dir.expanduser().resolve()
+    dry_run_path = _cleanup_plan_artifact_path(run_dir_resolved)
+    if dry_run_path.exists():
+        try:
+            dry_run = _read_json_payload(dry_run_path)
+        except Exception:
+            dry_run = build_worktree_cleanup_dry_run(repo_resolved, run_dir=run_dir_resolved)
+    else:
+        dry_run = build_worktree_cleanup_dry_run(repo_resolved, run_dir=run_dir_resolved)
+
+    expected_phrase = str(dry_run.get("approval_phrase") or "").strip()
+    results: list[dict[str, object]] = []
+    failures: list[dict[str, object]] = []
+    applied_path = _cleanup_applied_artifact_path(run_dir_resolved)
+    provided_phrase = str(approval_phrase or "").strip()
+
+    if provided_phrase != expected_phrase:
+        failures.append(
+            {
+                "code": "approval_phrase_mismatch",
+                "message": "Cleanup apply rejected because the confirmation phrase did not match the dry-run artifact.",
+                "expected": expected_phrase,
+                "received": provided_phrase,
+            }
+        )
+        payload = _cleanup_applied_payload(
+            dry_run,
+            status="approval_rejected",
+            approval_received=provided_phrase,
+            results=results,
+            failures=failures,
+        )
+        safe_write_text(applied_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        return payload
+
+    run_root = repo_resolved / ".AgentCLI" / "agent_runs"
+    parent_results: dict[str, dict[str, object]] = {}
+    covered_candidates: list[dict[str, object]] = []
+    candidates = [dict(item) for item in dry_run.get("candidates", []) if isinstance(item, dict)]
+    for candidate in candidates:
+        action = str(candidate.get("action") or "").strip()
+        result = {
+            "candidate_id": str(candidate.get("candidate_id") or "").strip(),
+            "kind": str(candidate.get("kind") or "").strip(),
+            "path": str(candidate.get("path") or "").strip(),
+            "owning_run": str(candidate.get("owning_run") or "").strip(),
+            "action": action,
+            "exact_action": str(candidate.get("exact_action") or "").strip(),
+            "protected": bool(candidate.get("protected")),
+        }
+        if action == "remove_with_run_directory":
+            covered_candidates.append(candidate)
+            continue
+        if action == "preserve_pending_review_evidence":
+            result["ok"] = True
+            result["result"] = "preserved"
+            results.append(result)
+            parent_results[result["candidate_id"]] = result
+            continue
+        try:
+            if action == "delete_branch":
+                result["result"] = _cleanup_safe_branch_delete(repo_resolved, str(candidate.get("branch") or candidate.get("path") or ""))
+            elif action == "remove_directory":
+                owner_run_dir = Path(str(candidate.get("owning_run_dir") or "")).expanduser().resolve()
+                result["result"] = _cleanup_safe_directory_remove(
+                    Path(str(candidate.get("path") or "")),
+                    allowed_root=owner_run_dir / "tasks",
+                )
+            elif action == "remove_run_directory":
+                result["result"] = _cleanup_safe_directory_remove(
+                    Path(str(candidate.get("path") or "")),
+                    allowed_root=run_root,
+                )
+            else:
+                raise RuntimeError(f"unsupported cleanup action: {action}")
+            result["ok"] = True
+        except Exception as ex:
+            result["ok"] = False
+            result["result"] = "failed"
+            result["error"] = str(ex).strip() or ex.__class__.__name__
+            failures.append(
+                {
+                    "candidate_id": str(result.get("candidate_id") or "").strip(),
+                    "kind": str(result.get("kind") or "").strip(),
+                    "path": str(result.get("path") or "").strip(),
+                    "action": action,
+                    "error": str(result.get("error") or "").strip(),
+                }
+            )
+        results.append(result)
+        parent_results[str(result.get("candidate_id") or "").strip()] = result
+
+    for candidate in covered_candidates:
+        parent_id = str(candidate.get("covered_by") or "").strip()
+        parent_result = parent_results.get(parent_id, {})
+        ok = bool(parent_result.get("ok"))
+        result = {
+            "candidate_id": str(candidate.get("candidate_id") or "").strip(),
+            "kind": str(candidate.get("kind") or "").strip(),
+            "path": str(candidate.get("path") or "").strip(),
+            "owning_run": str(candidate.get("owning_run") or "").strip(),
+            "action": str(candidate.get("action") or "").strip(),
+            "exact_action": str(candidate.get("exact_action") or "").strip(),
+            "covered_by": parent_id,
+            "protected": False,
+            "ok": ok,
+            "result": "removed_with_parent" if ok else "failed",
+        }
+        if not ok:
+            result["error"] = (
+                f"parent cleanup action {parent_id or '(unknown)'} did not complete"
+            )
+            failures.append(
+                {
+                    "candidate_id": str(result.get("candidate_id") or "").strip(),
+                    "kind": str(result.get("kind") or "").strip(),
+                    "path": str(result.get("path") or "").strip(),
+                    "action": str(result.get("action") or "").strip(),
+                    "error": str(result.get("error") or "").strip(),
+                }
+            )
+        results.append(result)
+
+    status = "applied_with_failures" if failures else "applied"
+    payload = _cleanup_applied_payload(
+        dry_run,
+        status=status,
+        approval_received=provided_phrase,
+        results=results,
+        failures=failures,
+    )
+    safe_write_text(applied_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    return payload
+
+
 def _worktree_pending_stale_reason(payload: dict[str, object], pending_path: Path) -> str:
     run_dir_value = _worktree_text_path(payload.get("run_dir") or payload.get("runDir"))
     patch_path = _worktree_text_path(payload.get("patch_path") or payload.get("patchPath") or payload.get("patch"))
@@ -2242,6 +3137,8 @@ def _worktree_filter_diagnostics_result(
     pending_markers = [dict(item) for item in diagnostics.get("pending_markers", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
     cleanup_failed = [dict(item) for item in diagnostics.get("cleanup_failed", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
     generated_worktrees = [dict(item) for item in diagnostics.get("generated_worktrees", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
+    stale_task_branches = [dict(item) for item in diagnostics.get("stale_task_branches", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
+    interrupted_attempts = [dict(item) for item in diagnostics.get("interrupted_attempts", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
     issues = [dict(item) for item in diagnostics.get("issues", []) if _worktree_diagnostic_matches_categories(dict(item), set(selected_categories))]
     issues_sorted = sorted(
         issues,
@@ -2267,9 +3164,11 @@ def _worktree_filter_diagnostics_result(
             "cleanup_failed": len(cleanup_failed),
             "generated_worktrees": len(generated_worktrees),
             "orphaned_worktrees": sum(1 for worktree in generated_worktrees if "orphaned" in _worktree_normalize_diagnostic_categories(worktree.get("categories"))),
+            "stale_task_branches": len(stale_task_branches),
+            "interrupted_attempts": len(interrupted_attempts),
             "issue_count": len(issues_sorted),
             "healthy": not issues_sorted,
-            "category_counts": _worktree_diagnostic_category_counts(pending_markers, cleanup_failed, generated_worktrees, issues_sorted),
+            "category_counts": _worktree_diagnostic_category_counts(pending_markers, cleanup_failed, generated_worktrees, stale_task_branches, interrupted_attempts, issues_sorted),
         }
     )
     summary["categoryCounts"] = summary["category_counts"]
@@ -2281,6 +3180,8 @@ def _worktree_filter_diagnostics_result(
         "pending_markers": pending_markers,
         "cleanup_failed": cleanup_failed,
         "generated_worktrees": generated_worktrees,
+        "stale_task_branches": stale_task_branches,
+        "interrupted_attempts": interrupted_attempts,
         "filters": {
             "categories": selected_categories,
             "available_categories": list(WORKTREE_DIAGNOSTIC_CATEGORY_ORDER),
@@ -2317,6 +3218,137 @@ def _path_exists_safely(path_text: str) -> bool:
         return Path(text).expanduser().exists()
     except Exception:
         return False
+
+
+def _pending_marker_reconciliation_artifact_path(pending_path: Path) -> Path:
+    target = pending_path.with_name(WORKTREE_MERGE_PENDING_RECONCILED)
+    if not target.exists():
+        return target
+    suffix = hashlib.sha256(f"{pending_path.as_posix()}:{now_iso()}".encode("utf-8")).hexdigest()[:8]
+    return pending_path.with_name(f"WORKTREE_MERGE_PENDING_RECONCILED_{_safe_ts()}_{suffix}.json")
+
+
+def _pending_marker_source_contains_head(repo: Path, marker: dict[str, object], source_head: str) -> tuple[bool, str, str]:
+    head_ref = str(marker.get("head_ref") or marker.get("headRef") or "").strip()
+    base_ref = str(marker.get("base_ref") or marker.get("baseRef") or marker.get("expected_head") or marker.get("expectedHead") or "").strip()
+    if not head_ref or not source_head or head_ref == base_ref:
+        return False, source_head, head_ref
+    source_repo_text = _worktree_text_path(marker.get("source_repo") or marker.get("sourceRepo")) or repo.as_posix()
+    try:
+        source_repo = Path(source_repo_text).expanduser().resolve()
+    except Exception:
+        source_repo = repo
+    marker_source_head = source_head if source_repo == repo else git_head(source_repo)
+    if not marker_source_head:
+        return False, marker_source_head, head_ref
+    return bool(head_ref == marker_source_head or _git_is_ancestor(source_repo, head_ref, marker_source_head)), marker_source_head, head_ref
+
+
+def _pending_marker_reconciliation_reason(repo: Path, marker: dict[str, object], source_head: str) -> tuple[str, dict[str, object]]:
+    reason_text = str(marker.get("reason") or "").strip().lower()
+    patch_path = _worktree_text_path(marker.get("patch_path") or marker.get("patchPath") or marker.get("patch"))
+    worktree_dir = _worktree_text_path(marker.get("worktree_dir") or marker.get("worktreeDir") or marker.get("worktree"))
+    is_stale = bool(marker.get("stale")) or str(marker.get("status") or "").strip().lower() == "stale"
+    patch_missing = bool(is_stale and patch_path and not _path_exists_safely(patch_path))
+    worktree_missing = bool(is_stale and worktree_dir and not _path_exists_safely(worktree_dir))
+    if patch_missing or "patch path is missing" in reason_text:
+        return "missing_patch", {"patch_path": patch_path}
+    if worktree_missing or "worktree directory is missing" in reason_text:
+        return "missing_worktree", {"worktree_dir": worktree_dir}
+    source_contains, marker_source_head, head_ref = _pending_marker_source_contains_head(repo, marker, source_head)
+    if source_contains:
+        return "source_head_contains_pending_head", {"source_head": marker_source_head, "head_ref": head_ref}
+    return "", {}
+
+
+def reconcile_stale_pending_worktree_markers(
+    repo: Path,
+    *,
+    diagnostics: dict[str, object] | None = None,
+    source_head: str = "",
+) -> list[dict[str, object]]:
+    """Clear pending merge markers that diagnostics prove are no longer actionable.
+
+    This is intentionally separate from ``scan_worktree_diagnostics`` so normal
+    doctor/API reads stay read-only. Startup readiness calls this after scanning
+    and records an audit artifact beside each removed marker.
+    """
+
+    repo_resolved = repo.expanduser().resolve()
+    scan = diagnostics if isinstance(diagnostics, dict) else scan_worktree_diagnostics(repo_resolved)
+    source_head_text = str(source_head or git_head(repo_resolved) or "").strip()
+    pending_markers = scan.get("pending_markers") if isinstance(scan.get("pending_markers"), list) else []
+    reconciled: list[dict[str, object]] = []
+    seen_paths: set[str] = set()
+
+    for raw_marker in pending_markers:
+        if not isinstance(raw_marker, dict):
+            continue
+        marker = dict(raw_marker)
+        marker_path_text = _worktree_text_path(marker.get("path"))
+        if not marker_path_text or marker_path_text in seen_paths:
+            continue
+        marker_path = Path(marker_path_text)
+        if not marker_path.exists():
+            continue
+        reason, reason_details = _pending_marker_reconciliation_reason(repo_resolved, marker, source_head_text)
+        if not reason:
+            continue
+        try:
+            payload = _read_json_payload(marker_path)
+        except Exception as ex:
+            payload = {"read_error": str(ex).strip() or ex.__class__.__name__}
+
+        companion_paths = _pending_companion_paths(payload if isinstance(payload, dict) else {}, marker_path)
+        removed_paths: list[str] = []
+        artifact_paths: list[str] = []
+        reconciled_at = now_iso()
+        for companion in companion_paths:
+            companion_key = companion.resolve().as_posix() if companion.exists() else companion.as_posix()
+            seen_paths.add(companion_key)
+            if not companion.exists():
+                continue
+            audit_payload = {
+                "schema_version": 1,
+                "status": "reconciled",
+                "reconciled_at": reconciled_at,
+                "reconciliation_reason": reason,
+                "reason": reason,
+                "reason_details": dict(reason_details),
+                "source_repo": repo_resolved.as_posix(),
+                "source_head": source_head_text,
+                "pending_marker_path": companion.resolve().as_posix(),
+                "removed_pending_paths": [path.as_posix() for path in companion_paths],
+                "original_pending_payload": dict(payload) if isinstance(payload, dict) else {},
+            }
+            artifact_path = _pending_marker_reconciliation_artifact_path(companion)
+            safe_write_text(artifact_path, json.dumps(audit_payload, ensure_ascii=False, indent=2) + "\n")
+            artifact_paths.append(artifact_path.resolve().as_posix())
+            removed_paths.append(companion.resolve().as_posix())
+            try:
+                companion.unlink()
+            except Exception:
+                pass
+
+        if removed_paths:
+            reconciled.append(
+                {
+                    "status": "reconciled",
+                    "reason": reason,
+                    "reason_details": dict(reason_details),
+                    "marker_path": marker_path_text,
+                    "removed_paths": removed_paths,
+                    "artifact_paths": artifact_paths,
+                    "source_head": source_head_text,
+                    "head_ref": str(marker.get("head_ref") or "").strip(),
+                    "run_dir": str(marker.get("run_dir") or "").strip(),
+                    "worktree_dir": str(marker.get("worktree_dir") or "").strip(),
+                    "patch_path": str(marker.get("patch_path") or "").strip(),
+                    "reconciled_at": reconciled_at,
+                }
+            )
+
+    return reconciled
 
 
 def _cleanup_failed_reconciliation_state(
@@ -2468,6 +3500,8 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
     generated_worktrees: list[dict[str, object]] = []
     pending_markers: list[dict[str, object]] = []
     cleanup_failed: list[dict[str, object]] = []
+    stale_task_branches: list[dict[str, object]] = []
+    interrupted_attempts: list[dict[str, object]] = []
     issues: list[dict[str, object]] = []
     referenced_worktrees: set[str] = set()
     seen_missing_patch_paths: set[str] = set()
@@ -2888,6 +3922,48 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
                 },
             )
 
+    current_source_head = git_head(repo_resolved)
+    for branch in _worktree_stale_task_branches(repo_resolved, run_dirs, current_source_head):
+        stale_task_branches.append(branch)
+        add_issue(
+            "stale_task_branch",
+            f"Stale task branch {branch.get('branch')}: {branch.get('reason')}",
+            severity="warn",
+            categories=["stale"],
+            details={
+                "branch": branch.get("branch"),
+                "age": branch.get("age"),
+                "age_seconds": branch.get("age_seconds"),
+                "status": branch.get("status"),
+                "reason": branch.get("reason"),
+                "owning_run": branch.get("owning_run"),
+                "owning_run_dir": branch.get("owning_run_dir"),
+                "task_id": branch.get("task_id"),
+                "head_ref": branch.get("head_ref"),
+                "source_head": branch.get("source_head"),
+            },
+        )
+
+    for attempt in _worktree_interrupted_attempt_dirs(run_dirs):
+        interrupted_attempts.append(attempt)
+        add_issue(
+            "interrupted_attempt_directory",
+            f"Interrupted attempt directory {attempt.get('path')}: {attempt.get('reason')}",
+            severity="warn",
+            path=str(attempt.get("path") or ""),
+            categories=["stale"],
+            details={
+                "age": attempt.get("age"),
+                "age_seconds": attempt.get("age_seconds"),
+                "status": attempt.get("status"),
+                "reason": attempt.get("reason"),
+                "owning_run": attempt.get("owning_run"),
+                "run_dir": attempt.get("run_dir"),
+                "task_id": attempt.get("task_id"),
+                "attempt": attempt.get("attempt"),
+            },
+        )
+
     issues_sorted = sorted(
         issues,
         key=lambda item: (
@@ -2912,9 +3988,11 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
         "cleanup_failed": len(cleanup_failed),
         "generated_worktrees": len(generated_worktrees),
         "orphaned_worktrees": sum(1 for worktree in generated_worktrees if worktree.get("orphaned")),
+        "stale_task_branches": len(stale_task_branches),
+        "interrupted_attempts": len(interrupted_attempts),
         "issue_count": len(issues_sorted),
         "healthy": not issues_sorted,
-        "category_counts": _worktree_diagnostic_category_counts(pending_markers, cleanup_failed, generated_worktrees, issues_sorted),
+        "category_counts": _worktree_diagnostic_category_counts(pending_markers, cleanup_failed, generated_worktrees, stale_task_branches, interrupted_attempts, issues_sorted),
     }
     summary["categoryCounts"] = summary["category_counts"]
 
@@ -2931,6 +4009,8 @@ def scan_worktree_diagnostics(repo: Path, categories: Sequence[str] | str | None
             "pending_markers": pending_markers,
             "cleanup_failed": cleanup_failed,
             "generated_worktrees": generated_worktrees,
+            "stale_task_branches": stale_task_branches,
+            "interrupted_attempts": interrupted_attempts,
         },
         categories=categories,
     )

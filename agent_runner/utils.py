@@ -98,6 +98,20 @@ def eprint(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+def subprocess_close_fds_kwargs() -> dict[str, Any]:
+    """Return subprocess kwargs with explicit child-handle inheritance policy.
+
+    ``close_fds=True`` is intentional on Windows too. Python still wires the
+    redirected stdio handles we pass explicitly, while preventing unrelated file
+    handles from leaking into child processes. Runner subprocess tests assert
+    this contract for the Windows launch paths that matter here.
+    """
+    kwargs: dict[str, Any] = {"close_fds": True}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return kwargs
+
+
 def run_cmd(cmd: Sequence[str], cwd: Path, timeout_sec: int = 600) -> Tuple[int, str]:
     """Run a subprocess and capture output (stdout+stderr)."""
     if not cmd:
@@ -113,7 +127,7 @@ def run_cmd(cmd: Sequence[str], cwd: Path, timeout_sec: int = 600) -> Tuple[int,
             timeout=timeout_sec,
             check=False,
             stdin=subprocess.DEVNULL,
-            **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
+            **subprocess_close_fds_kwargs(),
         )
         out = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
         return r.returncode, out.strip()
@@ -148,7 +162,7 @@ async def run_cmd_async(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.DEVNULL,
-            **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
+            **subprocess_close_fds_kwargs(),
         )
     except (OSError, FileNotFoundError) as e:
         return (127, str(e))
@@ -688,7 +702,7 @@ class _CodexAppServerClient:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
+            **subprocess_close_fds_kwargs(),
         )
         if self._proc.stdin is None or self._proc.stdout is None:
             raise CodexAppServerError("Failed to start codex app-server (stdio unavailable)")

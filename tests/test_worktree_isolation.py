@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import os
 import shutil
 import sys
 import threading
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -19,8 +21,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+from agent_runner.config import default_config_path
 from agent_runner.gitops import (
+    WORKTREE_CLEANUP_APPLIED,
+    WORKTREE_CLEANUP_DRY_RUN,
     WORKTREE_MERGE_PENDING,
+    WORKTREE_MERGE_PENDING_RECONCILED,
     WorktreeSafetyError,
     _cleanup_pytest_cache_tempdirs,
     abandon_task_branch,
@@ -36,7 +42,7 @@ from agent_runner.gitops import (
     restore_checkpoint,
     scan_worktree_diagnostics,
 )
-from agent_runner.failure_policy import should_preserve_for_review
+from agent_runner.failure_policy import build_failure_outcome, should_preserve_for_review
 from agent_runner.pr_queue import (
     load_branch_index,
     pr_branch_index_path,
@@ -46,9 +52,18 @@ from agent_runner.pr_queue import (
 )
 from agent_runner.preflight import check_runner_start_readiness
 from agent_runner.remote.controller import read_runner_control_event
-from agent_runner.runtime_contract import dispatch_task_branch_disposition
+from agent_runner.runtime_contract import (
+    ATTEMPT_FINISHED_MARKER,
+    ATTEMPT_STARTED_MARKER,
+    dispatch_task_branch_disposition,
+)
 from agent_runner.shell import RunnerShell
 from agent_runner.stop_progress import read_stop_progress, write_stop_progress
+from agent_runner.task_status import (
+    TASK_STATUS_BLOCKED_ENV,
+    TASK_STATUS_REGRESSION_FAILED,
+    TASK_STATUS_TEST_CONTRACT_CHANGED,
+)
 from agent_runner.utils import run_cmd
 
 
@@ -98,6 +113,82 @@ class WorktreeIsolationTests(unittest.TestCase):
         python_path.parent.mkdir(parents=True, exist_ok=True)
         python_path.write_text("", encoding="utf-8")
         return python_path
+
+    def _branch_exists(self, branch_name: str) -> bool:
+        code, _ = run_cmd(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+            cwd=self.repo,
+            timeout_sec=60,
+        )
+        return code == 0
+
+    def _write_state_payload(self, run_dir: Path, payload: dict[str, object]) -> None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "STATE.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _create_stale_task_branch(
+        self,
+        *,
+        run_dir: Path,
+        task_id: str,
+        branch_suffix: str,
+        filename: str,
+    ) -> str:
+        base_branch = self._source_branch()
+        branch_name = f"task/{task_id}_{branch_suffix}"
+        self._git("checkout", "-b", branch_name)
+        (self.repo / filename).write_text(f"{task_id}\n", encoding="utf-8")
+        self._git("add", filename)
+        self._git("commit", "-m", f"{task_id} work")
+        self._git("checkout", base_branch)
+        self._git("merge", "--ff-only", branch_name)
+        metrics_event = {
+            "event": "task_branch_created",
+            "branch": branch_name,
+            "task_id": task_id,
+            "cycle": 1,
+            "step": 1,
+        }
+        (run_dir / "metrics.jsonl").write_text(json.dumps(metrics_event) + "\n", encoding="utf-8")
+        return branch_name
+
+    def _write_interrupted_attempt(self, run_dir: Path, *, task_dir_name: str, content: str = "interrupted\n") -> Path:
+        attempt_dir = run_dir / "tasks" / task_dir_name / "attempt_00"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        (attempt_dir / "dev_output.txt").write_text(content, encoding="utf-8")
+        return attempt_dir
+
+    def _write_attempt_marker(
+        self,
+        attempt_dir: Path,
+        *,
+        marker: str,
+        task_id: str,
+        attempt: int = 0,
+        timestamp: str = "2026-05-05T00:00:00",
+        status: str = "",
+        reason: str = "",
+    ) -> Path:
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "marker": marker,
+            "task_id": task_id,
+            "attempt": attempt,
+            "timestamp": timestamp,
+        }
+        if status:
+            payload["status"] = status
+        if reason:
+            payload["reason"] = reason
+        marker_path = attempt_dir / marker
+        marker_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return marker_path
 
     def _record_pending_review(self, sink: list[dict[str, object]]):
         def _record(
@@ -211,6 +302,54 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertEqual((self.run_dir / "validation.log").as_posix(), pending_reviews[0]["validation_artifact"])
         remove_worktree(self.repo, self.worktree)
 
+    def test_dispatch_task_branch_disposition_preserves_blocked_env_branch_for_review(self) -> None:
+        self._init_repo()
+        create_worktree(self.repo, self.worktree, run_dir=self.run_dir)
+        tb = create_task_branch(self.worktree, "T-blocked", task_title="Preserve blocked env branch")
+        (self.worktree / "feature.txt").write_text("reviewable\n", encoding="utf-8")
+        self._git("add", "feature.txt", cwd=self.worktree)
+        self._git("commit", "-m", "reviewable", cwd=self.worktree)
+        branch_head = self._git("rev-parse", "HEAD", cwd=self.worktree).strip()
+        pending_reviews: list[dict[str, object]] = []
+        branch_events: list[dict[str, object]] = []
+        persisted: list[str] = []
+        failure_outcome = build_failure_outcome(
+            "build_failed",
+            task_status=TASK_STATUS_BLOCKED_ENV,
+            detail="tooling unavailable",
+            validation_artifact=(self.run_dir / "validation.log").as_posix(),
+        )
+
+        result = dispatch_task_branch_disposition(
+            failure_outcome=failure_outcome,
+            has_task_branch=True,
+            abandon_branch=lambda: abandon_task_branch(self.worktree, tb),
+            record_pending_review=self._record_pending_review(pending_reviews),
+            persist_state=lambda: persisted.append("saved"),
+            on_branch_success=lambda disposition, branch_name: branch_events.append(
+                {
+                    "event": disposition.event_name,
+                    "branch": branch_name,
+                    "preserve": disposition.preserve_for_review,
+                    "task_status": disposition.outcome_status,
+                }
+            ),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual("", result.stop_reason)
+        self.assertTrue(result.disposition.preserve_for_review)
+        self.assertEqual(TASK_STATUS_BLOCKED_ENV, result.disposition.outcome_status)
+        self.assertEqual(tb.base_commit, self._git("rev-parse", "HEAD", cwd=self.worktree).strip())
+        self.assertEqual(branch_head, self._git("rev-parse", tb.branch_name, cwd=self.worktree).strip())
+        self.assertEqual(["saved"], persisted)
+        self.assertEqual("task_branch_preserved", branch_events[0]["event"])
+        self.assertEqual(tb.branch_name, branch_events[0]["branch"])
+        self.assertEqual(TASK_STATUS_BLOCKED_ENV, pending_reviews[0]["task_status"])
+        self.assertEqual(tb.branch_name, pending_reviews[0]["branch"])
+        self.assertEqual((self.run_dir / "validation.log").as_posix(), pending_reviews[0]["validation_artifact"])
+        remove_worktree(self.repo, self.worktree)
+
     def test_preserve_task_branch_advances_generated_worktree_for_next_task(self) -> None:
         source_head = self._init_repo()
         create_worktree(self.repo, self.worktree, run_dir=self.run_dir)
@@ -251,13 +390,15 @@ class WorktreeIsolationTests(unittest.TestCase):
         branch_head = self._git("rev-parse", "HEAD", cwd=self.worktree).strip()
         pending_reviews: list[dict[str, object]] = []
         branch_events: list[dict[str, object]] = []
+        failure_outcome = build_failure_outcome(
+            "test_failed",
+            task_status=TASK_STATUS_REGRESSION_FAILED,
+            detail="tests failed",
+        )
 
         result = dispatch_task_branch_disposition(
-            "regression_failed",
-            task_status="regression_failed",
-            detail="tests failed",
+            failure_outcome=failure_outcome,
             has_task_branch=True,
-            task_status_resolver=lambda reason, detail: reason,
             abandon_branch=lambda: abandon_task_branch(self.worktree, tb),
             record_pending_review=self._record_pending_review(pending_reviews),
             persist_state=lambda: None,
@@ -272,12 +413,92 @@ class WorktreeIsolationTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertFalse(result.disposition.preserve_for_review)
+        self.assertEqual(TASK_STATUS_REGRESSION_FAILED, result.disposition.outcome_status)
         self.assertEqual(tb.base_commit, self._git("rev-parse", "HEAD", cwd=self.worktree).strip())
         self.assertEqual(branch_head, self._git("rev-parse", tb.branch_name, cwd=self.worktree).strip())
         self.assertEqual([], pending_reviews)
         self.assertEqual("task_branch_abandoned", branch_events[0]["event"])
         self.assertEqual(tb.branch_name, branch_events[0]["branch"])
         remove_worktree(self.repo, self.worktree)
+
+    def test_dispatch_task_branch_disposition_restores_test_contract_changed_checkpoint_for_review(self) -> None:
+        self._init_repo()
+        checkpoint = create_checkpoint(self.repo, self.fixture_root / "checkpoint")
+        (self.repo / "README.md").write_text("mutated\n", encoding="utf-8")
+        (self.repo / "feature.txt").write_text("new work\n", encoding="utf-8")
+        pending_reviews: list[dict[str, object]] = []
+        rollback_events: list[dict[str, object]] = []
+        persisted: list[str] = []
+        failure_outcome = build_failure_outcome(
+            "test_failed",
+            task_status=TASK_STATUS_TEST_CONTRACT_CHANGED,
+            detail="locator drift",
+            validation_artifact=(self.run_dir / "validation.log").as_posix(),
+        )
+
+        result = dispatch_task_branch_disposition(
+            failure_outcome=failure_outcome,
+            has_checkpoint=True,
+            restore_checkpoint=lambda: restore_checkpoint(
+                self.repo,
+                checkpoint,
+                dangerous=True,
+                run_dir=self.run_dir,
+                stop_path=None,
+                task_id="T-contract-review",
+            ),
+            record_pending_review=self._record_pending_review(pending_reviews),
+            persist_state=lambda: persisted.append("saved"),
+            on_rollback_success=lambda disposition, rescue_branch: rollback_events.append(
+                {
+                    "action": disposition.action,
+                    "branch": rescue_branch,
+                    "task_status": disposition.outcome_status,
+                }
+            ),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual("", result.stop_reason)
+        self.assertTrue(result.disposition.preserve_for_review)
+        self.assertEqual(TASK_STATUS_TEST_CONTRACT_CHANGED, result.disposition.outcome_status)
+        self.assertEqual("base\n", (self.repo / "README.md").read_text(encoding="utf-8"))
+        self.assertFalse((self.repo / "feature.txt").exists())
+        self.assertEqual(["saved"], persisted)
+        self.assertEqual(1, len(pending_reviews))
+        self.assertEqual(TASK_STATUS_TEST_CONTRACT_CHANGED, pending_reviews[0]["task_status"])
+        self.assertEqual((self.run_dir / "validation.log").as_posix(), pending_reviews[0]["validation_artifact"])
+        self.assertEqual("restore_checkpoint", rollback_events[0]["action"])
+        self.assertEqual(TASK_STATUS_TEST_CONTRACT_CHANGED, rollback_events[0]["task_status"])
+        self.assertTrue(rollback_events[0]["branch"].startswith("rescue/T-contract-review_"))
+
+    def test_dispatch_task_branch_disposition_records_test_contract_changed_without_branch(self) -> None:
+        pending_reviews: list[dict[str, object]] = []
+        persisted: list[str] = []
+        failure_outcome = build_failure_outcome(
+            "test_failed",
+            task_status=TASK_STATUS_TEST_CONTRACT_CHANGED,
+            detail="snapshot drift",
+            validation_artifact=(self.run_dir / "validation.log").as_posix(),
+        )
+
+        result = dispatch_task_branch_disposition(
+            failure_outcome=failure_outcome,
+            record_pending_review=self._record_pending_review(pending_reviews),
+            persist_state=lambda: persisted.append("saved"),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual("", result.stop_reason)
+        self.assertTrue(result.disposition.preserve_for_review)
+        self.assertEqual("record_pending_review", result.disposition.action)
+        self.assertEqual(TASK_STATUS_TEST_CONTRACT_CHANGED, result.disposition.outcome_status)
+        self.assertEqual(["saved"], persisted)
+        self.assertEqual(1, len(pending_reviews))
+        self.assertEqual(TASK_STATUS_TEST_CONTRACT_CHANGED, pending_reviews[0]["task_status"])
+        self.assertEqual("", pending_reviews[0]["branch"])
+        self.assertEqual("", pending_reviews[0]["rescue_branch"])
+        self.assertEqual((self.run_dir / "validation.log").as_posix(), pending_reviews[0]["validation_artifact"])
 
     def test_dispatch_task_branch_disposition_restores_checkpoint_without_branch(self) -> None:
         self._init_repo()
@@ -287,13 +508,15 @@ class WorktreeIsolationTests(unittest.TestCase):
         pending_reviews: list[dict[str, object]] = []
         rollback_events: list[dict[str, object]] = []
         persisted: list[str] = []
+        failure_outcome = build_failure_outcome(
+            "test_failed",
+            task_status=TASK_STATUS_REGRESSION_FAILED,
+            detail="tests failed",
+        )
 
         result = dispatch_task_branch_disposition(
-            "test_failed",
-            task_status="regression_failed",
-            detail="tests failed",
+            failure_outcome=failure_outcome,
             has_checkpoint=True,
-            task_status_resolver=lambda reason, detail: reason,
             restore_checkpoint=lambda: restore_checkpoint(
                 self.repo,
                 checkpoint,
@@ -777,6 +1000,193 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertTrue(readiness["ok"])
         self.assertEqual([], readiness["blockers"])
 
+    def test_runner_start_readiness_reconciles_missing_patch_pending_marker(self) -> None:
+        base_head = self._init_repo()
+        self._ensure_source_venv()
+        self.worktree.mkdir(parents=True, exist_ok=True)
+        marker = {
+            "schema_version": 1,
+            "status": "pending",
+            "created_at": "2026-04-27T12:00:00",
+            "source_repo": self.repo.resolve().as_posix(),
+            "run_dir": self.run_dir.resolve().as_posix(),
+            "worktree_dir": self.worktree.resolve().as_posix(),
+            "patch_path": self.patch_path.resolve().as_posix(),
+            "base_ref": base_head,
+            "head_ref": "abc12345",
+            "last_rc": 0,
+        }
+        central_pending = self.repo / ".AgentCLI" / WORKTREE_MERGE_PENDING
+        self.run_dir.joinpath(WORKTREE_MERGE_PENDING).write_text(json.dumps(marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        central_pending.write_text(json.dumps(marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        self.assertTrue(readiness["ok"])
+        self.assertFalse(self.run_dir.joinpath(WORKTREE_MERGE_PENDING).exists())
+        self.assertFalse(central_pending.exists())
+        self.assertTrue(self.run_dir.joinpath(WORKTREE_MERGE_PENDING_RECONCILED).exists())
+        self.assertTrue((self.repo / ".AgentCLI" / WORKTREE_MERGE_PENDING_RECONCILED).exists())
+        reconciliations = readiness["worktree_diagnostics"]["pending_marker_reconciliations"]
+        self.assertEqual("missing_patch", reconciliations[0]["reason"])
+        self.assertEqual([], readiness["worktree_diagnostics"]["pending_markers"])
+
+    def test_runner_start_readiness_reconciles_pending_marker_when_source_head_contains_head_ref(self) -> None:
+        base_head = self._init_repo()
+        self._ensure_source_venv()
+        (self.repo / "merged.txt").write_text("already merged\n", encoding="utf-8")
+        self._git("add", "merged.txt")
+        self._git("commit", "-m", "already merged")
+        merged_head = self._git("rev-parse", "HEAD").strip()
+        self.worktree.mkdir(parents=True, exist_ok=True)
+        self.patch_path.write_text("diff --git a/merged.txt b/merged.txt\n", encoding="utf-8")
+        marker = {
+            "schema_version": 1,
+            "status": "pending",
+            "created_at": "2026-04-27T12:00:00",
+            "source_repo": self.repo.resolve().as_posix(),
+            "run_dir": self.run_dir.resolve().as_posix(),
+            "worktree_dir": self.worktree.resolve().as_posix(),
+            "patch_path": self.patch_path.resolve().as_posix(),
+            "base_ref": base_head,
+            "head_ref": merged_head,
+            "last_rc": 0,
+        }
+        self.run_dir.joinpath(WORKTREE_MERGE_PENDING).write_text(json.dumps(marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        self.assertTrue(readiness["ok"])
+        self.assertFalse(self.run_dir.joinpath(WORKTREE_MERGE_PENDING).exists())
+        self.assertTrue(self.run_dir.joinpath(WORKTREE_MERGE_PENDING_RECONCILED).exists())
+        reconciliations = readiness["worktree_diagnostics"]["pending_marker_reconciliations"]
+        self.assertEqual("source_head_contains_pending_head", reconciliations[0]["reason"])
+
+    def test_runner_start_readiness_preserves_valid_pending_marker(self) -> None:
+        base_head = self._init_repo()
+        self._ensure_source_venv()
+        self.worktree.mkdir(parents=True, exist_ok=True)
+        self.patch_path.write_text("diff --git a/pending.txt b/pending.txt\n", encoding="utf-8")
+        marker = {
+            "schema_version": 1,
+            "status": "pending",
+            "created_at": "2026-04-27T12:00:00",
+            "source_repo": self.repo.resolve().as_posix(),
+            "run_dir": self.run_dir.resolve().as_posix(),
+            "worktree_dir": self.worktree.resolve().as_posix(),
+            "patch_path": self.patch_path.resolve().as_posix(),
+            "base_ref": base_head,
+            "head_ref": "abc12345abc12345abc12345abc12345abc12345",
+            "last_rc": 0,
+        }
+        self.run_dir.joinpath(WORKTREE_MERGE_PENDING).write_text(json.dumps(marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        self.assertTrue(readiness["ok"])
+        self.assertTrue(self.run_dir.joinpath(WORKTREE_MERGE_PENDING).exists())
+        self.assertFalse(self.run_dir.joinpath(WORKTREE_MERGE_PENDING_RECONCILED).exists())
+        self.assertEqual("pending", readiness["worktree_diagnostics"]["pending_markers"][0]["status"])
+        self.assertEqual([], readiness["worktree_diagnostics"]["pending_marker_reconciliations"])
+
+    def test_runner_start_readiness_and_doctor_list_stale_branch_and_interrupted_attempt_metadata(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
+        base_branch = self._source_branch()
+        branch_name = "task/T-stale_2026-05-04T23-00-00"
+        self._git("checkout", "-b", branch_name)
+        (self.repo / "stale-branch.txt").write_text("stale branch\n", encoding="utf-8")
+        self._git("add", "stale-branch.txt")
+        self._git("commit", "-m", "stale branch work")
+        self._git("checkout", base_branch)
+        self._git("merge", "--ff-only", branch_name)
+        metrics_event = {
+            "event": "task_branch_created",
+            "branch": branch_name,
+            "task_id": "T-stale",
+            "cycle": 1,
+            "step": 2,
+        }
+        (self.run_dir / "metrics.jsonl").write_text(json.dumps(metrics_event) + "\n", encoding="utf-8")
+        attempt_dir = self.run_dir / "tasks" / "c001_s002_T-stale" / "attempt_00"
+        self._write_attempt_marker(
+            attempt_dir,
+            marker=ATTEMPT_STARTED_MARKER,
+            task_id="T-stale",
+        )
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        diagnostics = readiness["worktree_diagnostics"]
+        self.assertEqual(1, diagnostics["summary"]["stale_task_branches"])
+        self.assertEqual(1, diagnostics["summary"]["interrupted_attempts"])
+        branch = diagnostics["stale_task_branches"][0]
+        attempt = diagnostics["interrupted_attempts"][0]
+        self.assertEqual(branch_name, branch["branch"])
+        self.assertEqual(self.run_dir.name, branch["owning_run"])
+        self.assertIn("age", branch)
+        self.assertEqual("merged", branch["status"])
+        self.assertIn("source HEAD", branch["reason"])
+        self.assertEqual(self.run_dir.name, attempt["owning_run"])
+        self.assertEqual("interrupted", attempt["status"])
+        self.assertIn(ATTEMPT_STARTED_MARKER, attempt["reason"])
+        self.assertIn(ATTEMPT_FINISHED_MARKER, attempt["reason"])
+        self.assertEqual(attempt_dir.resolve().as_posix(), attempt["path"])
+        warning_codes = {item["code"] for item in readiness["warnings"]}
+        self.assertIn("stale_task_branch", warning_codes)
+        self.assertIn("interrupted_attempt_directory", warning_codes)
+
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            shell.doctor()
+        output = stream.getvalue()
+        self.assertIn("stale task branches", output)
+        self.assertIn("interrupted attempts", output)
+        self.assertIn("age=", output)
+        self.assertIn("status=", output)
+        self.assertIn("reason=", output)
+        self.assertIn(f"owning_run={self.run_dir.name}", output)
+
+    def test_scan_worktree_diagnostics_ignores_finished_attempt_markers(self) -> None:
+        self._init_repo()
+        attempt_dir = self.run_dir / "tasks" / "c001_s002_T-finished" / "attempt_00"
+        self._write_attempt_marker(
+            attempt_dir,
+            marker=ATTEMPT_STARTED_MARKER,
+            task_id="T-finished",
+        )
+        self._write_attempt_marker(
+            attempt_dir,
+            marker=ATTEMPT_FINISHED_MARKER,
+            task_id="T-finished",
+            status="completed",
+            reason="completed",
+        )
+
+        diagnostics = scan_worktree_diagnostics(self.repo)
+
+        self.assertEqual(0, diagnostics["summary"]["interrupted_attempts"])
+        self.assertEqual([], diagnostics["interrupted_attempts"])
+
+    def test_scan_worktree_diagnostics_reports_legacy_output_only_attempt_without_markers(self) -> None:
+        self._init_repo()
+        attempt_dir = self._write_interrupted_attempt(
+            self.run_dir,
+            task_dir_name="c001_s002_T-legacy",
+        )
+
+        diagnostics = scan_worktree_diagnostics(self.repo)
+
+        self.assertEqual(1, diagnostics["summary"]["interrupted_attempts"])
+        attempt = diagnostics["interrupted_attempts"][0]
+        self.assertEqual(attempt_dir.resolve().as_posix(), attempt["path"])
+        self.assertEqual("interrupted", attempt["status"])
+        self.assertIn("legacy attempt directory", attempt["reason"])
+        self.assertIn("age", attempt)
+        self.assertIn("path", attempt)
+
     def test_scan_worktree_diagnostics_reports_orphaned_generated_worktree(self) -> None:
         generated_worktree = self.fixture_root / ".agentcli_worktrees" / self.repo.name / "orphaned"
         generated_worktree.mkdir(parents=True, exist_ok=True)
@@ -951,6 +1361,181 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertIn("reboot", output.lower())
         self.assertIn("administrator", output.lower())
 
+    def test_shell_worktree_cleanup_dry_run_writes_artifact_without_mutation(self) -> None:
+        self._init_repo()
+        stale_branch = self._create_stale_task_branch(
+            run_dir=self.run_dir,
+            task_id="T-clean",
+            branch_suffix="2026-05-04T23-00-00",
+            filename="stale-branch.txt",
+        )
+        attempt_dir = self._write_interrupted_attempt(
+            self.run_dir,
+            task_dir_name="c001_s001_T-clean",
+        )
+        old_run_dir = self.repo / ".AgentCLI" / "agent_runs" / "20260424-101010"
+        old_run_dir.mkdir(parents=True, exist_ok=True)
+        (old_run_dir / "run.log").write_text("old run\n", encoding="utf-8")
+
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        shell.run_dir = self.run_dir
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            shell.worktree(["cleanup"])
+
+        artifact_path = self.run_dir / WORKTREE_CLEANUP_DRY_RUN
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        candidates = payload["candidates"]
+        actions = {item["kind"]: item["action"] for item in candidates}
+
+        self.assertTrue(artifact_path.exists())
+        self.assertEqual("dry_run", payload["status"])
+        self.assertEqual("delete_branch", actions["stale_task_branch"])
+        self.assertEqual("remove_directory", actions["interrupted_attempt_directory"])
+        self.assertEqual("remove_run_directory", actions["old_run_directory"])
+        self.assertIn("approval_phrase", payload)
+        self.assertTrue(self._branch_exists(stale_branch))
+        self.assertTrue(attempt_dir.exists())
+        self.assertTrue(old_run_dir.exists())
+        self.assertIn("Dry run only", stream.getvalue())
+
+    def test_shell_worktree_cleanup_apply_rejects_wrong_phrase_without_mutation(self) -> None:
+        self._init_repo()
+        stale_branch = self._create_stale_task_branch(
+            run_dir=self.run_dir,
+            task_id="T-clean",
+            branch_suffix="2026-05-04T23-10-00",
+            filename="stale-branch.txt",
+        )
+        attempt_dir = self._write_interrupted_attempt(
+            self.run_dir,
+            task_dir_name="c001_s001_T-clean",
+        )
+        old_run_dir = self.repo / ".AgentCLI" / "agent_runs" / "20260424-101020"
+        old_run_dir.mkdir(parents=True, exist_ok=True)
+        (old_run_dir / "run.log").write_text("old run\n", encoding="utf-8")
+
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        shell.run_dir = self.run_dir
+        with redirect_stdout(io.StringIO()):
+            shell.worktree(["cleanup"])
+        stream = io.StringIO()
+        with (
+            redirect_stdout(stream),
+            patch("builtins.input", return_value="WRONG PHRASE"),
+        ):
+            shell.worktree(["cleanup", "apply"])
+
+        applied_path = self.run_dir / WORKTREE_CLEANUP_APPLIED
+        payload = json.loads(applied_path.read_text(encoding="utf-8"))
+
+        self.assertEqual("approval_rejected", payload["status"])
+        self.assertTrue(self._branch_exists(stale_branch))
+        self.assertTrue(attempt_dir.exists())
+        self.assertTrue(old_run_dir.exists())
+        self.assertIn("did not match", stream.getvalue())
+
+    def test_shell_worktree_cleanup_apply_writes_applied_artifact_and_removes_candidates(self) -> None:
+        self._init_repo()
+        stale_branch = self._create_stale_task_branch(
+            run_dir=self.run_dir,
+            task_id="T-clean",
+            branch_suffix="2026-05-04T23-20-00",
+            filename="stale-branch.txt",
+        )
+        attempt_dir = self._write_interrupted_attempt(
+            self.run_dir,
+            task_dir_name="c001_s001_T-clean",
+        )
+        old_run_dir = self.repo / ".AgentCLI" / "agent_runs" / "20260424-101030"
+        old_run_dir.mkdir(parents=True, exist_ok=True)
+        (old_run_dir / "run.log").write_text("old run\n", encoding="utf-8")
+
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        shell.run_dir = self.run_dir
+        with redirect_stdout(io.StringIO()):
+            shell.worktree(["cleanup"])
+        dry_run = json.loads((self.run_dir / WORKTREE_CLEANUP_DRY_RUN).read_text(encoding="utf-8"))
+        stream = io.StringIO()
+        with (
+            redirect_stdout(stream),
+            patch("builtins.input", return_value=str(dry_run["approval_phrase"])),
+        ):
+            shell.worktree(["cleanup", "apply"])
+
+        applied_path = self.run_dir / WORKTREE_CLEANUP_APPLIED
+        payload = json.loads(applied_path.read_text(encoding="utf-8"))
+        result_by_kind = {item["kind"]: item["result"] for item in payload["results"]}
+
+        self.assertEqual("applied", payload["status"])
+        self.assertEqual("deleted", result_by_kind["stale_task_branch"])
+        self.assertEqual("deleted", result_by_kind["interrupted_attempt_directory"])
+        self.assertEqual("deleted", result_by_kind["old_run_directory"])
+        self.assertFalse(self._branch_exists(stale_branch))
+        self.assertFalse(attempt_dir.exists())
+        self.assertFalse(old_run_dir.exists())
+        self.assertIn("Cleanup applied", stream.getvalue())
+
+    def test_shell_worktree_cleanup_preserves_pending_review_evidence(self) -> None:
+        self._init_repo()
+        old_run_dir = self.repo / ".AgentCLI" / "agent_runs" / "20260424-101040"
+        old_run_dir.mkdir(parents=True, exist_ok=True)
+        preserved_branch = self._create_stale_task_branch(
+            run_dir=old_run_dir,
+            task_id="T-review",
+            branch_suffix="2026-05-04T23-30-00",
+            filename="review-branch.txt",
+        )
+        attempt_dir = self._write_interrupted_attempt(
+            old_run_dir,
+            task_dir_name="c001_s001_T-review",
+        )
+        self._write_state_payload(
+            old_run_dir,
+            {
+                "pending_review": [
+                    {
+                        "task": "T-review",
+                        "task_status": "review_required",
+                        "branch": preserved_branch,
+                        "validation_artifact": (attempt_dir / "review.log").as_posix(),
+                    }
+                ]
+            },
+        )
+
+        shell = RunnerShell()
+        shell.set_repo(self.repo.as_posix())
+        shell.run_dir = self.run_dir
+        with redirect_stdout(io.StringIO()):
+            shell.worktree(["cleanup"])
+        dry_run = json.loads((self.run_dir / WORKTREE_CLEANUP_DRY_RUN).read_text(encoding="utf-8"))
+        action_by_kind = {item["kind"]: item["action"] for item in dry_run["candidates"]}
+
+        self.assertEqual("preserve_pending_review_evidence", action_by_kind["stale_task_branch"])
+        self.assertEqual("preserve_pending_review_evidence", action_by_kind["interrupted_attempt_directory"])
+        self.assertEqual("preserve_pending_review_evidence", action_by_kind["old_run_directory"])
+
+        with (
+            redirect_stdout(io.StringIO()),
+            patch("builtins.input", return_value=str(dry_run["approval_phrase"])),
+        ):
+            shell.worktree(["cleanup", "apply"])
+
+        payload = json.loads((self.run_dir / WORKTREE_CLEANUP_APPLIED).read_text(encoding="utf-8"))
+        result_by_kind = {item["kind"]: item["result"] for item in payload["results"]}
+
+        self.assertEqual("applied", payload["status"])
+        self.assertEqual("preserved", result_by_kind["stale_task_branch"])
+        self.assertEqual("preserved", result_by_kind["interrupted_attempt_directory"])
+        self.assertEqual("preserved", result_by_kind["old_run_directory"])
+        self.assertTrue(self._branch_exists(preserved_branch))
+        self.assertTrue(attempt_dir.exists())
+        self.assertTrue(old_run_dir.exists())
+
     def test_runner_start_readiness_reports_missing_source_venv_and_records_shell_event(self) -> None:
         self._init_repo()
         shell = RunnerShell()
@@ -992,6 +1577,212 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertIn("git_safe_directory_required", blocker_codes)
         blocker = next(item for item in readiness["blockers"] if item["code"] == "git_safe_directory_required")
         self.assertEqual("C:/temp/repo", blocker["details"]["safe_directory_hint"])
+
+    def test_runner_start_readiness_reports_stale_git_lock_with_guidance(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
+        lock_path = self.repo / ".git" / "index.lock"
+        lock_path.write_text("stale git lock\n", encoding="utf-8")
+        old_time = time.time() - 900
+        os.utime(lock_path, (old_time, old_time))
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        blocker_codes = {item["code"] for item in readiness["blockers"]}
+        self.assertFalse(readiness["ok"])
+        self.assertIn("stale_git_index_lock", blocker_codes)
+        blocker = next(item for item in readiness["blockers"] if item["code"] == "stale_git_index_lock")
+        self.assertEqual(lock_path.resolve().as_posix(), blocker["path"])
+        self.assertEqual("stale", blocker["details"]["state"])
+        self.assertGreaterEqual(int(blocker["details"]["age_seconds"] or 0), 300)
+        self.assertIn("Confirm no Git process", blocker["details"]["guidance"][0])
+        self.assertEqual(1, readiness["lock_diagnostics"]["summary"]["stale"])
+
+    def test_runner_start_readiness_reports_stale_web_instance_lock_with_owner_evidence(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
+        lock_path = self.repo / ".AgentCLI" / "web_console.lock.json"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "repo_root": self.repo.as_posix(),
+                    "pid": 999999,
+                    "hostname": "stale-web-owner",
+                    "process_executable": (self.repo / "bin" / "web-console.exe").as_posix(),
+                    "host": "127.0.0.1",
+                    "port": 8123,
+                    "created_at": "2026-05-04T00:00:00Z",
+                    "runner_control_state": "enabled",
+                    "runner_control_enabled": True,
+                    "runner_control_requested": True,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        old_time = time.time() - 900
+        os.utime(lock_path, (old_time, old_time))
+
+        readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        blocker_codes = {item["code"] for item in readiness["blockers"]}
+        self.assertFalse(readiness["ok"])
+        self.assertIn("stale_web_instance_lock", blocker_codes)
+        blocker = next(item for item in readiness["blockers"] if item["code"] == "stale_web_instance_lock")
+        self.assertEqual("stale", blocker["details"]["state"])
+        self.assertEqual(999999, blocker["details"]["owner"]["pid"])
+        self.assertEqual("stale-web-owner", blocker["details"]["owner"]["hostname"])
+        self.assertIn("restart the console", " ".join(blocker["details"]["guidance"]))
+
+    def test_runner_start_readiness_reports_stale_telegram_token_lock_with_fingerprint(self) -> None:
+        self._init_repo()
+        self._ensure_source_venv()
+        home = self.fixture_root / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        temp_dir = self.fixture_root / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        token = "stale-telegram-token"
+        token_fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()[:10]
+        old_time = time.time() - 900
+
+        with (
+            patch.dict(os.environ, {"AGENTCLI_HOME": home.as_posix()}),
+            patch("agent_runner.preflight.tempfile.gettempdir", return_value=temp_dir.as_posix()),
+        ):
+            config_path = default_config_path(self.repo)
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "repo": self.repo.as_posix(),
+                        "telegram": {
+                            "enabled": True,
+                            "bot_token": token,
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            lock_path = temp_dir / f"agentcli_tg_{token_fingerprint}.lock"
+            lock_path.write_text(
+                json.dumps(
+                    {
+                        "pid": 999999,
+                        "instance": "stale-telegram",
+                        "repo": self.repo.as_posix(),
+                        "started_unix": old_time,
+                        "token_fingerprint": token_fingerprint,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            os.utime(lock_path, (old_time, old_time))
+            readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        blocker_codes = {item["code"] for item in readiness["blockers"]}
+        self.assertFalse(readiness["ok"])
+        self.assertIn("stale_telegram_token_lock", blocker_codes)
+        blocker = next(item for item in readiness["blockers"] if item["code"] == "stale_telegram_token_lock")
+        self.assertEqual("stale", blocker["details"]["state"])
+        self.assertEqual(999999, blocker["details"]["owner"]["pid"])
+        self.assertEqual("stale-telegram", blocker["details"]["owner"]["instance"])
+        self.assertEqual(token_fingerprint, blocker["details"]["owner"]["token_fingerprint"])
+        self.assertIn("token fingerprint", blocker["details"]["guidance"][0])
+
+    def test_runner_start_readiness_keeps_active_web_and_telegram_locks_non_blocking(self) -> None:
+        from agent_runner.process_guard import _pid_create_time_ticks, _pid_executable_path
+
+        self._init_repo()
+        self._ensure_source_venv()
+        home = self.fixture_root / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        temp_dir = self.fixture_root / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        token = "live-telegram-token"
+        token_fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()[:10]
+        current_pid = os.getpid()
+        current_executable = _pid_executable_path(current_pid) or sys.executable
+        current_create_time = _pid_create_time_ticks(current_pid)
+
+        with (
+            patch.dict(os.environ, {"AGENTCLI_HOME": home.as_posix()}),
+            patch("agent_runner.preflight.tempfile.gettempdir", return_value=temp_dir.as_posix()),
+        ):
+            config_path = default_config_path(self.repo)
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "repo": self.repo.as_posix(),
+                        "telegram": {
+                            "enabled": True,
+                            "bot_token": token,
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            web_lock_path = self.repo / ".AgentCLI" / "web_console.lock.json"
+            web_lock_path.parent.mkdir(parents=True, exist_ok=True)
+            web_lock_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "repo_root": self.repo.as_posix(),
+                        "pid": current_pid,
+                        "pid_create_time": current_create_time,
+                        "process_executable": current_executable,
+                        "hostname": "active-web-owner",
+                        "host": "127.0.0.1",
+                        "port": 8124,
+                        "created_at": "2026-05-04T00:00:00Z",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            telegram_lock_path = temp_dir / f"agentcli_tg_{token_fingerprint}.lock"
+            telegram_lock_path.write_text(
+                json.dumps(
+                    {
+                        "pid": current_pid,
+                        "instance": "active-telegram",
+                        "repo": self.repo.as_posix(),
+                        "started_unix": time.time(),
+                        "token_fingerprint": token_fingerprint,
+                        "process_executable": current_executable,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            readiness = check_runner_start_readiness(self.repo, self.run_dir)
+
+        self.assertTrue(readiness["ok"])
+        self.assertEqual([], readiness["blockers"])
+        self.assertEqual([], readiness["warnings"])
+        lock_summary = readiness["lock_diagnostics"]["summary"]
+        self.assertEqual(2, lock_summary["active"])
+        lock_codes = {item["code"] for item in readiness["lock_diagnostics"]["items"]}
+        self.assertIn("active_web_instance_lock", lock_codes)
+        self.assertIn("active_telegram_token_lock", lock_codes)
 
     def test_runner_start_readiness_reports_stale_stop_and_runner_wait_artifacts(self) -> None:
         self._init_repo()

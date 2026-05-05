@@ -29,15 +29,35 @@ from .logger import close_all_loggers, register_structured_logger_cleanup
 from .todo import ensure_todo_file, read_current_todo, set_current_todo, open_path
 from .preflight import check_runner_start_readiness, format_runner_start_readiness, run_preflight
 from .process_guard import init_process_guard, terminate_all_children
-from .stop_progress import build_stop_file_paths, clear_stop_progress, read_stop_progress, record_stop_progress
+from .stop_progress import (
+    build_stop_file_paths,
+    clear_stop_progress,
+    read_stop_progress,
+    reconcile_stale_stop_files,
+    record_stop_progress,
+)
 from .utils import STOP_REASON_STOP_FILE
 from .remote.controller import (
     RUNNER_CONTROL_EVENT_FILE,
     read_runner_control_event,
     write_runner_control_event,
 )
+from .pr_queue import (
+    PrQueueMergeError,
+    describe_review_packet,
+    discard_review_packet,
+    list_review_packets,
+    merge_review_packet,
+    pr_queue_merge_confirmation_phrase,
+    rebase_review_packet,
+    validate_review_packet,
+)
 from .gitops import (
+    WORKTREE_CLEANUP_APPLIED,
+    WORKTREE_CLEANUP_DRY_RUN,
+    apply_worktree_cleanup,
     apply_pending_worktree_merge,
+    build_worktree_cleanup_dry_run,
     discard_pending_worktree_merge,
     find_pending_worktree_merge,
     read_pending_worktree_merge,
@@ -541,7 +561,23 @@ class RunnerShell:
         run_dir = self._ensure_run_dir()
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        stop_file = str(self.effective().get("stop_file") or "STOP")
+        eff = self.effective()
+        stop_file = str(eff.get("stop_file") or "STOP")
+        stop_reconciliation = reconcile_stale_stop_files(
+            run_dir,
+            stop_file=stop_file,
+            stop_stale_age_seconds=eff.get("stale_stop_reconcile_stop_age_seconds")
+            or DEFAULTS.get("stale_stop_reconcile_stop_age_seconds")
+            or 900,
+            heartbeat_stale_age_seconds=eff.get("stale_stop_reconcile_heartbeat_age_seconds")
+            or DEFAULTS.get("stale_stop_reconcile_heartbeat_age_seconds")
+            or 900,
+            allow_missing_heartbeat=bool(eff.get("stale_stop_reconcile_allow_missing_heartbeat", False)),
+            source="shell",
+        )
+        if str(stop_reconciliation.get("action_taken") or "") == "deleted_stop_files":
+            audit_path = str(stop_reconciliation.get("audit_path") or "").strip()
+            print(f"[STOP] Reconciled stale STOP file before runner start. audit={audit_path}".rstrip(), flush=True)
         readiness = check_runner_start_readiness(self.repo, run_dir, stop_file=stop_file)
         for line in format_runner_start_readiness(readiness):
             print(line)
@@ -556,8 +592,8 @@ class RunnerShell:
                 ok=False,
                 running=False,
                 phase="readiness",
-                details={"readiness": readiness},
-                result={"ok": False, "message": message, "readiness": readiness},
+                details={"readiness": readiness, "stop_reconciliation": stop_reconciliation},
+                result={"ok": False, "message": message, "readiness": readiness, "stop_reconciliation": stop_reconciliation},
             )
             return
 
@@ -584,7 +620,6 @@ class RunnerShell:
             phase="request",
         )
 
-        eff = self.effective()
         # NOTE: DEFAULTS includes "repo" so passing repo twice will crash.
         args_dict = {k: eff.get(k) for k in DEFAULTS.keys()}
         args_dict["repo"] = str(self.repo)
@@ -1008,6 +1043,242 @@ class RunnerShell:
         print("=====================\n")
         self._print_pending_worktree_merge_hint()
 
+    def _require_pr_queue_repo(self) -> Optional[Path]:
+        if not self.repo:
+            print("[ERR] repo is not set. Use /repo <path>.")
+            return None
+        return self.repo
+
+    def prs(self) -> None:
+        repo = self._require_pr_queue_repo()
+        if repo is None:
+            return
+        try:
+            payload = list_review_packets(repo)
+        except Exception as ex:
+            print(f"[ERR] Failed to list queued PR packets: {ex}")
+            return
+
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        print("\n=== PR Queue ===")
+        print(f"queue:   {payload.get('queue_root') or '(unknown)'}")
+        print(
+            "summary: "
+            f"total={int(summary.get('total') or 0)} "
+            f"needs_validation={int(summary.get('needs_validation') or 0)} "
+            f"needs_approval={int(summary.get('needs_approval') or 0)} "
+            f"validation_passed={int(summary.get('validation_passed') or 0)} "
+            f"validation_pending={int(summary.get('validation_pending') or 0)}"
+        )
+        if not items:
+            print(f"items:   {payload.get('message') or 'No queued PR packets.'}")
+            print("================")
+            return
+        for item in items:
+            task_ids = item.get("task_ids") if isinstance(item.get("task_ids"), list) else []
+            task_text = ",".join(str(task_id) for task_id in task_ids) if task_ids else "-"
+            print(
+                f" - {item.get('id')} "
+                f"status={item.get('status')} "
+                f"validation={item.get('validation_status')} "
+                f"need={item.get('need_label')} "
+                f"branch={item.get('branch') or '-'} "
+                f"tasks={task_text}"
+            )
+        print("================")
+
+    def pr(self, packet_id: str) -> None:
+        repo = self._require_pr_queue_repo()
+        if repo is None:
+            return
+        try:
+            payload = describe_review_packet(repo, packet_id)
+        except FileNotFoundError:
+            print(f"[ERR] PR packet not found: {packet_id}")
+            return
+        except Exception as ex:
+            print(f"[ERR] Failed to load PR packet: {ex}")
+            return
+
+        print("\n=== PR Packet ===")
+        print(f"id:        {payload.get('id')}")
+        print(f"status:    {payload.get('status')}")
+        print(f"validation:{payload.get('validation_status')}")
+        print(f"approval:  {payload.get('approval_status') or '-'}")
+        print(f"need:      {payload.get('need_label')}")
+        print(f"run_id:    {payload.get('run_id') or '-'}")
+        print(f"tasks:     {', '.join(payload.get('task_ids') or []) or '-'}")
+        print(f"branch:    {payload.get('branch') or '-'}")
+        print(f"base:      {payload.get('base_ref') or '-'}")
+        print(f"head:      {payload.get('head_ref') or '-'}")
+        print(f"created:   {payload.get('created_at') or '-'}")
+        print(f"updated:   {payload.get('updated_at') or '-'}")
+        print(f"packet:    {payload.get('packet_path') or '-'}")
+        print(f"branch_ix: {payload.get('branch_index_status') or '-'}")
+        validation_reason = str(payload.get("validation_reason") or "").strip()
+        validation_detail = str(payload.get("validation_detail") or "").strip()
+        if validation_reason:
+            print(f"validation_reason: {validation_reason}")
+        if validation_detail:
+            print(f"validation_detail: {validation_detail}")
+        rebase_status = str(payload.get("rebase_status") or "").strip()
+        rebase_reason = str(payload.get("rebase_reason") or "").strip()
+        discard_status = str(payload.get("discard_status") or "").strip()
+        discard_reason = str(payload.get("discard_reason") or "").strip()
+        if rebase_status:
+            print(f"rebase:    {rebase_status} ({rebase_reason or 'no reason'})")
+        if discard_status:
+            print(f"discard:   {discard_status} ({discard_reason or 'no reason'})")
+
+        qa_notes = payload.get("qa_notes") if isinstance(payload.get("qa_notes"), list) else []
+        if qa_notes:
+            print("qa_notes:")
+            for note in qa_notes:
+                print(f" - {note}")
+        changed_files = payload.get("changed_files") if isinstance(payload.get("changed_files"), list) else []
+        if changed_files:
+            print("changed_files:")
+            for changed_file in changed_files:
+                print(f" - {changed_file}")
+        commits = payload.get("commits") if isinstance(payload.get("commits"), list) else []
+        if commits:
+            print("commits:")
+            for commit in commits:
+                if isinstance(commit, dict):
+                    sha = str(commit.get("sha") or commit.get("full_sha") or "").strip()
+                    subject = str(commit.get("subject") or "").strip()
+                    print(f" - {sha or '(unknown)'} {subject}".rstrip())
+                else:
+                    print(f" - {commit}")
+        validation_artifacts = payload.get("validation_artifacts") if isinstance(payload.get("validation_artifacts"), list) else []
+        if validation_artifacts:
+            print("validation_artifacts:")
+            for artifact in validation_artifacts:
+                print(f" - {artifact}")
+        print("=================")
+
+    def validate_pr(self, packet_id: str, *, full: bool = False) -> None:
+        repo = self._require_pr_queue_repo()
+        if repo is None:
+            return
+        plan_name = "full validation plan" if full else "configured validation plan"
+        print(f"[INFO] Running {plan_name} for PR packet {packet_id}...")
+        try:
+            result = validate_review_packet(repo, packet_id)
+        except Exception as ex:
+            print(f"[ERR] PR validation failed: {ex}")
+            return
+
+        validation_summary = result.get("validation_summary") if isinstance(result.get("validation_summary"), dict) else {}
+        label = "[OK]" if bool(result.get("ok")) else "[WARN]"
+        print(f"{label} Validation finished: {result.get('status')}")
+        print(f"packet:   {result.get('packet_path') or '-'}")
+        print(f"summary:  {result.get('summary_path') or '-'}")
+        print(
+            "records:  "
+            f"passed={int(validation_summary.get('records_passed') or 0)} "
+            f"failed={int(validation_summary.get('records_failed') or 0)} "
+            f"blocked={int(validation_summary.get('records_blocked_env') or 0)} "
+            f"pending={int(validation_summary.get('records_pending') or 0)}"
+        )
+
+    def merge_pr(self, packet_id: str) -> None:
+        repo = self._require_pr_queue_repo()
+        if repo is None:
+            return
+        try:
+            payload = describe_review_packet(repo, packet_id)
+        except FileNotFoundError:
+            print(f"[ERR] PR packet not found: {packet_id}")
+            return
+        except Exception as ex:
+            print(f"[ERR] Failed to load PR packet: {ex}")
+            return
+
+        expected_phrase = pr_queue_merge_confirmation_phrase(str(payload.get("id") or packet_id))
+        print("\n=== Merge PR Packet ===")
+        print(f"id:        {payload.get('id')}")
+        print(f"status:    {payload.get('status')}")
+        print(f"validation:{payload.get('validation_status')}")
+        print(f"branch:    {payload.get('branch') or '-'}")
+        print(f"confirm:   {expected_phrase}")
+        phrase = input(f"Type '{expected_phrase}' to approve merge: ").strip()
+        try:
+            result = merge_review_packet(repo, str(payload.get("id") or packet_id), approval_phrase=phrase)
+        except PrQueueMergeError as ex:
+            print(f"[ERR] {ex.code}: {ex}")
+            return
+        except Exception as ex:
+            print(f"[ERR] Failed to approve PR packet: {ex}")
+            return
+
+        print(f"[OK] PR packet approved: {result.get('packet_id')}")
+        print(f"validation: {result.get('validation_status')}")
+        print(f"packet:     {result.get('packet_path') or '-'}")
+
+    def discard_pr(self, packet_id: str) -> None:
+        repo = self._require_pr_queue_repo()
+        if repo is None:
+            return
+        try:
+            payload = describe_review_packet(repo, packet_id)
+        except FileNotFoundError:
+            print(f"[ERR] PR packet not found: {packet_id}")
+            return
+        except Exception as ex:
+            print(f"[ERR] Failed to load PR packet: {ex}")
+            return
+
+        print("\n=== Discard PR Packet ===")
+        print(f"id:        {payload.get('id')}")
+        print(f"status:    {payload.get('status')}")
+        print(f"validation:{payload.get('validation_status')}")
+        print(f"branch:    {payload.get('branch') or '-'}")
+        answer = input("Discard this queued PR packet? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("[INFO] Discard skipped. The PR packet was left in place.")
+            return
+        try:
+            result = discard_review_packet(repo, str(payload.get("id") or packet_id))
+        except Exception as ex:
+            print(f"[ERR] Failed to discard PR packet: {ex}")
+            return
+
+        print(f"[OK] PR packet discarded: {result.get('packet_id')}")
+
+    def rebase_pr(self, packet_id: str) -> None:
+        repo = self._require_pr_queue_repo()
+        if repo is None:
+            return
+        try:
+            payload = describe_review_packet(repo, packet_id)
+        except FileNotFoundError:
+            print(f"[ERR] PR packet not found: {packet_id}")
+            return
+        except Exception as ex:
+            print(f"[ERR] Failed to load PR packet: {ex}")
+            return
+
+        print("\n=== Rebase PR Packet ===")
+        print(f"id:        {payload.get('id')}")
+        print(f"status:    {payload.get('status')}")
+        print(f"validation:{payload.get('validation_status')}")
+        print(f"branch:    {payload.get('branch') or '-'}")
+        print("This records a rebase request and resets validation to pending.")
+        answer = input("Record a rebase request for this PR packet? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("[INFO] Rebase request skipped. The PR packet was left in place.")
+            return
+        try:
+            result = rebase_review_packet(repo, str(payload.get("id") or packet_id))
+        except Exception as ex:
+            print(f"[ERR] Failed to record PR rebase request: {ex}")
+            return
+
+        print(f"[OK] Rebase request recorded: {result.get('packet_id')}")
+        print("[INFO] Update the branch, then rerun /validate-pr before merging.")
+
     def _pending_worktree_merge_path(self) -> Optional[Path]:
         if not self.repo:
             return None
@@ -1092,6 +1363,84 @@ class RunnerShell:
         except Exception as ex:
             print(f"[ERR] Failed to discard pending worktree merge: {ex}")
 
+    def _cleanup_plan_run_dir(self) -> Optional[Path]:
+        if not self.repo:
+            return None
+        if self.run_dir is not None:
+            return self.run_dir.expanduser().resolve()
+        latest = find_latest_run_dir(self.repo)
+        if latest is not None:
+            self.run_dir = latest.expanduser().resolve()
+            return self.run_dir
+        self.run_dir = make_run_dir(self.repo)
+        return self.run_dir
+
+    def _print_worktree_cleanup_plan(self, payload: dict[str, Any]) -> None:
+        run_dir = str(payload.get("run_dir") or "").strip()
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        print("\n=== Worktree Cleanup Dry Run ===")
+        print(f"run_dir:   {run_dir or '(unknown)'}")
+        print(f"artifact:  {(Path(run_dir) / WORKTREE_CLEANUP_DRY_RUN).as_posix() if run_dir else WORKTREE_CLEANUP_DRY_RUN}")
+        print(
+            "summary:   "
+            f"total={int(summary.get('total') or 0)} "
+            f"protected={int(summary.get('protected') or 0)} "
+            f"mutating={int(summary.get('mutating_candidates') or 0)}"
+        )
+        print(f"confirm:   {payload.get('approval_phrase') or '-'}")
+        print("candidates:")
+        for candidate in payload.get("candidates", []):
+            if not isinstance(candidate, dict):
+                continue
+            print(
+                "  - "
+                f"{candidate.get('kind') or 'candidate'} "
+                f"owning_run={candidate.get('owning_run') or 'unknown'} "
+                f"action={candidate.get('action') or 'unknown'} "
+                f"reason={candidate.get('reason') or 'unknown'} "
+                f"target={candidate.get('path') or candidate.get('branch') or '(unknown)'}"
+            )
+        print("================================\n")
+
+    def _worktree_cleanup(self, args: list[str]) -> None:
+        if not self.repo:
+            print("[ERR] repo is not set; use /repo <path>")
+            return
+        run_dir = self._cleanup_plan_run_dir()
+        if run_dir is None:
+            print("[ERR] Unable to determine a run directory for cleanup artifacts.")
+            return
+
+        apply_mode = bool(args and str(args[0]).strip().lower() == "apply")
+        dry_run = build_worktree_cleanup_dry_run(self.repo, run_dir=run_dir)
+        self._print_worktree_cleanup_plan(dry_run)
+        if not apply_mode:
+            print("[INFO] Dry run only. No cleanup was applied.")
+            return
+
+        phrase = input("Type the confirmation phrase exactly to apply cleanup: ").strip()
+        result = apply_worktree_cleanup(self.repo, run_dir=run_dir, approval_phrase=phrase)
+        applied_path = (run_dir / WORKTREE_CLEANUP_APPLIED).as_posix()
+        status = str(result.get("status") or "").strip().lower()
+        if status == "approval_rejected":
+            print(f"[ERR] Cleanup not applied. Confirmation phrase did not match. artifact={applied_path}")
+            return
+        failures = result.get("failures") if isinstance(result.get("failures"), list) else []
+        if failures:
+            print(f"[WARN] Cleanup applied with failures. artifact={applied_path}")
+            for failure in failures:
+                if not isinstance(failure, dict):
+                    continue
+                print(
+                    "  - "
+                    f"{failure.get('kind') or 'candidate'} "
+                    f"action={failure.get('action') or 'unknown'} "
+                    f"path={failure.get('path') or '(unknown)'} "
+                    f"error={failure.get('error') or failure.get('message') or 'unknown'}"
+                )
+            return
+        print(f"[OK] Cleanup applied. artifact={applied_path}")
+
     def cmd_set(self, key: str, raw_value: str) -> None:
         key = key.replace("-", "_").strip()
         if key not in DEFAULTS:
@@ -1166,29 +1515,38 @@ class RunnerShell:
 
     def help(self) -> None:
         lines = [
-            "Commands (명령어):",
-            "  /help                     도움말 표시",
-            "  /doctor                   환경/설정 진단 보고서 생성",
-            "  /worktree                 읽기 전용 워크트리 진단 목록 출력",
-            "  /repo <path>               레포지토리 루트 설정",
-            "  /config [--all]            현재 적용 설정 요약 출력 (--all: 전체 JSON 출력)",
-            "  /set <key> <value>         설정 값을 덮어쓰기(타입은 기본값 기준)",
-            "    예) /set execution_backend codex|claudecode",
-            "    예) /set roles PM,Security,Dev,QA   (단계 선택)",
-            "  /add <key> <value>         리스트 설정에 항목 추가 (예: policy_rule)",
-            "  /load [path]               config JSON 로드",
-            "  /save [path]               현재 설정을 config JSON으로 저장 (알 수 없는 키도 보존)",
-            "  /start [--flags...]        러너 백그라운드 시작 (예: /start --autopilot --loop)",
-            "  /stop [--wait]             중지 요청(STOP 파일 생성). --wait로 종료 대기",
-            "  /status                    러너 상태 확인",
-            "  /merge-worktree            pending worktree result를 Y/N 확인 후 원본 repo에 적용",
-            "  /discard-worktree          pending worktree result를 Y/N 확인 후 버림",
-            "  /todo [--save|--load ...]   TODO 파일 생성/선택(.AgentCLI/todo)",
-            "  /exit                      종료",
+            "Commands:",
+            "  /help                      Show shell help",
+            "  /doctor                    Write a shell environment report to DOCTOR.md",
+            "  /worktree                  Show worktree diagnostics",
+            "  /worktree cleanup          Write a non-mutating cleanup dry-run artifact",
+            "  /worktree cleanup apply    Apply the cleanup plan after typing the exact phrase",
+            "  /repo <path>               Set the repo root",
+            "  /config [--all]            Show the effective config",
+            "  /set <key> <value>         Override a config value for this shell session",
+            "    e.g. /set execution_backend codex|claudecode",
+            "    e.g. /set roles PM,Security,Dev,QA",
+            "  /add <key> <value>         Append to a list config value",
+            "  /load [path]               Load a config JSON file",
+            "  /save [path]               Save the current config JSON",
+            "  /start [--flags...]        Start the runner with optional overrides",
+            "  /stop [--wait]             Request runner stop and optionally wait",
+            "  /status                    Show runner status",
+            "  /prs                       List queued PR packets",
+            "  /pr <id>                   Show queued PR packet details",
+            "  /validate-pr <id> [--full] Run isolated PR validation and persist the result",
+            "  /merge-pr <id>             Approve a validated PR packet after typing the confirmation phrase",
+            "  /discard-pr <id>           Mark a queued PR packet as discarded",
+            "  /rebase-pr <id>            Record a rebase request and reset validation to pending",
+            "  /merge-worktree            Apply a pending worktree patch to the source repo",
+            "  /discard-worktree          Discard a pending worktree patch",
+            "  /todo [--save|--load ...]  Create or select the current TODO file",
+            "  /exit                      Exit the shell",
             "",
             "Tips:",
-            "  - 시작 전 /config로 설정을 확인하세요.",
-            "  - backend=claudecode 사용 시 Claude Code 로그인(claude auth login)과 claude-agent-sdk가 필요합니다.",
+            "  - Start with /config to confirm the effective settings.",
+            "  - /validate-pr and /merge-pr operate on .AgentCLI/pr_queue packets in the repo.",
+            "  - backend=claudecode requires Claude auth plus claude-agent-sdk.",
         ]
         print("  - /start creates a new run_dir by default.")
         print("  - Use /start --resume-latest or /start --run-dir <path> to reuse an existing run.")
@@ -1199,12 +1557,18 @@ class RunnerShell:
             print("[ERR] repo is not set; use /repo <path>")
             return
 
+        if args and str(args[0]).strip().lower() == "cleanup":
+            self._worktree_cleanup(args[1:])
+            return
+
         diagnostics = scan_worktree_diagnostics(self.repo)
         summary = diagnostics.get("summary") if isinstance(diagnostics.get("summary"), dict) else {}
         issues = diagnostics.get("issues") if isinstance(diagnostics.get("issues"), list) else []
         pending_markers = diagnostics.get("pending_markers") if isinstance(diagnostics.get("pending_markers"), list) else []
         cleanup_failed = diagnostics.get("cleanup_failed") if isinstance(diagnostics.get("cleanup_failed"), list) else []
         generated_worktrees = diagnostics.get("generated_worktrees") if isinstance(diagnostics.get("generated_worktrees"), list) else []
+        stale_task_branches = diagnostics.get("stale_task_branches") if isinstance(diagnostics.get("stale_task_branches"), list) else []
+        interrupted_attempts = diagnostics.get("interrupted_attempts") if isinstance(diagnostics.get("interrupted_attempts"), list) else []
 
         print("\n=== Worktree Diagnostics ===")
         print(f"status:   {diagnostics.get('status') or 'unknown'}")
@@ -1220,6 +1584,8 @@ class RunnerShell:
             f"cleanup_failed={int(summary.get('cleanup_failed') or 0)} "
             f"worktrees={int(summary.get('generated_worktrees') or 0)} "
             f"orphaned={int(summary.get('orphaned_worktrees') or 0)} "
+            f"stale_branches={int(summary.get('stale_task_branches') or 0)} "
+            f"interrupted_attempts={int(summary.get('interrupted_attempts') or 0)} "
             f"issues={int(summary.get('issue_count') or 0)}"
         )
 
@@ -1283,6 +1649,30 @@ class RunnerShell:
                     bits.append(f"contract={contract_path}")
                 if reason:
                     bits.append(reason)
+                print(f"  - {path}: {' | '.join(bits)}")
+
+        if stale_task_branches:
+            print("stale task branches:")
+            for item in stale_task_branches:
+                branch = str(item.get("branch") or item.get("path") or "").strip()
+                bits = [
+                    f"age={item.get('age') or '0s'}",
+                    f"status={item.get('status') or 'unknown'}",
+                    f"reason={item.get('reason') or 'unknown'}",
+                    f"owning_run={item.get('owning_run') or 'unknown'}",
+                ]
+                print(f"  - {branch}: {' | '.join(bits)}")
+
+        if interrupted_attempts:
+            print("interrupted attempts:")
+            for item in interrupted_attempts:
+                path = str(item.get("path") or "").strip()
+                bits = [
+                    f"age={item.get('age') or '0s'}",
+                    f"status={item.get('status') or 'unknown'}",
+                    f"reason={item.get('reason') or 'unknown'}",
+                    f"owning_run={item.get('owning_run') or 'unknown'}",
+                ]
                 print(f"  - {path}: {' | '.join(bits)}")
 
         if issues:
@@ -1378,6 +1768,46 @@ class RunnerShell:
             status = "OK" if result.ok else "FAIL"
             detail = f" ({'; '.join(result.issues)})" if result.issues else ""
             report_lines.append(f"  - {result.backend}: {status}{detail}")
+
+        try:
+            diagnostics = scan_worktree_diagnostics(self.repo)
+            summary = diagnostics.get("summary") if isinstance(diagnostics.get("summary"), dict) else {}
+            report_lines.append(
+                "- worktree diagnostics: "
+                f"status={diagnostics.get('status') or 'unknown'} "
+                f"stale_branches={int(summary.get('stale_task_branches') or 0)} "
+                f"interrupted_attempts={int(summary.get('interrupted_attempts') or 0)}"
+            )
+            stale_task_branches = diagnostics.get("stale_task_branches") if isinstance(diagnostics.get("stale_task_branches"), list) else []
+            interrupted_attempts = diagnostics.get("interrupted_attempts") if isinstance(diagnostics.get("interrupted_attempts"), list) else []
+            if stale_task_branches:
+                report_lines.append("  - stale task branches:")
+                for item in stale_task_branches:
+                    if not isinstance(item, dict):
+                        continue
+                    report_lines.append(
+                        "    - "
+                        f"{item.get('branch') or item.get('path') or '(unknown)'}: "
+                        f"age={item.get('age') or '0s'} "
+                        f"status={item.get('status') or 'unknown'} "
+                        f"reason={item.get('reason') or 'unknown'} "
+                        f"owning_run={item.get('owning_run') or 'unknown'}"
+                    )
+            if interrupted_attempts:
+                report_lines.append("  - interrupted attempts:")
+                for item in interrupted_attempts:
+                    if not isinstance(item, dict):
+                        continue
+                    report_lines.append(
+                        "    - "
+                        f"{item.get('path') or '(unknown)'}: "
+                        f"age={item.get('age') or '0s'} "
+                        f"status={item.get('status') or 'unknown'} "
+                        f"reason={item.get('reason') or 'unknown'} "
+                        f"owning_run={item.get('owning_run') or 'unknown'}"
+                    )
+        except Exception as ex:
+            report_lines.append(f"- worktree diagnostics: ERROR ({ex})")
 
         def _first_cmd(cmd_val: Any, fallback: str) -> str:
             if isinstance(cmd_val, list) and cmd_val:
@@ -1573,7 +2003,7 @@ def _build_completer() -> Any:
         {
             "/help": None,
             "/doctor": None,
-            "/worktree": None,
+            "/worktree": {"cleanup": {"apply": None}},
             "/repo": None,
             "/config": None,
             "/set": set_keys,
@@ -1583,6 +2013,12 @@ def _build_completer() -> Any:
             "/start": start_flags,
             "/stop": WordCompleter(["--wait"], ignore_case=True),
             "/status": None,
+            "/prs": None,
+            "/pr": None,
+            "/validate-pr": WordCompleter(["--full"], ignore_case=True),
+            "/merge-pr": None,
+            "/discard-pr": None,
+            "/rebase-pr": None,
             "/merge-worktree": None,
             "/discard-worktree": None,
             "/todo": WordCompleter(["--save", "--load", "latest"], ignore_case=True),
@@ -1737,6 +2173,52 @@ def _dispatch(sh: RunnerShell, line: str) -> bool:
         return False
     if cmd == "/status":
         sh.status()
+        return False
+    if cmd == "/prs":
+        if args:
+            print("[ERR] Usage: /prs")
+            return False
+        sh.prs()
+        return False
+    if cmd == "/pr":
+        if len(args) != 1:
+            print("[ERR] Usage: /pr <id>")
+            return False
+        sh.pr(args[0])
+        return False
+    if cmd == "/validate-pr":
+        packet_id = ""
+        full = False
+        for arg in args:
+            if arg == "--full":
+                full = True
+                continue
+            if packet_id:
+                print("[ERR] Usage: /validate-pr <id> [--full]")
+                return False
+            packet_id = arg
+        if not packet_id:
+            print("[ERR] Usage: /validate-pr <id> [--full]")
+            return False
+        sh.validate_pr(packet_id, full=full)
+        return False
+    if cmd == "/merge-pr":
+        if len(args) != 1:
+            print("[ERR] Usage: /merge-pr <id>")
+            return False
+        sh.merge_pr(args[0])
+        return False
+    if cmd == "/discard-pr":
+        if len(args) != 1:
+            print("[ERR] Usage: /discard-pr <id>")
+            return False
+        sh.discard_pr(args[0])
+        return False
+    if cmd == "/rebase-pr":
+        if len(args) != 1:
+            print("[ERR] Usage: /rebase-pr <id>")
+            return False
+        sh.rebase_pr(args[0])
         return False
     if cmd == "/merge-worktree":
         sh.merge_worktree()

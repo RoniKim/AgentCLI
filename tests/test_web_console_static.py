@@ -32,6 +32,33 @@ class WebConsoleStaticTests(unittest.TestCase):
         self.assertNotIn("docs/design/project", lowered)
         self.assertNotIn("text/babel", lowered)
 
+    def test_role_metadata_and_pipeline_contract_cover_pl_and_plugin_specs(self) -> None:
+        expected_tokens = [
+            "const BUILTIN_ROLE_OPTIONS = ['PM', 'PL', 'Security', 'Dev', 'QA'];",
+            "pmDevQaFlow: 'PM -> PL -> Dev -> QA'",
+            "pmDevQaFlowTitle: 'PM -> PL -> Dev -> QA'",
+            "CLI-first multi-agent runner with a PM -> PL -> Dev -> QA pipeline",
+            "PM -> PL -> Dev -> QA 파이프라인",
+            "PM, PL, Security, Dev, QA, pkg.mod:Class",
+            "hint: 'Built-in order: PM, PL, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.'",
+            "desc: 'Run PM -> PL -> Dev -> QA without stopping.'",
+            "hint: 'One iteration equals one full PM -> PL -> Dev -> QA cycle.'",
+            "pl: 1,",
+            "security: 2,",
+            "dev: 3,",
+            "qa: 4,",
+            "reporter: 5,",
+            "const id = toText(raw.id || raw.label || raw.name, '');",
+            "label: toText(raw.label || raw.id || raw.name, id),",
+            "title: toText(raw.title || raw.taskTitle || raw.task_title || raw.name, toText(raw.label || raw.id || raw.name, id)),",
+        ]
+
+        for token in expected_tokens:
+            self.assertIn(token, self.app_js)
+
+        self.assertNotIn("Built-in order: PM, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.", self.app_js)
+        self.assertNotIn("PM, Security, Dev, QA, pkg.mod:Class", self.app_js)
+
     def test_styles_lock_direction_a_shell_geometry(self) -> None:
         required_tokens = [
             "--topbar-h: 44px",
@@ -99,6 +126,11 @@ class WebConsoleStaticTests(unittest.TestCase):
             ".log-row__select",
             ".log-row__select--selected",
             ".log-row__select-mark",
+            ".log-feed__section",
+            ".log-feed__section-head",
+            ".log-feed__section-title",
+            ".log-feed__section-copy",
+            ".log-feed__signal",
             ".modal-actions",
             ".board-grid--four",
             ".kpi-grid--four",
@@ -313,6 +345,21 @@ class WebConsoleStaticTests(unittest.TestCase):
             self.assertNotIn("126, 227, 138", value)
             self.assertNotIn("#7ee38a", value.lower())
 
+    def test_mobile_navigation_styles_wrap_shell_routes_without_hidden_overflow(self) -> None:
+        required_style_snippets = [
+            ".mobile-workflow__route-grid {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));",
+            ".mobile-workflow__action-grid,\n.mobile-workflow__confirm-grid {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(min(138px, 100%), 1fr));",
+            ".mobile-workflow .runner-control__buttons {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(min(120px, 100%), 1fr));",
+            ".sidebar {\n    grid-column: 1;\n    border-right: 0;\n    border-bottom: 1px solid var(--border);\n    max-height: none;\n    overflow-x: hidden;\n    overflow-y: auto;\n  }",
+            ".sidebar__inner {\n    display: flex;\n    flex-wrap: wrap;\n    align-items: stretch;\n    align-content: flex-start;\n    gap: 8px;\n    padding: 8px 12px;\n    width: 100%;\n    min-width: 0;\n  }",
+            ".nav-group {\n    display: flex;\n    flex: 1 1 100%;\n    flex-wrap: wrap;\n    align-items: stretch;\n    gap: 4px;\n    margin: 0;\n    min-width: 0;\n  }",
+            ".nav-item {\n    width: auto;\n    min-height: 34px;\n    min-width: 0;\n    max-width: 100%;\n    padding: 8px 10px;\n    border-left: 0;\n    border-bottom: 2px solid transparent;\n    flex: 1 1 116px;\n  }",
+        ]
+
+        for snippet in required_style_snippets:
+            self.assertIn(snippet, self.styles_css)
+        self.assertIn('data-shell-nav-container', self.app_js)
+
     def test_app_js_defines_required_shell_views_and_keyboard_flows(self) -> None:
         required_views = [
             "Dashboard",
@@ -383,6 +430,9 @@ class WebConsoleStaticTests(unittest.TestCase):
             "normalizeLiveStateKey",
             "liveStateKindLabel",
             "liveStateStatusLabel",
+            "liveStateRunStatusLabel",
+            "liveStateFactValue",
+            "liveStateFactText",
             "liveStateToneClass",
             "normalizeLiveStateEntry",
             "normalizeLiveState",
@@ -397,6 +447,7 @@ class WebConsoleStaticTests(unittest.TestCase):
             "currentTopbarIdentity",
             "identityRunnerModeLabel",
             "runnerControlLiveStateChips",
+            "runnerControlLiveStateSummary",
             "normalizeSnapshot",
             "createBlankModel",
             "createFallbackFixture",
@@ -623,7 +674,10 @@ class WebConsoleStaticTests(unittest.TestCase):
             "__AGENTCLI_ADAPTERS__",
             "SNAPSHOT_POLL_MS",
             "MAX_LOG_ROWS",
-            "fetch('/api/status'",
+            "buildStatusRequestUrl",
+            "snapshotScopeForView",
+            "/api/status?scope=dashboard",
+            "/api/status?scope=full",
             "Fallback data",
             "Loading read-only snapshot",
             "Partial snapshot",
@@ -949,6 +1003,7 @@ class WebConsoleStaticTests(unittest.TestCase):
             "No matching log lines",
             "Log file missing",
             "Log read error",
+            "/api/logs structured events",
         ]
 
         for token in required_views + required_function_names + required_keyboard_tokens + required_shell_tokens:
@@ -960,6 +1015,7 @@ class WebConsoleStaticTests(unittest.TestCase):
         self.assertNotIn("state.snapshotLabel = 'Fallback data';", self.app_js)
         self.assertNotIn("state.snapshotLabel = 'Stale snapshot';", self.app_js)
         self.assertNotIn("state.snapshotLabel = 'API error';", self.app_js)
+        self.assertNotIn("fetch('/api/status'", self.app_js)
 
         lowered = self.app_js.lower()
         self.assertNotIn("reactdom", lowered)
@@ -968,6 +1024,19 @@ class WebConsoleStaticTests(unittest.TestCase):
         self.assertNotIn("docs/design/project", lowered)
         self.assertNotIn("text/babel", lowered)
         self.assertNotIn("quota 5h", lowered)
+
+    def test_snapshot_refresh_logic_uses_history_selection_and_api_freshness_timestamps(self) -> None:
+        required_tokens = [
+            "setHistorySelection",
+            "raw.snapshot_refresh || raw.snapshotRefresh",
+            "state.activeView === 'history'",
+            "selectedRun.freshnessTimestamp",
+            "selectedRun.endedAt",
+        ]
+        for token in required_tokens:
+            self.assertIn(token, self.app_js)
+
+        self.assertNotIn("nextRefresh.stale || nextLiveRunStale.value", self.app_js)
 
     def test_locale_persistence_and_bilingual_dashboard_config_palette_copy(self) -> None:
         locale_tokens = [
@@ -1263,6 +1332,7 @@ class WebConsoleStaticTests(unittest.TestCase):
                 "No matching log lines",
                 "Log file missing",
                 "Log read error",
+                "/api/logs structured events",
                 "Copy selected lines",
                 "Download filtered logs",
                 "Clear selection",

@@ -20,7 +20,6 @@ import asyncio
 import json
 import os
 import shutil
-import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -28,7 +27,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
-from .utils import has_quota_text
+from .utils import has_quota_text, subprocess_close_fds_kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -176,10 +175,8 @@ def _resolve_codex_path() -> str:
     return found if found else "codex"
 
 
-def _windows_hidden_subprocess_kwargs() -> dict[str, int]:
-    if os.name != "nt":
-        return {}
-    return {"creationflags": int(getattr(subprocess, "CREATE_NO_WINDOW", 0))}
+def _subprocess_launch_kwargs() -> dict[str, int | bool]:
+    return subprocess_close_fds_kwargs()
 
 
 async def codex_exec(
@@ -276,7 +273,7 @@ async def codex_exec(
             stdin=asyncio.subprocess.PIPE if use_stdin else asyncio.subprocess.DEVNULL,
             cwd=str(cwd) if cwd else None,
             env=proc_env,
-            **_windows_hidden_subprocess_kwargs(),
+            **_subprocess_launch_kwargs(),
         )
 
         # Register with process guard for cleanup

@@ -75,14 +75,16 @@ from .remote.controller import (
     read_runner_control_event,
     write_runner_control_event,
 )
-from .runtime_contract import CODEX_MODEL_FIELD_SPECS, PIPELINE_ROLE_FIELD_SPEC, PIPELINE_STAGE_ORDER
+from .runtime_contract import CODEX_MODEL_FIELD_SPECS, PIPELINE_ROLE_FIELD_SPEC, PIPELINE_STAGE_ORDER, ROLE_SPEC_CANONICALS
 from .stop_progress import normalize_stop_progress_payload, summarize_stop_progress_liveness
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, load_state, parse_backlog_md
+from .task_history import query_history
 from .failure_policy import (
     STATUS_GROUP_BLOCKED_ENV,
     STATUS_GROUP_REGRESSION,
     STATUS_GROUP_REVIEW,
     count_task_status_groups,
+    normalize_task_status_for_group,
 )
 from .utils import atomic_write_json, atomic_write_text, now_iso, run_cmd, STOP_REASON_PROJECT_COMPLETE
 from . import web_payloads as _web_payloads
@@ -211,6 +213,8 @@ RUN_DIR_ARTIFACT_NAMES = {
     "metrics.jsonl",
     "FINAL_RUN_REPORT.json",
     "FINAL_RUN_REPORT.md",
+    "OPERATIONS_SUMMARY.json",
+    "OPERATIONS_SUMMARY.md",
     "QA_VALIDATION_REPORT.json",
     "QA_VALIDATION_REPORT.md",
     "failed_tasks.json",
@@ -384,6 +388,7 @@ WORKTREE_STATUS_PRIORITY = {
     "patch_not_applied": 1,
     "not_applied": 1,
 }
+WORKTREE_FINALIZED_HISTORY_STATUSES = {"applied", "discarded"}
 
 
 def _worktree_artifact_sort_key(status: str, path: Path) -> tuple[int, int]:
@@ -459,6 +464,14 @@ def _worktree_default_payload(repo_root: Path, run_dir: Path | None, branch: str
         "dirty_patch_applied": None,
         "pendingMarkerPath": "",
         "pending_marker_path": "",
+        "historicalArtifacts": [],
+        "historical_artifacts": [],
+        "recentArtifacts": [],
+        "recent_artifacts": [],
+        "current": True,
+        "historical": False,
+        "isHistorical": False,
+        "mutatingActionsEnabled": False,
         "checklist": list(WORKTREE_REVIEW_CHECKLIST),
         "runDir": run_dir_value,
         "runnerRc": 0,
@@ -2049,6 +2062,9 @@ EXECUTION_STATUS_ALIASES = {
     "success": "completed",
 }
 EXECUTION_STATUS_VALUES = {"idle", "running", "stopped", "failed", "completed"}
+_TASK_ARTIFACT_DIR_RE = re.compile(r"^c(?P<cycle>\d+)_s(?P<step>\d+)_(?P<task_id>.+)$")
+_TASK_ARTIFACT_ATTEMPT_RE = re.compile(r"^attempt_(?P<attempt>\d+)$")
+_TASK_DEV_LOG_RE = re.compile(r"^c(?P<cycle>\d+)_s(?P<step>\d+)_(?P<task_id>.+?)_a(?P<attempt>\d+)\.txt$")
 
 
 def _coerce_optional_int(value: Any) -> int | None:
@@ -2357,6 +2373,85 @@ def _path_mtime_ms(path: Path | None) -> int | None:
         return int(path.stat().st_mtime_ns / 1_000_000)
     except Exception:
         return None
+
+
+def _latest_path_mtime_ms(path: Path | None) -> int | None:
+    if path is None:
+        return None
+    latest = _path_mtime_ms(path)
+    try:
+        if not path.exists():
+            return latest
+        if path.is_file():
+            return latest
+        for candidate in path.rglob("*"):
+            if not candidate.is_file():
+                continue
+            candidate_mtime_ms = _path_mtime_ms(candidate)
+            if candidate_mtime_ms is None:
+                continue
+            if latest is None or candidate_mtime_ms > latest:
+                latest = candidate_mtime_ms
+    except Exception:
+        return latest
+    return latest
+
+
+def _snapshot_freshness_timestamp_ms(
+    run_dir: Path | None,
+    *,
+    active_run: dict[str, Any] | None = None,
+    controller_status: dict[str, Any] | None = None,
+    logs: dict[str, Any] | None = None,
+    notifications: list[dict[str, Any]] | None = None,
+) -> int | None:
+    candidates: list[int] = []
+
+    def add_candidate(value: Any) -> None:
+        ms = _coerce_optional_ms(value)
+        if ms is not None and ms > 0:
+            candidates.append(ms)
+
+    active = active_run if isinstance(active_run, dict) else {}
+    controller_data = controller_status if isinstance(controller_status, dict) else {}
+    log_data = logs if isinstance(logs, dict) else {}
+    notification_items = notifications if isinstance(notifications, list) else []
+
+    add_candidate(_latest_path_mtime_ms(run_dir))
+    add_candidate(active.get("startedAt"))
+    add_candidate(active.get("started_at"))
+    add_candidate(active.get("endedAt"))
+    add_candidate(active.get("ended_at"))
+    add_candidate(controller_data.get("startedAt"))
+    add_candidate(controller_data.get("started_at"))
+    add_candidate(controller_data.get("endedAt"))
+    add_candidate(controller_data.get("ended_at"))
+
+    stop_progress = normalize_stop_progress_payload(controller_data.get("stop_progress"))
+    if isinstance(stop_progress, dict):
+        add_candidate(stop_progress.get("updated_at"))
+        add_candidate(stop_progress.get("updatedAt"))
+        current_phase = stop_progress.get("current_phase")
+        if isinstance(current_phase, dict):
+            add_candidate(current_phase.get("updated_at"))
+            add_candidate(current_phase.get("updatedAt"))
+        for entry in stop_progress.get("history") or []:
+            if not isinstance(entry, dict):
+                continue
+            add_candidate(entry.get("updated_at"))
+            add_candidate(entry.get("updatedAt"))
+
+    for entry in log_data.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        add_candidate(_pick_value(entry.get("t"), entry.get("ts"), entry.get("time"), entry.get("timestamp")))
+
+    for entry in notification_items:
+        if not isinstance(entry, dict):
+            continue
+        add_candidate(_pick_value(entry.get("t"), entry.get("ts"), entry.get("time"), entry.get("timestamp")))
+
+    return max(candidates, default=None)
 
 
 def _host_is_loopback(bind_host: str) -> bool:
@@ -3495,6 +3590,9 @@ def _load_tasks(run_dir: Path | None) -> list[TaskItem]:
 
 
 def _task_priority(task: TaskItem, index: int) -> str:
+    explicit = str(getattr(task, "priority", "") or "").strip().upper()
+    if explicit in {"P0", "P1", "P2", "P3"}:
+        return explicit
     text = f"{task.title} {task.prompt}".lower()
     if any(token in text for token in ("test", "qa", "verify", "regression")):
         return "P1"
@@ -3504,6 +3602,9 @@ def _task_priority(task: TaskItem, index: int) -> str:
 
 
 def _task_estimate(task: TaskItem) -> str:
+    explicit = str(getattr(task, "effort", "") or "").strip().upper()
+    if explicit in {"S", "M", "L"}:
+        return explicit
     score = len(task.files) + max(1, len(task.prompt.split()) // 45)
     if score <= 1:
         return "S"
@@ -3565,21 +3666,36 @@ def _load_backlog_payload(
     tasks = _load_tasks(run_dir)
     done_ids = set(str(item) for item in (state.get("done") or []) if str(item).strip())
     failed_items = state.get("failed") if isinstance(state.get("failed"), list) else []
+    pending_review_items = state.get("pending_review") if isinstance(state.get("pending_review"), list) else []
     failed_lookup: dict[str, dict[str, Any]] = {}
-    for item in failed_items:
+    for bucket, item in [("failed", item) for item in failed_items] + [("pending_review", item) for item in pending_review_items]:
         if not isinstance(item, dict):
             continue
         task_id = _pick_text(item.get("task"), item.get("task_id"))
         if not task_id:
             continue
-        failure_status = _pick_text(item.get("status"), item.get("task_status"), item.get("outcome_status"))
+        failure_reason = _pick_text(item.get("reason"), item.get("failure_reason"), item.get("failureReason"))
+        failure_detail = _pick_text(item.get("detail"), item.get("message"))
+        task_status = normalize_task_status_for_group(
+            reason=failure_reason,
+            task_status=_pick_value(item.get("task_status"), item.get("taskStatus")),
+            outcome_status=_pick_value(item.get("outcome_status"), item.get("outcomeStatus")),
+            status=item.get("status"),
+            detail=failure_detail,
+            default="failed" if bucket == "failed" else "review_required",
+        )
+        failure_status = (
+            task_status
+            if task_status in {"blocked_env", "review_required", "test_contract_changed"}
+            else "failed"
+        )
         failed_lookup[task_id] = {
-            "reason": _pick_text(item.get("reason"), item.get("status")),
+            "reason": failure_reason,
             "status": failure_status,
-            "task_status": failure_status,
+            "task_status": task_status,
             "review_required": bool(item.get("review_required") or item.get("reviewRequired")),
             "auto_merge_allowed": bool(item.get("auto_merge_allowed") or item.get("autoMergeAllowed")),
-            "detail": _pick_text(item.get("detail"), item.get("message")),
+            "detail": failure_detail,
             "blocked_dependencies": item.get("blocked_dependencies") or item.get("blockedDependencies") or [],
             "next_action": _pick_text(item.get("next_action"), item.get("nextAction")),
             "attempt": _coerce_optional_int(item.get("attempt")),
@@ -3639,7 +3755,7 @@ def _load_backlog_payload(
         failure = failed_lookup.get(task.id, {})
         failure_reason = _pick_text(failure.get("reason"))
         failure_detail = _pick_text(failure.get("detail"))
-        if status == "failed":
+        if task.id in failed_lookup:
             if not failure_reason:
                 failure_reason = runtime_reason
             if not failure_detail:
@@ -3670,8 +3786,10 @@ def _load_backlog_payload(
                 "depends_on": task.depends_on,
                 "status": status,
                 "priority": _task_priority(task, index),
+                "effort": _task_estimate(task),
                 "tags": _task_tags(task),
                 "estimate": _task_estimate(task),
+                "touched_file_globs": list(getattr(task, "touched_file_globs", []) or []),
                 "skill": task.skills[0] if task.skills else None,
                 "attempt": attempt,
                 "failure": {
@@ -3795,16 +3913,28 @@ def _event_message(event: dict[str, Any]) -> str:
 
 
 def _normalize_stage_name(value: Any) -> str:
-    raw = _pick_text(value).strip().lower()
-    if not raw:
+    raw_text = _pick_text(value).strip()
+    if not raw_text:
         return ""
+    raw = raw_text.lower()
+    if raw in {"idle", "boot", "pending", "unknown", "none", "unavailable"}:
+        return ""
+    builtin = ROLE_SPEC_CANONICALS.get(raw)
+    if builtin:
+        return builtin
     if raw.startswith("pm") or raw in {"planner", "planning", "pm_stage"}:
         return "PM"
+    if raw in {"pl_stage", "backlog_refiner_stage", "backlog_refinement"}:
+        return "PL"
     if raw.startswith("dev") or raw.startswith("task") or raw.startswith("build") or raw.startswith("test") or raw in {"implementation"}:
         return "Dev"
     if raw.startswith("qa") or raw in {"verification", "qa_stage"}:
         return "QA"
-    return ""
+    if raw.startswith("security") or raw in {"security_stage"}:
+        return "Security"
+    if raw.startswith("reporter") or raw in {"reporting", "report"}:
+        return "Reporter"
+    return raw_text
 
 
 def _normalize_lifecycle_status(
@@ -4039,6 +4169,21 @@ def _task_output_candidates(
                     run_dir / f"run_summary_cycle_{cycle_i:03d}.json",
                 ]
             )
+    elif stage_key == "PL" and cycle_i is not None:
+        candidates.extend(
+            [
+                run_dir / f"PL_OUTPUT_cycle_{cycle_i:03d}.json",
+                run_dir / f"BACKLOG_REFINEMENT_cycle_{cycle_i:03d}.json",
+                run_dir / "NOTES_PL.md",
+            ]
+        )
+        if include_summary_artifacts:
+            candidates.extend(
+                [
+                    run_dir / "cycle_summary.log",
+                    run_dir / f"run_summary_cycle_{cycle_i:03d}.json",
+                ]
+            )
     elif stage_key == "QA" and cycle_i is not None:
         candidates.append(run_dir / f"qa_followups_cycle_{cycle_i:03d}.json")
         if include_summary_artifacts:
@@ -4115,6 +4260,451 @@ def _task_output_signal(
             }
             best_score = score
     return best or {"text": "", "path": "", "mtimeMs": None}
+
+
+def _active_task_record(
+    *,
+    task_id: Any = "",
+    task_title: Any = "",
+    attempt: Any = None,
+    branch: Any = "",
+    cycle: Any = None,
+    step: Any = None,
+    source: str = "",
+) -> dict[str, Any]:
+    return {
+        "task_id": _pick_text(task_id),
+        "task_title": _pick_text(task_title),
+        "attempt": _coerce_optional_int(attempt),
+        "branch": _pick_text(branch),
+        "cycle": _coerce_optional_int(cycle),
+        "step": _coerce_optional_int(step),
+        "source": _pick_text(source),
+    }
+
+
+def _active_task_has_data(record: dict[str, Any] | None) -> bool:
+    if not isinstance(record, dict):
+        return False
+    return bool(
+        _pick_text(record.get("task_id"), record.get("task_title"), record.get("branch"))
+        or _coerce_optional_int(record.get("attempt")) is not None
+    )
+
+
+def _backlog_active_task_record(backlog: dict[str, Any] | None) -> dict[str, Any]:
+    backlog_data = backlog if isinstance(backlog, dict) else {}
+    items = backlog_data.get("items") if isinstance(backlog_data.get("items"), list) else []
+    selected_id = _pick_text(backlog_data.get("selected_id"), backlog_data.get("selectedId"))
+    if selected_id:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if _pick_text(item.get("id")) != selected_id:
+                continue
+            return _active_task_record(
+                task_id=selected_id,
+                task_title=_pick_text(item.get("title"), item.get("task_title"), item.get("taskTitle")),
+                attempt=item.get("attempt"),
+                cycle=_pick_value(item.get("cycle"), item.get("failure", {}).get("cycle") if isinstance(item.get("failure"), dict) else None),
+                step=_pick_value(item.get("step"), item.get("failure", {}).get("step") if isinstance(item.get("failure"), dict) else None),
+                source="backlog_selected",
+            )
+
+    best: dict[str, Any] | None = None
+    best_score = (-1, -1, -1, -1, -1)
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        task_id = _pick_text(item.get("id"))
+        task_title = _pick_text(item.get("title"), item.get("task_title"), item.get("taskTitle"))
+        attempt = _coerce_optional_int(item.get("attempt"))
+        started_at = _coerce_optional_ms(_pick_value(item.get("started_at"), item.get("startedAt")))
+        ended_at = _coerce_optional_ms(_pick_value(item.get("ended_at"), item.get("endedAt")))
+        cycle = _coerce_optional_int(item.get("cycle"))
+        step = _coerce_optional_int(item.get("step"))
+        status = _pick_text(item.get("status"), item.get("task_status"), item.get("taskStatus"))
+        status_rank = 2 if status == "in_progress" else 1 if status in {"failed", "review_required", "blocked_env", "test_contract_changed", "regression_failed", "done"} else 0
+        if not (task_id or task_title or attempt is not None or status_rank > 0):
+            continue
+        score = (
+            status_rank,
+            started_at or ended_at or -1,
+            cycle or -1,
+            attempt or -1,
+            -index,
+        )
+        if best is None or score > best_score:
+            best = _active_task_record(
+                task_id=task_id,
+                task_title=task_title,
+                attempt=attempt,
+                cycle=cycle,
+                step=step,
+                source="backlog_runtime",
+            )
+            best_score = score
+    return best or _active_task_record()
+
+
+def _task_history_active_task_record(
+    rows: list[dict[str, Any]] | None,
+    *,
+    task_id: str = "",
+    run_id: str = "",
+) -> dict[str, Any]:
+    history_rows = rows if isinstance(rows, list) else []
+    if not history_rows:
+        return _active_task_record()
+
+    candidate_rows = history_rows
+    if task_id:
+        matched = [row for row in history_rows if _pick_text(row.get("task_id")) == task_id]
+        candidate_rows = matched
+    if run_id:
+        run_matched = [row for row in candidate_rows if _pick_text(row.get("run_id")) == run_id]
+        if run_matched:
+            candidate_rows = run_matched
+        elif not candidate_rows:
+            run_only = [row for row in history_rows if _pick_text(row.get("run_id")) == run_id]
+            if run_only:
+                candidate_rows = run_only
+
+    row = candidate_rows[0] if candidate_rows else {}
+    return _active_task_record(
+        task_id=row.get("task_id"),
+        task_title=row.get("title"),
+        attempt=row.get("attempt"),
+        source="task_history",
+    )
+
+
+def _latest_event_task_artifact_record(
+    events: list[dict[str, Any]] | None,
+    *,
+    branch: str = "",
+) -> dict[str, Any]:
+    best: dict[str, Any] | None = None
+    best_score = (-1, -1, -1, -1, -1)
+    for index, event in enumerate(events or []):
+        if not isinstance(event, dict):
+            continue
+        task_id = _pick_text(event.get("task_id"), event.get("task"))
+        task_title = _pick_text(event.get("task_title"), event.get("taskTitle"), event.get("title"))
+        attempt = _coerce_optional_int(event.get("attempt"))
+        cycle = _coerce_optional_int(event.get("cycle"))
+        step = _coerce_optional_int(event.get("step"))
+        if not (task_id or task_title or attempt is not None):
+            continue
+        score = (
+            _coerce_optional_ms(event.get("ts")) or -1,
+            cycle or -1,
+            attempt or -1,
+            step or -1,
+            index,
+        )
+        if best is None or score > best_score:
+            best = _active_task_record(
+                task_id=task_id,
+                task_title=task_title,
+                attempt=attempt,
+                branch=branch,
+                cycle=cycle,
+                step=step,
+                source="artifact_event",
+            )
+            best_score = score
+    return best or _active_task_record()
+
+
+def _run_summary_active_task_record(
+    run_summary: dict[str, Any] | None,
+    last_run_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary = run_summary if isinstance(run_summary, dict) else {}
+    last_summary = last_run_summary if isinstance(last_run_summary, dict) else {}
+    branch_value = _pick_text(summary.get("branch"), last_summary.get("branch"))
+    cycles = summary.get("cycles") if isinstance(summary.get("cycles"), list) else []
+    best: dict[str, Any] | None = None
+    best_score = (-1, -1, -1, -1, -1)
+    for cycle_entry in cycles:
+        if not isinstance(cycle_entry, dict):
+            continue
+        cycle = _coerce_optional_int(cycle_entry.get("cycle"))
+        stages = cycle_entry.get("stages") if isinstance(cycle_entry.get("stages"), list) else []
+        for stage_index, stage in enumerate(stages):
+            if not isinstance(stage, dict):
+                continue
+            task_id = _pick_text(stage.get("taskId"), stage.get("task_id"))
+            task_title = _pick_text(stage.get("taskTitle"), stage.get("task_title"), stage.get("title"))
+            attempt = _coerce_optional_int(stage.get("attempt"))
+            step = _coerce_optional_int(stage.get("step"))
+            if not (task_id or task_title or attempt is not None):
+                continue
+            stage_name = _normalize_stage_name(_pick_value(stage.get("name"), stage.get("id"), stage.get("label")))
+            stage_rank = STAGE_ORDER.get(stage_name.lower(), -1) if stage_name else -1
+            score = (
+                cycle or -1,
+                _coerce_optional_ms(_pick_value(stage.get("endedAt"), stage.get("ended_at"), stage.get("startedAt"), stage.get("started_at"))) or -1,
+                stage_rank,
+                attempt or -1,
+                stage_index,
+            )
+            if best is None or score > best_score:
+                best = _active_task_record(
+                    task_id=task_id,
+                    task_title=task_title,
+                    attempt=attempt,
+                    branch=branch_value,
+                    cycle=cycle,
+                    step=step,
+                    source="run_summary",
+                )
+                best_score = score
+    return best or _active_task_record(branch=branch_value)
+
+
+def _task_path_active_task_record(
+    run_dir: Path | None,
+    *,
+    branch: str = "",
+    title_map: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    if run_dir is None:
+        return _active_task_record()
+    titles = title_map if isinstance(title_map, dict) else {}
+    candidate_names = {"dev_output.txt", "build.txt", "test.txt", "NOTES.md", "DEPENDENCY_REQUIRED.md"}
+    best: dict[str, Any] | None = None
+    best_score = (-1, -1, -1, -1, -1)
+
+    for candidate in run_dir.glob("tasks/c*_s*_*/*/*"):
+        if not candidate.is_file() or candidate.name not in candidate_names:
+            continue
+        try:
+            relative = candidate.relative_to(run_dir)
+        except Exception:
+            continue
+        if len(relative.parts) < 4:
+            continue
+        task_match = _TASK_ARTIFACT_DIR_RE.match(relative.parts[1])
+        attempt_match = _TASK_ARTIFACT_ATTEMPT_RE.match(relative.parts[2])
+        if not task_match or not attempt_match:
+            continue
+        task_id = _pick_text(task_match.group("task_id"))
+        cycle = _coerce_optional_int(task_match.group("cycle"))
+        step = _coerce_optional_int(task_match.group("step"))
+        attempt = _coerce_optional_int(attempt_match.group("attempt"))
+        score = (
+            _path_mtime_ms(candidate) or -1,
+            cycle or -1,
+            attempt or -1,
+            step or -1,
+            0,
+        )
+        if best is None or score > best_score:
+            best = _active_task_record(
+                task_id=task_id,
+                task_title=titles.get(task_id, ""),
+                attempt=attempt,
+                branch=branch,
+                cycle=cycle,
+                step=step,
+                source="task_artifact",
+            )
+            best_score = score
+
+    for candidate in run_dir.glob("dev_logs/c*_s*_*_a*.txt"):
+        if not candidate.is_file():
+            continue
+        match = _TASK_DEV_LOG_RE.match(candidate.name)
+        if not match:
+            continue
+        task_id = _pick_text(match.group("task_id"))
+        cycle = _coerce_optional_int(match.group("cycle"))
+        step = _coerce_optional_int(match.group("step"))
+        attempt = _coerce_optional_int(match.group("attempt"))
+        score = (
+            _path_mtime_ms(candidate) or -1,
+            cycle or -1,
+            attempt or -1,
+            step or -1,
+            1,
+        )
+        if best is None or score > best_score:
+            best = _active_task_record(
+                task_id=task_id,
+                task_title=titles.get(task_id, ""),
+                attempt=attempt,
+                branch=branch,
+                cycle=cycle,
+                step=step,
+                source="task_artifact",
+            )
+            best_score = score
+
+    return best or _active_task_record()
+
+
+def _latest_task_artifact_record(
+    run_dir: Path | None,
+    *,
+    events: list[dict[str, Any]] | None = None,
+    run_summary: dict[str, Any] | None = None,
+    last_run_summary: dict[str, Any] | None = None,
+    backlog: dict[str, Any] | None = None,
+    history_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    summary_record = _run_summary_active_task_record(run_summary, last_run_summary)
+    branch_value = _pick_text(summary_record.get("branch"), run_summary.get("branch") if isinstance(run_summary, dict) else "", last_run_summary.get("branch") if isinstance(last_run_summary, dict) else "")
+    title_map: dict[str, str] = {}
+    backlog_items = backlog.get("items") if isinstance(backlog, dict) and isinstance(backlog.get("items"), list) else []
+    for item in backlog_items:
+        if not isinstance(item, dict):
+            continue
+        task_id = _pick_text(item.get("id"))
+        task_title = _pick_text(item.get("title"), item.get("task_title"), item.get("taskTitle"))
+        if task_id and task_title and task_id not in title_map:
+            title_map[task_id] = task_title
+    for row in history_rows or []:
+        if not isinstance(row, dict):
+            continue
+        task_id = _pick_text(row.get("task_id"))
+        task_title = _pick_text(row.get("title"))
+        if task_id and task_title and task_id not in title_map:
+            title_map[task_id] = task_title
+
+    event_record = _latest_event_task_artifact_record(events, branch=branch_value)
+    path_record = _task_path_active_task_record(run_dir, branch=branch_value, title_map=title_map)
+    task_id = _pick_text(event_record.get("task_id"), summary_record.get("task_id"), path_record.get("task_id"))
+    return _active_task_record(
+        task_id=task_id,
+        task_title=_pick_text(
+            event_record.get("task_title"),
+            summary_record.get("task_title"),
+            title_map.get(task_id, "") if task_id else "",
+            path_record.get("task_title"),
+        ),
+        attempt=_pick_value(event_record.get("attempt"), summary_record.get("attempt"), path_record.get("attempt")),
+        branch=_pick_text(event_record.get("branch"), summary_record.get("branch"), path_record.get("branch"), branch_value),
+        cycle=_pick_value(event_record.get("cycle"), summary_record.get("cycle"), path_record.get("cycle")),
+        step=_pick_value(event_record.get("step"), summary_record.get("step"), path_record.get("step")),
+        source=_pick_text(
+            event_record.get("source") if _active_task_has_data(event_record) else "",
+            summary_record.get("source") if _active_task_has_data(summary_record) else "",
+            path_record.get("source") if _active_task_has_data(path_record) else "",
+        ),
+    )
+
+
+def _resolve_dashboard_active_task(
+    repo: Path,
+    *,
+    run_dir: Path | None,
+    backlog: dict[str, Any] | None = None,
+    controller_status: dict[str, Any] | None = None,
+    run_summary: dict[str, Any] | None = None,
+    last_run_summary: dict[str, Any] | None = None,
+    events: list[dict[str, Any]] | None = None,
+    repo_branch: str = "",
+) -> dict[str, Any]:
+    controller_data = controller_status if isinstance(controller_status, dict) else {}
+    live_record = _active_task_record(
+        task_id=_pick_text(controller_data.get("current_task_id"), controller_data.get("task_id"), controller_data.get("task")),
+        task_title=_pick_text(controller_data.get("current_task_title"), controller_data.get("task_title"), controller_data.get("taskTitle")),
+        attempt=_pick_value(controller_data.get("attempt"), controller_data.get("current_attempt"), controller_data.get("attempt_index")),
+        branch=_pick_text(controller_data.get("branch")),
+        cycle=_pick_value(controller_data.get("cycle"), controller_data.get("current_cycle")),
+        step=controller_data.get("step"),
+        source="live_runner",
+    )
+    backlog_record = _backlog_active_task_record(backlog)
+    artifact_record = _latest_task_artifact_record(
+        run_dir,
+        events=events,
+        run_summary=run_summary,
+        last_run_summary=last_run_summary,
+        backlog=backlog,
+        history_rows=None,
+    )
+    history_rows = query_history(repo, max_items=25)
+    run_id = run_dir.name if run_dir is not None else ""
+    hinted_task_id = _pick_text(live_record.get("task_id"), backlog_record.get("task_id"), artifact_record.get("task_id"))
+    history_record = _task_history_active_task_record(history_rows, task_id=hinted_task_id, run_id=run_id)
+    if hinted_task_id and not _pick_text(artifact_record.get("task_title")):
+        artifact_record["task_title"] = _pick_text(history_record.get("task_title"), artifact_record.get("task_title"))
+    if hinted_task_id and _coerce_optional_int(artifact_record.get("attempt")) is None:
+        artifact_record["attempt"] = _pick_value(history_record.get("attempt"), artifact_record.get("attempt"))
+    task_id = _pick_text(
+        live_record.get("task_id"),
+        backlog_record.get("task_id"),
+        history_record.get("task_id"),
+        artifact_record.get("task_id"),
+    )
+
+    def _matching_text(record: dict[str, Any], key: str) -> str:
+        if not isinstance(record, dict):
+            return ""
+        record_task_id = _pick_text(record.get("task_id"))
+        if task_id and record_task_id and record_task_id != task_id:
+            return ""
+        return _pick_text(record.get(key))
+
+    def _matching_int(record: dict[str, Any], key: str) -> int | None:
+        if not isinstance(record, dict):
+            return None
+        record_task_id = _pick_text(record.get("task_id"))
+        if task_id and record_task_id and record_task_id != task_id:
+            return None
+        return _coerce_optional_int(record.get(key))
+
+    task_title = _pick_text(
+        _matching_text(live_record, "task_title"),
+        _matching_text(backlog_record, "task_title"),
+        _matching_text(history_record, "task_title"),
+        _matching_text(artifact_record, "task_title"),
+    )
+    attempt = _coerce_optional_int(
+        _pick_value(
+            _matching_int(live_record, "attempt"),
+            _matching_int(backlog_record, "attempt"),
+            _matching_int(history_record, "attempt"),
+            _matching_int(artifact_record, "attempt"),
+        )
+    )
+    branch_value = _pick_text(
+        live_record.get("branch"),
+        artifact_record.get("branch"),
+        repo_branch,
+    )
+    cycle_value = _coerce_optional_int(
+        _pick_value(
+            _matching_int(live_record, "cycle"),
+            _matching_int(backlog_record, "cycle"),
+            _matching_int(artifact_record, "cycle"),
+        )
+    )
+    step_value = _coerce_optional_int(
+        _pick_value(
+            _matching_int(live_record, "step"),
+            _matching_int(backlog_record, "step"),
+            _matching_int(artifact_record, "step"),
+        )
+    )
+    source = _pick_text(
+        live_record.get("source") if _matching_text(live_record, "task_title") or _matching_text(live_record, "task_id") or _matching_int(live_record, "attempt") is not None else "",
+        backlog_record.get("source") if _matching_text(backlog_record, "task_title") or _matching_text(backlog_record, "task_id") or _matching_int(backlog_record, "attempt") is not None else "",
+        history_record.get("source") if _matching_text(history_record, "task_title") or _matching_text(history_record, "task_id") or _matching_int(history_record, "attempt") is not None else "",
+        artifact_record.get("source") if _matching_text(artifact_record, "task_title") or _matching_text(artifact_record, "task_id") or _matching_int(artifact_record, "attempt") is not None else "",
+    )
+    return _active_task_record(
+        task_id=task_id,
+        task_title=task_title,
+        attempt=attempt,
+        branch=branch_value,
+        cycle=cycle_value,
+        step=step_value,
+        source=source,
+    )
 
 
 def _stage_output_stall_threshold_seconds(config: dict[str, Any]) -> int:
@@ -4723,6 +5313,10 @@ def build_snapshot(
         runner_controller_auto_build=runner_controller_auto_build,
         web_instance_state=web_instance_state,
     )
+
+
+def status_snapshot_for_scope(snapshot: dict[str, Any], *, scope: str = "full") -> dict[str, Any]:
+    return _web_payloads.status_snapshot_for_scope(snapshot, scope=scope)
 
 
 def build_health(repo: Path | str | None = None) -> dict[str, Any]:
@@ -6672,8 +7266,8 @@ def create_app(
         }
 
     @app.get("/api/status")
-    def api_status() -> dict[str, Any]:
-        return _snapshot()
+    def api_status(scope: str = "full") -> dict[str, Any]:
+        return status_snapshot_for_scope(_snapshot(), scope=scope)
 
     @app.get("/api/progress")
     def api_progress() -> dict[str, Any]:
@@ -6803,6 +7397,15 @@ def create_app(
                     "selected_source_id": "",
                     "sources": source_catalog,
                     "malformed_lines": 0,
+                    "eof": False,
+                    "last_line": None,
+                    "lastLine": None,
+                    "last_activity_at": None,
+                    "lastActivityAt": None,
+                    "output_stalled": False,
+                    "outputStalled": False,
+                    "no_output_minutes": None,
+                    "noOutputMinutes": None,
                 }
                 return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_log_payload)
             live = bool(controller_status.get("running"))
@@ -6817,6 +7420,7 @@ def create_app(
                 task_id=task_id,
                 search=search,
                 live=live,
+                stalled_threshold_seconds=_stage_output_stall_threshold_seconds(cfg),
             )
             return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_log_payload)
         except Exception as ex:
@@ -6856,6 +7460,15 @@ def create_app(
                 "sources": source_catalog,
                 "error": str(ex).strip() or ex.__class__.__name__,
                 "malformed_lines": 0,
+                "eof": False,
+                "last_line": None,
+                "lastLine": None,
+                "last_activity_at": None,
+                "lastActivityAt": None,
+                "output_stalled": False,
+                "outputStalled": False,
+                "no_output_minutes": None,
+                "noOutputMinutes": None,
             }
             return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_log_payload)
 

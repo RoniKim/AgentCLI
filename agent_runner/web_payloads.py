@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .runtime_contract import PIPELINE_STAGE_ORDER
+
 
 def build_live_state_payload(
     web: Any,
@@ -40,11 +42,37 @@ def build_live_state_payload(
         active.get("executionStatus"),
         active.get("execution_status"),
     ).strip().lower()
+    backend_alive_states = {"running", "stopping"}
+    backend_stopped_states = {
+        "stopped",
+        "completed",
+        "complete",
+        "success",
+        "done",
+        "failed",
+        "error",
+        "aborted",
+        "cancelled",
+        "canceled",
+        "interrupted",
+        "timeout",
+    }
     backend_available = controller_live_available and bool(
-        run_status or active.get("status") or active.get("executionStatus") or active.get("execution_status")
+        run_status
+        or active.get("status")
+        or active.get("executionStatus")
+        or active.get("execution_status")
+        or stop_progress
     )
-    backend_alive = backend_available and run_status == "running"
-    backend_status = "unavailable" if not backend_available else ("alive" if backend_alive else "idle")
+    backend_status = "unavailable"
+    if backend_available:
+        if run_status in backend_alive_states:
+            backend_status = "alive"
+        elif run_status in backend_stopped_states or bool(stop_progress_liveness["phase"]):
+            backend_status = "stopped"
+        else:
+            backend_status = "idle"
+    backend_alive = backend_status == "alive"
 
     tracked_child_processes = stop_progress_liveness["tracked_child_processes"]
     tracked_child_pids = stop_progress_liveness["tracked_child_pids"]
@@ -52,7 +80,14 @@ def build_live_state_payload(
     tracked_alive_count = int(stop_progress_liveness["tracked_alive_count"])
     tracked_count = int(stop_progress_liveness["tracked_count"])
     tracked_alive = tracked_available and tracked_alive_count > 0
-    tracked_status = "unavailable" if not tracked_available else ("alive" if tracked_alive else "stopped")
+    tracked_status = "unavailable"
+    if tracked_available:
+        if tracked_alive:
+            tracked_status = "alive"
+        elif tracked_count > 0:
+            tracked_status = "stopped"
+        else:
+            tracked_status = "idle"
 
     artifact_phase = stop_progress_liveness["artifact_phase"]
     artifact_available = controller_live_available and bool(stop_progress)
@@ -156,14 +191,43 @@ def build_stage_payload(
 
     stage_titles = {
         "PM": "Backlog planning",
+        "PL": "Backlog refinement",
+        "Security": "Security",
         "Dev": "Implementation",
         "QA": "Verification",
+        "Reporter": "Close-out reporting",
     }
     stage_model_defaults = {
         "PM": str(config.get("pm_model") or "gpt-5.5"),
+        "PL": "",
+        "Security": "",
         "Dev": str(config.get("dev_model") or "gpt-5.4-mini"),
         "QA": str(config.get("qa_model") or "gpt-5.5"),
+        "Reporter": str(config.get("reporter_model") or "gpt-5.4-mini"),
     }
+    summary_stage_order: list[str] = []
+    observed_builtin_stage_names: set[str] = set()
+    observed_custom_stage_names: list[str] = []
+
+    def _observe_stage_name(stage_name: str, *, summary_order: bool = False) -> None:
+        if not stage_name:
+            return
+        if summary_order and stage_name not in summary_stage_order:
+            summary_stage_order.append(stage_name)
+        if stage_name in PIPELINE_STAGE_ORDER:
+            observed_builtin_stage_names.add(stage_name)
+        elif stage_name not in observed_custom_stage_names:
+            observed_custom_stage_names.append(stage_name)
+
+    def _ordered_stage_names() -> list[str]:
+        ordered = list(summary_stage_order)
+        for stage_name in PIPELINE_STAGE_ORDER:
+            if stage_name in observed_builtin_stage_names and stage_name not in ordered:
+                ordered.append(stage_name)
+        for stage_name in observed_custom_stage_names:
+            if stage_name not in ordered:
+                ordered.append(stage_name)
+        return ordered
 
     active_status = str(active_run.get("status") or progress.get("run_status") or "idle").strip().lower()
     current_stage = _normalize_stage_name(
@@ -253,9 +317,13 @@ def build_stage_payload(
     for raw_stage in target_cycle_entry.get("stages") if isinstance(target_cycle_entry.get("stages"), list) else []:
         if not isinstance(raw_stage, dict):
             continue
-        stage_name = _normalize_stage_name(raw_stage.get("name"))
-        if stage_name in stage_titles:
-            stage_summary_map[stage_name] = raw_stage
+        stage_name = _normalize_stage_name(
+            _pick_value(raw_stage.get("name"), raw_stage.get("id"), raw_stage.get("label"))
+        )
+        if not stage_name:
+            continue
+        stage_summary_map[stage_name] = raw_stage
+        _observe_stage_name(stage_name, summary_order=True)
 
     running_stage_name = current_stage if active_status == "running" else ""
     relevant_events = [
@@ -273,7 +341,11 @@ def build_stage_payload(
             stage_name = "PM"
         elif not stage_name and (event_type.startswith("qa_") or event_type.startswith("qa_stage_")):
             stage_name = "QA"
-        if stage_name not in {"PM", "QA"}:
+        elif not stage_name and event_type.startswith("security_"):
+            stage_name = "Security"
+        elif not stage_name and event_type.startswith("reporter_"):
+            stage_name = "Reporter"
+        if not stage_name:
             continue
         if event_type not in {
             "pm_start",
@@ -284,9 +356,13 @@ def build_stage_payload(
             "qa_end",
             "qa_stage_start",
             "qa_stage_end",
+            "security_start",
+            "security_end",
+            "security_skipped",
             "stage_event",
         }:
             continue
+        _observe_stage_name(stage_name)
         entry = stage_event_map.setdefault(
             stage_name,
             {
@@ -358,6 +434,8 @@ def build_stage_payload(
                 entry["status"] = _normalize_lifecycle_status(reason, reason=reason, default="done")
             elif not entry["status"]:
                 entry["status"] = "done"
+        elif event_type.endswith("skipped"):
+            entry["status"] = "skipped"
         elif event_type == "stage_event":
             if inner_event in {"error", "quota_exhausted"} or reason in {"error", "quota_exhausted"}:
                 entry["status"] = "failed"
@@ -393,8 +471,14 @@ def build_stage_payload(
         else:
             latest_task_runtime = max(cycle_task_runtimes, key=_runtime_key)
 
+    if latest_task_runtime:
+        _observe_stage_name("Dev")
+    if running_stage_name:
+        _observe_stage_name(running_stage_name)
+
+    stage_names = _ordered_stage_names()
     records: list[dict[str, Any]] = []
-    for stage_name in ("PM", "Dev", "QA"):
+    for stage_name in stage_names:
         summary = stage_summary_map.get(stage_name, {})
         stage_runtime = latest_task_runtime if stage_name == "Dev" else stage_event_map.get(stage_name, {})
 
@@ -433,7 +517,7 @@ def build_stage_payload(
                 summary.get("attempt"),
                 summary.get("currentAttempt"),
                 stage_runtime.get("attempt"),
-                current_attempt if stage_name in {"Dev", "PM", "QA"} else None,
+                current_attempt if stage_name in {"Dev", "PM", "QA"} or stage_name == running_stage_name else None,
             )
         )
         model = _pick_text(
@@ -621,6 +705,7 @@ def build_history_item(
     _normalize_execution_status = web._normalize_execution_status
     _normalize_run_status = web._normalize_run_status
     _epoch_ms = web._epoch_ms
+    _latest_path_mtime_ms = web._latest_path_mtime_ms
     _history_worktree_outcome = web._history_worktree_outcome
     _tail_text = web._tail_text
 
@@ -687,7 +772,8 @@ def build_history_item(
     )
 
     started_at = _epoch_ms(run_dir.stat().st_ctime)
-    ended_at = _epoch_ms(run_dir.stat().st_mtime)
+    artifact_updated_at = _latest_path_mtime_ms(run_dir)
+    ended_at = artifact_updated_at or _epoch_ms(run_dir.stat().st_mtime)
     duration_sec = _coerce_optional_int(
         _pick_value(
             last_summary.get("duration_seconds"),
@@ -706,9 +792,11 @@ def build_history_item(
     qa_validation_report = _safe_json(run_dir / "QA_VALIDATION_REPORT.json", {})
     final_run_report = _safe_json(run_dir / "FINAL_RUN_REPORT.json", {})
     cycle_change_summary = _safe_json(run_dir / "cycle_change_summary.json", {})
+    operations_summary = _safe_json(run_dir / "OPERATIONS_SUMMARY.json", {})
     qa_validation_report = qa_validation_report if isinstance(qa_validation_report, dict) else {}
     final_run_report = final_run_report if isinstance(final_run_report, dict) else {}
     cycle_change_summary = cycle_change_summary if isinstance(cycle_change_summary, dict) else {}
+    operations_summary = operations_summary if isinstance(operations_summary, dict) else {}
     report_summary = _pick_text(final_run_report.get("summary"), "")
     report_status = _pick_text(final_run_report.get("status"), "")
     qa_report_status = _pick_text(qa_validation_report.get("status"), "")
@@ -752,6 +840,10 @@ def build_history_item(
         "shutdownReason": shutdown_reason,
         "stopReason": shutdown_reason,
         "runDir": run_dir.as_posix(),
+        "freshnessTimestamp": ended_at,
+        "freshness_timestamp": ended_at,
+        "freshnessSource": "artifact_mtime" if artifact_updated_at else "run_dir_mtime",
+        "freshness_source": "artifact_mtime" if artifact_updated_at else "run_dir_mtime",
         "lastCycle": last_cycle,
         "runSummary": run_summary,
         "lastRunSummary": last_summary,
@@ -762,6 +854,8 @@ def build_history_item(
         "final_run_report": final_run_report,
         "cycleChangeSummary": cycle_change_summary,
         "cycle_change_summary": cycle_change_summary,
+        "operationsSummary": operations_summary,
+        "operations_summary": operations_summary,
         "failedTasks": failed_tasks,
         "failed_tasks": failed_tasks,
         "reportSummary": report_summary,
@@ -775,6 +869,8 @@ def build_history_item(
             "finalRunMarkdown": (run_dir / "FINAL_RUN_REPORT.md").as_posix(),
             "cycleChangeSummaryJson": (run_dir / "cycle_change_summary.json").as_posix(),
             "cycleChangeSummaryMarkdown": (run_dir / "cycle_change_summary.md").as_posix(),
+            "operationsSummaryJson": (run_dir / "OPERATIONS_SUMMARY.json").as_posix(),
+            "operationsSummaryMarkdown": (run_dir / "OPERATIONS_SUMMARY.md").as_posix(),
             "failedTasksJson": (run_dir / "failed_tasks.json").as_posix(),
             "failedTasksMarkdown": (run_dir / "failed_tasks.md").as_posix(),
             "shutdownReport": (run_dir / "SHUTDOWN_REPORT.md").as_posix(),
@@ -1089,6 +1185,7 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
     _worktree_status_payload = web._worktree_status_payload
     _worktree_status_artifacts = web._worktree_status_artifacts
     _worktree_select_artifact = web._worktree_select_artifact
+    WORKTREE_FINALIZED_HISTORY_STATUSES = web.WORKTREE_FINALIZED_HISTORY_STATUSES
     summarize_worktree_diff = web.summarize_worktree_diff
     git_show_toplevel = web.git_show_toplevel
     summarize_worktree_preflight = web.summarize_worktree_preflight
@@ -1096,6 +1193,77 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
     repo_root = _repo_root(repo)
     run_dir_value = run_dir.as_posix() if run_dir else ""
     source_branch = branch or "HEAD"
+
+    def _artifact_mtime_ns(item: tuple[str, Path]) -> int:
+        try:
+            return item[1].stat().st_mtime_ns
+        except OSError:
+            return 0
+
+    def _attach_recent_artifacts(payload: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+        recent = [dict(item) for item in artifacts]
+        payload["historicalArtifacts"] = recent
+        payload["historical_artifacts"] = recent
+        payload["recentArtifacts"] = recent
+        payload["recent_artifacts"] = recent
+        payload["current"] = True
+        payload["historical"] = False
+        payload["isHistorical"] = False
+        payload["mutatingActionsEnabled"] = bool(
+            payload.get("status") in {"pending", "pending review"}
+            and payload.get("cleanupState") == "pending"
+            and payload.get("reviewRequired")
+        )
+        return payload
+
+    def _finalized_artifact_payload(artifact_status: str, artifact_path: Path) -> dict[str, Any] | None:
+        if artifact_status not in WORKTREE_FINALIZED_HISTORY_STATUSES:
+            return None
+        payload = _safe_json(artifact_path, {})
+        if not isinstance(payload, dict):
+            payload = {}
+        artifact = _worktree_status_payload(
+            repo_root,
+            run_dir,
+            branch,
+            status=artifact_status,
+            artifact_path=artifact_path,
+            payload=payload,
+            pending_path=None,
+        )
+        artifact["historicalArtifacts"] = []
+        artifact["historical_artifacts"] = []
+        artifact["recentArtifacts"] = []
+        artifact["recent_artifacts"] = []
+        artifact["current"] = False
+        artifact["historical"] = True
+        artifact["isHistorical"] = True
+        artifact["mutatingActionsEnabled"] = False
+        return artifact
+
+    def _recent_finalized_artifacts(candidates: list[tuple[str, Path]]) -> list[dict[str, Any]]:
+        recent: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for artifact_status, artifact_path in sorted(candidates, key=_artifact_mtime_ns, reverse=True):
+            artifact = _finalized_artifact_payload(artifact_status, artifact_path)
+            if artifact is None:
+                continue
+            key = artifact_path.resolve().as_posix() if artifact_path.exists() else artifact_path.as_posix()
+            if key in seen:
+                continue
+            seen.add(key)
+            recent.append(artifact)
+            if len(recent) >= 12:
+                break
+        return recent
+
+    artifact_candidates = [
+        (artifact_status, artifact_path)
+        for artifact_status, artifact_path in _worktree_status_artifacts(repo_root, run_dir)
+        if artifact_status != "pending" and artifact_path.exists()
+    ]
+    recent_finalized_artifacts = _recent_finalized_artifacts(artifact_candidates)
+
     pending_path = find_pending_worktree_merge(repo_root, run_dir)
     if pending_path is not None:
         try:
@@ -1164,7 +1332,7 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
                     "lastRc": 0,
                 }
             )
-            return invalid
+            return _attach_recent_artifacts(invalid, recent_finalized_artifacts)
 
         payload = raw_payload
         stale_reason = _worktree_pending_is_stale(payload, pending_path)
@@ -1221,9 +1389,9 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
                     "lastRc": 0,
                 }
             )
-            return invalid
+            return _attach_recent_artifacts(invalid, recent_finalized_artifacts)
 
-        return _worktree_status_payload(
+        return _attach_recent_artifacts(_worktree_status_payload(
             repo_root,
             run_dir,
             branch,
@@ -1231,21 +1399,21 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
             artifact_path=pending_path,
             payload=payload,
             pending_path=pending_path,
-        )
+        ), recent_finalized_artifacts)
 
-    artifact_candidates = [
+    current_artifact_candidates = [
         (artifact_status, artifact_path)
-        for artifact_status, artifact_path in _worktree_status_artifacts(repo_root, run_dir)
-        if artifact_status != "pending" and artifact_path.exists()
+        for artifact_status, artifact_path in artifact_candidates
+        if artifact_status not in WORKTREE_FINALIZED_HISTORY_STATUSES
     ]
-    selected_artifact = _worktree_select_artifact(artifact_candidates)
+    selected_artifact = _worktree_select_artifact(current_artifact_candidates)
     if selected_artifact is not None:
         artifact_status, artifact_path = selected_artifact
-        if artifact_status in {"applied", "discarded", "applied_cleanup_failed", "discard_cleanup_failed"}:
+        if artifact_status in {"applied_cleanup_failed", "discard_cleanup_failed"}:
             payload = _safe_json(artifact_path, {})
             if not isinstance(payload, dict):
                 payload = {}
-            return _worktree_status_payload(
+            return _attach_recent_artifacts(_worktree_status_payload(
                 repo_root,
                 run_dir,
                 branch,
@@ -1253,7 +1421,7 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
                 artifact_path=artifact_path,
                 payload=payload,
                 pending_path=artifact_path.with_name("WORKTREE_MERGE_PENDING.json"),
-            )
+            ), recent_finalized_artifacts)
         if artifact_status in {"apply_failed", "patch_not_applied", "not_applied"}:
             artifact_patch_path = (run_dir / "worktree.patch") if run_dir is not None else None
             artifact_patch_text = (
@@ -1318,9 +1486,9 @@ def build_worktree_payload(web: Any, repo: Path, run_dir: Path | None, branch: s
                     "runDir": run_dir.as_posix() if run_dir else "",
                 }
             )
-            return payload
+            return _attach_recent_artifacts(payload, recent_finalized_artifacts)
 
-    return _worktree_default_payload(repo_root, run_dir, branch)
+    return _attach_recent_artifacts(_worktree_default_payload(repo_root, run_dir, branch), recent_finalized_artifacts)
 
 
 def build_snapshot(
@@ -1375,6 +1543,7 @@ def build_snapshot(
     _build_pr_queue_payload = web._build_pr_queue_payload
     _build_experience_payload = web._build_experience_payload
     scan_worktree_diagnostics = web.scan_worktree_diagnostics
+    _stage_output_stall_threshold_seconds = web._stage_output_stall_threshold_seconds
     _tail_text = web._tail_text
     _log_tail_source_catalog = web._log_tail_source_catalog
     _build_live_state_payload = web._build_live_state_payload
@@ -1395,9 +1564,11 @@ def build_snapshot(
     _resolve_log_tail_source_record = web._resolve_log_tail_source_record
     _build_log_tail_payload = web._build_log_tail_payload
     _web_redaction_meta = web._web_redaction_meta
+    _resolve_dashboard_active_task = web._resolve_dashboard_active_task
     buildSectionState = web.buildSectionState
     fallbackSectionMessage = web.fallbackSectionMessage
     _live_run_payload = web._live_run_payload
+    _snapshot_freshness_timestamp_ms = web._snapshot_freshness_timestamp_ms
     _git_head_short = web._git_head_short
     REDACTED_VALUE = web.REDACTED_VALUE
     LAN_SAFETY_MUTATION_DISABLED_MESSAGE = web.LAN_SAFETY_MUTATION_DISABLED_MESSAGE
@@ -1549,6 +1720,11 @@ def build_snapshot(
     worktree_diagnostics = scan_worktree_diagnostics(repo_root)
     log_tail = _tail_text((latest_run_dir / "cycle_summary.log") if latest_run_dir else Path(""), 80)
     log_source_catalog = _log_tail_source_catalog(latest_run_dir)
+    log_entries_source = {
+        "id": "api_logs_structured" if logs_events else "run_log",
+        "label": "/api/logs structured events" if logs_events else "run.log",
+        "kind": "structured" if logs_events else "log",
+    }
     log_files = {
         str(source.get("id") or "").strip(): str(source.get("path") or "")
         for source in log_source_catalog
@@ -1652,6 +1828,14 @@ def build_snapshot(
         "state": "empty",
         "ok": False,
         "malformedLines": 0,
+        "eof": False,
+        "lastLine": None,
+        "last_activity_at": None,
+        "lastActivityAt": None,
+        "output_stalled": False,
+        "outputStalled": False,
+        "no_output_minutes": None,
+        "noOutputMinutes": None,
     }
     log_source_record = _resolve_log_tail_source_record(latest_run_dir)
     log_source_path = (
@@ -1668,6 +1852,7 @@ def build_snapshot(
                 cursor=None,
                 max_lines=1,
                 live=str(progress.get("run_status") or "idle").strip().lower() == "running",
+                stalled_threshold_seconds=_stage_output_stall_threshold_seconds(cfg),
             )
             log_summary_payload = {
                 "source": log_tail_source_payload.get("source", {}),
@@ -1679,6 +1864,15 @@ def build_snapshot(
                 "state": str(log_tail_source_payload.get("state") or "empty"),
                 "ok": bool(log_tail_source_payload.get("ok", False)),
                 "malformedLines": int(log_tail_source_payload.get("malformed_lines") or 0),
+                "eof": bool(log_tail_source_payload.get("eof", False)),
+                "last_line": log_tail_source_payload.get("last_line"),
+                "lastLine": log_tail_source_payload.get("lastLine") or log_tail_source_payload.get("last_line"),
+                "last_activity_at": log_tail_source_payload.get("last_activity_at"),
+                "lastActivityAt": log_tail_source_payload.get("lastActivityAt", log_tail_source_payload.get("last_activity_at")),
+                "output_stalled": bool(log_tail_source_payload.get("output_stalled", False)),
+                "outputStalled": bool(log_tail_source_payload.get("outputStalled", log_tail_source_payload.get("output_stalled", False))),
+                "no_output_minutes": log_tail_source_payload.get("no_output_minutes"),
+                "noOutputMinutes": log_tail_source_payload.get("noOutputMinutes", log_tail_source_payload.get("no_output_minutes")),
             }
         except Exception:
             log_summary_payload = {
@@ -1701,6 +1895,14 @@ def build_snapshot(
                 "state": "read_error",
                 "ok": False,
                 "malformedLines": 0,
+                "eof": False,
+                "lastLine": None,
+                "last_activity_at": None,
+                "lastActivityAt": None,
+                "output_stalled": False,
+                "outputStalled": False,
+                "no_output_minutes": None,
+                "noOutputMinutes": None,
             }
     log_summary_payload = _web_apply_redaction(log_summary_payload, active=redaction_active, redactor=_redact_web_log_payload)
     if redaction_active:
@@ -1708,6 +1910,39 @@ def build_snapshot(
     else:
         logs_redaction = {}
         prompts_redaction = {}
+    resolved_active_task = _resolve_dashboard_active_task(
+        repo_root,
+        run_dir=latest_run_dir,
+        backlog=backlog,
+        controller_status=controller_status,
+        run_summary=run_summary,
+        last_run_summary=last_run_summary,
+        events=logs_events,
+        repo_branch=branch,
+    )
+    if isinstance(resolved_active_task, dict):
+        resolved_task_id = str(resolved_active_task.get("task_id") or "").strip()
+        resolved_task_title = str(resolved_active_task.get("task_title") or "").strip()
+        resolved_attempt = resolved_active_task.get("attempt")
+        resolved_branch = str(resolved_active_task.get("branch") or "").strip()
+        resolved_cycle = resolved_active_task.get("cycle")
+        resolved_step = resolved_active_task.get("step")
+        if resolved_task_id:
+            active_run["task"] = resolved_task_id
+            progress["current_task_id"] = resolved_task_id
+        if resolved_task_title:
+            active_run["taskTitle"] = resolved_task_title
+            progress["current_task_title"] = resolved_task_title
+        if resolved_attempt is not None:
+            active_run["attempt"] = resolved_attempt
+            progress["attempt"] = resolved_attempt
+        if resolved_branch:
+            active_run["branch"] = resolved_branch
+            progress["branch"] = resolved_branch
+        if resolved_cycle is not None and progress.get("cycle") is None:
+            progress["cycle"] = resolved_cycle
+        if resolved_step is not None and progress.get("step") is None:
+            progress["step"] = resolved_step
     active_run_empty = active_run["status"] == "idle" and not active_run.get("task") and not active_run.get("startedAt")
     runner_control_status = runner_control.get("status") if isinstance(runner_control.get("status"), dict) else {}
     runner_control_status_reason = str(runner_control_status.get("reason") or "").strip()
@@ -1843,6 +2078,15 @@ def build_snapshot(
             "state": log_summary_payload.get("state", "empty"),
             "ok": log_summary_payload.get("ok", False),
             "malformedLines": log_summary_payload.get("malformedLines", 0),
+            "eof": bool(log_summary_payload.get("eof", False)),
+            "last_line": log_summary_payload.get("last_line"),
+            "lastLine": log_summary_payload.get("lastLine"),
+            "last_activity_at": log_summary_payload.get("last_activity_at"),
+            "lastActivityAt": log_summary_payload.get("lastActivityAt"),
+            "output_stalled": bool(log_summary_payload.get("output_stalled", False)),
+            "outputStalled": bool(log_summary_payload.get("outputStalled", False)),
+            "no_output_minutes": log_summary_payload.get("no_output_minutes"),
+            "noOutputMinutes": log_summary_payload.get("noOutputMinutes"),
         },
         notifications=notifications,
         runner_control=runner_control,
@@ -1861,6 +2105,25 @@ def build_snapshot(
         live_identity["web_instance_duplicate"] = bool(web_instance_state_value == "duplicate")
         live_identity["webInstance"] = dict(web_instance)
         live_identity["web_instance"] = dict(web_instance)
+    snapshot_freshness_at = _snapshot_freshness_timestamp_ms(
+        latest_run_dir,
+        active_run=active_run,
+        controller_status=controller_status,
+        logs={"entries": log_entries},
+        notifications=notifications,
+    ) or int(datetime.now(timezone.utc).timestamp() * 1000)
+    snapshot_refresh = {
+        "status": "ready",
+        "lastUpdatedAt": snapshot_freshness_at,
+        "last_updated_at": snapshot_freshness_at,
+        "lastSuccessAt": snapshot_freshness_at,
+        "last_success_at": snapshot_freshness_at,
+        "latestRunDir": latest_run_dir.as_posix() if latest_run_dir else "",
+        "latest_run_dir": latest_run_dir.as_posix() if latest_run_dir else "",
+        "stale": False,
+        "staleReasons": [],
+        "stale_reasons": [],
+    }
 
     return {
         "ok": True,
@@ -1871,6 +2134,8 @@ def build_snapshot(
             "branch": branch or "HEAD",
         },
         "latest_run_dir": latest_run_dir.as_posix() if latest_run_dir else None,
+        "snapshot_refresh": snapshot_refresh,
+        "snapshotRefresh": snapshot_refresh,
         "active_run": active_run,
         "stages": stages,
         "backlog": backlog,
@@ -1879,10 +2144,22 @@ def build_snapshot(
             "entries": log_entries,
             "tail": log_tail,
             "files": log_files,
+            "entries_source_id": log_entries_source.get("id", ""),
+            "entries_source_label": log_entries_source.get("label", ""),
+            "entries_source_kind": log_entries_source.get("kind", "log"),
             "source": log_summary_payload.get("source", {}),
             "source_id": log_summary_payload.get("source_id", ""),
             "selected_source_id": log_summary_payload.get("selected_source_id", ""),
             "sources": log_summary_payload.get("sources", []),
+            "eof": bool(log_summary_payload.get("eof", False)),
+            "last_line": log_summary_payload.get("last_line"),
+            "lastLine": log_summary_payload.get("lastLine"),
+            "last_activity_at": log_summary_payload.get("last_activity_at"),
+            "lastActivityAt": log_summary_payload.get("lastActivityAt"),
+            "output_stalled": bool(log_summary_payload.get("output_stalled", False)),
+            "outputStalled": bool(log_summary_payload.get("outputStalled", False)),
+            "no_output_minutes": log_summary_payload.get("no_output_minutes"),
+            "noOutputMinutes": log_summary_payload.get("noOutputMinutes"),
             "redaction": logs_redaction,
         },
         "config": config_payload,
@@ -1923,6 +2200,7 @@ def build_snapshot(
             "current_task_id": progress.get("current_task_id", ""),
             "current_task_title": progress.get("current_task_title", ""),
             "attempt": progress.get("attempt"),
+            "branch": progress.get("branch", active_run.get("branch", "")),
             "worktree_mode": progress.get("worktree_mode", ""),
             "execution_status": progress.get("execution_status", ""),
             "executionStatus": progress.get("executionStatus", progress.get("execution_status", "")),
@@ -1973,3 +2251,203 @@ def build_snapshot(
         "run_summary": run_summary,
         "last_run_summary": last_run_summary,
     }
+
+
+_DASHBOARD_STATUS_LOG_ENTRY_LIMIT = 12
+_DASHBOARD_STATUS_NOTIFICATION_LIMIT = 12
+
+
+def _dashboard_goals_payload(goals: Any) -> dict[str, Any]:
+    raw = goals if isinstance(goals, dict) else {}
+    compact = dict(raw)
+    compact.pop("raw_text", None)
+    compact.pop("rawText", None)
+    return compact
+
+
+def _dashboard_logs_payload(logs: Any) -> dict[str, Any]:
+    raw = logs if isinstance(logs, dict) else {}
+    entries = list(raw.get("entries") or [])
+    return {
+        "entries": entries[-_DASHBOARD_STATUS_LOG_ENTRY_LIMIT:],
+        "entries_source_id": raw.get("entries_source_id", ""),
+        "entries_source_label": raw.get("entries_source_label", ""),
+        "entries_source_kind": raw.get("entries_source_kind", "log"),
+        "source": raw.get("source", {}),
+        "source_id": raw.get("source_id", ""),
+        "selected_source_id": raw.get("selected_source_id", ""),
+        "sources": list(raw.get("sources") or []),
+        "eof": bool(raw.get("eof", False)),
+        "last_line": raw.get("last_line"),
+        "lastLine": raw.get("lastLine", raw.get("last_line")),
+        "last_activity_at": raw.get("last_activity_at"),
+        "lastActivityAt": raw.get("lastActivityAt", raw.get("last_activity_at")),
+        "output_stalled": bool(raw.get("output_stalled", False)),
+        "outputStalled": bool(raw.get("outputStalled", raw.get("output_stalled", False))),
+        "no_output_minutes": raw.get("no_output_minutes"),
+        "noOutputMinutes": raw.get("noOutputMinutes", raw.get("no_output_minutes")),
+        "redaction": raw.get("redaction", {}),
+    }
+
+
+def _dashboard_config_payload(config: Any, config_contract: Any) -> dict[str, Any]:
+    raw = config if isinstance(config, dict) else {}
+    contract = config_contract if isinstance(config_contract, dict) else {}
+    contract_meta = contract.get("meta") if isinstance(contract.get("meta"), dict) else {}
+    resolved_prompts_dir = str(
+        raw.get("resolved_prompts_dir")
+        or contract.get("resolved_prompts_dir")
+        or contract_meta.get("resolved_prompts_dir")
+        or ""
+    )
+    return {
+        "path": raw.get("path", ""),
+        "source": raw.get("source", ""),
+        "resolved_prompts_dir": resolved_prompts_dir,
+        "meta": {
+            "path": raw.get("path", ""),
+            "source": raw.get("source", ""),
+            "resolved_prompts_dir": resolved_prompts_dir,
+        },
+    }
+
+
+def _dashboard_config_contract_payload(config_contract: Any) -> dict[str, Any]:
+    raw = config_contract if isinstance(config_contract, dict) else {}
+    redaction = raw.get("redaction") if isinstance(raw.get("redaction"), dict) else {}
+    meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
+    resolved_prompts_dir = str(raw.get("resolved_prompts_dir") or meta.get("resolved_prompts_dir") or "")
+    return {
+        "path": raw.get("path", ""),
+        "source": raw.get("source", ""),
+        "resolved_prompts_dir": resolved_prompts_dir,
+        "values": {},
+        "defaults": {},
+        "schema": {},
+        "groups": [],
+        "restart_required_paths": [],
+        "backups": [],
+        "redaction": {
+            "placeholder": redaction.get("placeholder", "[redacted]"),
+            "paths": list(redaction.get("paths") or []),
+            "tokens": list(redaction.get("tokens") or []),
+        },
+        "meta": {
+            "path": raw.get("path", ""),
+            "source": raw.get("source", ""),
+            "resolved_prompts_dir": resolved_prompts_dir,
+            "save_enabled": bool(meta.get("save_enabled", False)),
+            "save_endpoint": meta.get("save_endpoint", "/api/config/save"),
+            "save_requires_opt_in": bool(meta.get("save_requires_opt_in", True)),
+            "restore_enabled": bool(meta.get("restore_enabled", False)),
+            "restore_endpoint": meta.get("restore_endpoint", "/api/config/restore"),
+            "restore_requires_opt_in": bool(meta.get("restore_requires_opt_in", True)),
+        },
+    }
+
+
+def _dashboard_prompts_payload(prompts: Any) -> dict[str, Any]:
+    raw = prompts if isinstance(prompts, dict) else {}
+    return {
+        "dir": raw.get("dir", ""),
+        "exists": bool(raw.get("exists", False)),
+        "items": [],
+        "redaction": raw.get("redaction", {}),
+    }
+
+
+def _dashboard_history_payload(history: Any) -> dict[str, Any]:
+    raw = history if isinstance(history, dict) else {}
+    compact = dict(raw)
+    compact["items"] = []
+    return compact
+
+
+def _dashboard_live_run_log_payload(log: Any) -> dict[str, Any]:
+    raw = log if isinstance(log, dict) else {}
+    entries = list(raw.get("entries") or [])
+    return {
+        "source": raw.get("source", {}),
+        "cursor": raw.get("cursor", 0),
+        "nextCursor": raw.get("nextCursor", raw.get("next_cursor", raw.get("cursor", 0))),
+        "next_cursor": raw.get("next_cursor", raw.get("nextCursor", raw.get("cursor", 0))),
+        "state": raw.get("state", "empty"),
+        "entries": entries[-_DASHBOARD_STATUS_LOG_ENTRY_LIMIT:],
+        "tail": "",
+        "files": {},
+        "ok": bool(raw.get("ok", False)),
+        "malformedLines": int(raw.get("malformedLines") or 0),
+        "malformed_lines": int(raw.get("malformed_lines") or raw.get("malformedLines") or 0),
+        "eof": bool(raw.get("eof", False)),
+        "lastLine": raw.get("lastLine", raw.get("last_line")),
+        "last_line": raw.get("last_line", raw.get("lastLine")),
+        "outputStalled": bool(raw.get("outputStalled", raw.get("output_stalled", False))),
+        "output_stalled": bool(raw.get("output_stalled", raw.get("outputStalled", False))),
+        "noOutputMinutes": raw.get("noOutputMinutes", raw.get("no_output_minutes")),
+        "no_output_minutes": raw.get("no_output_minutes", raw.get("noOutputMinutes")),
+        "lastActivityAt": raw.get("lastActivityAt", raw.get("last_activity_at")),
+        "last_activity_at": raw.get("last_activity_at", raw.get("lastActivityAt")),
+    }
+
+
+def _dashboard_live_run_notifications_payload(notifications: Any) -> dict[str, Any]:
+    raw = notifications if isinstance(notifications, dict) else {}
+    compact = dict(raw)
+    compact["items"] = list(raw.get("items") or [])[:_DASHBOARD_STATUS_NOTIFICATION_LIMIT]
+    return compact
+
+
+def _dashboard_live_run_payload(live_run: Any) -> dict[str, Any]:
+    raw = live_run if isinstance(live_run, dict) else {}
+    compact = dict(raw)
+    compact["log"] = _dashboard_live_run_log_payload(raw.get("log"))
+    compact["notifications"] = _dashboard_live_run_notifications_payload(raw.get("notifications"))
+    return compact
+
+
+def status_snapshot_for_scope(snapshot: dict[str, Any], *, scope: str = "full") -> dict[str, Any]:
+    normalized_scope = str(scope or "full").strip().lower() or "full"
+    if normalized_scope != "dashboard":
+        return snapshot
+
+    notifications = list(snapshot.get("notifications") or [])
+    pr_queue = snapshot.get("pr_queue", snapshot.get("prQueue", {}))
+    compact_snapshot: dict[str, Any] = {
+        "ok": bool(snapshot.get("ok", False)),
+        "repo": snapshot.get("repo", {}),
+        "latest_run_dir": snapshot.get("latest_run_dir"),
+        "snapshot_refresh": snapshot.get("snapshot_refresh", {}),
+        "snapshotRefresh": snapshot.get("snapshotRefresh", snapshot.get("snapshot_refresh", {})),
+        "active_run": snapshot.get("active_run", {}),
+        "stages": list(snapshot.get("stages") or []),
+        "backlog": snapshot.get("backlog", {}),
+        "goals": _dashboard_goals_payload(snapshot.get("goals")),
+        "logs": _dashboard_logs_payload(snapshot.get("logs")),
+        "config": _dashboard_config_payload(snapshot.get("config"), snapshot.get("config_contract")),
+        "config_contract": _dashboard_config_contract_payload(snapshot.get("config_contract")),
+        "prompts": _dashboard_prompts_payload(snapshot.get("prompts")),
+        "history": _dashboard_history_payload(snapshot.get("history")),
+        "metrics": snapshot.get("metrics", {}),
+        "notifications": notifications[:_DASHBOARD_STATUS_NOTIFICATION_LIMIT],
+        "pr_queue": pr_queue,
+        "prQueue": pr_queue,
+        "worktree": snapshot.get("worktree", {}),
+        "runner_control": snapshot.get("runner_control", {}),
+        "web_instance": snapshot.get("web_instance", {}),
+        "webInstance": snapshot.get("webInstance", snapshot.get("web_instance", {})),
+        "liveRun": _dashboard_live_run_payload(snapshot.get("liveRun")),
+        "redaction": snapshot.get("redaction", {}),
+        "progress": snapshot.get("progress", {}),
+        "execution_status": snapshot.get("execution_status", ""),
+        "executionStatus": snapshot.get("executionStatus", snapshot.get("execution_status", "")),
+        "project_complete": bool(snapshot.get("project_complete", False)),
+        "projectComplete": bool(snapshot.get("projectComplete", snapshot.get("project_complete", False))),
+        "project_status": snapshot.get("project_status", ""),
+        "projectStatus": snapshot.get("projectStatus", snapshot.get("project_status", "")),
+        "goals_complete": bool(snapshot.get("goals_complete", False)),
+        "goalsComplete": bool(snapshot.get("goalsComplete", snapshot.get("goals_complete", False))),
+        "backlog_complete": bool(snapshot.get("backlog_complete", False)),
+        "backlogComplete": bool(snapshot.get("backlogComplete", snapshot.get("backlog_complete", False))),
+        "sectionState": snapshot.get("sectionState", {}),
+    }
+    return compact_snapshot

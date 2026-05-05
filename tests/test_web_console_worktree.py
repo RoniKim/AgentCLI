@@ -1091,6 +1091,122 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
         self.assertEqual("failed", normalized["worktreeMerge"]["preflight"]["applyCheck"]["status"])
         self.assertEqual("partial", normalized["sectionState"]["worktree"]["status"])
 
+    def test_active_pending_overrides_old_applied_artifacts(self) -> None:
+        self._clear_worktree_artifacts()
+        self._write_pending_payload(
+            patch_text="diff --git a/current.txt b/current.txt\n",
+            base_ref="main",
+            expected_head="abc12345",
+            branch="main",
+        )
+        applied_path = self._write_status_artifact(
+            "WORKTREE_MERGE_APPLIED.json",
+            {
+                "schema_version": 1,
+                "status": "applied",
+                "created_at": "2026-04-26T12:20:00",
+                "source_repo": self.repo.as_posix(),
+                "run_dir": self.run_dir.as_posix(),
+                "worktree_dir": self.worktree_dir.as_posix(),
+                "patch_path": self.patch_path.as_posix(),
+                "base_ref": "main",
+                "head_ref": "old12345",
+                "last_rc": 0,
+            },
+        )
+
+        snapshot = self._build_snapshot()
+        normalized = _run_adapter_harness([snapshot])[0]
+        worktree = snapshot["worktree"]
+
+        self.assertEqual("pending review", worktree["status"])
+        self.assertEqual(self.pending_path.as_posix(), worktree["statusFile"])
+        self.assertEqual("pending", worktree["cleanupState"])
+        self.assertTrue(worktree["reviewRequired"])
+        self.assertTrue(worktree["mutatingActionsEnabled"])
+        self.assertEqual("pending review", normalized["worktreeMerge"]["status"])
+        self.assertEqual(1, len(worktree["historicalArtifacts"]))
+        self.assertEqual("applied", worktree["historicalArtifacts"][0]["status"])
+        self.assertEqual(applied_path.as_posix(), worktree["historicalArtifacts"][0]["statusFile"])
+        self.assertFalse(worktree["historicalArtifacts"][0]["mutatingActionsEnabled"])
+
+    def test_no_active_pending_hides_old_finalized_artifacts_until_history_opens(self) -> None:
+        self._clear_worktree_artifacts()
+        _write(self.patch_path, "diff --git a/finalized.txt b/finalized.txt\n")
+        applied_path = self._write_status_artifact(
+            "WORKTREE_MERGE_APPLIED.json",
+            {
+                "schema_version": 1,
+                "status": "applied",
+                "created_at": "2026-04-26T12:21:00",
+                "source_repo": self.repo.as_posix(),
+                "run_dir": self.run_dir.as_posix(),
+                "worktree_dir": self.worktree_dir.as_posix(),
+                "patch_path": self.patch_path.as_posix(),
+                "base_ref": "main",
+                "head_ref": "done1234",
+                "last_rc": 0,
+            },
+        )
+
+        snapshot = self._build_snapshot()
+        worktree = snapshot["worktree"]
+        self.assertEqual("none", worktree["status"])
+        self.assertFalse(worktree["reviewRequired"])
+        self.assertEqual("", worktree["statusFile"])
+        self.assertEqual([], worktree["changedFiles"])
+        self.assertEqual(1, len(worktree["historicalArtifacts"]))
+        self.assertEqual("applied", worktree["historicalArtifacts"][0]["status"])
+
+        closed = _run_worktree_render_harness(snapshot, locale="en")
+        self.assertIn("Recent worktree context", closed["main"])
+        self.assertIn("Historical apply/discard records are hidden until opened.", closed["main"])
+        self.assertNotIn(applied_path.as_posix(), closed["main"])
+        self.assertNotIn('data-worktree-history-artifact="applied"', closed["main"])
+
+        opened = _run_worktree_render_harness(
+            snapshot,
+            locale="en",
+            actions=[{"kind": "call", "name": "setWorktreeHistoricalOpen", "args": [True]}],
+        )
+        self.assertIn(applied_path.as_posix(), opened["main"])
+        self.assertIn('data-worktree-history-artifact="applied"', opened["main"])
+        self.assertIn("Historical artifacts are read-only and cannot enable merge or discard.", opened["main"])
+
+    def test_open_historical_context_does_not_enable_current_merge_or_discard(self) -> None:
+        self._clear_worktree_artifacts()
+        _write(self.patch_path, "diff --git a/discarded.txt b/discarded.txt\n")
+        self._write_status_artifact(
+            "WORKTREE_MERGE_DISCARDED.json",
+            {
+                "schema_version": 1,
+                "status": "discarded",
+                "created_at": "2026-04-26T12:22:00",
+                "source_repo": self.repo.as_posix(),
+                "run_dir": self.run_dir.as_posix(),
+                "worktree_dir": self.worktree_dir.as_posix(),
+                "patch_path": self.patch_path.as_posix(),
+                "base_ref": "main",
+                "head_ref": "done5678",
+                "last_rc": 0,
+            },
+        )
+
+        snapshot = self._build_snapshot()
+        rendered = _run_worktree_render_harness(
+            snapshot,
+            locale="en",
+            actions=[{"kind": "call", "name": "setWorktreeHistoricalOpen", "args": [True]}],
+        )
+        main_html = rendered["main"]
+
+        self.assertEqual("none", snapshot["worktree"]["status"])
+        self.assertIn('data-worktree-history-artifact="discarded"', main_html)
+        self.assertIn('data-action="worktree-apply" data-action-state="disabled"', main_html)
+        self.assertIn('data-action="worktree-discard" data-action-state="disabled"', main_html)
+        self.assertNotIn('data-action="worktree-apply" >', main_html)
+        self.assertNotIn('data-action="worktree-discard" >', main_html)
+
     def test_malformed_pending_file_returns_error_state(self) -> None:
         _write(self.pending_path, "{ not-json }\n")
 
@@ -1262,17 +1378,23 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
                 )
                 snapshot = assert_snapshot(
                     label=status_name,
-                    expected_status=status_name,
-                    expected_section_status=section_status,
+                    expected_status="none",
+                    expected_section_status="empty",
                     expected_review_required=False,
-                    expected_cleanup_state=cleanup_state,
-                    expected_status_file=(self.run_dir / ("WORKTREE_MERGE_APPLIED.json" if status_name == "applied" else "WORKTREE_MERGE_DISCARDED.json")).as_posix(),
-                    expected_changed_files=True,
+                    expected_cleanup_state="none",
+                    expected_status_file="",
+                    expected_changed_files=False,
                 )
-                if status_name == "applied":
-                    self.assertEqual("Patch applied to the source repository.", snapshot["worktree"]["reviewRequiredMessage"])
-                else:
-                    self.assertEqual("Pending worktree result discarded.", snapshot["worktree"]["reviewRequiredMessage"])
+                historical = snapshot["worktree"]["historicalArtifacts"]
+                self.assertEqual(1, len(historical))
+                self.assertEqual(status_name, historical[0]["status"])
+                self.assertEqual(cleanup_state, historical[0]["cleanupState"])
+                self.assertEqual(
+                    (self.run_dir / ("WORKTREE_MERGE_APPLIED.json" if status_name == "applied" else "WORKTREE_MERGE_DISCARDED.json")).as_posix(),
+                    historical[0]["statusFile"],
+                )
+                self.assertTrue(historical[0]["changedFiles"])
+                self.assertFalse(historical[0]["mutatingActionsEnabled"])
 
         for status_name, artifact_name in [
             ("applied_cleanup_failed", "WORKTREE_MERGE_APPLIED_CLEANUP_FAILED.json"),
@@ -1369,20 +1491,23 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             self.assertTrue(failure_path.exists())
             snapshot = assert_snapshot(
                 label="reconciled-after-cleanup-failure",
-                expected_status="applied",
-                expected_section_status="ready",
+                expected_status="none",
+                expected_section_status="empty",
                 expected_review_required=False,
-                expected_cleanup_state="done",
-                expected_status_file=(self.run_dir / "WORKTREE_MERGE_APPLIED.json").as_posix(),
-                expected_changed_files=True,
+                expected_cleanup_state="none",
+                expected_status_file="",
+                expected_changed_files=False,
             )
-            self.assertEqual("Patch applied to the source repository.", snapshot["worktree"]["reviewRequiredMessage"])
             self.assertFalse(failure_path.exists())
             self.assertTrue((self.run_dir / "WORKTREE_MERGE_APPLIED.json").exists())
-            self.assertTrue(snapshot["worktree"]["cleanupReconciliation"]["reconciled"])
-            self.assertEqual("applied_cleanup_failed", snapshot["worktree"]["cleanupReconciliation"]["reconciled_from"])
-            self.assertEqual("cleanup_failed_reconcile", snapshot["worktree"]["resolutionActions"][-1]["kind"])
-            self.assertEqual("done", snapshot["worktree"]["resolutionActions"][-1]["status"])
+            historical = snapshot["worktree"]["historicalArtifacts"]
+            self.assertEqual(1, len(historical))
+            self.assertEqual("applied", historical[0]["status"])
+            self.assertTrue(historical[0]["cleanupReconciliation"]["reconciled"])
+            self.assertEqual("applied_cleanup_failed", historical[0]["cleanupReconciliation"]["reconciled_from"])
+            self.assertEqual("cleanup_failed_reconcile", historical[0]["resolutionActions"][-1]["kind"])
+            self.assertEqual("done", historical[0]["resolutionActions"][-1]["status"])
+            self.assertFalse(historical[0]["mutatingActionsEnabled"])
 
         with self.subTest("stale-central-marker"):
             self._clear_worktree_artifacts()
@@ -1478,9 +1603,15 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             )
 
             snapshot = self._build_snapshot()
-            rendered = _run_worktree_render_harness(snapshot)
+            closed = _run_worktree_render_harness(snapshot)
+            self.assertNotIn(split_patch_path.as_posix(), closed["main"])
+            rendered = _run_worktree_render_harness(
+                snapshot,
+                actions=[{"kind": "call", "name": "setWorktreeHistoricalOpen", "args": [True]}],
+            )
             main_html = rendered["main"]
 
+            self.assertEqual("none", snapshot["worktree"]["status"])
             self.assertIn("Split-merge recovery", main_html)
             self.assertIn('chip--accent">available</span>', main_html)
             self.assertIn("Fast-forward ref", main_html)
@@ -1514,7 +1645,10 @@ class WorktreeReviewSnapshotTests(unittest.TestCase):
             )
 
             snapshot = self._build_snapshot()
-            rendered = _run_worktree_render_harness(snapshot)
+            rendered = _run_worktree_render_harness(
+                snapshot,
+                actions=[{"kind": "call", "name": "setWorktreeHistoricalOpen", "args": [True]}],
+            )
             main_html = rendered["main"].lower()
 
             self.assertIn("split-merge recovery", main_html)

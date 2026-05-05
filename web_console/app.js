@@ -337,7 +337,7 @@
         currentStageOutput: 'Current stage output',
         stageGuardrails: 'Stage guardrails',
         liveTokens: 'Live tokens',
-        pmDevQaFlow: 'PM -> Dev -> QA',
+        pmDevQaFlow: 'PM -> PL -> Dev -> QA',
         readOnlyShell: 'Read-only shell by default. Stop, merge, and discard are not auto-applied here.',
         manualConfirmation: 'Current run uses manual stop confirmation and a local review workflow.',
         devStage: 'Dev stage',
@@ -856,6 +856,14 @@
         discardSummary: 'Confirm discard to remove the pending state for {worktreeDir} without touching {sourceRepo}.',
         actionFailedHttp: 'Worktree action failed (HTTP {status}).',
         noPatchPathAvailable: 'No patch path is available.',
+        recentContext: 'Recent worktree context',
+        recentContextClosed: 'Historical apply/discard records are hidden until opened.',
+        recentContextOpen: 'Read-only historical worktree artifacts.',
+        showRecentContext: 'Show recent context',
+        hideRecentContext: 'Hide recent context',
+        noRecentContext: 'No recent worktree artifacts.',
+        historicalArtifact: 'Historical artifact',
+        historicalNoActions: 'Historical artifacts are read-only and cannot enable merge or discard.',
       },
       logs: {
         title: 'Logs',
@@ -863,6 +871,7 @@
         tailFilter: 'Tail filter',
         loadingActiveRunLog: 'Loading active run log',
         activeRunLog: 'active run log',
+        structuredEventsSource: '/api/logs structured events',
         filteredLine: 'filtered line',
         filteredLines: 'filtered lines',
         cursor: 'cursor',
@@ -900,7 +909,7 @@
         marketingShell: 'marketing shell',
         directionAChip: 'Direction A',
         headline: 'Leave it running.<br>Wake up to a PR.',
-        copy: 'CLI-first multi-agent runner with a PM -> Dev -> QA pipeline, local-safe worktree review, and a compact production shell.',
+        copy: 'CLI-first multi-agent runner with a PM -> PL -> Dev -> QA pipeline, local-safe worktree review, and a compact production shell.',
         openDashboard: 'Open Dashboard',
         copyRunCommand: 'Copy run command',
         productionNotes: 'Production notes',
@@ -910,7 +919,7 @@
         desktopShellRecovery: 'Desktop shell recovery',
         openMobile: 'Open Mobile',
         directionAMarketingShell: 'Direction A marketing shell',
-        pmDevQaFlowTitle: 'PM -> Dev -> QA',
+        pmDevQaFlowTitle: 'PM -> PL -> Dev -> QA',
         pmDevQaFlowCopy: 'Structured backlog emission and stage handoff with live run feedback.',
         readOnlyFirstPassTitle: 'Read-only first pass',
         readOnlyFirstPassCopy: 'Status, logs, and review surfaces without destructive browser-side controls.',
@@ -1515,6 +1524,7 @@
         liveTail: '라이브 tail',
         tailFilter: '라이브 tail 필터',
         loadingActiveRunLog: '활성 실행 로그를 불러오는 중',
+        structuredEventsSource: '/api/logs 구조화 이벤트',
         liveTailActive: '라이브 tail 활성',
         liveTailPaused: '라이브 tail 일시정지',
         logFileMissing: '로그 파일 없음',
@@ -1536,7 +1546,7 @@
         marketingShell: '마케팅 쉘',
         directionAChip: 'Direction A',
         headline: '그대로 실행해 두세요.<br>PR로 깨어나세요.',
-        copy: 'PM -> Dev -> QA 파이프라인, 로컬 안전 워크트리 검토, 컴팩트한 프로덕션 쉘을 갖춘 CLI 우선 멀티 에이전트 러너입니다.',
+        copy: 'PM -> PL -> Dev -> QA 파이프라인, 로컬 안전 워크트리 검토, 컴팩트한 프로덕션 쉘을 갖춘 CLI 우선 멀티 에이전트 러너입니다.',
         openDashboard: '대시보드 열기',
         copyRunCommand: '실행 명령 복사',
         productionNotes: '프로덕션 메모',
@@ -1546,7 +1556,7 @@
         desktopShellRecovery: '데스크톱 쉘 복구',
         openMobile: '모바일 열기',
         directionAMarketingShell: 'Direction A 마케팅 쉘',
-        pmDevQaFlowTitle: 'PM -> Dev -> QA',
+        pmDevQaFlowTitle: 'PM -> PL -> Dev -> QA',
         pmDevQaFlowCopy: '실시간 실행 피드백과 함께 구조화된 백로그 발행 및 단계 인계를 제공합니다.',
         readOnlyFirstPassTitle: '읽기 전용 우선 통과',
         readOnlyFirstPassCopy: '파괴적인 브라우저 측 제어 없이 상태, 로그, 검토 화면을 제공합니다.',
@@ -1741,7 +1751,7 @@
   Object.assign(LOCALE_TEXT.ko.pipeline, {
     started: '시작',
     ended: '종료',
-    pmDevQaFlow: 'PM -> Dev -> QA',
+    pmDevQaFlow: 'PM -> PL -> Dev -> QA',
   });
   Object.assign(LOCALE_TEXT.ko.config, {
     description: '설명',
@@ -2785,7 +2795,7 @@
     const inputValue = fmtList(items);
     const placeholder = optionValues.length
       ? `${optionValues.join(', ')}, pkg.mod:Class`
-      : 'PM, Security, Dev, QA, pkg.mod:Class';
+      : 'PM, PL, Security, Dev, QA, pkg.mod:Class';
     const chipsHTML = items.length
       ? items
         .map((item, index) => {
@@ -3299,10 +3309,11 @@
   const STAGE_INDEX = {
     idle: 0,
     pm: 0,
-    security: 1,
-    dev: 2,
-    qa: 3,
-    reporter: 4,
+    pl: 1,
+    security: 2,
+    dev: 3,
+    qa: 4,
+    reporter: 5,
   };
 
   function toText(value, fallback = '') {
@@ -3839,6 +3850,7 @@
   function runnerControlStateInfo(control = currentLiveRunRunnerControl()) {
     const current = toObject(control);
     const status = toObject(current.status);
+    const liveState = normalizeLiveState(current.liveState || current.live_state || status.liveState || status.live_state);
     const webInstance = normalizeWebInstance(current.webInstance || current.web_instance);
     const statusReason = toText(status.reason, '');
     const statusReasonText = redactionAwareText(statusReason, '');
@@ -3933,6 +3945,10 @@
         copy: currentMessageText || lastMessageText,
       };
     }
+    const liveStateSummary = runnerControlLiveStateSummary(liveState);
+    if (liveStateSummary) {
+      return liveStateSummary;
+    }
     if (status.running) {
       return {
         chipTone: 'running',
@@ -3955,7 +3971,7 @@
     const current = normalizeLiveState(liveState);
     const chips = toArray(current.items)
       .map((entry) => {
-        const label = `${entry.label}: ${entry.statusLabel}`;
+        const label = liveStateFactText(entry);
         return chip(label, liveStateToneClass(entry.kind, entry.status, entry.available));
       })
       .join('');
@@ -3969,7 +3985,7 @@
     const current = normalizeLiveState(liveState);
     return toArray(current.items).map((entry) => ({
       label: entry.label,
-      value: entry.statusLabel,
+      value: liveStateFactValue(entry),
       className: liveStateToneClass(entry.kind, entry.status, entry.available),
     }));
   }
@@ -3993,10 +4009,12 @@
     const stateInfo = display || runnerControlStateInfo(current);
     const status = toObject(current.status);
     const stopProgress = normalizeStopProgress(status.stopProgress);
-    const liveStateRows = runnerControlLiveStateRows(current.liveState || current.live_state || status.liveState || status.live_state);
+    const liveState = normalizeLiveState(current.liveState || current.live_state || status.liveState || status.live_state);
+    const liveStateRows = runnerControlLiveStateRows(liveState);
     const statusConfigPath = redactionAwareText(status.configPath, t('common.unknown'));
     const sourceValue = current.source && current.source !== 'default' ? current.source : t('common.unknown');
-    const runStatusValue = current.runStatus
+    const liveStateRunStatus = liveStateRunStatusLabel(liveState);
+    const runStatusValue = liveStateRunStatus || (current.runStatus
       ? (String(current.runStatus).toLowerCase() === 'running'
         ? t('runner.running')
         : String(current.runStatus).toLowerCase() === 'idle'
@@ -4004,11 +4022,11 @@
           : String(current.runStatus).toLowerCase() === 'loading'
             ? t('common.loading')
             : String(current.runStatus).toLowerCase() === 'ready'
-              ? t('runner.ready')
-              : String(current.runStatus).toLowerCase() === 'stopped'
+            ? t('runner.ready')
+            : String(current.runStatus).toLowerCase() === 'stopped'
                 ? t('runner.stopped')
                 : current.runStatus)
-      : (status.running ? t('runner.running') : t('runner.idle'));
+      : (status.running ? t('runner.running') : t('runner.idle')));
     const lastActionValue = current.lastAction
       ? (String(current.lastAction).toLowerCase() === 'start'
         ? t('runner.start')
@@ -4643,7 +4661,99 @@
     if (normalized === 'stopped') {
       return t('runner.stopped');
     }
+    if (normalized === 'unavailable') {
+      return t('runner.unavailable');
+    }
     return t('common.unavailable');
+  }
+
+  function liveStateRunStatusLabel(liveState = currentLiveRunLiveState()) {
+    const current = normalizeLiveState(liveState);
+    const status = toText(current.taskBackend?.status, '').trim().toLowerCase();
+    if (status === 'alive') {
+      return t('runner.running');
+    }
+    if (status === 'stopped') {
+      return t('runner.stopped');
+    }
+    if (status === 'idle') {
+      return t('runner.idle');
+    }
+    return '';
+  }
+
+  function liveStateFactValue(rawEntry) {
+    const entry = normalizeLiveStateEntry(rawEntry);
+    if (!entry.available) {
+      return toText(entry.statusLabel, t('common.unavailable'));
+    }
+    const statusLabel = toText(entry.statusLabel, liveStateStatusLabel(entry.status));
+    const kind = normalizeLiveStateKey(entry.kind);
+    if (kind === 'trackedChildren') {
+      const count = toMaybeNumber(entry.count);
+      const aliveCount = toMaybeNumber(entry.aliveCount);
+      if (count != null && count > 0 && aliveCount != null) {
+        return `${statusLabel} (${aliveCount}/${count})`;
+      }
+    }
+    if (kind === 'artifactWriter') {
+      const phase = toText(entry.phase, '').replace(/[_-]+/g, ' ').trim();
+      if (phase && entry.status === 'flushing') {
+        return `${statusLabel} (${phase})`;
+      }
+    }
+    return statusLabel;
+  }
+
+  function liveStateFactText(rawEntry) {
+    const entry = normalizeLiveStateEntry(rawEntry);
+    return `${entry.label}: ${liveStateFactValue(entry)}`;
+  }
+
+  function runnerControlLiveStateSummary(liveState = currentLiveRunLiveState()) {
+    const current = normalizeLiveState(liveState);
+    const facts = toArray(current.items).map((entry) => liveStateFactText(entry)).join(' | ');
+    const runnerProcess = normalizeLiveStateEntry(current.runnerProcess, 'runnerProcess');
+    const taskBackend = normalizeLiveStateEntry(current.taskBackend, 'taskBackend');
+    const trackedChildren = normalizeLiveStateEntry(current.trackedChildren, 'trackedChildren');
+    const artifactWriter = normalizeLiveStateEntry(current.artifactWriter, 'artifactWriter');
+
+    if (artifactWriter.available && artifactWriter.status === 'flushing') {
+      return {
+        chipTone: 'warn',
+        bannerTone: 'warn',
+        label: liveStateFactText(artifactWriter),
+        title: t('runner.liveStates'),
+        copy: facts,
+      };
+    }
+    if (trackedChildren.available && trackedChildren.status === 'alive') {
+      return {
+        chipTone: 'warn',
+        bannerTone: 'warn',
+        label: liveStateFactText(trackedChildren),
+        title: t('runner.liveStates'),
+        copy: facts,
+      };
+    }
+    if (
+      runnerProcess.available
+      && taskBackend.available
+      && runnerProcess.status
+      && taskBackend.status
+      && runnerProcess.status !== taskBackend.status
+    ) {
+      const primary = taskBackend.status === 'alive' || taskBackend.status === 'stopped' ? taskBackend : runnerProcess;
+      const backendAlive = taskBackend.status === 'alive';
+      return {
+        chipTone: backendAlive ? 'running' : 'warn',
+        bannerTone: backendAlive ? 'info' : 'warn',
+        label: liveStateFactText(primary),
+        title: t('runner.liveStates'),
+        copy: facts,
+      };
+    }
+    return null;
   }
 
   function liveStateToneClass(kind, status, available) {
@@ -4666,12 +4776,26 @@
     const availableValue = item.available ?? item.present ?? item.known;
     const aliveValue = item.alive ?? item.running ?? item.active;
     const flushingValue = item.flushing ?? item.writing;
-    const statusText = toText(item.status, '').trim().toLowerCase();
-    const statusLabelText = toText(item.statusLabel || item.status_label, '').trim();
-    const status = statusText || toText(statusLabelText, '').trim().toLowerCase() || 'unavailable';
-    const available = availableValue == null ? status !== 'unavailable' : Boolean(availableValue);
     const count = toMaybeNumber(item.count ?? item.total ?? item.trackedCount ?? item.tracked_count);
     const aliveCount = toMaybeNumber(item.aliveCount ?? item.alive_count);
+    const statusText = toText(item.status, '').trim().toLowerCase();
+    const statusLabelText = toText(item.statusLabel || item.status_label, '').trim();
+    let status = statusText || toText(statusLabelText, '').trim().toLowerCase();
+    if (!status) {
+      if (flushingValue === true) {
+        status = 'flushing';
+      } else if (aliveValue === true) {
+        status = 'alive';
+      } else if (availableValue === true) {
+        status = canonicalKind === 'artifactWriter'
+          ? 'idle'
+          : (count != null && count <= 0 ? 'idle' : 'stopped');
+      } else if (availableValue === false) {
+        status = 'unavailable';
+      }
+    }
+    status = status || 'unavailable';
+    const available = availableValue == null ? status !== 'unavailable' : Boolean(availableValue);
     const normalized = {
       kind: canonicalKind || normalizeLiveStateKey(kind) || 'unknown',
       label: liveStateKindLabel(canonicalKind || kind),
@@ -4687,7 +4811,7 @@
     };
     if (!normalized.available) {
       normalized.status = 'unavailable';
-      normalized.statusLabel = t('common.unavailable');
+      normalized.statusLabel = liveStateStatusLabel('unavailable');
       normalized.alive = null;
       normalized.flushing = null;
     }
@@ -4722,9 +4846,10 @@
       'artifactWriter'
     );
     const items = [runnerProcess, taskBackend, trackedChildren, artifactWriter];
+    const available = item.available == null ? items.some((entry) => entry.available) : Boolean(item.available);
     const normalized = {
-      available: Boolean(item.available),
-      source: toText(item.source, Boolean(item.available) ? 'api' : 'unavailable'),
+      available,
+      source: toText(item.source, available ? 'api' : 'unavailable'),
       runnerProcess,
       runner_process: runnerProcess,
       taskBackend,
@@ -5204,8 +5329,13 @@
   function normalizeLogEntry(entry) {
     const raw = toObject(entry);
     const lineNumber = toMaybeNumber(raw.line_number ?? raw.lineNumber ?? raw.cursor, null);
+    const taskId = toText(raw.taskId || raw.task_id, '');
+    const taskTitle = toText(raw.taskTitle || raw.task_title, '');
+    const event = toText(raw.event || raw.type, '');
+    const reason = toText(raw.reason || raw.detail, '');
     return {
       t: toText(raw.t || raw.ts, fmtClock(nowMs())),
+      ts: toText(raw.ts || raw.timestamp || raw.time, ''),
       lvl: normalizeLogLevel(raw.lvl || raw.level),
       stage: normalizeLogStage(raw.stage || raw.component || raw.scope),
       msg: toText(raw.msg || raw.message || raw.text, ''),
@@ -5213,6 +5343,55 @@
       line_number: lineNumber == null ? null : lineNumber,
       lineNumber: lineNumber == null ? null : lineNumber,
       raw: toText(raw.raw || raw.raw_line || raw.rawLine || '', ''),
+      task_id: taskId,
+      taskId,
+      task_title: taskTitle,
+      taskTitle,
+      event,
+      type: event,
+      reason,
+    };
+  }
+
+  function normalizeOptionalLogEntry(entry) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return null;
+    }
+    if (
+      !toText(entry.msg || entry.message || entry.text, '') &&
+      !toText(entry.raw || entry.raw_line || entry.rawLine, '') &&
+      !toText(entry.t || entry.ts || entry.timestamp || entry.time, '') &&
+      !toText(entry.taskId || entry.task_id, '') &&
+      !toText(entry.taskTitle || entry.task_title, '') &&
+      !toText(entry.event || entry.type, '') &&
+      !toText(entry.reason || entry.detail, '')
+    ) {
+      return null;
+    }
+    return normalizeLogEntry(entry);
+  }
+
+  function inferLogEntriesSourceKind(entries = []) {
+    return toArray(entries).some((entry) => {
+      const item = toObject(entry);
+      return Boolean(
+        toText(item.taskId || item.task_id || item.taskTitle || item.task_title || item.event || item.type, '').trim()
+        || (toText(item.stage, '').trim() && normalizeLogStage(item.stage) !== 'boot')
+      );
+    })
+      ? 'structured'
+      : 'log';
+  }
+
+  function normalizeLogEntriesSource(source = {}, entries = []) {
+    const raw = toObject(source);
+    const kind = toText(raw.kind || raw.type, inferLogEntriesSourceKind(entries)).trim().toLowerCase() || 'log';
+    const id = toText(raw.id || raw.sourceId || raw.source_id, kind === 'structured' ? 'api_logs_structured' : 'run_log').trim();
+    const label = toText(raw.label || raw.sourceLabel || raw.source_label, kind === 'structured' ? t('logs.structuredEventsSource') : t('logs.activeRunLog')).trim();
+    return {
+      id,
+      label,
+      kind,
     };
   }
 
@@ -5282,6 +5461,22 @@
       startedAt: toMaybeNumber(raw.started_at || raw.startedAt),
       endedAt: toMaybeNumber(raw.ended_at || raw.endedAt),
     };
+  }
+
+  function backlogTaskGroupStatus(task) {
+    const raw = toObject(task);
+    const failure = toObject(raw.failure);
+    return normalizeBacklogStatus(
+      raw.taskStatus ||
+        raw.task_status ||
+        raw.outcomeStatus ||
+        raw.outcome_status ||
+        failure.taskStatus ||
+        failure.task_status ||
+        failure.status ||
+        raw.status,
+      normalizeBacklogStatus(raw.status, 'pending')
+    );
   }
 
   function normalizeGoalBucket(bucket) {
@@ -5642,10 +5837,11 @@
     const doneCount = toNumber(stateCounts.done ?? raw.tasksDone ?? taskCounts.done ?? lastRunSummary.done ?? 0, 0);
     const failedCount = toNumber(stateCounts.failed ?? raw.tasksFailed ?? taskCounts.failed ?? lastRunSummary.failed_count ?? 0, 0);
     const warningCount = toNumber(stateCounts.warnings ?? raw.warnings ?? raw.warningCount ?? raw.warning_count ?? 0, 0);
+    const endedAt = toNumber(raw.endedAt || raw.ended_at || 0, 0);
     return {
       id: toText(raw.id, 'run'),
       startedAt: toNumber(raw.startedAt || raw.started_at || 0, 0),
-      endedAt: toNumber(raw.endedAt || raw.ended_at || 0, 0),
+      endedAt,
       status: toText(raw.status, 'idle'),
       executionStatus: toText(raw.executionStatus || raw.execution_status || '', ''),
       execution_status: toText(raw.execution_status || raw.executionStatus || '', ''),
@@ -5679,6 +5875,10 @@
       shutdownReason: toText(raw.shutdownReason || raw.shutdown_reason || raw.stopReason || lastRunSummary.stop_reason || runSummary.final?.reason || '', ''),
       stopReason: toText(raw.stopReason || raw.shutdownReason || raw.shutdown_reason || lastRunSummary.stop_reason || runSummary.final?.reason || '', ''),
       runDir: toText(raw.runDir || raw.run_dir, ''),
+      freshnessTimestamp: toNumber(raw.freshnessTimestamp || raw.freshness_timestamp || endedAt || raw.startedAt || raw.started_at || 0, 0),
+      freshness_timestamp: toNumber(raw.freshness_timestamp || raw.freshnessTimestamp || endedAt || raw.startedAt || raw.started_at || 0, 0),
+      freshnessSource: toText(raw.freshnessSource || raw.freshness_source, ''),
+      freshness_source: toText(raw.freshness_source || raw.freshnessSource, ''),
       lastCycle: toText(raw.lastCycle, ''),
       runSummary,
       lastRunSummary,
@@ -5899,6 +6099,27 @@
       ''
     );
     const applyCheck = normalizeWorktreeApplyCheck(raw.applyCheck || raw.apply_check || preflight.applyCheck);
+    const historicalArtifacts = toArray(
+      raw.historicalArtifacts || raw.historical_artifacts || raw.recentArtifacts || raw.recent_artifacts
+    ).map((item) => {
+      const nested = normalizeWorktreeState({
+        ...toObject(item),
+        historicalArtifacts: [],
+        historical_artifacts: [],
+        recentArtifacts: [],
+        recent_artifacts: [],
+      });
+      return {
+        ...nested,
+        current: false,
+        historical: true,
+        isHistorical: true,
+        mutatingActionsEnabled: false,
+      };
+    });
+    const historical = Boolean(raw.historical ?? raw.isHistorical ?? raw.is_historical);
+    const current = Boolean(raw.current ?? !historical);
+    const mutatingActionsEnabled = Boolean(raw.mutatingActionsEnabled ?? raw.mutating_actions_enabled ?? false);
     return {
       status,
       mode: toText(raw.mode, 'manual'),
@@ -5955,6 +6176,14 @@
       applyCheck,
       apply_check: applyCheck,
       checklist,
+      historicalArtifacts,
+      historical_artifacts: historicalArtifacts,
+      recentArtifacts: historicalArtifacts,
+      recent_artifacts: historicalArtifacts,
+      current,
+      historical,
+      isHistorical: historical,
+      mutatingActionsEnabled,
       runDir,
       runnerRc,
       lastRc: runnerRc,
@@ -6441,6 +6670,16 @@
     return true;
   }
 
+  function setWorktreeHistoricalOpen(open = true) {
+    state.worktreeHistoricalOpen = Boolean(open);
+    renderShell({ preserveScroll: true });
+    return state.worktreeHistoricalOpen;
+  }
+
+  function toggleWorktreeHistoricalOpen() {
+    return setWorktreeHistoricalOpen(!state.worktreeHistoricalOpen);
+  }
+
   function normalizeMetrics(metrics) {
     const raw = toObject(metrics);
     const tokens = toObject(raw.tokens);
@@ -6873,16 +7112,22 @@
     const statusReviewCount = (statusCounts.review_required != null || statusCounts.test_contract_changed != null)
       ? toNumber(statusCounts.review_required, 0) + toNumber(statusCounts.test_contract_changed, 0)
       : undefined;
+    const groupStatusCounts = {
+      failed: items.filter((task) => ['failed', 'review_required', 'blocked_env', 'test_contract_changed', 'regression_failed'].includes(backlogTaskGroupStatus(task))).length,
+      blocked_env: items.filter((task) => backlogTaskGroupStatus(task) === 'blocked_env').length,
+      review: items.filter((task) => ['review_required', 'test_contract_changed'].includes(backlogTaskGroupStatus(task))).length,
+      regressed: items.filter((task) => ['failed', 'regression_failed'].includes(backlogTaskGroupStatus(task))).length,
+    };
     return {
       items,
       counts: {
         pending: toNumber(counts.pending || items.filter((task) => task.status === 'pending').length, 0),
         in_progress: toNumber(counts.in_progress || items.filter((task) => task.status === 'in_progress').length, 0),
         done: toNumber(counts.done || items.filter((task) => task.status === 'done').length, 0),
-        failed: toNumber(counts.failed || items.filter((task) => task.status === 'failed').length, 0),
-        blocked_env: toNumber(counts.blocked_env ?? counts.tasks_blocked_env ?? failureGroups.blocked_env ?? statusCounts.blocked_env ?? items.filter((task) => task.status === 'blocked_env').length, 0),
-        review: toNumber(counts.review ?? counts.tasks_review ?? failureGroups.review ?? statusReviewCount ?? items.filter((task) => ['review_required', 'test_contract_changed'].includes(task.status)).length, 0),
-        regressed: toNumber(counts.regressed ?? counts.tasks_regressed ?? failureGroups.regression ?? statusCounts.regression_failed ?? items.filter((task) => ['failed', 'regression_failed'].includes(task.status)).length, 0),
+        failed: toNumber(counts.failed ?? groupStatusCounts.failed, 0),
+        blocked_env: toNumber(counts.blocked_env ?? counts.tasks_blocked_env ?? failureGroups.blocked_env ?? statusCounts.blocked_env ?? groupStatusCounts.blocked_env, 0),
+        review: toNumber(counts.review ?? counts.tasks_review ?? failureGroups.review ?? statusReviewCount ?? groupStatusCounts.review, 0),
+        regressed: toNumber(counts.regressed ?? counts.tasks_regressed ?? failureGroups.regression ?? statusCounts.regression_failed ?? groupStatusCounts.regressed, 0),
       },
       status_counts: statusCounts,
       failure_group_counts: failureGroups,
@@ -7013,19 +7258,40 @@
     const sources = normalizeLogTailSources(raw.sources || raw.source_catalog || raw.sourceCatalog || []);
     const source = normalizeLogTailSource(raw.source || {});
     const sourceId = toText(raw.source_id || raw.selected_source_id || raw.sourceId || source.id, '').trim();
+    const entriesSource = normalizeLogEntriesSource(
+      {
+        id: raw.entries_source_id || raw.entriesSourceId,
+        label: raw.entries_source_label || raw.entriesSourceLabel,
+        kind: raw.entries_source_kind || raw.entriesSourceKind,
+      },
+      items
+    );
     const selection = resolveLogTailSourceSelection({
       sources,
       sourceId,
       source,
     });
+    const cursor = toMaybeNumber(raw.cursor ?? raw.nextCursor ?? raw.next_cursor) ?? 0;
+    const tailState = toText(raw.state, items.length ? 'ready' : 'empty');
     return {
       entries: items,
+      entriesSource,
       tail: toText(raw.tail, ''),
       files,
       source: selection.source,
       sourceId: selection.sourceId,
       selectedSourceId: selection.sourceId,
       sources: selection.sources,
+      tailState,
+      cursor,
+      nextCursor: toMaybeNumber(raw.nextCursor ?? raw.next_cursor ?? cursor) ?? cursor,
+      ok: Boolean(raw.ok ?? true),
+      malformedLines: toMaybeNumber(raw.malformedLines ?? raw.malformed_lines) ?? 0,
+      eof: Boolean(raw.eof),
+      lastLine: normalizeOptionalLogEntry(raw.lastLine || raw.last_line),
+      outputStalled: Boolean(raw.outputStalled ?? raw.output_stalled),
+      noOutputMinutes: toMaybeNumber(raw.noOutputMinutes ?? raw.no_output_minutes),
+      lastActivityAt: toMaybeNumber(raw.lastActivityAt ?? raw.last_activity_at) ?? 0,
       state: buildSectionState('logs', items.length ? 'ready' : 'empty', items.length ? '' : fallbackSectionMessage('logs')),
     };
   }
@@ -7401,23 +7667,21 @@
       step: toMaybeNumber(rawCurrentTask.step ?? rawProgress.step),
       cycle: toMaybeNumber(rawCurrentTask.cycle ?? rawProgress.cycle),
     };
-    const logSource = toObject(rawLog.source);
-    const logCursor = toMaybeNumber(rawLog.cursor ?? rawLog.nextCursor ?? rawLog.next_cursor);
-    const logState = toText(rawLog.state, status.run === 'running' ? 'loading' : 'empty');
     const logSummary = {
-      source: {
-        path: toText(logSource.path, ''),
-        name: toText(logSource.name, ''),
-        exists: Boolean(logSource.exists),
-      },
-      cursor: logCursor == null ? 0 : logCursor,
-      nextCursor: toMaybeNumber(rawLog.nextCursor ?? rawLog.next_cursor ?? logCursor) ?? (logCursor == null ? 0 : logCursor),
-      state: logState,
+      source: normalizedLog.source,
+      cursor: normalizedLog.cursor,
+      nextCursor: normalizedLog.nextCursor,
+      state: normalizedLog.tailState || (status.run === 'running' ? 'loading' : 'empty'),
       entries: logEntries,
       tail: normalizedLogTail,
       files: normalizedLogFiles,
-      ok: Boolean(rawLog.ok ?? true),
-      malformedLines: toMaybeNumber(rawLog.malformedLines ?? rawLog.malformed_lines) ?? 0,
+      ok: Boolean(normalizedLog.ok ?? true),
+      malformedLines: toMaybeNumber(normalizedLog.malformedLines) ?? 0,
+      eof: Boolean(normalizedLog.eof),
+      lastLine: normalizeOptionalLogEntry(normalizedLog.lastLine),
+      outputStalled: Boolean(normalizedLog.outputStalled),
+      noOutputMinutes: toMaybeNumber(normalizedLog.noOutputMinutes),
+      lastActivityAt: toNumber(normalizedLog.lastActivityAt, 0),
     };
     const notificationCounts = toObject(rawNotifications.kinds);
     const notificationsSummary = {
@@ -7457,8 +7721,8 @@
     const derivedStale = {
       value: Boolean(rawStale.value ?? (staleReasons.length || logSourceMissing || controlStatusError || processMismatch)),
       reasons: staleReasons,
-      logs: Boolean(rawStale.logs ?? ['missing_file', 'read_error'].includes(logState)),
-      logSourceMissing,
+      logs: Boolean(rawStale.logs ?? ['missing_file', 'read_error'].includes(logSummary.state)),
+      logSourceMissing: logSummary.source.exists === false,
       control: Boolean(rawStale.control ?? controlStatusError),
       controlStatusError,
       process: Boolean(rawStale.process ?? processMismatch),
@@ -7528,6 +7792,7 @@
     const repo = toObject(raw.repo);
     const progress = toObject(raw.progress);
     const redaction = toObject(raw.redaction);
+    const rawSnapshotRefresh = toObject(raw.snapshot_refresh || raw.snapshotRefresh);
     const webInstance = normalizeWebInstance(raw.web_instance || raw.webInstance);
     const config = adaptConfig(raw.config, { progress, repo });
     const configContract = adaptConfigContract(raw.config_contract || raw.configContract || raw.config, {
@@ -7597,13 +7862,19 @@
       branch: repo.branch || '',
       source: 'api',
     });
+    const snapshotLastUpdatedAt = toMaybeNumber(
+      rawSnapshotRefresh.lastUpdatedAt
+        ?? rawSnapshotRefresh.last_updated_at
+        ?? rawSnapshotRefresh.freshnessTimestamp
+        ?? rawSnapshotRefresh.freshness_timestamp
+    ) ?? nowMs();
     const snapshotRefresh = {
-      status: 'ready',
-      lastUpdatedAt: nowMs(),
+      status: toText(rawSnapshotRefresh.status, 'ready'),
+      lastUpdatedAt: snapshotLastUpdatedAt,
       lastSuccessAt: nowMs(),
-      stale: Boolean(toObject(liveRun.stale).value),
-      staleReasons: toArray(toObject(liveRun.stale).reasons).map((reason) => toText(reason, '')).filter(Boolean),
-      latestRunDir: toText(raw.latest_run_dir, ''),
+      stale: false,
+      staleReasons: [],
+      latestRunDir: toText(rawSnapshotRefresh.latestRunDir || rawSnapshotRefresh.latest_run_dir || raw.latest_run_dir, ''),
     };
 
     return {
@@ -7631,6 +7902,7 @@
       goalsPath: goals.path,
       goalsCompletion: goals.completion,
       logs: logs.entries,
+      logStructuredSource: logs.entriesSource,
       logTail: logs.tail,
       logTailSummary: logs.tail,
       logFiles: logs.files,
@@ -7694,7 +7966,7 @@
 
   function createBlankModel() {
     const DEFAULT_ROLE_SPECS = ['PM', 'Dev', 'QA'];
-    const BUILTIN_ROLE_OPTIONS = ['PM', 'Security', 'Dev', 'QA'];
+    const BUILTIN_ROLE_OPTIONS = ['PM', 'PL', 'Security', 'Dev', 'QA'];
     const CODEX_DEV_MODEL_LADDER = ['gpt-5.4-mini', 'gpt-5.4', 'gpt-5.5'];
     const CODEX_MODEL_DEFAULTS = {
       pm_model: 'gpt-5.5',
@@ -7845,7 +8117,7 @@
         options: BUILTIN_ROLE_OPTIONS,
         restart: false,
         desc: 'Stages enabled in the pipeline.',
-        hint: 'Built-in order: PM, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.',
+        hint: 'Built-in order: PM, PL, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.',
       },
       'security.enabled': {
         kind: 'bool',
@@ -7862,7 +8134,7 @@
       continuous: {
         kind: 'bool',
         restart: false,
-        desc: 'Run PM -> Dev -> QA without stopping.',
+        desc: 'Run PM -> PL -> Dev -> QA without stopping.',
         hint: 'Pair with autopilot=true for unattended runs.',
       },
       iterations: {
@@ -7871,7 +8143,7 @@
         max: 20,
         restart: false,
         desc: 'Max number of run iterations.',
-        hint: 'One iteration equals one full PM -> Dev -> QA cycle.',
+        hint: 'One iteration equals one full PM -> PL -> Dev -> QA cycle.',
       },
       max_turns_per_task: {
         kind: 'number',
@@ -8276,6 +8548,7 @@
       goalsDirty: false,
       goalSave: createBlankGoalSaveState(),
       logs: [],
+      logStructuredSource: normalizeLogEntriesSource({ kind: 'log', label: t('logs.activeRunLog') }),
       logTail: createBlankLogTailState(),
       logFiles: {},
       configDefault: clone(configBase),
@@ -8344,6 +8617,14 @@
         dirty_patch_applied: null,
         pendingMarkerPath: '',
         pending_marker_path: '',
+        historicalArtifacts: [],
+        historical_artifacts: [],
+        recentArtifacts: [],
+        recent_artifacts: [],
+        current: true,
+        historical: false,
+        isHistorical: false,
+        mutatingActionsEnabled: false,
         checklist: [
           t('worktree.checklistInspectPatchHunks'),
           t('worktree.checklistVerifyNoSecretLeakage'),
@@ -8356,6 +8637,7 @@
         lastRc: 0,
       },
       worktreeAction: null,
+      worktreeHistoricalOpen: false,
       history: [],
       historySummary: { runs: 0, successes: 0, failures: 0, stopped: 0, tasksDone: 0, tasksTotal: 0 },
       experience: adaptExperience({
@@ -8807,6 +9089,14 @@
         dirty_patch_applied: null,
         pendingMarkerPath: '',
         pending_marker_path: '',
+        historicalArtifacts: [],
+        historical_artifacts: [],
+        recentArtifacts: [],
+        recent_artifacts: [],
+        current: true,
+        historical: false,
+        isHistorical: false,
+        mutatingActionsEnabled: false,
         checklist: [
           t('worktree.checklistInspectPatchHunks'),
           t('worktree.checklistVerifyNoSecretLeakage'),
@@ -8821,6 +9111,7 @@
       worktreeDiagnostics: normalizeWorktreeDiagnostics({}),
       worktreeDiagnosticsFilter: normalizeWorktreeDiagnosticsFilter({}),
       worktreeAction: null,
+      worktreeHistoricalOpen: false,
       history: [
         {
           id: 'run_offline_20260425_223000',
@@ -8988,10 +9279,14 @@
     normalizeLiveStateKey,
     liveStateKindLabel,
     liveStateStatusLabel,
+    liveStateRunStatusLabel,
+    liveStateFactValue,
+    liveStateFactText,
     liveStateToneClass,
     normalizeLiveStateEntry,
     normalizeLiveState,
     runnerControlLiveStateChips,
+    runnerControlLiveStateSummary,
     runnerControlStateInfo,
     runnerControlDetailRows,
     runnerControlActionPresentation,
@@ -9004,6 +9299,7 @@
     createFallbackFixture,
     createBlankLogTailState,
     createBlankSnapshotRefreshState,
+    snapshotRefreshDisplay,
     normalizeLogTailFilters,
     normalizeLogTailSource,
     normalizeLogTailSources,
@@ -9027,6 +9323,8 @@
     setWorktreeDiagnosticsFilter,
     clearWorktreeDiagnosticsFilter,
     toggleWorktreeDiagnosticsFilter,
+    setWorktreeHistoricalOpen,
+    toggleWorktreeHistoricalOpen,
     isLiveTailPaused,
     setLiveTailPaused,
     resetServerLogTailState,
@@ -9034,6 +9332,8 @@
     startServerLogTail,
     stopServerLogTail,
     syncLogTailStreaming,
+    snapshotScopeForView,
+    buildStatusRequestUrl,
     refreshSnapshot,
     startSnapshotPolling,
     stopSnapshotPolling,
@@ -9094,6 +9394,7 @@
     goalSaveInFlight,
     currentLocale,
     setLocale,
+    setHistorySelection,
     setView,
     renderShell,
     inspectGoalSaveState,
@@ -9139,6 +9440,7 @@
       removeJSON(STORAGE.goals);
     }
     state.logs = toArray(next.logs).slice(-MAX_LOG_ROWS);
+    state.logStructuredSource = normalizeLogEntriesSource(next.logStructuredSource, state.logs);
     state.logTailSummary = toText(next.logTailSummary || next.logTail, '');
     state.logFiles = toObject(next.logFiles);
     const nextLogTailSources = normalizeLogTailSources(next.logSources);
@@ -9212,8 +9514,7 @@
     state.sectionState = toObject(next.sectionState);
     const previousRefresh = ensureSnapshotRefreshState();
     const nextRefresh = toObject(next.snapshotRefresh);
-    const nextLiveRunStale = toObject(toObject(next.liveRun).stale);
-    const staleReasons = toArray(nextRefresh.staleReasons || nextLiveRunStale.reasons)
+    const staleReasons = toArray(nextRefresh.staleReasons)
       .map((reason) => toText(reason, ''))
       .filter(Boolean);
     state.snapshotRefresh = {
@@ -9232,7 +9533,7 @@
       lastErrorAt: 0,
       lastErrorStatus: 0,
       lastError: '',
-      stale: Boolean(nextRefresh.stale || nextLiveRunStale.value),
+      stale: Boolean(nextRefresh.stale),
       staleReasons,
       latestRunDir: toText(nextRefresh.latestRunDir || next.latestRunDir, state.latestRunDir),
       timer: previousRefresh.timer,
@@ -9270,7 +9571,25 @@
   }
 
   function snapshotRefreshDisplay(refresh = state.snapshotRefresh) {
-    const current = toObject(refresh);
+    const selectedRun = state.activeView === 'history' ? toObject(currentRun()) : {};
+    const selectedRunLastUpdatedAt = toNumber(
+      selectedRun.freshnessTimestamp
+        || selectedRun.freshness_timestamp
+        || selectedRun.endedAt
+        || selectedRun.ended_at
+        || selectedRun.startedAt
+        || selectedRun.started_at
+        || 0,
+      0
+    );
+    const current = state.activeView === 'history' && selectedRunLastUpdatedAt > 0
+      ? {
+          ...toObject(refresh),
+          lastUpdatedAt: selectedRunLastUpdatedAt,
+          stale: false,
+          staleReasons: [],
+        }
+      : toObject(refresh);
     const status = normalizeSectionStatus(current.status || state.snapshotStatus || 'loading');
     const errorKind = normalizeSnapshotErrorKind(current.lastErrorStatus);
     const lastUpdatedAt = toNumber(current.lastUpdatedAt || state.lastSnapshotAt || 0, 0);
@@ -13868,6 +14187,9 @@
     const data = toObject(review);
     const status = toText(data.status, 'none');
     const cleanupState = toText(data.cleanupState, 'none');
+    if (data.historical || data.isHistorical || data.current === false) {
+      return false;
+    }
     if (status !== 'pending review' && status !== 'pending') {
       return false;
     }
@@ -13892,6 +14214,9 @@
     const data = toObject(review);
     const status = toText(data.status, 'none');
     const cleanupState = toText(data.cleanupState, 'none');
+    if (data.historical || data.isHistorical || data.current === false) {
+      return t('worktree.historicalNoActions');
+    }
     if (status === 'none') {
       return t('worktree.noPendingMerge');
     }
@@ -14354,7 +14679,7 @@
       .join('');
 
     return `
-      <div class="sidebar__inner">
+      <div class="sidebar__inner" data-shell-nav-container>
         ${groupsHTML}
         <div class="sidebar-card">
           <div class="sidebar-card__title">
@@ -14377,7 +14702,8 @@
     const display = runnerControlStateInfo(control);
     const messageTone = display.bannerTone;
     const busyAction = runnerControlBusyAction(control);
-    const statusSummaryRunStatus = control.runStatus || liveStatus.run || liveProcess.running
+    const liveStateRunStatus = liveStateRunStatusLabel(liveState);
+    const statusSummaryRunStatus = liveStateRunStatus || (control.runStatus || liveStatus.run || liveProcess.running
       ? (String(control.runStatus || liveStatus.run || '').toLowerCase() === 'running'
         ? t('runner.running')
         : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'idle'
@@ -14385,11 +14711,11 @@
           : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'loading'
             ? t('common.loading')
             : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'ready'
-              ? t('runner.ready')
-              : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'stopped'
+            ? t('runner.ready')
+            : String(control.runStatus || liveStatus.run || '').toLowerCase() === 'stopped'
                 ? t('runner.stopped')
                 : control.runStatus || liveStatus.run || (liveProcess.running ? t('runner.running') : t('runner.idle')))
-      : (control.status.running || liveProcess.running ? t('runner.running') : t('runner.idle'));
+      : (control.status.running || liveProcess.running ? t('runner.running') : t('runner.idle')));
     const statusSummary = [
       display.label.toLowerCase(),
       liveProcess.runnerMode || control.status.runnerMode || t('common.unknown'),
@@ -14451,6 +14777,146 @@
     );
   }
 
+  function compareTuple(left, right) {
+    const a = Array.isArray(left) ? left : [];
+    const b = Array.isArray(right) ? right : [];
+    const limit = Math.max(a.length, b.length);
+    for (let index = 0; index < limit; index += 1) {
+      const av = toMaybeNumber(a[index]) ?? -1;
+      const bv = toMaybeNumber(b[index]) ?? -1;
+      if (av > bv) return 1;
+      if (av < bv) return -1;
+    }
+    return 0;
+  }
+
+  function dashboardBacklogTaskFallback(currentTaskId = '') {
+    const items = toArray(state.backlog);
+    const selectedId = toText(currentTaskId || state.backlogSelectedId || '', '');
+    if (selectedId) {
+      const selected = items.find((item) => toText(item.id, '') === selectedId);
+      if (selected) {
+        return {
+          id: toText(selected.id, ''),
+          title: toText(selected.title || selected.taskTitle, ''),
+          attempt: toMaybeNumber(selected.attempt),
+        };
+      }
+    }
+
+    let best = null;
+    let bestScore = [-1, -1, -1, -1, -1];
+    items.forEach((item, index) => {
+      const task = toObject(item);
+      const id = toText(task.id, '');
+      const title = toText(task.title || task.taskTitle, '');
+      const attempt = toMaybeNumber(task.attempt);
+      const startedAt = toMaybeNumber(task.startedAt);
+      const endedAt = toMaybeNumber(task.endedAt);
+      const cycle = toMaybeNumber(task.cycle);
+      const status = normalizeBacklogStatus(task.status || task.taskStatus, 'pending');
+      const statusRank =
+        status === 'in_progress'
+          ? 2
+          : ['failed', 'review_required', 'blocked_env', 'test_contract_changed', 'regression_failed', 'done'].includes(status)
+            ? 1
+            : 0;
+      if (!id && !title && attempt == null && statusRank === 0) return;
+      const score = [
+        statusRank,
+        startedAt ?? endedAt ?? -1,
+        cycle ?? -1,
+        attempt ?? -1,
+        -index,
+      ];
+      if (!best || compareTuple(score, bestScore) > 0) {
+        best = { id, title, attempt };
+        bestScore = score;
+      }
+    });
+
+    return best || { id: '', title: '', attempt: null };
+  }
+
+  function dashboardArtifactTaskFallback() {
+    const runs = toArray(state.runs || state.history);
+    const liveRun = currentLiveRun();
+    const activeRun = currentLiveRunActiveRun(liveRun);
+    const runDirHint = toText(activeRun.runDir || liveRun.runDir || state.latestRunDir || '', '');
+    const run = (runDirHint && runs.find((item) => toText(item.runDir, '') === runDirHint)) || runs[0] || null;
+    if (!run) {
+      return { id: '', title: '', attempt: null, branch: '' };
+    }
+
+    const runSummary = toObject(run.runSummary || run.run_summary);
+    const lastRunSummary = toObject(run.lastRunSummary || run.last_run_summary);
+    let best = null;
+    let bestScore = [-1, -1, -1, -1, -1];
+    for (const cycleEntry of toArray(runSummary.cycles)) {
+      const cycle = toMaybeNumber(toObject(cycleEntry).cycle);
+      for (const [stageIndex, stage] of toArray(toObject(cycleEntry).stages).entries()) {
+        const raw = toObject(stage);
+        const id = toText(raw.taskId || raw.task_id, '');
+        const title = toText(raw.taskTitle || raw.task_title || raw.title, '');
+        const attempt = toMaybeNumber(raw.attempt);
+        if (!id && !title && attempt == null) continue;
+        const endedAt = toMaybeNumber(raw.endedAt || raw.ended_at);
+        const startedAt = toMaybeNumber(raw.startedAt || raw.started_at);
+        const stageName = toText(raw.name || raw.id || raw.label, '');
+        const stageRank = STAGE_INDEX[stageName.toLowerCase()] ?? -1;
+        const score = [
+          cycle ?? -1,
+          endedAt ?? startedAt ?? -1,
+          stageRank,
+          attempt ?? -1,
+          stageIndex,
+        ];
+        if (!best || compareTuple(score, bestScore) > 0) {
+          best = { id, title, attempt };
+          bestScore = score;
+        }
+      }
+    }
+
+    return {
+      id: toText(best?.id, ''),
+      title: toText(best?.title, ''),
+      attempt: toMaybeNumber(best?.attempt),
+      branch: toText(run.branch || runSummary.branch || lastRunSummary.branch, ''),
+    };
+  }
+
+  function resolveDashboardActiveTask() {
+    const liveRun = currentLiveRun();
+    const run = currentLiveRunActiveRun(liveRun);
+    const progress = currentLiveRunProgress(liveRun);
+    const liveStatus = currentLiveRunStatus(liveRun);
+    const liveIdentity = toObject(liveRun.identity);
+    const liveCurrentTask = toObject(liveRun.currentTask);
+    const live = {
+      id: toText(liveCurrentTask.id || liveStatus.currentTaskId || progress.current_task_id || run.task || '', ''),
+      title: toText(liveCurrentTask.title || liveStatus.currentTaskTitle || progress.current_task_title || run.taskTitle || '', ''),
+      attempt: toMaybeNumber(liveCurrentTask.attempt ?? run.attempt ?? progress.attempt),
+      branch: toText(liveIdentity.branch || progress.branch || run.branch || '', ''),
+    };
+    const backlog = dashboardBacklogTaskFallback(live.id);
+    const artifact = dashboardArtifactTaskFallback();
+    const taskId = live.id || backlog.id || artifact.id || '';
+    const taskTitle =
+      live.title ||
+      ((taskId && backlog.id === taskId) ? backlog.title : '') ||
+      ((taskId && artifact.id === taskId) ? artifact.title : '') ||
+      backlog.title ||
+      artifact.title ||
+      '';
+    const attempt =
+      live.attempt ??
+      (((!taskId || backlog.id === taskId) ? backlog.attempt : null)) ??
+      (((!taskId || artifact.id === taskId) ? artifact.attempt : null));
+    const branch = live.branch || artifact.branch || toText(state.repo.branch || 'HEAD', 'HEAD');
+    return { taskId, taskTitle, attempt, branch };
+  }
+
   function renderDashboard() {
     const liveRun = currentLiveRun();
     const run = currentLiveRunActiveRun(liveRun);
@@ -14463,11 +14929,12 @@
     const liveLog = currentLiveRunLog(liveRun);
     const liveNotifications = currentLiveRunNotifications(liveRun);
     const budgetCap = toMaybeNumber(state.config?.budget?.max_usd);
-    const taskId = liveCurrentTask.id || liveStatus.currentTaskId || progress.current_task_id || run.task || '';
-    const taskTitle = liveCurrentTask.title || liveStatus.currentTaskTitle || progress.current_task_title || run.taskTitle || '';
-    const attempt = liveCurrentTask.attempt ?? run.attempt ?? progress.attempt;
+    const activeTask = resolveDashboardActiveTask();
+    const taskId = activeTask.taskId;
+    const taskTitle = activeTask.taskTitle;
+    const attempt = activeTask.attempt;
     const attemptText = attempt == null ? t('common.unavailable') : String(attempt);
-    const branchText = liveIdentity.branch || progress.branch || run.branch || state.repo.branch || 'HEAD';
+    const branchText = activeTask.branch || state.repo.branch || 'HEAD';
     const worktreeModeText = liveCurrentTask.worktreeMode || progress.worktree_mode || run.worktreeMode || '';
     const runDirText = liveIdentity.runDir || run.runDir || progress.latest_run_dir || state.latestRunDir || '';
     const finalReason = liveStatus.finalReason || progress.final_reason || run.finalReason || '';
@@ -14477,13 +14944,13 @@
     const runTone = runStatusTone(runStatus, finalReason);
     const runLabel = runStatusLabel(runStatus, finalReason);
     const runSummary = [
-      `${t('dashboard.currentTaskId')} ${taskId || t('common.unavailable')}`,
-      `${t('dashboard.currentTaskTitle')} ${taskTitle || t('common.unavailable')}`,
-      `${t('dashboard.attempt')} ${attemptText}`,
-      `${t('dashboard.branch')} ${branchText}`,
-      `${t('dashboard.worktreeMode')} ${worktreeModeText || t('common.unavailable')}`,
-      runDirText ? `${t('dashboard.runDirectory')} ${runDirText}` : `${t('dashboard.runDirectory')} ${t('common.unavailable')}`,
-      finalReason ? `${t('dashboard.finalReason')} ${finalReason}` : null,
+      `${t('dashboard.currentTaskId')}: ${taskId || t('common.unavailable')}`,
+      `${t('dashboard.currentTaskTitle')}: ${taskTitle || t('common.unavailable')}`,
+      `${t('dashboard.attempt')}: ${attemptText}`,
+      `${t('dashboard.branch')}: ${branchText}`,
+      `${t('dashboard.worktreeMode')}: ${worktreeModeText || t('common.unavailable')}`,
+      runDirText ? `${t('dashboard.runDirectory')}: ${runDirText}` : `${t('dashboard.runDirectory')}: ${t('common.unavailable')}`,
+      finalReason ? `${t('dashboard.finalReason')}: ${finalReason}` : null,
     ]
       .filter(Boolean)
       .join(' | ');
@@ -14651,7 +15118,7 @@
     return viewShell(
       'dashboard',
       t('dashboard.title'),
-      `${escapeHTML(taskId || 'unavailable')} | ${escapeHTML(taskTitle || 'task title unavailable')} | ${escapeHTML(branchText)} | ${escapeHTML(run.id)}`,
+      `${escapeHTML(taskId || t('common.unavailable'))} | ${escapeHTML(taskTitle || t('common.unavailable'))} | ${escapeHTML(branchText)} | ${escapeHTML(run.id)}`,
       `
         ${button(t('common.openPipeline'), 'nav-pipeline', 'button--quiet')}
         ${button(t('common.openLogs'), 'nav-logs', 'button--quiet')}
@@ -14707,6 +15174,11 @@
       cursor: 0,
       nextCursor: 0,
       malformedLines: 0,
+      eof: false,
+      lastLine: null,
+      outputStalled: false,
+      noOutputMinutes: null,
+      lastActivityAt: 0,
       sourceId: '',
       source: {
         id: '',
@@ -14754,6 +15226,8 @@
       stale: false,
       staleReasons: [],
       latestRunDir: '',
+      requestScope: '',
+      pendingScope: '',
       timer: null,
     };
   }
@@ -14776,6 +15250,11 @@
     if (!state.logTail.source || typeof state.logTail.source !== 'object') {
       state.logTail.source = {};
     }
+    state.logTail.eof = Boolean(state.logTail.eof);
+    state.logTail.lastLine = normalizeOptionalLogEntry(state.logTail.lastLine || state.logTail.last_line);
+    state.logTail.outputStalled = Boolean(state.logTail.outputStalled ?? state.logTail.output_stalled);
+    state.logTail.noOutputMinutes = toMaybeNumber(state.logTail.noOutputMinutes ?? state.logTail.no_output_minutes);
+    state.logTail.lastActivityAt = toNumber(state.logTail.lastActivityAt || state.logTail.last_activity_at || 0, 0);
     const normalizedSelection = resolveLogTailSourceSelection(state.logTail);
     applyLogTailSourceSelection(state.logTail, normalizedSelection);
     return state.logTail;
@@ -14988,6 +15467,54 @@
     return parts.length ? `/api/logs/tail?${parts.join('&')}` : '/api/logs/tail';
   }
 
+  function logTailEntrySearchText(entry) {
+    const item = toObject(entry);
+    return [
+      item.t,
+      item.ts,
+      item.lvl,
+      item.level,
+      item.stage,
+      item.task_id,
+      item.taskId,
+      item.task_title,
+      item.taskTitle,
+      item.event,
+      item.type,
+      item.msg,
+      item.message,
+      item.reason,
+      item.raw,
+    ]
+      .map((value) => toText(value, '').trim().toLowerCase())
+      .filter(Boolean)
+      .join(' ');
+  }
+
+  function logTailEntryMatchesFilters(entry, filters = {}) {
+    const item = normalizeLogEntry(entry);
+    const normalized = normalizeLogTailFilters(filters);
+    if (normalized.level && !['all', 'any', '*'].includes(normalized.level)) {
+      if (normalizeLogLevel(item.lvl) !== normalized.level) {
+        return false;
+      }
+    }
+    if (normalized.stage && !['all', 'any', '*'].includes(normalized.stage.toLowerCase())) {
+      if (normalizeLogStage(item.stage).toLowerCase() !== normalized.stage.toLowerCase()) {
+        return false;
+      }
+    }
+    if (normalized.taskId) {
+      if (toText(item.taskId || item.task_id, '').trim().toLowerCase() !== normalized.taskId.toLowerCase()) {
+        return false;
+      }
+    }
+    if (normalized.search && !logTailEntrySearchText(item).includes(normalized.search.toLowerCase())) {
+      return false;
+    }
+    return true;
+  }
+
   function tailSourceName(path) {
     const value = toText(path, '');
     if (!value) {
@@ -15086,6 +15613,34 @@
     };
   }
 
+  function describeLogTailOutputSignal(primary, fallback = {}) {
+    const model = toObject(primary);
+    const fallbackModel = toObject(fallback);
+    const lastLine =
+      normalizeOptionalLogEntry(model.lastLine || model.last_line)
+      || normalizeOptionalLogEntry(fallbackModel.lastLine || fallbackModel.last_line)
+      || normalizeOptionalLogEntry(toArray(model.entries).slice(-1)[0])
+      || normalizeOptionalLogEntry(toArray(fallbackModel.entries).slice(-1)[0]);
+    const noOutputMinutes = toMaybeNumber(
+      model.noOutputMinutes ?? model.no_output_minutes ?? fallbackModel.noOutputMinutes ?? fallbackModel.no_output_minutes,
+      null
+    );
+    const outputStalled = Boolean(
+      model.outputStalled ?? model.output_stalled ?? fallbackModel.outputStalled ?? fallbackModel.output_stalled
+    );
+    const lastLineText = compactText(
+      redactionAwareText(lastLine?.msg || lastLine?.raw || '', t('pipeline.latestLogLineUnavailable')),
+      180
+    ) || t('pipeline.latestLogLineUnavailable');
+    return {
+      visible: outputStalled && noOutputMinutes != null,
+      noOutputMinutes,
+      warningText: outputStalled && noOutputMinutes != null ? t('pipeline.noOutputWarning', { count: Math.max(1, noOutputMinutes) }) : '',
+      lastLine,
+      lastLineText,
+    };
+  }
+
   function describeLogTailState(tail) {
     const model = toObject(tail);
     const status = toText(model.status, 'loading');
@@ -15140,6 +15695,19 @@
         copy: t('logs.malformedLinesSkipped', { count: malformedLines }),
         badge: 'warn',
         state: 'malformed_line',
+      };
+    }
+    if (status === 'eof' && !entries.length) {
+      const cursor = toMaybeNumber(model.nextCursor ?? model.cursor, 0) || 0;
+      const outputSignal = describeLogTailOutputSignal(model);
+      return {
+        tone: outputSignal.visible ? 'warn' : 'info',
+        title: outputSignal.visible ? outputSignal.warningText : t('logs.liveTail'),
+        copy: outputSignal.visible
+          ? `${t('pipeline.latestLogLine')}: ${outputSignal.lastLineText}`
+          : `${sourceName} ${t('logs.cursor')} ${cursor}.${sourceMeta ? ` ${sourceMeta}.` : ''}`,
+        badge: 'eof',
+        state: 'eof',
       };
     }
     if (entries.length) {
@@ -15554,6 +16122,11 @@
     tail.loading = false;
     tail.error = '';
     tail.malformedLines = 0;
+    tail.eof = false;
+    tail.lastLine = null;
+    tail.outputStalled = false;
+    tail.noOutputMinutes = null;
+    tail.lastActivityAt = 0;
     if (!preserveSource) {
       tail.sourceId = '';
       tail.source = {
@@ -15589,6 +16162,11 @@
       tail.selected = [];
       tail.malformedLines = 0;
       tail.error = '';
+      tail.eof = false;
+      tail.lastLine = null;
+      tail.outputStalled = false;
+      tail.noOutputMinutes = null;
+      tail.lastActivityAt = 0;
     }
     tail.loading = true;
     tail.status = 'loading';
@@ -15724,6 +16302,18 @@
     const nextCursor = toMaybeNumber(response.next_cursor, tail.nextCursor || tail.cursor || 0);
     const cursor = toMaybeNumber(response.cursor, tail.cursor || 0);
     const stateValue = toText(response.state, 'loading');
+    const responseLastLine = normalizeOptionalLogEntry(response.lastLine || response.last_line);
+    const nextLastLine = responseLastLine || normalizeOptionalLogEntry(incomingEntries[incomingEntries.length - 1]) || normalizeOptionalLogEntry(tail.lastLine);
+    const hasEof = Object.prototype.hasOwnProperty.call(response, 'eof');
+    const hasOutputStalled =
+      Object.prototype.hasOwnProperty.call(response, 'outputStalled')
+      || Object.prototype.hasOwnProperty.call(response, 'output_stalled');
+    const hasNoOutputMinutes =
+      Object.prototype.hasOwnProperty.call(response, 'noOutputMinutes')
+      || Object.prototype.hasOwnProperty.call(response, 'no_output_minutes');
+    const hasLastActivityAt =
+      Object.prototype.hasOwnProperty.call(response, 'lastActivityAt')
+      || Object.prototype.hasOwnProperty.call(response, 'last_activity_at');
     return {
       ...tail,
       status: response.ok === false ? toText(response.state, 'read_error') || 'read_error' : stateValue,
@@ -15737,6 +16327,11 @@
       source,
       sources: selection.sources,
       selected,
+      eof: hasEof ? Boolean(response.eof) : Boolean(tail.eof),
+      lastLine: nextLastLine,
+      outputStalled: hasOutputStalled ? Boolean(response.outputStalled ?? response.output_stalled) : Boolean(tail.outputStalled),
+      noOutputMinutes: hasNoOutputMinutes ? toMaybeNumber(response.noOutputMinutes ?? response.no_output_minutes, null) : toMaybeNumber(tail.noOutputMinutes, null),
+      lastActivityAt: hasLastActivityAt ? (toMaybeNumber(response.lastActivityAt ?? response.last_activity_at, 0) || 0) : toNumber(tail.lastActivityAt, 0),
       lastUpdatedAt: nowMs(),
     };
   }
@@ -15836,6 +16431,11 @@
       sources: normalizeLogTailSources(tail.sources),
       error: toText(tail.error, ''),
       malformedLines: toNumber(tail.malformedLines, 0),
+      eof: Boolean(tail.eof),
+      lastLine: normalizeOptionalLogEntry(tail.lastLine),
+      outputStalled: Boolean(tail.outputStalled),
+      noOutputMinutes: toMaybeNumber(tail.noOutputMinutes),
+      lastActivityAt: toNumber(tail.lastActivityAt, 0),
       summary: toText(state.logTailSummary, ''),
     };
   }
@@ -15857,6 +16457,11 @@
     tail.paused = Boolean(tail.paused);
     tail.loading = Boolean(tail.loading);
     tail.malformedLines = toNumber(tail.malformedLines, 0);
+    tail.eof = Boolean(tail.eof);
+    tail.lastLine = normalizeOptionalLogEntry(tail.lastLine || tail.last_line);
+    tail.outputStalled = Boolean(tail.outputStalled ?? tail.output_stalled);
+    tail.noOutputMinutes = toMaybeNumber(tail.noOutputMinutes ?? tail.no_output_minutes);
+    tail.lastActivityAt = toNumber(tail.lastActivityAt || tail.last_activity_at || 0, 0);
     tail.requestSeq = toNumber(tail.requestSeq, 0);
     tail.timer = tail.timer || null;
     tail.runDir = toText(tail.runDir, '');
@@ -15882,6 +16487,9 @@
     }
     if (overrides.logTailSummary != null) {
       state.logTailSummary = toText(overrides.logTailSummary, '');
+    }
+    if (overrides.logStructuredSource != null) {
+      state.logStructuredSource = normalizeLogEntriesSource(overrides.logStructuredSource, state.logs);
     }
     return inspectLogTailState();
   }
@@ -16040,19 +16648,61 @@
       const tail = ensureLogTailState();
       const control = describeLogTailControl(tail);
       const entries = toArray(tail.entries);
+      const structuredSource = normalizeLogEntriesSource(state.logStructuredSource, state.logs);
+      const filters = normalizeLogTailFilters(tail.filters);
+      const structuredEntries = structuredSource.kind === 'structured'
+        ? toArray(state.logs).map(normalizeLogEntry).filter((entry) => logTailEntryMatchesFilters(entry, filters))
+        : [];
       const selected = new Set(toArray(tail.selected).map((value) => String(toMaybeNumber(value, null))).filter(Boolean));
       const banner = describeLogTailState(tail);
       const liveLogSource = toObject(liveLog.source);
+      const outputSignal = describeLogTailOutputSignal(tail, liveLog);
       const liveLogCursor = toMaybeNumber(tail.nextCursor ?? tail.cursor ?? liveLog.nextCursor ?? liveLog.cursor, 0) ?? 0;
       const sourceName = redactionAwareText(
         logTailSourceDisplayName(tail.source?.id ? tail.source : liveLogSource),
         t('logs.activeRunLog'),
       ) || t('logs.activeRunLog');
+      const totalVisible = structuredEntries.length + entries.length;
+      const liveSectionLabel = `${t('logs.liveTail')} / ${sourceName}`;
+      const structuredSection = structuredEntries.length
+        ? `
+          <div class="log-feed__section log-feed__section--structured">
+            <div class="log-feed__section-head">
+              <span class="badge badge--info">${escapeHTML(t('common.source'))}</span>
+              <div class="log-feed__section-title">${escapeHTML(redactionAwareText(structuredSource.label, t('logs.structuredEventsSource')) || t('logs.structuredEventsSource'))}</div>
+              <div class="log-feed__section-copy">${escapeHTML(t('logs.linesShown', { count: structuredEntries.length }))}</div>
+            </div>
+            ${structuredEntries.map((line) => renderLogRow(line)).join('')}
+          </div>
+        `
+        : '';
+      const liveSection = `
+        <div class="log-feed__section log-feed__section--live">
+          <div class="log-feed__section-head">
+            <span class="badge badge--accent">${escapeHTML(t('common.source'))}</span>
+            <div class="log-feed__section-title">${escapeHTML(liveSectionLabel)}</div>
+            <div class="log-feed__section-copy">${escapeHTML(t('logs.linesShown', { count: entries.length }))}</div>
+          </div>
+          ${outputSignal.visible ? `
+            <div class="section-banner section-banner--warn log-feed__signal">
+              <span class="dot"></span>
+              <div>
+                <div class="section-banner__title">${escapeHTML(outputSignal.warningText)}</div>
+                <div class="section-banner__copy">${escapeHTML(`${t('pipeline.latestLogLine')}: ${outputSignal.lastLineText}`)}</div>
+              </div>
+            </div>
+          ` : ''}
+          ${entries.length ? entries.map((line) => renderLogRow(line, {
+            selectable: true,
+            selected: selected.has(String(toMaybeNumber(line.line_number ?? line.cursor, null))),
+          })).join('') : `<div class="summary-note">${escapeHTML(banner.copy)}</div>`}
+        </div>
+      `;
       const body = `
         <div class="view-grid">
           ${panel(
             t('logs.liveTail'),
-          `${escapeHTML(t('logs.linesShown', { count: entries.length }))} | ${escapeHTML(t('logs.cursor'))} ${escapeHTML(String(liveLogCursor))}`,
+          `${escapeHTML(t('logs.linesShown', { count: totalVisible }))} | ${escapeHTML(t('logs.cursor'))} ${escapeHTML(String(liveLogCursor))}`,
           `
               ${renderLogTailBanner(tail)}
               ${redactionNote}
@@ -16062,14 +16712,12 @@
 
           ${panel(
             `${escapeHTML(sourceName)}`,
-            escapeHTML(entries.length === 1 ? t('logs.filteredLine') : t('logs.filteredLines')),
+            escapeHTML(totalVisible === 1 ? t('logs.filteredLine') : t('logs.filteredLines')),
             `
               <div class="log-feed">
                 <div class="log-feed__scroll" data-log-scroll>
-                  ${entries.length ? entries.map((line) => renderLogRow(line, {
-                    selectable: true,
-                    selected: selected.has(String(toMaybeNumber(line.line_number ?? line.cursor, null))),
-                  })).join('') : `<div class="summary-note">${escapeHTML(banner.copy)}</div>`}
+                  ${structuredSection}
+                  ${liveSection}
                 </div>
               </div>
             `
@@ -16284,9 +16932,9 @@
                 ${kpiCard(t('backlog.pending'), String(toNumber(backlogCounts.pending ?? state.backlog.filter((task) => task.status === 'pending').length, 0)), t('backlog.queued'))}
                 ${kpiCard(t('backlog.inProgress'), String(toNumber(backlogCounts.in_progress ?? state.backlog.filter((task) => task.status === 'in_progress').length, 0)), t('backlog.active'), true)}
                 ${kpiCard(t('backlog.done'), String(toNumber(backlogCounts.done ?? state.backlog.filter((task) => task.status === 'done').length, 0)), t('backlog.completed'))}
-                ${kpiCard(t('backlog.environment'), String(toNumber(backlogCounts.blocked_env ?? state.backlog.filter((task) => task.status === 'blocked_env').length, 0)), t('backlog.blockedEnv'))}
-                ${kpiCard(t('backlog.contract'), String(toNumber(backlogCounts.review ?? state.backlog.filter((task) => ['review_required', 'test_contract_changed'].includes(task.status)).length, 0)), t('backlog.manualReview'))}
-                ${kpiCard(t('backlog.regression'), String(toNumber(backlogCounts.regressed ?? state.backlog.filter((task) => ['failed', 'regression_failed'].includes(task.status)).length, 0)), t('backlog.regressionFailed'))}
+                ${kpiCard(t('backlog.environment'), String(toNumber(backlogCounts.blocked_env ?? state.backlog.filter((task) => backlogTaskGroupStatus(task) === 'blocked_env').length, 0)), t('backlog.blockedEnv'))}
+                ${kpiCard(t('backlog.contract'), String(toNumber(backlogCounts.review ?? state.backlog.filter((task) => ['review_required', 'test_contract_changed'].includes(backlogTaskGroupStatus(task))).length, 0)), t('backlog.manualReview'))}
+                ${kpiCard(t('backlog.regression'), String(toNumber(backlogCounts.regressed ?? state.backlog.filter((task) => ['failed', 'regression_failed'].includes(backlogTaskGroupStatus(task))).length, 0)), t('backlog.regressionFailed'))}
               </div>
               <div style="margin-top:12px;">${detail}</div>
             `
@@ -17376,6 +18024,8 @@
   function renderWorktree() {
     const review = state.worktreeMerge;
     const status = toText(review.status, 'none');
+    const historicalArtifacts = toArray(review.historicalArtifacts || review.historical_artifacts || review.recentArtifacts || review.recent_artifacts);
+    const historicalOpen = Boolean(state.worktreeHistoricalOpen);
     const cleanupState = toText(review.cleanupState, 'none');
     const cleanupDetails = toObject(review.cleanupDetails || review.cleanup_details);
     const resolutionActions = normalizeWorktreeResolutionActions(review.resolutionActions || review.resolution_actions);
@@ -17409,8 +18059,8 @@
         </div>
       `
       : `<div class="summary-note">${escapeHTML(t('worktree.noChangedFiles'))}</div>`;
-    const statusLabel = (() => {
-      const normalized = status.toLowerCase();
+    const worktreeStatusLabel = (value) => {
+      const normalized = toText(value, 'none').toLowerCase();
       if (normalized === 'none') return t('common.none');
       if (normalized === 'pending review' || normalized === 'pending') return t('worktree.reviewRequired');
       if (normalized === 'applied') return t('worktree.patchApplied');
@@ -17420,8 +18070,9 @@
       if (normalized === 'applied_cleanup_failed') return t('worktree.mergeRecordedCleanupFailed');
       if (normalized === 'discard_cleanup_failed') return t('worktree.discardRecordedCleanupFailed');
       if (normalized === 'error') return t('common.failed');
-      return status;
-    })();
+      return toText(value, 'none');
+    };
+    const statusLabel = worktreeStatusLabel(status);
     const cleanupStateLabel = (() => {
       const normalized = cleanupState.toLowerCase();
       if (normalized === 'none') return t('common.none');
@@ -17561,6 +18212,53 @@
         `
       )
       .join('');
+    const historicalToggle = historicalArtifacts.length
+      ? `<button type="button" class="button button--quiet" data-worktree-history-toggle="${historicalOpen ? 'closed' : 'open'}">${escapeHTML(historicalOpen ? t('worktree.hideRecentContext') : t('worktree.showRecentContext'))}</button>`
+      : '';
+    const historicalContextBody = historicalOpen && historicalArtifacts.length
+      ? `
+        <div class="compact-list" data-worktree-history-context="open">
+          ${historicalArtifacts.map((item) => {
+            const itemStatus = toText(item.status, 'none');
+            const itemStatusFile = toText(item.statusFile || item.status_file, '');
+            const itemPatchPath = toText(item.patchPath || item.patch_path || item.patch, '');
+            const itemRunDir = toText(item.runDir || item.run_dir, '');
+            const itemCleanupState = toText(item.cleanupState || item.cleanup_state, 'none');
+            const bodyText = [worktreeStatusLabel(itemStatus), itemStatusFile || itemPatchPath || itemRunDir || t('common.unavailable')]
+              .filter(Boolean)
+              .join(' | ');
+            const metaText = [
+              t('worktree.historicalArtifact'),
+              itemCleanupState !== 'none' ? `${t('worktree.cleanupState')} ${itemCleanupState}` : '',
+              t('worktree.readOnly'),
+            ].filter(Boolean).join(' | ');
+            return `
+              <div class="compact-list__item" data-worktree-history-artifact="${escapeHTML(itemStatus)}">
+                <span class="compact-list__bullet"></span>
+                <div>
+                  <div class="compact-list__body">${escapeHTML(bodyText)}</div>
+                  <div class="compact-list__meta">${escapeHTML(metaText)}</div>
+                  ${itemStatus !== 'none' ? renderWorktreePreflightBlock(item) : ''}
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+        <div class="summary-note" style="margin-top:12px;">${escapeHTML(t('worktree.historicalNoActions'))}</div>
+      `
+      : `<div class="summary-note" data-worktree-history-context="closed">${escapeHTML(historicalArtifacts.length ? t('worktree.recentContextClosed') : t('worktree.noRecentContext'))}</div>`;
+    const historicalContextHTML = historicalArtifacts.length
+      ? panel(
+          t('worktree.recentContext'),
+          historicalOpen ? t('worktree.recentContextOpen') : `${historicalArtifacts.length} ${t('common.recent')}`,
+          `
+            <div class="modal-actions" style="margin-bottom:12px;">
+              ${historicalToggle}
+            </div>
+            ${historicalContextBody}
+          `
+        )
+      : '';
 
     const body = `
       <div class="review-layout">
@@ -17610,6 +18308,8 @@
             `${escapeHTML(review.changedFiles.length)} ${escapeHTML(t('common.files'))}`,
             changedFilesHTML
           )}
+
+          ${historicalContextHTML}
         </div>
 
         <div class="view-grid">
@@ -18983,6 +19683,7 @@
     experience: clone(defaults.experience),
     metrics: clone(defaults.metrics),
     logs: clone(defaults.logs),
+    logStructuredSource: clone(defaults.logStructuredSource),
     logTail: clone(defaults.logTail),
     logFiles: clone(defaults.logFiles),
     notifications: clone(defaults.notifications),
@@ -19039,7 +19740,7 @@
 
   const APP_BOOTSTRAP = `
     <div class="topbar" id="topbar"></div>
-    <aside class="sidebar" id="sidebar"><div class="sidebar__inner"></div></aside>
+    <aside class="sidebar" id="sidebar"><div class="sidebar__inner" data-shell-nav-container></div></aside>
     <main class="main" id="main"></main>
     <div class="overlay-root" id="overlay-root" aria-live="polite"></div>
   `;
@@ -20134,6 +20835,7 @@
 
   function setView(view) {
     const next = normalizeView(view);
+    const previous = state.activeView;
     state.activeView = next;
     state.paletteOpen = false;
     state.stopOpen = false;
@@ -20146,12 +20848,7 @@
     }
     renderShell({ preserveScroll: false });
     syncLogTailStreaming();
-    if (next === 'prompts') {
-      void loadPromptEditor(currentPrompt());
-    }
-    if (next === 'pr-queue') {
-      requestPrQueueDetailForView();
-    }
+    hydrateRouteView(next, previous);
   }
 
   function applyPaletteSelection(index) {
@@ -20232,6 +20929,64 @@
     if (state.pollTimer) {
       window.clearTimeout(state.pollTimer);
       state.pollTimer = null;
+    }
+  }
+
+  function snapshotScopeForView(view = state.activeView) {
+    return normalizeView(view) === 'dashboard' ? 'dashboard' : 'full';
+  }
+
+  function buildStatusRequestUrl(view = state.activeView, scopeOverride = '') {
+    const scope = toText(scopeOverride || snapshotScopeForView(view), 'full').trim().toLowerCase() || 'full';
+    return scope === 'dashboard' ? '/api/status?scope=dashboard' : '/api/status?scope=full';
+  }
+
+  function routeNeedsSnapshotHydration(view = state.activeView) {
+    const normalizedView = normalizeView(view);
+    if (normalizedView === 'goals') {
+      return !toText(state.goalsSnapshot?.raw_text || state.goalsSnapshot?.rawText, '').trim();
+    }
+    if (normalizedView === 'config') {
+      return !Object.keys(toObject(state.configSchema || state.configContract?.schema || {})).length;
+    }
+    if (normalizedView === 'prompts') {
+      return !toArray(state.prompts).length;
+    }
+    if (normalizedView === 'history') {
+      return !toArray(state.history).length;
+    }
+    return false;
+  }
+
+  function routeNeedsExplicitFullSnapshot(nextView, previousView = state.activeView) {
+    return (
+      snapshotScopeForView(nextView) === 'full' &&
+      snapshotScopeForView(previousView) !== 'full' &&
+      routeNeedsSnapshotHydration(nextView)
+    );
+  }
+
+  function hydrateRouteView(nextView, previousView = state.activeView) {
+    const normalizedNext = normalizeView(nextView);
+    if (routeNeedsExplicitFullSnapshot(normalizedNext, previousView)) {
+      void refreshSnapshot({ silent: true, forceScope: 'full' }).then(() => {
+        if (state.activeView !== normalizedNext) {
+          return;
+        }
+        if (normalizedNext === 'prompts') {
+          void loadPromptEditor(currentPrompt());
+        }
+        if (normalizedNext === 'pr-queue') {
+          requestPrQueueDetailForView();
+        }
+      });
+      return;
+    }
+    if (normalizedNext === 'prompts') {
+      void loadPromptEditor(currentPrompt());
+    }
+    if (normalizedNext === 'pr-queue') {
+      requestPrQueueDetailForView();
     }
   }
 
@@ -20319,9 +21074,13 @@
   }
 
   async function refreshSnapshot(options = {}) {
-    const { allowFallback = false } = options;
+    const { allowFallback = false, forceScope = '' } = options;
     const refresh = ensureSnapshotRefreshState();
+    const requestScope = toText(forceScope || snapshotScopeForView(state.activeView), 'full').trim().toLowerCase() || 'full';
     if (refresh.inFlight) {
+      if (requestScope !== toText(refresh.requestScope, '').trim().toLowerCase()) {
+        refresh.pendingScope = requestScope;
+      }
       return false;
     }
     if (refresh.timer) {
@@ -20335,10 +21094,12 @@
     const requestSeq = refresh.requestSeq + 1;
     refresh.requestSeq = requestSeq;
     refresh.inFlight = true;
+    refresh.requestScope = requestScope;
+    refresh.pendingScope = '';
     const attemptAt = nowMs();
     refresh.lastAttemptAt = attemptAt;
     try {
-      const response = await fetch('/api/status', {
+      const response = await fetch(buildStatusRequestUrl(state.activeView, requestScope), {
         headers: { Accept: 'application/json' },
         cache: 'no-store',
       });
@@ -20433,6 +21194,9 @@
       nextRefresh.stale = Boolean(nextRefresh.stale);
       nextRefresh.staleReasons = toArray(nextRefresh.staleReasons).map((reason) => toText(reason, '')).filter(Boolean);
       nextRefresh.latestRunDir = toText(normalized.latestRunDir || nextRefresh.latestRunDir, nextRefresh.latestRunDir);
+      const pendingScope = toText(nextRefresh.pendingScope, '').trim().toLowerCase();
+      nextRefresh.requestScope = '';
+      nextRefresh.pendingScope = '';
       if (nextRefresh.stale) {
         state.snapshotStatus = 'stale';
         state.snapshotLabel = t('snapshot.stale');
@@ -20441,6 +21205,9 @@
       syncLogTailStreaming({
         reset: previousSourceMode !== state.sourceMode || previousLatestRunDir !== state.latestRunDir,
       });
+      if (pendingScope && pendingScope !== requestScope) {
+        return refreshSnapshot({ silent: true, forceScope: pendingScope });
+      }
       if (nextRefresh.active) {
         scheduleSnapshotRefresh(nextRefresh.retryDelayMs);
       }
@@ -20474,6 +21241,8 @@
         fallbackRefresh.retryCount = 0;
         fallbackRefresh.retryDelayMs = SNAPSHOT_POLL_MS;
         fallbackRefresh.nextRefreshAt = fallbackRefresh.active ? nowMs() + fallbackRefresh.retryDelayMs : 0;
+        fallbackRefresh.requestScope = '';
+        fallbackRefresh.pendingScope = '';
         state.snapshotStatus = 'fallback';
         state.snapshotLabel = t('snapshot.fallback');
         state.sourceMode = 'fallback';
@@ -20515,7 +21284,13 @@
             ? t('snapshot.permissionDenied')
             : t('snapshot.error');
       }
+      const pendingScope = toText(nextRefresh.pendingScope, '').trim().toLowerCase();
+      nextRefresh.requestScope = '';
+      nextRefresh.pendingScope = '';
       renderSnapshotRefreshUI();
+      if (pendingScope && pendingScope !== requestScope) {
+        return refreshSnapshot({ silent: true, forceScope: pendingScope });
+      }
       if (nextRefresh.active) {
         scheduleSnapshotRefresh(nextRefresh.retryDelayMs);
       }
@@ -20611,6 +21386,12 @@
       } else {
         toggleWorktreeDiagnosticsFilter(value);
       }
+      return;
+    }
+
+    const worktreeHistoryToggle = event.target.closest('[data-worktree-history-toggle]');
+    if (worktreeHistoryToggle) {
+      setWorktreeHistoricalOpen(worktreeHistoryToggle.dataset.worktreeHistoryToggle === 'open');
       return;
     }
 
@@ -20977,15 +21758,12 @@
 
   window.addEventListener('hashchange', () => {
     const next = normalizeView(location.hash.replace(/^#/, ''));
+    const previous = state.activeView;
     if (next !== state.activeView) {
       state.activeView = next;
       renderShell({ preserveScroll: false });
-      if (next === 'prompts') {
-        void loadPromptEditor(currentPrompt());
-      }
-      if (next === 'pr-queue') {
-        requestPrQueueDetailForView();
-      }
+      syncLogTailStreaming();
+      hydrateRouteView(next, previous);
     }
   });
 

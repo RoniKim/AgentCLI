@@ -466,12 +466,20 @@ function Get-LogHandles {
 $repoRootResolved = Resolve-RepoRoot -Value $RepoRoot
 $explicitRunDir = [bool]$RunDir
 $runDirResolved = Resolve-LatestRunDir -RepoRoot $repoRootResolved -Value $RunDir
-$diagnosticsDir = Join-Path $repoRootResolved ".AgentCLI\diagnostics"
+$diagnosticsDir = if ($runDirResolved) {
+    Join-Path $runDirResolved "diagnostics"
+} else {
+    Join-Path $repoRootResolved ".AgentCLI\diagnostics"
+}
 New-Item -ItemType Directory -Force -Path $diagnosticsDir | Out-Null
 
 if (-not $OutputPath) {
-    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $OutputPath = Join-Path $diagnosticsDir "windows-handle-diagnostics-$stamp.jsonl"
+    if ($runDirResolved) {
+        $OutputPath = Join-Path $diagnosticsDir "windows-handle-diagnostics.jsonl"
+    } else {
+        $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        $OutputPath = Join-Path $diagnosticsDir "windows-handle-diagnostics-$stamp.jsonl"
+    }
 }
 
 $outputParent = Split-Path -Parent $OutputPath
@@ -527,6 +535,7 @@ while ($true) {
         ts = $now.ToString("o")
         repoRoot = $repoRootResolved
         runDir = $runDirResolved
+        processCount = @($processes).Count
         latestMetric = Read-LastJsonLine -Path $metricsPath
         state = Read-JsonFile -Path $statePath
         files = [ordered]@{

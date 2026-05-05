@@ -509,6 +509,125 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(min(nav_heights), 26, f"{route} sidebar controls below desktop height: {metrics}")
         self.assertLessEqual(max(nav_heights), 44, f"{route} sidebar controls above stable desktop height: {metrics}")
 
+    def _assert_mobile_navigation_layout(self, page, route: str) -> None:
+        metrics = page.evaluate(
+            """(route) => {
+                const visible = (el) => {
+                    const style = getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                };
+                const round = (value) => Math.round(value * 10) / 10;
+                const rectSummary = (el) => {
+                    if (!el) return null;
+                    const rect = el.getBoundingClientRect();
+                    return {
+                        top: round(rect.top),
+                        bottom: round(rect.bottom),
+                        left: round(rect.left),
+                        right: round(rect.right),
+                        width: round(rect.width),
+                        height: round(rect.height),
+                    };
+                };
+                const findOffscreenButtons = (selector, container) => {
+                    const containerRect = container ? container.getBoundingClientRect() : null;
+                    return Array.from(document.querySelectorAll(selector))
+                        .filter(visible)
+                        .map((el) => {
+                            const rect = el.getBoundingClientRect();
+                            return {
+                                text: (el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 120),
+                                left: rect.left,
+                                right: rect.right,
+                                top: rect.top,
+                                bottom: rect.bottom,
+                            };
+                        })
+                        .filter((item) => {
+                            if (!containerRect) return true;
+                            return (
+                                item.left < containerRect.left - 2 ||
+                                item.right > containerRect.right + 2 ||
+                                item.left < -2 ||
+                                item.right > window.innerWidth + 2
+                            );
+                        })
+                        .map((item) => ({
+                            text: item.text,
+                            left: round(item.left),
+                            right: round(item.right),
+                            top: round(item.top),
+                            bottom: round(item.bottom),
+                        }));
+                };
+                const root = document.documentElement;
+                const body = document.body;
+                const main = document.querySelector('#main');
+                const shellNav = document.querySelector('[data-shell-nav-container]');
+                const mobileRouteGrid = document.querySelector('[data-mobile-route-grid]');
+                return {
+                    route,
+                    innerWidth: window.innerWidth,
+                    rootClientWidth: root.clientWidth,
+                    documentScrollWidth: root.scrollWidth,
+                    bodyScrollWidth: body.scrollWidth,
+                    mainClientWidth: main ? main.clientWidth : 0,
+                    mainScrollWidth: main ? main.scrollWidth : 0,
+                    shellNavRect: rectSummary(shellNav),
+                    shellNavClientWidth: shellNav ? shellNav.clientWidth : 0,
+                    shellNavScrollWidth: shellNav ? shellNav.scrollWidth : 0,
+                    mobileRouteRect: rectSummary(mobileRouteGrid),
+                    mobileRouteClientWidth: mobileRouteGrid ? mobileRouteGrid.clientWidth : 0,
+                    mobileRouteScrollWidth: mobileRouteGrid ? mobileRouteGrid.scrollWidth : 0,
+                    shellNavCount: Array.from(document.querySelectorAll('#sidebar [data-nav]')).filter(visible).length,
+                    mobileRouteCount: Array.from(document.querySelectorAll('[data-mobile-route-grid] [data-nav]')).filter(visible).length,
+                    sidebarOffscreenButtons: findOffscreenButtons('#sidebar [data-nav]', shellNav),
+                    mobileRouteOffscreenButtons: findOffscreenButtons('[data-mobile-route-grid] [data-nav]', mobileRouteGrid),
+                };
+            }""",
+            route,
+        )
+        width_tolerance = 2
+        self.assertEqual(390, metrics["innerWidth"], f"{route} was not measured at the mobile viewport: {metrics}")
+        self.assertLessEqual(
+            metrics["documentScrollWidth"],
+            metrics["rootClientWidth"] + width_tolerance,
+            f"{route} document overflows horizontally at mobile width: {metrics}",
+        )
+        self.assertLessEqual(
+            metrics["bodyScrollWidth"],
+            metrics["rootClientWidth"] + width_tolerance,
+            f"{route} body overflows horizontally at mobile width: {metrics}",
+        )
+        self.assertLessEqual(
+            metrics["mainScrollWidth"],
+            metrics["mainClientWidth"] + width_tolerance,
+            f"{route} main overflows horizontally at mobile width: {metrics}",
+        )
+        self.assertGreater(metrics["shellNavCount"], 0, f"{route} shell navigation controls were not measured: {metrics}")
+        self.assertGreater(metrics["mobileRouteCount"], 0, f"{route} mobile workflow route buttons were not measured: {metrics}")
+        self.assertIsNotNone(metrics["shellNavRect"], f"{route} shell nav container missing: {metrics}")
+        self.assertIsNotNone(metrics["mobileRouteRect"], f"{route} mobile route grid missing: {metrics}")
+        self.assertLessEqual(
+            metrics["shellNavScrollWidth"],
+            metrics["shellNavClientWidth"] + width_tolerance,
+            f"{route} shell nav container hides controls with internal horizontal overflow: {metrics}",
+        )
+        self.assertLessEqual(
+            metrics["mobileRouteScrollWidth"],
+            metrics["mobileRouteClientWidth"] + width_tolerance,
+            f"{route} mobile route grid hides controls with internal horizontal overflow: {metrics}",
+        )
+        shell_rect = metrics["shellNavRect"]
+        self.assertGreaterEqual(shell_rect["left"], -width_tolerance, f"{route} shell nav is shifted off-screen: {metrics}")
+        self.assertLessEqual(shell_rect["right"], metrics["innerWidth"] + width_tolerance, f"{route} shell nav exceeds the viewport: {metrics}")
+        route_rect = metrics["mobileRouteRect"]
+        self.assertGreaterEqual(route_rect["left"], -width_tolerance, f"{route} mobile route grid is shifted off-screen: {metrics}")
+        self.assertLessEqual(route_rect["right"], metrics["innerWidth"] + width_tolerance, f"{route} mobile route grid exceeds the viewport: {metrics}")
+        self.assertEqual([], metrics["sidebarOffscreenButtons"], f"{route} shell nav has off-screen route controls: {metrics}")
+        self.assertEqual([], metrics["mobileRouteOffscreenButtons"], f"{route} mobile workflow route buttons are not fully reachable: {metrics}")
+
     def _read_snapshot(self) -> dict[str, object]:
         with urlopen(f"{self.server_url}/api/status", timeout=5) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -853,6 +972,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             page.locator('#sidebar [data-nav="mobile"]').click()
             self.expect(page.locator("#main")).to_have_attribute("data-view", "mobile")
             mobile_root = page.locator("[data-mobile-workflow-root]")
+            self._assert_mobile_navigation_layout(page, "mobile")
 
             filter_input = mobile_root.locator('[data-mobile-filter-panel] [data-log-filter-field="search"]')
             self.expect(filter_input).to_be_visible()
@@ -877,11 +997,10 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             dimensions = page.evaluate(
                 """() => ({
                     innerWidth: window.innerWidth,
-                    scrollWidth: document.documentElement.scrollWidth,
                     confirmHeights: Array.from(document.querySelectorAll('[data-mobile-confirmation-panel] .button')).map((el) => el.getBoundingClientRect().height),
                 })"""
             )
-            self.assertLessEqual(dimensions["scrollWidth"], dimensions["innerWidth"])
+            self.assertEqual(390, dimensions["innerWidth"])
             self.assertGreaterEqual(min(dimensions["confirmHeights"]), 34)
             self._capture_screenshot(page, "mobile-workflow-390.png")
 
@@ -1293,7 +1412,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
                         return
                     route.fulfill(json=fixture)
 
-                context.route("**/api/status", handle_status)
+                context.route("**/api/status**", handle_status)
 
             try:
                 page = self._open_page(playwright, before_goto=before_goto)

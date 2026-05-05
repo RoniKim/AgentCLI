@@ -11,6 +11,7 @@ from ..runtime_contract import (
     ROLE_SPEC_CANONICALS,
 )
 from .stages.base import Stage
+from .stages.backlog_refiner_stage import BacklogRefinerStage
 from .stages.pm_stage import PMStage
 from .stages.dev_stage import DevStage
 from .stages.qa_stage import QAStage
@@ -19,6 +20,7 @@ from .stages.security_stage import SecurityStage
 
 _BUILTIN: dict[str, Type[Stage]] = {
     "PM": PMStage,
+    "PL": BacklogRefinerStage,
     "Dev": DevStage,
     "QA": QAStage,
     "Security": SecurityStage,
