@@ -30,7 +30,14 @@ from ..stop_progress import (
     record_stop_progress,
 )
 from ..state import count_state_task_ids, load_backlog_task_ids, load_state
-from ..utils import STOP_REASON_STOP_FILE, atomic_write_json, detect_stop_reason, now_iso, rotate_log_file
+from ..utils import (
+    STOP_REASON_STOP_FILE,
+    atomic_write_json,
+    detect_stop_reason,
+    now_iso,
+    rotate_log_file,
+    subprocess_close_fds_kwargs,
+)
 
 
 RUNNER_START_MODE_CHOICES = ("one-shot", "continuous", "loop")
@@ -1360,7 +1367,7 @@ class RunnerController:
                 stdin=subprocess.DEVNULL,
                 stdout=self._runner_log_handle,
                 stderr=subprocess.STDOUT,
-                **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
+                **subprocess_close_fds_kwargs(),
             )
             if self._runner_process.pid:
                 try:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import ctypes
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import shutil
 from types import SimpleNamespace
@@ -509,6 +511,103 @@ class ProcessGuardTests(unittest.TestCase):
             patch.object(process_guard.sys, "executable", str(fake_python)),
         ):
             self.assertEqual(str(fake_pythonw), process_guard._watchdog_executable())
+
+    def test_runner_controller_subprocess_launch_uses_close_fds(self) -> None:
+        import agent_runner.remote.controller as controller_module
+        from agent_runner.remote.controller import RunnerController
+
+        repo = self.fixture_root / "repo"
+        run_dir = repo / ".AgentCLI" / "agent_runs" / "run"
+        run_dir.mkdir(parents=True)
+        args = argparse.Namespace(config_path="", run_dir=str(run_dir), stop_file="STOP")
+        controller = RunnerController(repo=repo, base_args=args, runner_mode="subprocess")
+        calls: list[dict[str, object]] = []
+
+        def _fake_popen(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append({"cmd": cmd, **kwargs})
+            return SimpleNamespace(pid=321)
+
+        with (
+            patch.object(controller_module.sys, "platform", "win32"),
+            patch.object(controller_module.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True),
+            patch("agent_runner.remote.controller.rotate_log_file"),
+            patch("agent_runner.remote.controller.register_pid"),
+            patch("agent_runner.remote.controller.subprocess.Popen", side_effect=_fake_popen),
+            patch.object(RunnerController, "_start_subprocess_watch"),
+        ):
+            controller._start_subprocess(args, run_dir)
+
+        if controller._runner_log_handle is not None:
+            self.addCleanup(controller._runner_log_handle.close)
+        self.assertEqual(1, len(calls))
+        call = calls[0]
+        self.assertTrue(bool(call["close_fds"]))
+        self.assertEqual(0x08000000, int(call["creationflags"]))
+        self.assertIs(call["stdin"], subprocess.DEVNULL)
+        self.assertIs(call["stderr"], subprocess.STDOUT)
+        self.assertEqual(str(repo.resolve()), str(call["cwd"]))
+
+    def test_codex_exec_async_launch_uses_close_fds(self) -> None:
+        from agent_runner import codex_exec as codex_exec_module
+
+        def _reader(data: bytes) -> asyncio.StreamReader:
+            reader = asyncio.StreamReader()
+            reader.feed_data(data)
+            reader.feed_eof()
+            return reader
+
+        class _FakeStdin:
+            def __init__(self) -> None:
+                self.closed = False
+                self.writes: list[bytes] = []
+
+            def write(self, data: bytes) -> None:
+                self.writes.append(data)
+
+            async def drain(self) -> None:
+                return None
+
+            def close(self) -> None:
+                self.closed = True
+
+        class _FakeProc:
+            def __init__(self) -> None:
+                self.pid: int | None = None
+                self.returncode: int | None = None
+                self.stdin = _FakeStdin()
+                self.stdout = _reader(b"")
+                self.stderr = _reader(b"")
+
+            async def wait(self) -> int:
+                self.returncode = 0
+                return 0
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+        calls: list[dict[str, object]] = []
+
+        async def _fake_create_subprocess_exec(*cmd: object, **kwargs: object) -> _FakeProc:
+            calls.append({"cmd": list(cmd), **kwargs})
+            return _FakeProc()
+
+        with (
+            patch.object(codex_exec_module, "_ALWAYS_USE_STDIN", True),
+            patch("agent_runner.utils.sys.platform", "win32"),
+            patch("agent_runner.utils.subprocess.CREATE_NO_WINDOW", 0x08000000, create=True),
+            patch("agent_runner.codex_exec.asyncio.create_subprocess_exec", side_effect=_fake_create_subprocess_exec),
+        ):
+            result = asyncio.run(codex_exec_module.codex_exec("ping", cwd=self.fixture_root))
+
+        self.assertEqual(0, result.exit_code)
+        self.assertEqual(1, len(calls))
+        call = calls[0]
+        self.assertTrue(bool(call["close_fds"]))
+        self.assertEqual(0x08000000, int(call["creationflags"]))
+        self.assertIs(call["stdout"], asyncio.subprocess.PIPE)
+        self.assertIs(call["stderr"], asyncio.subprocess.PIPE)
+        self.assertIs(call["stdin"], asyncio.subprocess.PIPE)
+        self.assertEqual(str(self.fixture_root), str(call["cwd"]))
 
     @unittest.skipUnless(sys.platform == "win32", "Windows process-tree smoke test")
     def test_run_cmd_async_cleans_inherited_stdout_child_process(self) -> None:
