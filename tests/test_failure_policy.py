@@ -220,10 +220,19 @@ class FailurePolicyTests(unittest.TestCase):
         self.assertEqual(1, len(state["pending_review"]))
 
     def test_failure_result_preserves_validation_artifact_and_detail_metadata(self) -> None:
+        outcome = build_failure_outcome(
+            "build_failed",
+            task_status=TASK_STATUS_REGRESSION_FAILED,
+            detail="BrowserTests failed with stale lock reuse.",
+            validation_artifact="C:/tmp/tasks/T4/attempt_02/validation.json",
+            attempt=0,
+            max_attempts=3,
+        )
         result = build_task_failure_result(
             task_id="T4",
             task_title="Validate browser console",
             reason="build_failed",
+            failure_outcome=outcome,
             task_status=TASK_STATUS_REGRESSION_FAILED,
             detail="BrowserTests failed with stale lock reuse.",
             duration=3.5,
@@ -239,6 +248,13 @@ class FailurePolicyTests(unittest.TestCase):
         self.assertEqual(TASK_STATUS_REGRESSION_FAILED, result["taskStatus"])
         self.assertEqual(TASK_STATUS_REGRESSION_FAILED, result["outcome_status"])
         self.assertTrue(result["review_required"])
+        self.assertTrue(result["retry_eligible"])
+        self.assertTrue(result["retryEligible"])
+        self.assertFalse(result["retry_allowed_now"])
+        self.assertTrue(result["auto_retry_allowed"])
+        self.assertTrue(result["autoRetryAllowed"])
+        self.assertEqual(ACTION_STOP_RUN, result["disposition"])
+        self.assertIn("Failure needs operator review", result["disposition_message"])
         self.assertEqual("BrowserTests failed with stale lock reuse.", result["detail"])
         self.assertEqual(2, result["attempt"])
         self.assertEqual(3, result["max_attempts"])
