@@ -1331,6 +1331,26 @@ def validate_web_console_doc(repo: Path, text: str) -> list[str]:
                         f"{doc_label}: stale final-reason claim in Current Status: {', '.join(invalid)}"
                     )
 
+    validation_section = _section_text(text, "## Validation")
+    if validation_section is not None:
+        normalized_validation = validation_section.replace("\\", "/").lower()
+        required_validation_tokens = {
+            ".venv/Scripts/python.exe".lower(): "repo-local .venv Python",
+            "pythonpycacheprefix": "PYTHONPYCACHEPREFIX",
+            "-m compileall -q agent_runner tests": "package compileall command",
+            "tests.test_docs_validation": "docs validation tests",
+            "tests.test_web_console_static": "web static test slice",
+            "tests.test_web_console_worktree": "web worktree test slice",
+            "tests.test_web_console_readonly": "web readonly test slice",
+            "tests.test_web_console_safety": "web safety test slice",
+            "tests.test_worktree_isolation": "worktree isolation test slice",
+            "tests.test_worktree_manual_merge": "worktree manual-merge test slice",
+            "tests/web_console_playwright_smoke.py": "Playwright smoke command",
+        }
+        for token, label in required_validation_tokens.items():
+            if token not in normalized_validation:
+                errors.append(f"{doc_label}: Validation section missing {label}: {token}")
+
     return errors
 
 

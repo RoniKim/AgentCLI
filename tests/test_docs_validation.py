@@ -239,6 +239,24 @@ class DocsValidationTests(unittest.TestCase):
         self.assertTrue(any("/api/reports/export" in error for error in direct_route_errors), direct_route_errors)
         self.assertTrue(any("stale report-export" in error for error in scope_errors), scope_errors)
 
+    def test_web_console_doc_rejects_incomplete_validation_command_set(self) -> None:
+        text = (ROOT / "docs" / "WEB_CONSOLE.md").read_text(encoding="utf-8")
+        missing_docs_validator = text.replace("& $py -B -m unittest tests.test_docs_validation\n", "", 1)
+        unsplit_web_tests = text.replace(
+            "& $py -B -m unittest tests.test_web_console_static tests.test_web_console_worktree\n"
+            "& $py -B -m unittest tests.test_web_console_readonly\n"
+            "& $py -B -m unittest tests.test_web_console_safety\n",
+            '& $py -B -m unittest discover -s tests -p "test_web_console*.py"\n',
+            1,
+        )
+
+        docs_errors = validate_web_console_doc(ROOT, missing_docs_validator)
+        split_errors = validate_web_console_doc(ROOT, unsplit_web_tests)
+
+        self.assertTrue(any("docs validation tests" in error for error in docs_errors), docs_errors)
+        self.assertTrue(any("web static test slice" in error for error in split_errors), split_errors)
+        self.assertTrue(any("web readonly test slice" in error for error in split_errors), split_errors)
+
     def test_case_mismatched_paths_are_rejected(self) -> None:
         temp_root = ROOT / ".test-scratch" / "docs-validation-case-mismatch"
         shutil.rmtree(temp_root, ignore_errors=True)

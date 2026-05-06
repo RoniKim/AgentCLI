@@ -122,7 +122,7 @@ http://<notebook-ip>:8000
 Run the checked-in Playwright smoke against fixture data:
 
 ```powershell
-python .\tests\web_console_playwright_smoke.py
+.\.venv\Scripts\python.exe -B .\tests\web_console_playwright_smoke.py
 ```
 
 If Playwright or the browser runtime is unavailable, the local smoke skips cleanly and prints the optional setup command instead of installing packages. A release gate must run with Playwright and Chromium installed; skipped smoke output is not browser-render proof.
@@ -132,8 +132,8 @@ If Playwright or the browser runtime is unavailable, the local smoke skips clean
 Install the optional browser test dependency and Chromium binary only if you want to run the smoke locally:
 
 ```powershell
-python -m pip install playwright
-python -m playwright install chromium
+.\.venv\Scripts\python.exe -m pip install playwright
+.\.venv\Scripts\python.exe -m playwright install chromium
 ```
 
 ## Runner Controls
@@ -159,13 +159,18 @@ Authentication is planned separately in [AUTHENTICATION_PLAN.md](AUTHENTICATION_
 ## Validation
 
 ```powershell
-python -B -m py_compile agent_runner\web.py tests\web_console_playwright_smoke.py
-python -B -m unittest discover -s tests -p "test_web_console*.py"
-python -B -m unittest discover -s tests -p "test_worktree*.py"
-python -B .\tests\web_console_playwright_smoke.py
+$py = ".\.venv\Scripts\python.exe"
+$env:PYTHONPYCACHEPREFIX = ".test-scratch\pycache-validation"
+& $py -B -m compileall -q agent_runner tests
+& $py -B -m unittest tests.test_docs_validation
+& $py -B -m unittest tests.test_web_console_static tests.test_web_console_worktree
+& $py -B -m unittest tests.test_web_console_readonly
+& $py -B -m unittest tests.test_web_console_safety
+& $py -B -m unittest tests.test_worktree_isolation tests.test_worktree_manual_merge
+& $py -B .\tests\web_console_playwright_smoke.py
 ```
 
-The web smoke path covers the primary views, Dashboard and Config locale switching, prompt read loading, worktree review, browser console/page errors, and the mobile-width layout. Install Playwright locally before using the browser smoke command as a release gate.
+The web smoke path covers the primary views, Dashboard and Config locale switching, prompt read loading, worktree review, failed merge preflight and patch-apply diagnostics, browser console/page errors, and the mobile-width layout. Install Playwright locally before using the browser smoke command as a release gate.
 
 ## Worktree Diagnostics
 
