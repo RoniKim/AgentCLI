@@ -157,6 +157,46 @@ def _redact_web_local_retention_payload(payload: dict[str, Any]) -> dict[str, An
     return redacted
 
 
+def _redact_web_todo_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(payload)
+    for key in (
+        "dir",
+        "todo_dir",
+        "todoDir",
+        "pointer_path",
+        "pointerPath",
+        "active_path",
+        "activePath",
+        "active_relative_path",
+        "activeRelativePath",
+        "path",
+        "backup_path",
+        "backupPath",
+    ):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+    preview = redacted.get("preview")
+    if isinstance(preview, dict):
+        preview = deepcopy(preview)
+        if preview.get("text") not in (None, "", False):
+            preview["text"] = REDACTED_VALUE
+        if preview.get("lines"):
+            preview["lines"] = []
+        redacted["preview"] = preview
+    todo = redacted.get("todo")
+    if isinstance(todo, dict):
+        redacted["todo"] = _redact_web_todo_payload(todo)
+    redacted["redaction"] = _web_redaction_meta(
+        "dir",
+        "pointer_path",
+        "active_path",
+        "active_relative_path",
+        "preview.text",
+        "preview.lines",
+    )
+    return redacted
+
+
 def _redact_web_log_payload(payload: dict[str, Any]) -> dict[str, Any]:
     redacted = deepcopy(payload)
     entries = redacted.get("entries")

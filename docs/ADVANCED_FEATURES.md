@@ -6,8 +6,8 @@
 
 ## 개요
 
-TODO는 사용자가 작성한 **오늘의 우선순위/작업 목록**을 PM 에이전트에 **최우선 컨텍스트**로 주입하는 기능입니다.
-PM이 백로그를 생성할 때 TODO 내용을 가장 먼저 반영하므로, "이번 Cycle에서 꼭 이것만 해줘"를 지정할 수 있습니다.
+TODO는 사용자가 작성한 **오늘의 우선순위/작업 목록**을 PM 에이전트에 주입하는 기능입니다.
+PM이 백로그를 생성할 때 TODO 내용을 현재 미완료 GOALS 범위 안의 우선순위/맥락으로 반영하므로, "이번 Cycle에서 어떤 GOALS 관련 작업을 먼저 다뤄줘"를 지정할 수 있습니다.
 
 ## 저장 위치
 
@@ -36,7 +36,7 @@ REPO/.AgentCLI/todo/
 ```
 1. /todo --save              ← 오늘의 TODO 파일 생성, 에디터 열림
 2. (에디터에서 우선순위/작업 작성 후 저장)
-3. /start                    ← 러너 실행 → PM이 TODO를 최우선으로 반영
+3. /start                    ← 러너 실행 → PM이 TODO를 미완료 GOALS 범위 안에서 우선 반영
 ```
 
 ## TODO 파일 기본 템플릿
@@ -66,18 +66,19 @@ REPO/.AgentCLI/todo/
 TODO 내용은 PM의 백로그 생성 프롬프트에 다음과 같이 주입됩니다:
 
 ```
-User TODO (highest priority; if present, reflect into backlog tasks):
+User TODO (operator priority within unmet GOALS; if present, reflect into backlog tasks without overriding GOALS-first gating):
 {todo_block}
 ```
 
-- **"highest priority"** — PM은 TODO 항목을 다른 소스(repo 분석, 이전 백로그 등)보다 우선 반영
+- **"operator priority within unmet GOALS"** — PM은 TODO 항목을 현재 미완료 GOALS 범위 안에서 우선순위/맥락으로 반영
+- TODO는 GOALS-first 완료 게이트를 덮어쓰지 않으며, 미완료 GOALS와 무관한 작업을 만들기 위한 우회 수단이 아닙니다.
 - TODO가 없으면 `(none)`이 삽입되어 PM이 자체 판단으로 백로그 생성
 - 최대 12,000자 / 120줄까지 전달 (초과 시 자동 truncate)
 - Codex, Claude 양쪽 백엔드 모두 동일하게 지원
 
 ## TODO만 돌릴 때 Config 설정
 
-"TODO에 적은 작업만 빠르게 처리"하려면 iterations를 낮추고, TODO에 집중 지시를 적습니다:
+"TODO에 적은 GOALS 관련 작업을 빠르게 처리"하려면 iterations를 낮추고, TODO에 집중 지시를 적습니다:
 
 ```json
 {
@@ -118,7 +119,7 @@ python agent_cli.py
 python agent_cli.py --run-now --repo D:\MyProject --iterations 3 --continuous
 ```
 
-> **Tip**: TODO에 `## Priorities` 섹션에 "이 작업만 처리하고 종료"처럼 명시하면 PM이 해당 작업만 백로그로 생성합니다.
+> **Tip**: TODO에 `## Priorities` 섹션을 작성하면 PM이 미완료 GOALS와 맞는 항목을 먼저 백로그에 반영합니다. TODO는 GOALS-first 완료 게이트를 우회하지 않습니다.
 
 ---
 

@@ -1830,6 +1830,7 @@ class WebConsoleSafetyTests(unittest.TestCase):
             ("/api/config/restore", {"backup_path": "agentcli.20260426.bak.json", "confirm": "RESTORE CONFIG BACKUP"}),
             ("/api/prompts/save", {"id": "pm_bootstrap", "file": "pm_bootstrap_prompt.md", "content": "Repo: {repo} {analysis_md}\n"}),
             ("/api/prompts/restore", {"id": "pm_bootstrap", "file": "pm_bootstrap_prompt.md", "backup_path": "pm_bootstrap_prompt.bak.md", "confirm": "RESTORE BACKUP"}),
+            ("/api/todo/save", {"content": "# TODO\n- [ ] Keep GOALS first\n"}),
             ("/api/goals/save", {"draft": {"p0": [self._goal_item("Add FastAPI web console", done=False)], "p1": []}}),
             ("/api/worktree/merge", {"confirmation": "MERGE WORKTREE"}),
             ("/api/worktree/discard", {"confirmation": "DISCARD WORKTREE"}),
@@ -3907,6 +3908,61 @@ class WebConsoleSafetyTests(unittest.TestCase):
         )
         self.assertEqual(403, restore.status_code)
         self.assertEqual("prompt_mutation_disabled", restore.json()["error"]["code"])
+
+    def test_todo_save_requires_opt_in(self) -> None:
+        client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=self.config_path)
+
+        response = client.post("/api/todo/save", json={"content": "# TODO\n- [ ] Stay inside GOALS\n"})
+        self.assertEqual(403, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("todo_save_disabled", payload["error"]["code"])
+        self.assertFalse((self.repo / ".AgentCLI" / "todo").exists())
+
+    def test_todo_save_creates_backup_and_redacted_web_action_audit(self) -> None:
+        todo_path = self.repo / ".AgentCLI" / "todo" / "Today_manual.md"
+        original = "# TODO\n- [ ] Old item\n"
+        updated = "# TODO\n- [ ] Keep GOALS-first PM gating\n"
+        secret_marker = "TODO_SECRET_20260506"
+        _write(todo_path, original)
+        _write(self.repo / ".AgentCLI" / "todo" / "LAST_TODO.txt", ".AgentCLI/todo/Today_manual.md\n")
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        response = client.post("/api/todo/save", json={"content": updated + f"\n# {secret_marker}\n"})
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual("saved", payload["status"])
+        self.assertEqual(todo_path.as_posix(), payload["activePath"])
+        self.assertEqual(updated + f"\n# {secret_marker}\n", todo_path.read_text(encoding="utf-8"))
+        backup_path = Path(payload["backupPath"])
+        self.assertTrue(backup_path.exists())
+        self.assertEqual(original, backup_path.read_text(encoding="utf-8"))
+        self.assertTrue(payload["todo"]["pmInjection"]["doesNotOverrideGoals"])
+        self.assertEqual("goals_first", payload["todo"]["pmInjection"]["priorityPolicy"])
+
+        records = self._read_web_action_audit()
+        todo_record = next(record for record in records if record["action"] == "todo.save")
+        self.assertTrue(todo_record["ok"])
+        self.assertEqual("saved", todo_record["status"])
+        self.assertEqual(len(updated + f"\n# {secret_marker}\n"), todo_record["result"]["content_length"])
+        self.assertTrue(todo_record["result"]["backup_written"])
+        self.assertTrue(todo_record["result"]["does_not_override_goals"])
+        audit_text = self._web_action_audit_path().read_text(encoding="utf-8", errors="replace")
+        self.assertNotIn(secret_marker, audit_text)
+
+    def test_todo_save_rejects_active_path_outside_repo_todo_dir(self) -> None:
+        outside_path = self._tmp / "outside.md"
+        _write(outside_path, "outside\n")
+        _write(self.repo / ".AgentCLI" / "todo" / "LAST_TODO.txt", outside_path.as_posix() + "\n")
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        response = client.post("/api/todo/save", json={"content": "# TODO\n- [ ] Invalid outside write\n"})
+        self.assertEqual(400, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("todo_save_invalid", payload["error"]["code"])
+        self.assertEqual("outside\n", outside_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

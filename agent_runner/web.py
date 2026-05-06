@@ -88,6 +88,7 @@ from .runtime_contract import CODEX_MODEL_FIELD_SPECS, PIPELINE_ROLE_FIELD_SPEC,
 from .stop_progress import normalize_stop_progress_payload, summarize_stop_progress_liveness
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, load_state, parse_backlog_md
 from .task_history import query_history
+from .todo import build_todo_status, save_current_todo_text
 from .failure_policy import (
     STATUS_GROUP_BLOCKED_ENV,
     STATUS_GROUP_REGRESSION,
@@ -123,6 +124,7 @@ from .web_redaction import (
     _redact_web_runner_status_payload,
     _redact_web_stage,
     _redact_web_stages_payload,
+    _redact_web_todo_payload,
     _redact_web_text,
     _web_apply_redaction,
     _web_redaction_active,
@@ -363,6 +365,7 @@ def fallbackSectionMessage(kind: str) -> str:
         "metrics": "No metrics snapshot is available yet.",
         "history": "Run history is empty.",
         "experience": EXPERIENCE_UNAVAILABLE_MESSAGE,
+        "todo": "No active TODO file is selected.",
         "worktree": "No pending worktree merge is available.",
         "prQueue": "No PR queue packets are available.",
         "runnerControl": "Runner controls are unavailable in fallback mode.",
@@ -8262,6 +8265,7 @@ def create_app(
             "logs": snap.get("logs", {}),
             "config": snap.get("config", {}),
             "prompts": snap.get("prompts", {}),
+            "todo": snap.get("todo", {}),
             "history": snap.get("history", {}),
             "metrics": snap.get("metrics", {}),
             "notifications": snap.get("notifications", []),
@@ -8677,6 +8681,108 @@ def create_app(
     @app.get("/api/prompts")
     def api_prompts() -> dict[str, Any]:
         return _section("prompts")
+
+    @app.get("/api/todo")
+    def api_todo(preview: bool = True) -> dict[str, Any]:
+        payload = build_todo_status(repo_root, include_preview=bool(preview))
+        return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_todo_payload)
+
+    def _todo_save_error(status_code: int, code: str, message: str, **details: Any) -> JSONResponse:
+        payload = {
+            "ok": False,
+            "action": "todo-save",
+            "status": "error",
+            "message": message,
+            "error": {
+                "code": code,
+                "message": message,
+                "details": details,
+            },
+            "error_code": code,
+            "errorCode": code,
+            "details": details,
+        }
+        _record_web_action(
+            action="todo.save",
+            route="/api/todo/save",
+            status=_audit_error_status(status_code, code),
+            ok=False,
+            message=message,
+            error_code=code,
+            details=details,
+        )
+        return JSONResponse(status_code=status_code, content=payload)
+
+    @app.post("/api/todo/save")
+    async def api_todo_save(request: Request) -> Any:
+        if lan_safety_active:
+            return _todo_save_error(
+                403,
+                "lan_safety_mutation_blocked",
+                LAN_SAFETY_MUTATION_DISABLED_MESSAGE,
+                **_lan_safety_error_details("todo-save"),
+            )
+        if not controls_enabled:
+            return _todo_save_error(
+                403,
+                "todo_save_disabled",
+                controls_disabled_reason or "TODO edits require runner controls to be enabled.",
+            )
+        if not control_lock.acquire(blocking=False):
+            return _todo_save_error(409, "todo_save_busy", "A mutating action is already in flight.")
+        try:
+            body = await _config_save_body(request)
+            if body is None:
+                return _todo_save_error(400, "invalid_json", "TODO save request body must be JSON.")
+            content_present = any(key in body for key in ("content", "text", "todo", "todo_text", "todoText"))
+            if not content_present:
+                return _todo_save_error(400, "todo_content_required", "TODO save request must include content.")
+            raw_content = _pick_value(
+                body.get("content"),
+                body.get("text"),
+                body.get("todo"),
+                body.get("todo_text"),
+                body.get("todoText"),
+            )
+            try:
+                result = save_current_todo_text(repo_root, "" if raw_content is None else str(raw_content))
+            except ValueError as ex:
+                return _todo_save_error(400, "todo_save_invalid", str(ex))
+            except Exception as ex:
+                return _todo_save_error(500, "todo_save_failed", f"TODO save failed: {ex}")
+            response_payload = {
+                "ok": True,
+                "action": "todo-save",
+                "status": "saved",
+                "message": "TODO saved. PM injection remains constrained by GOALS-first gating.",
+                "path": result.get("path", ""),
+                "active_path": result.get("active_path", ""),
+                "activePath": result.get("activePath", ""),
+                "backup_path": result.get("backup_path", ""),
+                "backupPath": result.get("backupPath", ""),
+                "todo": result.get("todo", {}),
+                "snapshot": _snapshot(busy_override=False),
+            }
+            todo_status = result.get("todo") if isinstance(result.get("todo"), dict) else {}
+            pm_injection = todo_status.get("pmInjection") if isinstance(todo_status.get("pmInjection"), dict) else {}
+            _record_web_action(
+                action="todo.save",
+                route="/api/todo/save",
+                status="saved",
+                ok=True,
+                message=response_payload["message"],
+                result={
+                    "active_path": result.get("active_path", ""),
+                    "backup_path": result.get("backup_path", ""),
+                    "backup_written": bool(result.get("backup_path")),
+                    "content_length": len("" if raw_content is None else str(raw_content)),
+                    "pm_priority_policy": str(pm_injection.get("priorityPolicy") or "goals_first"),
+                    "does_not_override_goals": bool(pm_injection.get("doesNotOverrideGoals", True)),
+                },
+            )
+            return _web_apply_redaction(response_payload, active=web_redaction_active, redactor=_redact_web_todo_payload)
+        finally:
+            control_lock.release()
 
     def _prompt_error(status_code: int, code: str, message: str, **details: Any) -> JSONResponse:
         payload: dict[str, Any] = {

@@ -26,7 +26,7 @@ from .runner_entry import run as run_runner
 from .run_dir import make_run_dir
 from .run_dir import find_latest_run_dir
 from .logger import close_all_loggers, register_structured_logger_cleanup
-from .todo import ensure_todo_file, read_current_todo, set_current_todo, open_path
+from .todo import build_todo_status, ensure_todo_file, read_current_todo, set_current_todo, open_path
 from .preflight import check_runner_start_readiness, format_runner_start_readiness, run_preflight
 from .process_guard import init_process_guard, terminate_all_children
 from .stop_progress import (
@@ -305,6 +305,7 @@ class RunnerShell:
         run_dir_display = eff.get("run_dir") or (self.run_dir.as_posix() if self.run_dir else "(auto, fresh)")
         print(f"run_dir:    {run_dir_display}")
         print(f"resume_latest: {bool(eff.get('resume_latest'))}")
+        self._print_todo_status()
         print(f"autopilot:  {bool(eff.get('autopilot'))}")
         print(f"loop:       {bool(eff.get('loop'))} (sleep={eff.get('loop_sleep_seconds')}s, max_cycles={eff.get('loop_max_cycles')})")
         print(f"continuous: {bool(eff.get('continuous'))} (iterations={eff.get('iterations')}, max_turns_per_task={eff.get('max_turns_per_task')})")
@@ -501,6 +502,26 @@ class RunnerShell:
             return
 
         print("[ERR] Usage: /todo --save | /todo --load <path|latest>")
+
+    def _print_todo_status(self) -> None:
+        if not self.repo:
+            return
+        try:
+            status = build_todo_status(self.repo, include_preview=False)
+        except Exception as ex:
+            print(f"todo:    ERROR ({ex})")
+            return
+        pm = status.get("pm_injection") if isinstance(status.get("pm_injection"), dict) else {}
+        print(
+            "todo:    "
+            f"state={status.get('state') or 'missing'} "
+            f"freshness={status.get('freshness') or 'unknown'} "
+            f"injection={pm.get('state') or 'missing'} "
+            f"goals_first={bool(pm.get('does_not_override_goals', True))}"
+        )
+        active = str(status.get("active_relative_path") or status.get("active_path") or "").strip()
+        if active:
+            print(f"todo_path: {active}")
 
     def start(self, extra_tokens: list[str]) -> None:
         if not self._start_lock.acquire(blocking=False):
@@ -968,6 +989,7 @@ class RunnerShell:
             print(f"mode:    {data.get('runner_mode') or 'thread'}")
             print(f"run_dir: {data.get('run_dir') or '(not set)'}")
             print(f"goals_completion_level: {eff.get('goals_completion_level')}")
+            self._print_todo_status()
             print(f"uptime:  {int(data.get('uptime_seconds') or 0)}s")
             print(f"exit:    {data.get('exit_code') if data.get('exit_code') is not None else '(running/unknown)'}")
             print(
@@ -1012,6 +1034,7 @@ class RunnerShell:
         print(f"running: {alive}")
         print(f"run_dir: {_shorten(run_dir)}")
         print(f"goals_completion_level: {eff.get('goals_completion_level')}")
+        self._print_todo_status()
         print(f"uptime:  {dur}")
         print(f"exit:    {self._runner_exit_code if (not alive) else '(running)'}")
         control_event = read_runner_control_event(run_dir)

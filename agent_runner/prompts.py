@@ -314,7 +314,7 @@ Hard constraint on tasks (important):
 
 Optional: include run-local notes in JSON field 'notes_md'.
 
-User TODO (highest priority; if present, reflect into backlog tasks):
+User TODO (operator priority within unmet GOALS; if present, reflect into backlog tasks without overriding GOALS-first gating):
 {todo_block}
 
 Context:
@@ -377,7 +377,7 @@ Hard constraint on tasks (important):
 
 Optional: include run-local notes in JSON field 'notes_md'.
 
-User TODO (highest priority; if present, reflect into backlog tasks):
+User TODO (operator priority within unmet GOALS; if present, reflect into backlog tasks without overriding GOALS-first gating):
 {todo_block}
 
 Rules:

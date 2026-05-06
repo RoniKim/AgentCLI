@@ -4132,6 +4132,27 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(status_payload["experience"], ensure_ascii=False))
         self.assertFalse(status_payload["runner_control"]["enabled"])
 
+    def test_api_todo_status_preview_and_progress_expose_goals_first_policy(self) -> None:
+        todo_path = self.repo / ".AgentCLI" / "todo" / "Today_demo.md"
+        _write(todo_path, "# TODO\n\n## Priorities\n- [ ] Keep this inside unmet GOALS\n")
+        _write(self.repo / ".AgentCLI" / "todo" / "LAST_TODO.txt", ".AgentCLI/todo/Today_demo.md\n")
+
+        status_payload = self.client.get("/api/status").json()
+        todo_status = status_payload["todo"]
+        self.assertEqual("ready", todo_status["state"])
+        self.assertEqual(todo_path.as_posix(), todo_status["activePath"])
+        self.assertTrue(todo_status["pmInjection"]["enabled"])
+        self.assertTrue(todo_status["pmInjection"]["doesNotOverrideGoals"])
+        self.assertEqual("goals_first", todo_status["pmInjection"]["priorityPolicy"])
+        self.assertEqual("ready", status_payload["sectionState"]["todo"]["status"])
+
+        progress_payload = self.client.get("/api/progress").json()
+        self.assertEqual(todo_path.as_posix(), progress_payload["todo"]["activePath"])
+
+        preview_payload = self.client.get("/api/todo").json()
+        self.assertIn("Keep this inside unmet GOALS", preview_payload["preview"]["text"])
+        self.assertEqual("/api/todo/save", preview_payload["controls"]["edit"]["endpoint"])
+
     def test_api_history_and_history_view_show_missing_report_state(self) -> None:
         missing_run_dir = self._make_live_run_dir("20260426-130500")
         _write_run_bundle(

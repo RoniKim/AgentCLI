@@ -1567,6 +1567,7 @@ def build_snapshot(
     _build_worktree_payload = web._build_worktree_payload
     _build_pr_queue_payload = web._build_pr_queue_payload
     _build_experience_payload = web._build_experience_payload
+    build_todo_status = web.build_todo_status
     scan_worktree_diagnostics = web.scan_worktree_diagnostics
     _stage_output_stall_threshold_seconds = web._stage_output_stall_threshold_seconds
     _tail_text = web._tail_text
@@ -1585,6 +1586,7 @@ def build_snapshot(
     _redact_web_notifications_payload = web._redact_web_notifications_payload
     _redact_web_history_payload = web._redact_web_history_payload
     _redact_web_pr_queue_payload = web._redact_web_pr_queue_payload
+    _redact_web_todo_payload = web._redact_web_todo_payload
     _redact_web_runner_control = web._redact_web_runner_control
     _resolve_log_tail_source_record = web._resolve_log_tail_source_record
     _build_log_tail_payload = web._build_log_tail_payload
@@ -1659,6 +1661,7 @@ def build_snapshot(
     goals_completion_level = resolve_goals_completion_level(cfg.get("goals_completion_level"))
     goals = _build_goals_payload(repo_root, completion_level=goals_completion_level)
     prompt_items = _load_prompt_items(repo_root, prompts_dir, profile=profile)
+    todo = build_todo_status(repo_root, include_preview=False)
     branch = _branch_name(repo_root)
     controller = runner_controller
     if controller is None and runner_controller_auto_build:
@@ -1828,6 +1831,7 @@ def build_snapshot(
     notifications = _web_apply_redaction(notifications, active=redaction_active, redactor=_redact_web_notifications_payload)
     history = _web_apply_redaction(history, active=redaction_active, redactor=_redact_web_history_payload)
     pr_queue = _web_apply_redaction(pr_queue, active=redaction_active, redactor=_redact_web_pr_queue_payload)
+    todo = _web_apply_redaction(todo, active=redaction_active, redactor=_redact_web_todo_payload)
     runner_control = _web_apply_redaction(
         runner_control,
         active=redaction_active,
@@ -2025,6 +2029,12 @@ def build_snapshot(
         "ready" if prompt_items else "empty",
         "" if prompt_items else fallbackSectionMessage("prompts"),
     )
+    todo_state = str(todo.get("state") or "missing").strip().lower() if isinstance(todo, dict) else "missing"
+    todo_section_state = buildSectionState(
+        "todo",
+        "ready" if todo_state == "ready" else "partial" if todo_state in {"empty", "stale"} else "empty" if todo_state == "missing" else "error",
+        str(todo.get("message") or fallbackSectionMessage("todo")) if isinstance(todo, dict) else fallbackSectionMessage("todo"),
+    )
     logs_section_state = buildSectionState(
         "logs",
         "ready" if log_entries else "empty",
@@ -2198,6 +2208,7 @@ def build_snapshot(
         "history": history,
         "metrics": metrics,
         "notifications": notifications,
+        "todo": todo,
         "experience": experience,
         "pr_queue": pr_queue,
         "prQueue": pr_queue,
@@ -2266,6 +2277,7 @@ def build_snapshot(
             "prompts": prompts_section_state,
             "logs": logs_section_state,
             "notifications": notifications_section_state,
+            "todo": todo_section_state,
             "metrics": metrics_section_state,
             "history": history_section_state,
             "experience": experience_section_state,

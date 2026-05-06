@@ -348,7 +348,7 @@
 - [x] Each run writes a concise `WORK_SUMMARY.md` suitable for daily work logs without exposing raw secrets or long transcripts.
 - [x] Web action audit artifacts record local start, stop, restart, config, prompt, goals, and worktree actions with timestamps and results.
 - [x] Local retention settings and dry-run prune reports manage run directories, logs, diagnostics, and backups without deleting pending worktree review state.
-- [ ] TODO management is visible from shell/web status with active TODO path, freshness, PM injection state, and safe preview/edit controls without overriding GOALS-first PM gating.
+- [x] TODO management is visible from shell/web status with active TODO path, freshness, PM injection state, and safe preview/edit controls without overriding GOALS-first PM gating.
 - [ ] Skills doctor/status shows configured roots, discovered skill count, selected skill ids, missing skill warnings, and fuzzy-match suggestions.
 - [ ] PM/Dev/QA skill injection is covered by tests for disabled, enabled, missing-root, missing-skill, and fuzzy-autofix modes.
 - [ ] Claude advanced controls expose validated config, diagnostics, and tests for MCP tools, hooks, dynamic permission, strict isolation, and subagent enablement.

@@ -220,7 +220,7 @@ SKILLS_INDEX summary:
 - Razor 컴포넌트의 CancellationToken 패턴을 항상 확인하세요
 - 안드로이드/Windows 동시 빌드 호환성 유지
 
-User TODO:
+User TODO (operator priority within unmet GOALS; if present, reflect into backlog tasks without overriding GOALS-first gating):
 {todo_block}
 
 Rules:
