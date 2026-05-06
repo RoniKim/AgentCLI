@@ -5,11 +5,11 @@ import queue
 import shutil
 import subprocess
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from ..quota_utils import seconds_until_unix_reset
 from ..utils import eprint, subprocess_close_fds_kwargs
 
 
@@ -268,18 +268,6 @@ def parse_codex_rate_limit_windows(rate_limits_result: dict[str, Any]) -> dict[s
                 windows[f"{win.limit_id}:{wkey}"] = win
 
     return windows
-
-
-def seconds_until_unix_reset(resets_at_unix: Optional[int]) -> int:
-    """Calculate seconds until a Unix reset timestamp."""
-
-    if resets_at_unix is None:
-        return 0
-    try:
-        diff = int(resets_at_unix) - int(time.time())
-        return max(0, diff + 60)
-    except Exception:
-        return 0
 
 
 def check_codex_quota_utilization(

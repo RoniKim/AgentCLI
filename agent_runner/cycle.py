@@ -115,7 +115,7 @@ from .state import (
     write_default_p0_backlog,
     write_backlog_files,
 )
-from .backends.codex_quota import seconds_until_unix_reset
+from .quota_utils import seconds_until_unix_reset
 from .utils import (
     force_utf8_stdio,
     eprint,

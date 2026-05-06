@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import inspect
 
+import agent_runner.cycle as cycle
 import agent_runner.progress as progress
 import agent_runner.utils as utils
 from agent_runner.backends import claude_quota, claudecode, codex_quota, codex_runner
+from agent_runner.quota_utils import seconds_until_unix_reset
 
 
 def test_backend_specific_quota_implementations_live_under_backend_modules() -> None:
     assert codex_runner.check_codex_quota_utilization is codex_quota.check_codex_quota_utilization
+    assert codex_quota.seconds_until_unix_reset is seconds_until_unix_reset
     assert claudecode.check_quota_utilization is claude_quota.check_quota_utilization
     assert claudecode.seconds_until_reset is claude_quota.seconds_until_reset
 
@@ -49,3 +52,9 @@ def test_shared_progress_does_not_own_backend_specific_token_extractors() -> Non
     source = inspect.getsource(progress)
     assert "Codex RunResult" not in source
     assert "Claude SDK structured response" not in source
+
+
+def test_orchestration_does_not_import_backend_specific_quota_modules() -> None:
+    source = inspect.getsource(cycle)
+    assert ".backends.codex_quota" not in source
+    assert ".backends.claude_quota" not in source
