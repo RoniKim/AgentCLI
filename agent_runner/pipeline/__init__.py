@@ -8,6 +8,23 @@ The goal is to decouple orchestration from any specific execution backend.
 """
 
 from .manager import PipelineManager
-from .stage_registry import make_stages, parse_roles
+from .stage_registry import (
+    PluginStageLoadError,
+    build_plugin_stage_diagnostics_payload,
+    coerce_plugin_bool,
+    format_plugin_stage_diagnostics_markdown,
+    make_stages,
+    normalize_plugin_allowlist,
+    parse_roles,
+)
 
-__all__ = ["PipelineManager", "make_stages", "parse_roles"]
+__all__ = [
+    "PipelineManager",
+    "PluginStageLoadError",
+    "build_plugin_stage_diagnostics_payload",
+    "coerce_plugin_bool",
+    "format_plugin_stage_diagnostics_markdown",
+    "make_stages",
+    "normalize_plugin_allowlist",
+    "parse_roles",
+]

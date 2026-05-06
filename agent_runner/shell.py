@@ -30,6 +30,7 @@ from .todo import build_todo_status, ensure_todo_file, read_current_todo, set_cu
 from .skills.status import build_skills_status, format_skills_status_lines
 from .backends.claude_extensions import build_claude_advanced_diagnostics, format_claude_advanced_diagnostics_lines
 from .mcp_diagnostics import build_mcp_diagnostics, format_mcp_diagnostics_lines
+from .pipeline import coerce_plugin_bool, normalize_plugin_allowlist
 from .preflight import check_runner_start_readiness, format_runner_start_readiness, run_preflight
 from .process_guard import init_process_guard, terminate_all_children
 from .stop_progress import (
@@ -359,7 +360,12 @@ class RunnerShell:
                 f"subagents={bool((features.get('subagents') or {}).get('enabled'))}"
             )
         print(f"roles:      {eff.get('roles')}")
-        print(f"plugins_enabled: {bool(eff.get('plugins_enabled'))} (allowlist={eff.get('plugins_allowlist')}, strict={bool(eff.get('plugins_strict'))})")
+        print(
+            "plugins_enabled: "
+            f"{coerce_plugin_bool(eff.get('plugins_enabled'), default=False)} "
+            f"(allowlist={normalize_plugin_allowlist(eff.get('plugins_allowlist'))}, "
+            f"strict={coerce_plugin_bool(eff.get('plugins_strict'), default=True)})"
+        )
         tg = eff.get("telegram") if isinstance(eff.get("telegram"), dict) else {}
         notify_events = tg.get("notify_events") if isinstance(tg.get("notify_events"), list) else []
         print(

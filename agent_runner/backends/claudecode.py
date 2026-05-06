@@ -95,7 +95,14 @@ from ..experience import (
 )
 from ..reporting import collect_shutdown_context, build_local_shutdown_report, write_run_report_artifacts
 from ..pr_queue import queue_review_packet
-from ..pipeline import PipelineManager, make_stages
+from ..pipeline import (
+    PipelineManager,
+    build_plugin_stage_diagnostics_payload,
+    coerce_plugin_bool,
+    format_plugin_stage_diagnostics_markdown,
+    make_stages,
+    normalize_plugin_allowlist,
+)
 from ..pipeline.shared_runtime import (
     SharedCycleDeps,
     append_cycle_summary_line,
@@ -1329,23 +1336,36 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
     continuous = bool(getattr(args, "continuous", False) or getattr(args, "loop", False))
 
     roles_raw = _coerce_roles_arg(getattr(args, "roles", None))
-    plugins_allowlist = getattr(args, "plugins_allowlist", []) or []
-    if isinstance(plugins_allowlist, str):
-        plugins_allowlist = [p.strip() for p in plugins_allowlist.split(",") if p.strip()]
+    plugins_allowlist = normalize_plugin_allowlist(getattr(args, "plugins_allowlist", []) or [])
 
     stages: list = []
     plugin_failure: Optional[Exception] = None
+    plugin_diagnostics: list[dict[str, Any]] = []
+    plugins_enabled = coerce_plugin_bool(getattr(args, "plugins_enabled", False), default=False)
+    plugins_strict = coerce_plugin_bool(getattr(args, "plugins_strict", True), default=True)
     try:
         stages = make_stages(
             roles_raw,
-            plugins_enabled=bool(getattr(args, "plugins_enabled", False)),
-            plugins_allowlist=list(plugins_allowlist),
-            plugins_strict=bool(getattr(args, "plugins_strict", True)),
+            plugins_enabled=plugins_enabled,
+            plugins_allowlist=plugins_allowlist,
+            plugins_strict=plugins_strict,
+            plugin_diagnostics=plugin_diagnostics,
         )
     except Exception as ex:
         plugin_failure = ex
-        safe_write_text(run_dir / "PLUGIN_LOAD_FAILURE.md", f"# Plugin load failure\n\n{ex}\n")
         eprint(f"[STOP] Plugin load failure: {ex}")
+
+    if plugin_diagnostics or plugin_failure is not None:
+        plugin_payload = build_plugin_stage_diagnostics_payload(
+            plugin_diagnostics,
+            strict=plugins_strict,
+            error=plugin_failure,
+        )
+        plugin_report = format_plugin_stage_diagnostics_markdown(plugin_payload)
+        safe_write_text(run_dir / "PLUGIN_LOAD_DIAGNOSTICS.json", json.dumps(plugin_payload, ensure_ascii=False, indent=2) + "\n")
+        safe_write_text(run_dir / "PLUGIN_LOAD_DIAGNOSTICS.md", plugin_report)
+        if plugin_failure is not None:
+            safe_write_text(run_dir / "PLUGIN_LOAD_FAILURE.md", plugin_report)
 
     if plugin_failure is not None:
         if worktree_dir is not None:

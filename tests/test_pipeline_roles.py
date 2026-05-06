@@ -10,11 +10,18 @@ from uuid import uuid4
 
 from agent_runner import web as web_module
 from agent_runner.config import builtin_roles, normalize_roles_value, validate_roles_value
-from agent_runner.pipeline import PipelineManager, make_stages, parse_roles
+from agent_runner.pipeline import (
+    PipelineManager,
+    PluginStageLoadError,
+    build_plugin_stage_diagnostics_payload,
+    format_plugin_stage_diagnostics_markdown,
+    make_stages,
+    parse_roles,
+)
 from agent_runner.pipeline.stages.base import Stage, StageOutcome
 from agent_runner.runtime_contract import BUILTIN_ROLE_SPECS, CODEX_MODEL_DEFAULTS, DEFAULT_ROLE_SPECS, PIPELINE_ROLE_FIELD_SPEC
 from agent_runner.shared import coerce_roles_arg
-from agent_runner.web_config import _build_config_contract, _config_save_changes, _normalize_config_for_launch
+from agent_runner.web_config import _build_config_contract, _config_save_changes, _config_save_validate_change, _normalize_config_for_launch
 from agent_runner.web_payloads import build_stage_payload
 
 
@@ -72,6 +79,123 @@ class PipelineRolesTests(unittest.TestCase):
 
         self.assertEqual(["PM", "pkg.mod:Class", "QA"], [stage.name for stage in stages])
 
+    def test_plugin_stage_diagnostics_cover_allowed_blocked_missing_and_load_error(self) -> None:
+        module_name = "fake_role_plugin_diagnostics"
+        module = types.ModuleType(module_name)
+
+        class PluginStage(Stage):
+            name = "diagnostic-plugin"
+
+            async def run(self, session, cycle_idx):  # type: ignore[override]
+                return StageOutcome.ok()
+
+        class BrokenStage(Stage):
+            name = "broken-plugin"
+
+            def __init__(self) -> None:
+                raise RuntimeError("plugin exploded")
+
+            async def run(self, session, cycle_idx):  # type: ignore[override]
+                return StageOutcome.ok()
+
+        module.PluginStage = PluginStage
+        module.BrokenStage = BrokenStage
+        sys.modules[module_name] = module
+        self.addCleanup(lambda: sys.modules.pop(module_name, None))
+
+        allowed_diagnostics: list[dict[str, object]] = []
+        stages = make_stages(
+            f"PM,{module_name}:PluginStage,QA",
+            plugins_enabled=True,
+            plugins_allowlist=[f"{module_name}:PluginStage"],
+            plugins_strict=True,
+            plugin_diagnostics=allowed_diagnostics,
+        )
+        self.assertEqual(["PM", "diagnostic-plugin", "QA"], [stage.name for stage in stages])
+        self.assertEqual("loaded", allowed_diagnostics[0]["status"])
+        self.assertEqual("loaded", allowed_diagnostics[0]["action"])
+
+        blocked_diagnostics: list[dict[str, object]] = []
+        stages = make_stages(
+            f"PM,{module_name}:PluginStage,QA",
+            plugins_enabled=True,
+            plugins_allowlist=["other.module"],
+            plugins_strict="false",
+            plugin_diagnostics=blocked_diagnostics,
+        )
+        self.assertEqual(["PM", "QA"], [stage.name for stage in stages])
+        self.assertEqual("blocked", blocked_diagnostics[0]["status"])
+        self.assertEqual("allowlist_blocked", blocked_diagnostics[0]["reason"])
+        self.assertEqual("skipped", blocked_diagnostics[0]["action"])
+
+        disabled_diagnostics: list[dict[str, object]] = []
+        stages = make_stages(
+            f"PM,{module_name}:PluginStage,QA",
+            plugins_enabled=False,
+            plugins_allowlist=[module_name],
+            plugins_strict=False,
+            plugin_diagnostics=disabled_diagnostics,
+        )
+        self.assertEqual(["PM", "QA"], [stage.name for stage in stages])
+        self.assertEqual("plugins_disabled", disabled_diagnostics[0]["reason"])
+
+        missing_diagnostics: list[dict[str, object]] = []
+        stages = make_stages(
+            "PM,missing_plugin_module:Stage,QA",
+            plugins_enabled=True,
+            plugins_allowlist=["missing_plugin_module"],
+            plugins_strict=False,
+            plugin_diagnostics=missing_diagnostics,
+        )
+        self.assertEqual(["PM", "QA"], [stage.name for stage in stages])
+        self.assertEqual("missing", missing_diagnostics[0]["status"])
+        self.assertEqual("skipped", missing_diagnostics[0]["action"])
+
+        load_error_diagnostics: list[dict[str, object]] = []
+        stages = make_stages(
+            f"PM,{module_name}:BrokenStage,QA",
+            plugins_enabled=True,
+            plugins_allowlist=[module_name],
+            plugins_strict=False,
+            plugin_diagnostics=load_error_diagnostics,
+        )
+        self.assertEqual(["PM", "QA"], [stage.name for stage in stages])
+        self.assertEqual("load_error", load_error_diagnostics[0]["status"])
+        self.assertEqual("RuntimeError", load_error_diagnostics[0]["error_type"])
+
+        strict_diagnostics: list[dict[str, object]] = []
+        with self.assertRaises(PluginStageLoadError) as raised:
+            make_stages(
+                f"PM,{module_name}:BrokenStage,QA",
+                plugins_enabled=True,
+                plugins_allowlist=[module_name],
+                plugins_strict=True,
+                plugin_diagnostics=strict_diagnostics,
+            )
+        self.assertIn("Plugin stage load failed", str(raised.exception))
+        self.assertEqual("failed", strict_diagnostics[0]["action"])
+
+        payload = build_plugin_stage_diagnostics_payload(load_error_diagnostics, strict=False)
+        self.assertEqual("partial", payload["status"])
+        self.assertEqual({"load_error": 1}, payload["counts"])
+        markdown = format_plugin_stage_diagnostics_markdown(payload)
+        self.assertIn("# Plugin stage diagnostics", markdown)
+        self.assertIn("load_error", markdown)
+
+    def test_plugin_load_diagnostics_are_written_by_codex_and_claude_backends(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for relative in ("agent_runner/cycle.py", "agent_runner/backends/claudecode.py"):
+            source = (root / relative).read_text(encoding="utf-8")
+            for token in (
+                "plugin_diagnostics=",
+                "build_plugin_stage_diagnostics_payload(",
+                "format_plugin_stage_diagnostics_markdown(",
+                "PLUGIN_LOAD_DIAGNOSTICS.json",
+                "PLUGIN_LOAD_DIAGNOSTICS.md",
+                "PLUGIN_LOAD_FAILURE.md",
+            ):
+                self.assertIn(token, source, relative)
+
     def test_coerce_roles_arg_uses_default_for_empty_values(self) -> None:
         default_role_string = ",".join(DEFAULT_ROLE_SPECS)
         self.assertEqual(default_role_string, coerce_roles_arg([]))
@@ -125,6 +249,71 @@ class PipelineRolesTests(unittest.TestCase):
             repo_root / "prompts",
         )
         self.assertEqual(["PM", "pkg.mod:Class", "QA"], contract["values"]["roles"])
+
+    def test_web_config_contract_exposes_and_validates_plugin_stage_fields(self) -> None:
+        repo_root = Path.cwd() / ".tmp" / f"agentcli-plugin-config-{uuid4().hex}"
+        repo_root.mkdir(parents=True, exist_ok=True)
+        cfg_path = repo_root / "agentcli.json"
+        raw_config = {
+            "repo": repo_root.as_posix(),
+            "roles": ["PM", "pkg.mod:Class", "QA"],
+            "plugins_enabled": "true",
+            "plugins_allowlist": "pkg.mod, other.plugin:Stage",
+            "plugins_strict": "false",
+        }
+        cfg_path.write_text(json.dumps(raw_config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        contract = _build_config_contract(
+            repo_root,
+            raw_config,
+            cfg_path,
+            "unit-test",
+            repo_root / "prompts",
+        )
+
+        group = next(item for item in contract["groups"] if item["id"] == "plugins")
+        self.assertEqual(["plugins_enabled", "plugins_allowlist", "plugins_strict"], group["paths"])
+        self.assertEqual("bool", contract["schema"]["plugins_enabled"]["kind"])
+        self.assertEqual("list", contract["schema"]["plugins_allowlist"]["kind"])
+        self.assertEqual("bool", contract["schema"]["plugins_strict"]["kind"])
+        self.assertTrue(contract["values"]["plugins_enabled"])
+        self.assertEqual(["pkg.mod", "other.plugin:Stage"], contract["values"]["plugins_allowlist"])
+        self.assertFalse(contract["values"]["plugins_strict"])
+
+        invalid_enabled, enabled_code, _ = _config_save_validate_change(
+            "plugins_enabled",
+            "yes",
+            contract["schema"]["plugins_enabled"],
+            False,
+        )
+        self.assertEqual("yes", invalid_enabled)
+        self.assertEqual("config_value_type_mismatch", enabled_code)
+
+        save_result, save_error = _config_save_changes(
+            cfg_path,
+            [
+                {"path": "plugins_enabled", "value": True},
+                {"path": "plugins_allowlist", "value": "pkg.mod, other.plugin:Stage"},
+                {"path": "plugins_strict", "value": False},
+            ],
+            schema={
+                "plugins_enabled": contract["schema"]["plugins_enabled"],
+                "plugins_allowlist": contract["schema"]["plugins_allowlist"],
+                "plugins_strict": contract["schema"]["plugins_strict"],
+            },
+            restart_required_paths=["plugins_enabled", "plugins_allowlist", "plugins_strict"],
+        )
+        self.assertIsNone(save_error)
+        self.assertIsNotNone(save_result)
+        saved_raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+        self.assertTrue(saved_raw["plugins_enabled"])
+        self.assertEqual(["pkg.mod", "other.plugin:Stage"], saved_raw["plugins_allowlist"])
+        self.assertFalse(saved_raw["plugins_strict"])
+
+        normalized = _normalize_config_for_launch(saved_raw)
+        self.assertTrue(normalized["plugins_enabled"])
+        self.assertEqual(["pkg.mod", "other.plugin:Stage"], normalized["plugins_allowlist"])
+        self.assertFalse(normalized["plugins_strict"])
 
     def test_build_stage_payload_preserves_pl_and_plugin_stage_records(self) -> None:
         stages = build_stage_payload(

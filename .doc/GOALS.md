@@ -354,7 +354,7 @@
 - [x] Claude advanced controls expose validated config, diagnostics, and tests for MCP tools, hooks, dynamic permission, strict isolation, and subagent enablement.
 - [x] Claude backend parity tests cover PR queue, task status, failure policy, validation artifacts, and advanced-control disabled/enabled modes.
 - [x] MCP mode diagnostics report selected mode, timeout, unavailable tools, and safe fallback behavior without blocking non-MCP runs.
-- [ ] Plugin stage loading has allowlist, strict-mode, failure diagnostics, Web config validation, and tests for allowed, blocked, missing, and load-error stages.
+- [x] Plugin stage loading has allowlist, strict-mode, failure diagnostics, Web config validation, and tests for allowed, blocked, missing, and load-error stages.
 - [ ] Enterprise profile has tests and Web config visibility for Security stage insertion, policy/security scan enablement, and budget floor enforcement.
 - [ ] Completed runs can persist a lightweight redacted final web-history snapshot for replay without storing raw prompts, raw logs, or full GOALS text.
 - [ ] Command Palette exposes operator actions for Runbook, PR Queue, diagnostics, run history, config changes, and safe runner controls with disabled/read-only states.

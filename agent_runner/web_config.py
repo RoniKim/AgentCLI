@@ -71,6 +71,11 @@ CONFIG_CONTRACT_GROUPS: list[dict[str, Any]] = [
         "paths": ["mcp_mode", "mcp_timeout_seconds", "codex_package"],
     },
     {
+        "id": "plugins",
+        "title": "Plugin Stages",
+        "paths": ["plugins_enabled", "plugins_allowlist", "plugins_strict"],
+    },
+    {
         "id": "quota",
         "title": "Quota",
         "paths": [
@@ -231,6 +236,9 @@ CONFIG_CONTRACT_FIELDS: list[dict[str, Any]] = [
     {"path": "mcp_mode", "group": "mcp", "kind": "enum", "label": "MCP mode", "restart": True, "options": ["npx", "codex", "disabled"], "allow_empty": False, "desc": "Launcher mode for Codex MCP integration.", "hint": "Diagnostics stay non-blocking when the selected launcher is unavailable."},
     {"path": "mcp_timeout_seconds", "group": "mcp", "kind": "number", "label": "MCP timeout seconds", "restart": True, "min": 0, "allow_empty": False, "desc": "Timeout applied to MCP launcher operations.", "hint": "Zero disables waiting beyond immediate command completion."},
     {"path": "codex_package", "group": "mcp", "kind": "text", "label": "Codex package", "restart": True, "allow_empty": False, "desc": "Package passed to npx when MCP mode uses npx.", "hint": "Default is @openai/codex@latest."},
+    {"path": "plugins_enabled", "group": "plugins", "kind": "bool", "label": "Plugin stages", "restart": True, "allow_empty": True, "desc": "Enable external plugin stage loading from role specs.", "hint": "Plugin specs must still pass the allowlist."},
+    {"path": "plugins_allowlist", "group": "plugins", "kind": "list", "label": "Plugin allowlist", "restart": True, "item_kind": "text", "allow_empty": True, "desc": "Allowed plugin module or module:class patterns.", "hint": "Examples: my_pkg.stages, my_pkg.* or my_pkg.stage:StageClass."},
+    {"path": "plugins_strict", "group": "plugins", "kind": "bool", "label": "Plugin strict mode", "restart": True, "allow_empty": True, "desc": "Fail the run when plugin stages are disabled, blocked, missing, or fail to load.", "hint": "When off, affected plugin stages are skipped with diagnostics."},
     {"path": "quota_check_enabled", "group": "quota", "kind": "bool", "label": "Quota checks", "allow_empty": True, "desc": "Enable quota utilization checks.", "hint": "Disabling this removes the quota guardrails from the runner."},
     {"path": "quota_five_hour_max_utilization", "group": "quota", "kind": "number", "label": "5h max utilization", "min": 0, "max": 100, "allow_empty": False, "desc": "Five-hour quota utilization ceiling.", "hint": "Percent used before the runner stops or pauses."},
     {"path": "quota_seven_day_max_utilization", "group": "quota", "kind": "number", "label": "7d max utilization", "min": 0, "max": 100, "allow_empty": False, "desc": "Seven-day quota utilization ceiling.", "hint": "Percent used before the runner stops or pauses."},
