@@ -677,7 +677,7 @@ class PRQueueTests(unittest.TestCase):
 
     def test_shell_validate_pr_command_persists_validation_status(self) -> None:
         packet = self._prepare_validation_packet()
-        self._write_pr_queue_validation_config(build_enabled=True, run_tests=True)
+        self._write_pr_queue_validation_config(build_enabled=False, run_tests=False)
         shell = RunnerShell()
         shell.set_repo(self.repo.as_posix())
         stream = io.StringIO()
@@ -752,9 +752,15 @@ class PRQueueTests(unittest.TestCase):
 
         packet_data = json.loads(Path(packet["packet_path"]).read_text(encoding="utf-8"))
         output = stream.getvalue()
+        validation_summary = json.loads(Path(packet_data["validation_artifact_path"]).read_text(encoding="utf-8"))
         self.assertIn("validation_passed", output)
+        self.assertIn("full validation plan", output)
         self.assertEqual("validation_passed", packet_data["validation_status"])
         self.assertTrue(str(packet_data["validation_artifact_path"]).endswith("validation.json"))
+        self.assertTrue(validation_summary["validation_plan"]["full"])
+        self.assertEqual("full", validation_summary["validation_plan"]["mode"])
+        self.assertTrue(validation_summary["validation_plan"]["build_enabled"])
+        self.assertTrue(validation_summary["validation_plan"]["run_tests"])
 
     def test_shell_merge_pr_command_rejects_bad_confirmation(self) -> None:
         packet = self._prepare_validated_packet()

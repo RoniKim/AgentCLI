@@ -2579,6 +2579,7 @@ async def validate_review_packet_async(
     packet_id: str,
     *,
     stop_path: Path | None = None,
+    full: bool = False,
 ) -> dict[str, object]:
     source_repo_path = Path(source_repo).expanduser().resolve()
     packet_id_text = str(packet_id or "").strip()
@@ -2607,6 +2608,10 @@ async def validate_review_packet_async(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     config = _load_pr_queue_validation_config(run_dir)
+    if full:
+        config = dict(config)
+        config["build_enabled"] = True
+        config["run_tests"] = True
     goal_trace_value = _normalize_list_value(packet.get("goal_trace") or packet.get("goalTrace"))
     qa_notes_value = _normalize_str_list(packet.get("qa_notes") or packet.get("qaNotes"))
     changed_files_value = _normalize_str_list(packet.get("changed_files") or packet.get("changedFiles"))
@@ -2955,6 +2960,8 @@ async def validate_review_packet_async(
     }
 
     validation_plan = {
+        "mode": "full" if full else "configured",
+        "full": bool(full),
         "build_enabled": bool(config.get("build_enabled", False)),
         "run_tests": bool(config.get("run_tests", False)),
         "fast_regression_applicable": repo_has_web_worktree_markers(source_repo_path),
@@ -3123,12 +3130,14 @@ def validate_review_packet(
     packet_id: str,
     *,
     stop_path: Path | None = None,
+    full: bool = False,
 ) -> dict[str, object]:
     return asyncio.run(
         validate_review_packet_async(
             source_repo,
             packet_id,
             stop_path=stop_path,
+            full=full,
         )
     )
 

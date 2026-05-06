@@ -2,7 +2,7 @@
 
 > 마지막 갱신: 2026-05-06
 > Web Console 상태 문구와 런타임 role order 검증 반영
-> 모든 항목은 코드와 실제 파일 inventory + file:line 단위 대조 완료
+> 모든 링크는 실제 파일 inventory + case-sensitive path 검증 대상이며, `⚠️ 업데이트 필요` 상태는 validator가 실패로 처리
 
 ---
 
@@ -24,14 +24,14 @@
 | 문서 | 상태 | 우선순위 | 비고 |
 |------|------|---------|------|
 | [INSTALLATION.md](INSTALLATION.md) | ✅ OK | HIGH | 신규 사용자 진입점 |
-| [CONFIGURATION.md](CONFIGURATION.md) | ⚠️ 업데이트 필요 | HIGH | Codex 모델 표·worktree 명령 갱신 필요 |
-| [CONFIG_REFERENCE_KO.md](CONFIG_REFERENCE_KO.md) | ⚠️ 업데이트 필요 | HIGH | 모델 기본값 6개·failover·telegram 섹션 갱신 |
-| [OPERATIONS.md](OPERATIONS.md) | ⚠️ 업데이트 필요 | MEDIUM | budgets 기본값·/doctor 항목 수 |
-| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | ⚠️ 업데이트 필요 | MEDIUM | Stop Reason 표 9개로 확장 |
-| [PIPELINE.md](PIPELINE.md) | ⚠️ 업데이트 필요 | HIGH | Enterprise 가드레일 정정 |
-| [ADVANCED_FEATURES.md](ADVANCED_FEATURES.md) | ⚠️ 업데이트 필요 | HIGH | 매칭 임계값 80%·키 이름 정정 |
-| [CUSTOMIZATION.md](CUSTOMIZATION.md) | ⚠️ 업데이트 필요 | MEDIUM | Skills 기본값 4건 |
-| [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) | ⚠️ 업데이트 필요 | MEDIUM | L5 watchdog·신규 모듈 반영 |
+| [CONFIGURATION.md](CONFIGURATION.md) | ✅ OK | HIGH | Codex 모델 표·worktree 명령 검증 대상 |
+| [CONFIG_REFERENCE_KO.md](CONFIG_REFERENCE_KO.md) | ✅ OK | HIGH | 모델 기본값·failover·telegram 섹션 갱신됨 |
+| [OPERATIONS.md](OPERATIONS.md) | ✅ OK | MEDIUM | budgets 기본값·/doctor·worktree 운영 계약 검증 대상 |
+| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | ✅ OK | MEDIUM | Stop Reason·failover·budget 대응표 갱신됨 |
+| [PIPELINE.md](PIPELINE.md) | ✅ OK | HIGH | Enterprise 가드레일과 역할 순서 갱신됨 |
+| [ADVANCED_FEATURES.md](ADVANCED_FEATURES.md) | ✅ OK | HIGH | 매칭 임계값·shutdown report 키 이름 검증 대상 |
+| [CUSTOMIZATION.md](CUSTOMIZATION.md) | ✅ OK | MEDIUM | Skills 설정 섹션 갱신됨 |
+| [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) | ✅ OK | MEDIUM | watchdog·신규 모듈 구조 반영됨 |
 | [WEB_CONSOLE.md](WEB_CONSOLE.md) | ✅ OK | HIGH | FastAPI route inventory + runtime role order 검증 |
 | [TELEGRAM.md](TELEGRAM.md) | ✅ OK | MEDIUM | 13개 명령·11개 CLI 플래그 정합 |
 | [WORKTREE_MERGE_FAILURE_20260428.md](WORKTREE_MERGE_FAILURE_20260428.md) | ✅ OK | LOW | 이미 코드화 반영됨 |

@@ -5524,9 +5524,23 @@ def build_health(repo: Path | str | None = None) -> dict[str, Any]:
     }
 
 
-def _ensure_fastapi() -> None:
+def _web_dependency_error_message(name: str, repo: Path | str | None = None) -> str:
+    diagnostics = build_web_diagnostics(repo)
+    issue_codes = [
+        str(item.get("code") or "").strip()
+        for item in diagnostics.get("issues") or []
+        if str(item.get("code") or "").strip()
+    ]
+    issues = ", ".join(issue_codes) if issue_codes else "none"
+    return (
+        f"{name} is not installed. Install project requirements inside the repo virtual environment. "
+        f"Web diagnostics status={diagnostics.get('status')}; issues={issues}."
+    )
+
+
+def _ensure_fastapi(repo: Path | str | None = None) -> None:
     if FastAPI is None or FileResponse is None:
-        raise RuntimeError("FastAPI is not installed. Add the declared dependencies before serving the web console.")
+        raise RuntimeError(_web_dependency_error_message("fastapi", repo))
 
 
 def _resolve_web_dir(web_dir: Path | str | None) -> Path:
@@ -6007,12 +6021,12 @@ def create_app(
     trusted_network: bool | None = None,
     enable_runner_controls: bool | None = None,
 ) -> Any:
-    _ensure_fastapi()
+    repo_root = _repo_root(repo)
+    _ensure_fastapi(repo_root)
     try:
         init_process_guard()
     except Exception:
         pass
-    repo_root = _repo_root(repo)
     static_root = _resolve_web_dir(web_dir)
     cfg_path, cfg, _ = _load_config_payload(repo_root, config_path)
     controller = _build_runner_controller(repo_root, cfg, cfg_path)
@@ -8205,7 +8219,7 @@ def serve(
     enable_runner_controls: bool | None = None,
 ) -> None:
     if uvicorn is None:
-        raise RuntimeError("uvicorn is not installed. Add the declared dependencies before serving the web console.")
+        raise RuntimeError(_web_dependency_error_message("uvicorn", repo))
     app = create_app(
         repo,
         web_dir=web_dir,

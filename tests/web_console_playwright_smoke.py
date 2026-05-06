@@ -669,6 +669,89 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
         self.assertTrue(focus_state["firstEnabled"], focus_state)
         self.assertEqual(focus_state["firstEnabled"], focus_state["active"], focus_state)
 
+    def _assert_accessible_control_names_and_contrast(self, page) -> None:
+        audit = page.evaluate(
+            """() => {
+                const visible = (el) => {
+                    const style = getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                };
+                const accessibleName = (el) => (
+                    el.getAttribute('aria-label') ||
+                    el.getAttribute('title') ||
+                    el.getAttribute('placeholder') ||
+                    el.textContent ||
+                    el.value ||
+                    ''
+                ).trim();
+                const describe = (el) => {
+                    const parts = [el.tagName.toLowerCase()];
+                    if (el.id) parts.push(`#${el.id}`);
+                    if (el.className && typeof el.className === 'string') parts.push(`.${el.className.trim().replace(/\\s+/g, '.')}`);
+                    return `${parts.join('')}: ${(el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 80)}`;
+                };
+                const controls = Array.from(document.querySelectorAll('button, input, select, textarea, a[href], [role="button"], [role="tab"]'))
+                    .filter(visible)
+                    .filter((el) => el.getAttribute('aria-hidden') !== 'true');
+                const missingNames = controls.filter((el) => !accessibleName(el)).map(describe);
+
+                const parseRgb = (value) => {
+                    const text = String(value || '').trim();
+                    const hex = text.match(/^#([0-9a-f]{6})$/i);
+                    if (hex) {
+                        return {
+                            r: parseInt(hex[1].slice(0, 2), 16),
+                            g: parseInt(hex[1].slice(2, 4), 16),
+                            b: parseInt(hex[1].slice(4, 6), 16),
+                            a: 1,
+                        };
+                    }
+                    const match = text.match(/rgba?\\(([^)]+)\\)/);
+                    if (!match) return null;
+                    const parts = match[1].split(',').map((part) => Number(part.trim()));
+                    if (parts.length < 3 || parts.slice(0, 3).some((part) => Number.isNaN(part))) return null;
+                    return { r: parts[0], g: parts[1], b: parts[2], a: parts.length >= 4 ? parts[3] : 1 };
+                };
+                const channel = (value) => {
+                    const normalized = value / 255;
+                    return normalized <= 0.03928 ? normalized / 12.92 : Math.pow((normalized + 0.055) / 1.055, 2.4);
+                };
+                const luminance = (rgb) => 0.2126 * channel(rgb.r) + 0.7152 * channel(rgb.g) + 0.0722 * channel(rgb.b);
+                const contrast = (fg, bg) => {
+                    const lighter = Math.max(luminance(fg), luminance(bg));
+                    const darker = Math.min(luminance(fg), luminance(bg));
+                    return (lighter + 0.05) / (darker + 0.05);
+                };
+                const rootStyle = getComputedStyle(document.documentElement);
+                const token = (name) => parseRgb(rootStyle.getPropertyValue(name));
+                const pairs = [
+                    ['--text', '--bg', 4.5],
+                    ['--text', '--surface', 4.5],
+                    ['--text-dim', '--surface', 3.0],
+                    ['--accent', '--bg', 3.0],
+                    ['--danger', '--bg', 3.0],
+                ];
+                const lowContrast = pairs
+                    .map(([fgName, bgName, minimum]) => {
+                        const fg = token(fgName);
+                        const bg = token(bgName);
+                        if (!fg || !bg) return { pair: `${fgName}/${bgName}`, ratio: 0, minimum };
+                        return { pair: `${fgName}/${bgName}`, ratio: Math.round(contrast(fg, bg) * 100) / 100, minimum };
+                    })
+                    .filter((item) => item.ratio < item.minimum);
+                const reducedMotionRule = Array.from(document.styleSheets)
+                    .flatMap((sheet) => {
+                        try { return Array.from(sheet.cssRules || []); } catch (_err) { return []; }
+                    })
+                    .some((rule) => String(rule.cssText || '').includes('prefers-reduced-motion') && String(rule.cssText || '').includes('transition-duration'));
+                return { missingNames, lowContrast, reducedMotionRule };
+            }"""
+        )
+        self.assertEqual([], audit["missingNames"], audit)
+        self.assertEqual([], audit["lowContrast"], audit)
+        self.assertTrue(audit["reducedMotionRule"], audit)
+
     def _apply_snapshot_model(self, page, snapshot: dict[str, object]) -> None:
         page.evaluate("(model) => window.__AGENTCLI_ADAPTERS__.applySnapshotModel(model)", snapshot)
 
@@ -695,25 +778,24 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
                 ) from exc
 
             page.set_viewport_size({"width": 1440, "height": 1024})
-            page.locator('#topbar [data-action="set-locale-ko"]').click()
-            self.expect(page.locator("html")).to_have_attribute("lang", "ko")
-            self._capture_screenshot(page, "desktop-dashboard-ko.png")
+            for locale in ("en", "ko"):
+                page.locator(f'#topbar [data-action="set-locale-{locale}"]').click()
+                self.expect(page.locator("html")).to_have_attribute("lang", locale)
 
-            for route in self.DESKTOP_PRIMARY_ROUTES:
-                page.locator(f'#sidebar [data-nav="{route}"]').click()
-                self.expect(page.locator("#main")).to_have_attribute("data-view", route)
-                if route == "prompts":
-                    self.expect(page.locator("[data-prompt-editor-root]")).to_have_attribute("data-prompt-loading", "false")
-                if route == "pipeline":
-                    self._capture_screenshot(page, "desktop-pipeline-ko.png")
-                self._assert_desktop_route_layout(page, route)
+                for route in self.DESKTOP_PRIMARY_ROUTES:
+                    page.locator(f'#sidebar [data-nav="{route}"]').click()
+                    self.expect(page.locator("#main")).to_have_attribute("data-view", route)
+                    if route == "prompts":
+                        self.expect(page.locator("[data-prompt-editor-root]")).to_have_attribute("data-prompt-loading", "false")
+                    self._assert_desktop_route_layout(page, f"{route}-{locale}")
+                    self._capture_screenshot(page, f"desktop-{route}-{locale}.png")
 
-            page.locator('#topbar [data-action="open-palette"]').click()
-            palette = page.locator("[data-overlay='palette']")
-            self.expect(palette).to_be_visible()
-            self._capture_screenshot(page, "desktop-palette-ko.png")
-            page.keyboard.press("Escape")
-            self.expect(palette).to_be_hidden()
+                page.locator('#topbar [data-action="open-palette"]').click()
+                palette = page.locator("[data-overlay='palette']")
+                self.expect(palette).to_be_visible()
+                self._capture_screenshot(page, f"desktop-palette-{locale}.png")
+                page.keyboard.press("Escape")
+                self.expect(palette).to_be_hidden()
         finally:
             self._close_playwright(manager)
 
@@ -1033,6 +1115,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
                 ) from exc
 
             self.expect(page.locator("#main")).to_have_attribute("data-view", "dashboard")
+            self._assert_accessible_control_names_and_contrast(page)
 
             page.evaluate("window.__AGENTCLI_ADAPTERS__.handleAction('runner-stop')")
             stop_overlay = page.locator("[data-overlay='stop']")

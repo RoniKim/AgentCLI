@@ -1165,7 +1165,7 @@ class RunnerShell:
         plan_name = "full validation plan" if full else "configured validation plan"
         print(f"[INFO] Running {plan_name} for PR packet {packet_id}...")
         try:
-            result = validate_review_packet(repo, packet_id)
+            result = validate_review_packet(repo, packet_id, full=full)
         except Exception as ex:
             print(f"[ERR] PR validation failed: {ex}")
             return

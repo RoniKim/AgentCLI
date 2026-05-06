@@ -271,6 +271,9 @@ def validate_master_index(repo: Path, index_path: Path) -> list[str]:
         if not cells:
             continue
 
+        if any("⚠️ 업데이트 필요" in cell for cell in cells):
+            errors.append(f"{index_path.as_posix()}:{line_no}: stale master-index status must be resolved or moved to GOALS backlog")
+
         for claim in _extract_path_claims_from_cell(cells[0]):
             resolved_rel = _resolve_claim_relpath(claim, current_base)
             _, error = _resolve_case_sensitive_path(repo, resolved_rel)

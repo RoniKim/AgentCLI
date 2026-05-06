@@ -216,6 +216,39 @@ class DocsValidationTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
 
+    def test_master_index_rejects_stale_update_needed_status(self) -> None:
+        temp_root = ROOT / ".test-scratch" / "docs-validation-stale-status"
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+        try:
+            repo = temp_root
+            docs_dir = repo / "docs"
+            docs_dir.mkdir(parents=True)
+            (docs_dir / "Real.md").write_text("# Real\n", encoding="utf-8")
+
+            index_path = docs_dir / "MASTER_INDEX.md"
+            index_path.write_text(
+                "\n".join(
+                    [
+                        "# Index",
+                        "",
+                        "## 1. 운영 가이드 (docs/, 영구)",
+                        "",
+                        "| 문서 | 상태 |",
+                        "|------|------|",
+                        "| [Real.md](Real.md) | ⚠️ 업데이트 필요 |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            errors = validate_master_index(repo, index_path)
+
+            self.assertTrue(any("stale master-index status" in error for error in errors), errors)
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
+
     def test_nonexistent_route_claim_is_rejected(self) -> None:
         route_inventory = collect_fastapi_route_inventory(ROOT)
         errors = validate_web_console_route_claims("The console does not expose `/api/config/backup`.", route_inventory)

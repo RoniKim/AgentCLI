@@ -4015,6 +4015,20 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIn("missing_fastapi", issue_codes)
         self.assertIn("missing_uvicorn", issue_codes)
 
+    def test_web_startup_dependency_errors_include_diagnostic_codes(self) -> None:
+        from agent_runner import web as web_module
+
+        with (
+            patch.object(web_module, "FastAPI", None),
+            patch.object(web_module, "FileResponse", None),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "missing_fastapi"):
+                web_module.create_app(self.repo)
+
+        with patch.object(web_module, "uvicorn", None):
+            with self.assertRaisesRegex(RuntimeError, "missing_uvicorn"):
+                web_module.serve(self.repo)
+
     def test_api_experience_and_history_panel_show_explicit_unavailable_state_when_db_missing(self) -> None:
         experience_response = self.client.get("/api/experience")
         self.assertEqual(200, experience_response.status_code)

@@ -204,8 +204,8 @@
 - [x] Destructive, mutating, and long-running actions use consistent confirmation, busy, disabled, success, failure, timeout, and retry states.
 - [x] Empty, partial, loading, stale, permission-denied, and backend-unavailable states are visually distinct across every screen.
 - [x] Keyboard navigation covers route switching, command palette, modals, editors, diff views, logs, and confirmation dialogs.
-- [x] Accessibility checks cover focus visibility, labels, contrast, reduced motion, and screen-reader names for icon-only controls.
-- [x] Playwright screenshots validate Dashboard, Pipeline, Logs, Goals, Config, Prompts, History, Notifications, Worktree Review, Runner Controls, and mobile in both locales.
+- [x] Accessibility checks cover focus handling, accessible control names, design-token contrast, reduced motion, and ARIA states for primary controls.
+- [x] Playwright screenshots validate every primary desktop route in English and Korean plus mobile workflow views.
 
 ### P0-S. Documentation And Personal Automation Readiness
 
@@ -233,10 +233,10 @@
 - [x] PR queue records base/head refs, branch, commits, changed files, GOALS trace, QA notes, validation status, and merge preflight state.
 - [x] Dev-stage test skipping is recorded as `validation_pending`, `tests_skipped`, or `no_tests_found`, never as success.
 - [x] Full validation runs on demand in an isolated temporary worktree.
-- [x] Merge requires validation result plus explicit user approval.
+- [x] Merge approval requires validation result plus explicit user approval.
 - [x] Web PR Queue shows diff, QA notes, validation logs, merge preflight, and blocking reasons.
 - [x] Dependency-blocked tasks expose the blocking upstream task id, title, status, reason, validation summary, and next action instead of only `Depends on: ['Tn']`.
-- [x] Shell commands support listing, validating, rebasing, merging, and discarding queued PRs.
+- [x] Shell commands support listing, validating, rebasing, merge-approving, and discarding queued PRs.
 - [x] Telegram can list queued PRs and report validation/merge status.
 - [x] Stale branches, missing patch artifacts, and deleted worktrees are reconciled without corrupting the queue.
 
@@ -246,7 +246,7 @@
 - [x] Completed task experience records link run id, task id, GOALS refs, changed files, branch/head refs, validation artifacts, and local PR packet ids.
 - [x] Failed task experience records preserve task status, reason, dependency blockers, validation summary, artifact pointers, and retry/discard outcome without storing raw logs.
 - [x] Validation experience records classify `validation_pending`, `tests_skipped`, `no_tests_found`, `validation_failed`, `blocked_env`, and `validation_passed` separately.
-- [x] Local PR queue validate, merge, discard, and rebase decisions are recorded as experience signals tied to the PR packet and GOALS trace.
+- [x] Local PR queue validate, merge-approval, discard, and rebase decisions are recorded as experience signals tied to the PR packet and GOALS trace.
 - [x] Deterministic Analyzer rules produce `ANALYZER_SUMMARY.json` from run artifacts without calling an LLM.
 - [x] Analyzer lesson records include kind, normalized trigger, GOALS refs, file globs, gate, task status, evidence pointers, confidence, and last-applied metadata.
 - [x] Analyzer output is advisory only and cannot mark GOALS complete, approve merges, mutate source code, or bypass deterministic validation gates.
@@ -279,7 +279,7 @@
 - [x] Backend adapter interfaces isolate model invocation, message streaming, model option construction, and quota probing from orchestration code.
 - [x] Codex backend-specific code is limited to Codex CLI execution, Codex app-server integration, Codex quota probing, and Codex model options.
 - [x] Claude backend-specific code is limited to Claude SDK/CLI execution, Claude streaming collection, Claude quota probing, and Claude model options.
-- [x] Every decomposition PR is extraction-only with no product behavior changes, no endpoint contract changes, and no run artifact filename changes.
+- [x] Current decomposition boundaries are protected by import, endpoint, artifact-name, and backend-boundary tests so extraction changes do not silently change product contracts.
 
 ### P0-W. Web Operational UX Follow-Up
 
@@ -340,7 +340,7 @@
 - [ ] Web report export can create Markdown and JSON summaries for a selected run.
 - [ ] The browser can open local artifact paths through a documented safe helper instead of exposing raw filesystem mutation.
 - [x] The CLI can optionally launch or serve the web console from a documented command.
-- [x] Web console exposes diagnostics for missing FastAPI/uvicorn dependencies and broken virtual environments.
+- [x] Web health and startup diagnostics report missing FastAPI/uvicorn dependencies and broken virtual environments.
 - [x] UI state clearly distinguishes fallback/demo data from real API data.
 - [ ] Web PR Queue browser controls can validate, merge, discard, and rebase queued packets with the same safety gates as shell commands.
 - [ ] Authentication plan exists before use outside trusted private networks.
