@@ -286,6 +286,7 @@ class WebConsoleStaticTests(unittest.TestCase):
             ".mobile-workflow__action-grid",
             ".mobile-workflow__confirm-grid",
             ".mobile-workflow__notification-list",
+            ".runbook-command__text",
             "overflow: auto",
         ]
 
@@ -891,6 +892,14 @@ class WebConsoleStaticTests(unittest.TestCase):
             "Prompt restore failed",
             "/api/prompts/read",
             "/api/pr-queue/",
+            "nav-runbook",
+            "renderRunbook",
+            "Activate repo virtual environment",
+            "GET /api/health",
+            "GET /api/worktree/diagnostics",
+            "--unattended --worktree-isolation",
+            "/merge-worktree",
+            "/discard-worktree",
             "data-pr-queue-select",
             "nav-pr-queue",
             "field-error",

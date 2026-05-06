@@ -34,6 +34,7 @@
     'logs',
     'backlog',
     'pr-queue',
+    'runbook',
     'goals',
     'config',
     'prompts',
@@ -88,6 +89,7 @@
         logs: 'Logs',
         backlog: 'Backlog',
         prQueue: 'PR Queue',
+        runbook: 'Runbook',
         goals: 'Goals',
         config: 'Config',
         prompts: 'Prompts',
@@ -141,6 +143,7 @@
         openDashboard: 'Open Dashboard',
         openLogs: 'Open Logs',
         openPrQueue: 'Open PR Queue',
+        openRunbook: 'Open Runbook',
         openBacklog: 'Open Backlog',
         openGoals: 'Open Goals',
         openConfig: 'Open Config',
@@ -210,8 +213,41 @@
         resumeLiveTail: 'Resume live tail',
         openWorktreeReview: 'Open Worktree Review',
         openPrQueue: 'Open PR Queue',
+        openRunbook: 'Open Runbook',
         openMobilePreview: 'Open mobile workflow',
         openLandingPreview: 'Open Landing preview',
+      },
+      runbook: {
+        title: 'Runbook',
+        subtitle: 'Repo-specific local operator commands for this console.',
+        environment: 'Environment',
+        shell: 'Shell',
+        web: 'Web',
+        controls: 'Status and controls',
+        review: 'Review and PR queue',
+        diagnostics: 'Diagnostics',
+        longRun: 'Recommended long run',
+        activeRepo: 'Active repo',
+        activeRunDir: 'Active run dir',
+        configPath: 'Config path',
+        venvActivation: 'Activate repo virtual environment',
+        installDeps: 'Install/update dependencies',
+        shellStart: 'Open AgentCLI shell',
+        webServe: 'Serve this web console',
+        status: 'Show runner status',
+        stop: 'Stop and wait',
+        mergeWorktree: 'Merge pending worktree review',
+        discardWorktree: 'Discard pending worktree review',
+        listPrs: 'List queued PR packets',
+        validatePr: 'Validate queued PR packet',
+        approvePr: 'Approve validated PR packet',
+        discardPr: 'Discard queued PR packet',
+        rebasePr: 'Record rebase request',
+        doctor: 'Run doctor diagnostics',
+        worktreeDoctor: 'Read-only worktree diagnostics',
+        healthApi: 'Web health diagnostics',
+        worktreeApi: 'Web worktree diagnostics',
+        unattended: 'Unattended safe worktree run',
       },
       shortcuts: {
         ctrlEnterSaves: 'ctrl+enter saves',
@@ -963,6 +999,7 @@
         logs: '로그',
         backlog: '백로그',
         prQueue: 'PR 큐',
+        runbook: '런북',
         goals: '목표',
         config: '설정',
         prompts: '프롬프트',
@@ -1008,6 +1045,7 @@
         openDashboard: '대시보드 열기',
         openLogs: '로그 열기',
         openPrQueue: 'PR 큐 열기',
+        openRunbook: '런북 열기',
         openBacklog: '백로그 열기',
         openGoals: '목표 열기',
         openConfig: '설정 열기',
@@ -1068,8 +1106,41 @@
         resumeLiveTail: '라이브 tail 재개',
         openWorktreeReview: '워크트리 검토 열기',
         openPrQueue: 'PR 큐 열기',
+        openRunbook: '런북 열기',
         openMobilePreview: '모바일 워크플로 열기',
         openLandingPreview: '랜딩 미리보기 열기',
+      },
+      runbook: {
+        title: '런북',
+        subtitle: '현재 콘솔의 저장소별 로컬 운영 명령입니다.',
+        environment: '환경',
+        shell: '셸',
+        web: '웹',
+        controls: '상태와 제어',
+        review: '검토와 PR 큐',
+        diagnostics: '진단',
+        longRun: '권장 장기 실행',
+        activeRepo: '활성 저장소',
+        activeRunDir: '활성 실행 디렉터리',
+        configPath: '설정 경로',
+        venvActivation: '저장소 가상환경 활성화',
+        installDeps: '의존성 설치/갱신',
+        shellStart: 'AgentCLI 셸 열기',
+        webServe: '이 웹 콘솔 서빙',
+        status: '실행기 상태 보기',
+        stop: '중지 후 대기',
+        mergeWorktree: '대기 중인 워크트리 검토 병합',
+        discardWorktree: '대기 중인 워크트리 검토 폐기',
+        listPrs: '대기 중인 PR 패킷 목록',
+        validatePr: 'PR 패킷 검증',
+        approvePr: '검증된 PR 패킷 승인',
+        discardPr: 'PR 패킷 폐기',
+        rebasePr: '리베이스 요청 기록',
+        doctor: 'doctor 진단 실행',
+        worktreeDoctor: '읽기 전용 워크트리 진단',
+        healthApi: '웹 health 진단',
+        worktreeApi: '웹 워크트리 진단',
+        unattended: '안전한 워크트리 장기 실행',
       },
       shortcuts: {
         ctrlEnterSaves: 'ctrl+enter 저장',
@@ -2396,6 +2467,7 @@
       logs: 'nav.logs',
       backlog: 'nav.backlog',
       'pr-queue': 'nav.prQueue',
+      runbook: 'nav.runbook',
       goals: 'nav.goals',
       config: 'nav.config',
       prompts: 'nav.prompts',
@@ -2434,6 +2506,7 @@
     logs: 'g l',
     backlog: 'g b',
     'pr-queue': 'g q',
+    runbook: 'g u',
     goals: 'g g',
     config: 'g c',
     prompts: 'g t',
@@ -3106,6 +3179,7 @@
     logs: ['logs'],
     backlog: ['backlog'],
     'pr-queue': ['prQueue'],
+    runbook: ['activeRun', 'runnerControl', 'worktree'],
     goals: ['goals'],
     config: ['config', 'runnerControl'],
     prompts: ['prompts'],
@@ -9258,6 +9332,7 @@
     adaptWorktree,
     currentPrQueuePacket,
     renderPrQueue,
+    renderRunbook,
     setPrQueueSelection,
     loadPrQueueDetail,
     setLocale,
@@ -14670,6 +14745,7 @@
         items: [
           { view: 'backlog', label: viewLabel('backlog'), shortcut: VIEW_SHORTCUTS.backlog },
           { view: 'pr-queue', label: viewLabel('pr-queue'), shortcut: VIEW_SHORTCUTS['pr-queue'], badge: state.prQueue?.summary?.blocked ? '!' : '' },
+          { view: 'runbook', label: viewLabel('runbook'), shortcut: VIEW_SHORTCUTS.runbook },
           { view: 'goals', label: viewLabel('goals'), shortcut: VIEW_SHORTCUTS.goals },
           { view: 'config', label: viewLabel('config'), shortcut: VIEW_SHORTCUTS.config },
           { view: 'prompts', label: viewLabel('prompts'), shortcut: VIEW_SHORTCUTS.prompts },
@@ -18634,6 +18710,122 @@
     );
   }
 
+  function runbookPathArg(value, fallback = '.') {
+    const text = toText(value, fallback).trim() || fallback;
+    return `"${text.replace(/"/g, '\\"')}"`;
+  }
+
+  function renderRunbookCommand(label, command, meta = '') {
+    return `
+      <div class="compact-list__item runbook-command">
+        <span class="compact-list__bullet"></span>
+        <div class="runbook-command__body">
+          <div class="compact-list__meta">${escapeHTML(label)}</div>
+          <code class="runbook-command__text">${escapeHTML(command)}</code>
+          ${meta ? `<div class="compact-list__meta">${escapeHTML(meta)}</div>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderRunbookCommandPanel(title, commands) {
+    return panel(
+      title,
+      `${commands.length} ${escapeHTML(t('common.total'))}`,
+      `<div class="compact-list runbook-command-list">${commands.map((item) => renderRunbookCommand(item.label, item.command, item.meta)).join('')}</div>`,
+      'runbook-panel'
+    );
+  }
+
+  function runbookCommands() {
+    const repoPath = state.activeRun.repo || state.repo.path || state.liveRun?.identity?.repo || '.';
+    const repoArg = runbookPathArg(repoPath);
+    const runDir = state.activeRun.runDir || state.latestRunDir || state.runnerControl?.status?.runDir || '';
+    const configPath = state.runnerControl?.status?.configPath || state.configMeta?.path || state.config?.path || '';
+    const configArg = configPath ? ` --config ${runbookPathArg(configPath)}` : '';
+    const webHost = state.webInstance?.host || state.liveRun?.identity?.host || '127.0.0.1';
+    const webPort = state.webInstance?.port || state.liveRun?.identity?.port || 8000;
+    return {
+      repoPath,
+      runDir,
+      configPath,
+      groups: [
+        {
+          title: t('runbook.environment'),
+          commands: [
+            { label: t('runbook.venvActivation'), command: '.\\.venv\\Scripts\\Activate.ps1' },
+            { label: t('runbook.installDeps'), command: '.\\.venv\\Scripts\\python.exe -m pip install -r requirements.txt' },
+          ],
+        },
+        {
+          title: t('runbook.shell'),
+          commands: [
+            { label: t('runbook.shellStart'), command: `.\\.venv\\Scripts\\python.exe agent_cli.py --repo ${repoArg}${configArg}` },
+            { label: t('runbook.status'), command: '/status' },
+            { label: t('runbook.stop'), command: '/stop --wait' },
+          ],
+        },
+        {
+          title: t('runbook.web'),
+          commands: [
+            { label: t('runbook.webServe'), command: `.\\.venv\\Scripts\\python.exe agent_cli.py --web --repo ${repoArg} --host ${webHost} --port ${webPort}` },
+            { label: t('runbook.healthApi'), command: 'GET /api/health' },
+          ],
+        },
+        {
+          title: t('runbook.review'),
+          commands: [
+            { label: t('runbook.mergeWorktree'), command: '/merge-worktree' },
+            { label: t('runbook.discardWorktree'), command: '/discard-worktree' },
+            { label: t('runbook.listPrs'), command: '/prs' },
+            { label: t('runbook.validatePr'), command: '/validate-pr <id> --full' },
+            { label: t('runbook.approvePr'), command: '/merge-pr <id>' },
+            { label: t('runbook.discardPr'), command: '/discard-pr <id>' },
+            { label: t('runbook.rebasePr'), command: '/rebase-pr <id>' },
+          ],
+        },
+        {
+          title: t('runbook.diagnostics'),
+          commands: [
+            { label: t('runbook.doctor'), command: '/doctor' },
+            { label: t('runbook.worktreeDoctor'), command: '/worktree' },
+            { label: t('runbook.worktreeApi'), command: 'GET /api/worktree/diagnostics' },
+          ],
+        },
+        {
+          title: t('runbook.longRun'),
+          commands: [
+            {
+              label: t('runbook.unattended'),
+              command: `.\\.venv\\Scripts\\python.exe agent_cli.py --repo ${repoArg}${configArg} --run-now --non-interactive --autopilot --continuous --loop --unattended --worktree-isolation`,
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  function renderRunbook() {
+    const model = runbookCommands();
+    const metaCards = [
+      detailCard(t('runbook.activeRepo'), model.repoPath || '--', model.repoPath ? 'runner-control__value--accent' : 'runner-control__value--muted'),
+      detailCard(t('runbook.activeRunDir'), model.runDir || '--', model.runDir ? 'runner-control__value--muted' : 'runner-control__value--unavailable'),
+      detailCard(t('runbook.configPath'), model.configPath || '--', model.configPath ? 'runner-control__value--muted' : 'runner-control__value--unavailable'),
+    ].join('');
+    const panels = model.groups.map((group) => renderRunbookCommandPanel(group.title, group.commands)).join('');
+    return viewShell(
+      'runbook',
+      t('runbook.title'),
+      t('runbook.subtitle'),
+      `${button(t('topbar.refresh'), 'refresh-status', 'button--quiet')} ${button(t('common.openWorktree'), 'nav-worktree', 'button--quiet')} ${button(t('common.openPrQueue'), 'nav-pr-queue', 'button--quiet')}`,
+      `
+        ${sectionNotice('activeRun')}
+        <div class="runner-control__details runbook-meta">${metaCards}</div>
+        <div class="view-grid view-grid--two runbook-grid">${panels}</div>
+      `
+    );
+  }
+
   function renderMainView() {
     switch (state.activeView) {
       case 'dashboard':
@@ -18646,6 +18838,8 @@
         return renderBacklog();
       case 'pr-queue':
         return renderPrQueue();
+      case 'runbook':
+        return renderRunbook();
       case 'goals':
         return renderGoals();
       case 'config':
@@ -18685,6 +18879,7 @@
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'toggle-logs', title: isLiveTailPaused() ? t('palette.resumeLiveTail') : t('palette.pauseLiveTail'), shortcut: 'logs' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-worktree', title: t('palette.openWorktreeReview'), shortcut: 'worktree' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-pr-queue', title: t('palette.openPrQueue'), shortcut: 'pr queue' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-runbook', title: t('palette.openRunbook'), shortcut: 'runbook' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-mobile', title: t('palette.openMobilePreview'), shortcut: 'mobile' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-landing', title: t('palette.openLandingPreview'), shortcut: 'landing' },
     ];
@@ -19247,6 +19442,7 @@
       'nav-logs': 'logs',
       'nav-backlog': 'backlog',
       'nav-pr-queue': 'pr-queue',
+      'nav-runbook': 'runbook',
       'nav-goals': 'goals',
       'nav-config': 'config',
       'nav-prompts': 'prompts',
@@ -19372,6 +19568,7 @@
       case 'nav-logs':
       case 'nav-backlog':
       case 'nav-pr-queue':
+      case 'nav-runbook':
       case 'nav-goals':
       case 'nav-config':
       case 'nav-prompts':
@@ -19801,6 +19998,7 @@
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'toggle-logs', title: isLiveTailPaused() ? t('palette.resumeLiveTail') : t('palette.pauseLiveTail'), shortcut: 'logs' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-worktree', title: t('palette.openWorktreeReview'), shortcut: 'worktree' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-pr-queue', title: t('palette.openPrQueue'), shortcut: 'pr queue' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-runbook', title: t('palette.openRunbook'), shortcut: 'runbook' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-mobile', title: t('palette.openMobilePreview'), shortcut: 'mobile' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-landing', title: t('palette.openLandingPreview'), shortcut: 'landing' },
     ];
@@ -20904,6 +21102,8 @@
         return renderBacklog();
       case 'pr-queue':
         return renderPrQueue();
+      case 'runbook':
+        return renderRunbook();
       case 'goals':
         return renderGoals();
       case 'config':

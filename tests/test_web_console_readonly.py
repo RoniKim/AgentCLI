@@ -5792,6 +5792,30 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIn("data-pr-queue-select", main_html)
         self.assertEqual([], shell["fetchCalls"])
 
+    def test_runbook_view_renders_active_repo_operator_commands(self) -> None:
+        status_payload = self.client.get("/api/status").json()
+        normalized = _run_adapter_harness([{"kind": "call", "name": "normalizeSnapshot", "args": [status_payload]}])[0]
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+                {"kind": "call", "name": "setView", "args": ["runbook"]},
+                {"kind": "call", "name": "renderShell", "args": [{"force": True, "preserveScroll": True}]},
+            ]
+        )
+        main_html = shell["roots"]["main"]
+
+        self.assertEqual("runbook", shell["roots"]["view"])
+        self.assertIn("Runbook", shell["title"])
+        self.assertIn(".venv\\Scripts\\Activate.ps1", main_html)
+        self.assertIn("agent_cli.py --web --repo", main_html)
+        self.assertIn("/status", main_html)
+        self.assertIn("/stop --wait", main_html)
+        self.assertIn("/merge-worktree", main_html)
+        self.assertIn("/discard-worktree", main_html)
+        self.assertIn("GET /api/health", main_html)
+        self.assertIn("--unattended --worktree-isolation", main_html)
+        self.assertEqual([], shell["fetchCalls"])
+
     def test_adapter_normalizes_live_run_contract_from_api_snapshot(self) -> None:
         status_payload = self.client.get("/api/status").json()
         adapted = _run_adapter_harness(

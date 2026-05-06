@@ -3296,6 +3296,47 @@ select.field-control,
   overflow-wrap: anywhere;
 }
 
+.runbook-meta {
+  margin-bottom: 14px;
+}
+
+.runbook-grid {
+  align-items: stretch;
+}
+
+.runbook-panel .panel__body {
+  min-width: 0;
+}
+
+.runbook-command-list {
+  gap: 10px;
+}
+
+.runbook-command {
+  align-items: flex-start;
+}
+
+.runbook-command__body {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.runbook-command__text {
+  display: block;
+  max-width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-1);
+  background: var(--surface-3);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .worktree-diagnostics {
   display: grid;
   gap: 12px;

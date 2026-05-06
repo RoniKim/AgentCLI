@@ -22,6 +22,7 @@ Verified on 2026-05-06 with local API, unit, and checked-in browser smoke covera
 - Static console serving works from `agent_runner.web`.
 - Live FastAPI routes cover `/api/health`, `/api/status`, `/api/progress`, `/api/history`, `/api/logs`, `/api/logs/tail`, `/api/logs/live`, `/api/worktree`, `/api/worktree/diagnostics`, guarded `/api/config`, `/api/config/restore`, `/api/config/save`, `/api/prompts`, `/api/prompts/read`, `/api/prompts/content`, `/api/prompts/save`, `/api/prompts/restore`, `/api/goals`, `/api/goals/save`, `/api/runner/status`, `/api/runner/start`, `/api/runner/stop`, `/api/runner/reload`, `/api/runner/restart`, `/api/worktree/merge`, `/api/worktree/discard`, and `/api/pr-queue/merge`.
 - `/api/health` exposes web diagnostics for FastAPI/uvicorn availability and repo `.venv` health, including missing executables and stale `pyvenv.cfg` base paths; startup dependency failures include the same diagnostic issue codes when the HTTP app cannot start.
+- The Runbook route renders active-repo commands for venv activation, shell/web startup, status/stop, worktree merge/discard, PR queue review, diagnostics, and long unattended runs.
 - Backup creation happens inside save/restore flows; there is no standalone `/api/*/backup` route family.
 - Read-only worktree diagnostics now scan `.AgentCLI/agent_runs`, the central pending marker, patch paths, cleanup-failed artifacts, and generated worktree directories without deleting anything by default.
 - Additional read-only contracts now cover Goals metadata and backend log tailing.
@@ -39,7 +40,7 @@ Verified on 2026-05-06 with local API, unit, and checked-in browser smoke covera
 
 Known remaining scope:
 
-- Run History comparison, Notifications read/unread workflow, report export, local artifact opening helpers, and Runbook/Instance Health panels remain tracked in `.doc/GOALS.md` P1.
+- Run History comparison, Notifications read/unread workflow, report export, local artifact opening helpers, and Instance Health remain tracked in `.doc/GOALS.md` P1.
 - Browser PR Queue detail is currently read-oriented: it shows packet data, validation logs, merge preflight, blockers, and disabled action affordances; shell commands and guarded backend routes remain the operational path for mutating queue decisions.
 - There is no authentication layer. Treat LAN binds as trusted-network-only until authentication exists.
 
