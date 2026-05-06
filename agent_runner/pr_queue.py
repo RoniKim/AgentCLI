@@ -2052,6 +2052,16 @@ def _load_pr_queue_validation_evidence(source_repo: Path, packet: dict[str, Any]
     ).strip()
     validation_artifact_candidates = [candidate.as_posix() for candidate in _pr_queue_validation_artifact_candidates(source_repo, packet, packet_id)]
 
+    if packet_validation_status and packet_validation_status != "validation_passed":
+        return {
+            "source": "packet",
+            "artifact_path": "",
+            "status": packet_validation_status,
+            "reason": packet_validation_reason or packet_validation_status,
+            "detail": packet_validation_detail,
+            "candidates": validation_artifact_candidates,
+        }
+
     for candidate in _pr_queue_validation_artifact_candidates(source_repo, packet, packet_id):
         if not candidate.exists() or not candidate.is_file():
             continue
@@ -2620,6 +2630,12 @@ async def validate_review_packet_async(
     branch_text = str(packet.get("branch") or "").strip()
     if not changed_files_value and base_ref_text and head_ref_text and base_ref_text != head_ref_text:
         changed_files_value = git_changed_files(source_repo_path, base_ref_text, head_ref_text)
+    validation_ref = git_rev_parse_ref(source_repo_path, head_ref_text) if head_ref_text else ""
+    if not validation_ref:
+        raise RuntimeError(f"PR packet {packet_id_text} head_ref cannot be resolved for validation.")
+    branch_ref = git_rev_parse_ref(source_repo_path, branch_text) if branch_text else ""
+    if branch_ref and branch_ref != validation_ref:
+        raise RuntimeError(f"PR packet {packet_id_text} branch no longer points at the recorded head_ref.")
 
     validation_root = _pr_queue_validation_artifact_root(run_dir, packet_id_text)
     validation_root.mkdir(parents=True, exist_ok=True)
@@ -2648,7 +2664,7 @@ async def validate_review_packet_async(
     source_repo_state_before = git_repo_state(source_repo_path)
 
     try:
-        create_worktree(source_repo_path, worktree_dir)
+        create_worktree(source_repo_path, worktree_dir, ref=validation_ref)
         worktree_created = True
 
         if bool(config.get("build_enabled", False)):
@@ -2983,6 +2999,8 @@ async def validate_review_packet_async(
         "branch": branch_text,
         "base_ref": base_ref_text,
         "head_ref": head_ref_text,
+        "validation_ref": validation_ref,
+        "validationRef": validation_ref,
         "goal_trace": goal_trace_value,
         "goalTrace": goal_trace_value,
         "qa_notes": qa_notes_value,
@@ -3106,6 +3124,8 @@ async def validate_review_packet_async(
         "packet_id": packet_id_text,
         "packet_path": packet_path.as_posix(),
         "packet": updated_packet,
+        "validation_ref": validation_ref,
+        "validationRef": validation_ref,
         "validation_artifact_path": summary_path.as_posix(),
         "validation_artifacts": list(validation_artifacts),
         "validation_records": validation_records,
@@ -3231,6 +3251,12 @@ def rebase_review_packet(
         updated_packet["validationReason"] = "rebase_requested"
         updated_packet["validation_detail"] = "Rebase requested; rerun validation after updating the branch."
         updated_packet["validationDetail"] = "Rebase requested; rerun validation after updating the branch."
+        updated_packet["validation_artifact_path"] = ""
+        updated_packet["validationArtifactPath"] = ""
+        updated_packet["validation_artifacts"] = []
+        updated_packet["validationArtifacts"] = []
+        updated_packet["merge_preflight"] = {}
+        updated_packet["mergePreflight"] = {}
         updated_packet["rebase_status"] = "requested"
         updated_packet["rebaseStatus"] = "requested"
         updated_packet["rebase_reason"] = rebase_reason

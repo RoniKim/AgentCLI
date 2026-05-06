@@ -3389,6 +3389,31 @@ select.field-control,
   background: var(--surface-2);
 }
 
+.pr-queue-action {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.pr-queue-action__details {
+  margin-top: 0;
+}
+
+.pr-queue-action__field,
+.pr-queue-action__warning {
+  min-width: 0;
+}
+
+.pr-queue-action__check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .pr-queue-detail-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

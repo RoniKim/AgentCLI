@@ -1411,7 +1411,7 @@ def _validate_existing_worktree_reuse(repo: Path, worktree_dir: Path, run_dir: P
     _validate_worktree_contract(repo=repo, worktree_dir=worktree_dir, run_dir=run_dir, contract=contract)
 
 
-def create_worktree(repo: Path, worktree_dir: Path, *, run_dir: Path | None = None) -> None:
+def create_worktree(repo: Path, worktree_dir: Path, *, run_dir: Path | None = None, ref: str = "HEAD") -> None:
     repo_resolved = repo.expanduser().resolve()
     worktree_resolved = worktree_dir.expanduser().resolve()
     if _path_is_relative_to(worktree_resolved, repo_resolved):
@@ -1435,7 +1435,8 @@ def create_worktree(repo: Path, worktree_dir: Path, *, run_dir: Path | None = No
         _validate_existing_worktree_reuse(repo, worktree_dir, run_dir)
         return
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
-    code, out = run_cmd(["git", "worktree", "add", "--detach", str(worktree_dir), "HEAD"], cwd=repo, timeout_sec=120)
+    target_ref = str(ref or "HEAD").strip() or "HEAD"
+    code, out = run_cmd(["git", "worktree", "add", "--detach", str(worktree_dir), target_ref], cwd=repo, timeout_sec=120)
     if code != 0:
         raise RuntimeError(f"git worktree add failed: rc={code}\n{out}")
     error = _worktree_validation_error(repo, worktree_dir)

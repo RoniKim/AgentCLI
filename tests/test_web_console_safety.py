@@ -2739,6 +2739,131 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual("approval_mismatch", payload["error"]["code"])
 
+    def test_pr_queue_validate_route_runs_packet_validation(self) -> None:
+        packet = self._prepare_pr_queue_merge_packet()
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        async def fake_validate(source_repo: Path, packet_id: str, *, stop_path: Path | None = None, full: bool = False) -> dict[str, object]:
+            self.assertEqual(self.repo.resolve(), source_repo.resolve())
+            self.assertEqual(packet["packet_id"], packet_id)
+            self.assertIsNone(stop_path)
+            self.assertTrue(full)
+            return {
+                "ok": True,
+                "status": "validation_passed",
+                "packet_id": packet_id,
+                "packet_path": str(packet["packet_path"]),
+                "validation_summary": {"records_passed": 2},
+            }
+
+        with patch("agent_runner.web.validate_review_packet_async", new=fake_validate):
+            response = client.post(
+                "/api/pr-queue/validate",
+                json={"packetId": packet["packet_id"], "full": True},
+            )
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual("validate", payload["action"])
+        self.assertEqual("validation_passed", payload["status"])
+        self.assertEqual(2, payload["result"]["validation_summary"]["records_passed"])
+
+    def test_pr_queue_discard_records_operator_decision(self) -> None:
+        packet = self._prepare_pr_queue_merge_packet()
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+        head_before = self._git("rev-parse", "HEAD")
+
+        response = client.post(
+            "/api/pr-queue/discard",
+            json={
+                "packetId": packet["packet_id"],
+                "confirmation": f"DISCARD PR {packet['packet_id']}",
+                "reason": "operator rejected stale packet",
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual("discard", payload["action"])
+        self.assertEqual("discarded", payload["status"])
+        self.assertEqual(head_before, self._git("rev-parse", "HEAD"))
+
+        packet_data = json.loads(packet["packet_path"].read_text(encoding="utf-8"))
+        self.assertEqual("discarded", packet_data["status"])
+        self.assertEqual("operator rejected stale packet", packet_data["discard_reason"])
+
+    def test_pr_queue_rebase_records_request_and_resets_validation(self) -> None:
+        packet = self._prepare_pr_queue_merge_packet()
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+        head_before = self._git("rev-parse", "HEAD")
+
+        response = client.post(
+            "/api/pr-queue/rebase",
+            json={
+                "packetId": packet["packet_id"],
+                "confirmation": f"REBASE PR {packet['packet_id']}",
+                "reason": "base branch moved",
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual("rebase", payload["action"])
+        self.assertEqual("review_required", payload["status"])
+        self.assertEqual(head_before, self._git("rev-parse", "HEAD"))
+
+        packet_data = json.loads(packet["packet_path"].read_text(encoding="utf-8"))
+        self.assertEqual("review_required", packet_data["status"])
+        self.assertEqual("validation_pending", packet_data["validation_status"])
+        self.assertEqual("base branch moved", packet_data["rebase_reason"])
+
+    def test_pr_queue_discard_and_rebase_require_confirmation_phrase(self) -> None:
+        packet = self._prepare_pr_queue_merge_packet()
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        for route, action in (("/api/pr-queue/discard", "discard"), ("/api/pr-queue/rebase", "rebase")):
+            with self.subTest(route=route):
+                response = client.post(route, json={"packetId": packet["packet_id"], "confirmation": "WRONG"})
+                self.assertEqual(400, response.status_code)
+                payload = response.json()
+                self.assertFalse(payload["ok"])
+                self.assertEqual("pr_queue_confirmation_mismatch", payload["error"]["code"])
+                self.assertEqual(f"{action.upper()} PR {packet['packet_id']}", payload["error"]["details"]["expected_phrase"])
+
+    def test_pr_queue_rebase_clears_stale_validation_before_merge_approval(self) -> None:
+        packet = self._prepare_pr_queue_merge_packet()
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        rebase_response = client.post(
+            "/api/pr-queue/rebase",
+            json={
+                "packetId": packet["packet_id"],
+                "confirmation": f"REBASE PR {packet['packet_id']}",
+                "reason": "base branch moved",
+            },
+        )
+        self.assertEqual(200, rebase_response.status_code)
+
+        merge_response = client.post(
+            "/api/pr-queue/merge",
+            json={
+                "packetId": packet["packet_id"],
+                "confirmation": f"MERGE PR {packet['packet_id']}",
+            },
+        )
+        self.assertEqual(409, merge_response.status_code)
+        payload = merge_response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("validation_pending", payload["error"]["code"])
+
+        packet_data = json.loads(packet["packet_path"].read_text(encoding="utf-8"))
+        self.assertEqual("validation_pending", packet_data["validation_status"])
+        self.assertEqual("", packet_data["validation_artifact_path"])
+        self.assertEqual([], packet_data["validation_artifacts"])
+
     def test_pr_queue_merge_is_disabled_until_opt_in(self) -> None:
         client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=self.config_path)
 
@@ -2750,6 +2875,17 @@ class WebConsoleSafetyTests(unittest.TestCase):
         payload = response.json()
         self.assertFalse(payload["ok"])
         self.assertEqual("pr_queue_actions_disabled", payload["error"]["code"])
+
+    def test_pr_queue_browser_actions_are_disabled_until_opt_in(self) -> None:
+        client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=self.config_path)
+
+        for route in ("/api/pr-queue/validate", "/api/pr-queue/discard", "/api/pr-queue/rebase"):
+            with self.subTest(route=route):
+                response = client.post(route, json={"packetId": "pr-queue-demo"})
+                self.assertEqual(403, response.status_code)
+                payload = response.json()
+                self.assertFalse(payload["ok"])
+                self.assertEqual("pr_queue_actions_disabled", payload["error"]["code"])
 
     def test_pr_queue_merge_is_blocked_on_lan_binds_without_trusted_network(self) -> None:
         client, _ = _create_client(
@@ -2768,6 +2904,23 @@ class WebConsoleSafetyTests(unittest.TestCase):
         payload = response.json()
         self.assertFalse(payload["ok"])
         self.assertEqual("lan_safety_mutation_blocked", payload["error"]["code"])
+
+    def test_pr_queue_browser_actions_are_blocked_on_lan_binds_without_trusted_network(self) -> None:
+        client, _ = _create_client(
+            self.repo,
+            enable_runner_controls=True,
+            config_path=self.config_path,
+            host="0.0.0.0",
+            trusted_network=False,
+        )
+
+        for route in ("/api/pr-queue/validate", "/api/pr-queue/discard", "/api/pr-queue/rebase"):
+            with self.subTest(route=route):
+                response = client.post(route, json={"packetId": "pr-queue-demo"})
+                self.assertEqual(403, response.status_code)
+                payload = response.json()
+                self.assertFalse(payload["ok"])
+                self.assertEqual("lan_safety_mutation_blocked", payload["error"]["code"])
 
     def test_config_save_is_disabled_until_opt_in(self) -> None:
         _write_config(self.config_path, self.repo)

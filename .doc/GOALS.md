@@ -236,7 +236,7 @@
 - [x] Merge approval requires validation result plus explicit user approval.
 - [x] Web PR Queue shows diff, QA notes, validation logs, merge preflight, and blocking reasons.
 - [x] Dependency-blocked tasks expose the blocking upstream task id, title, status, reason, validation summary, and next action instead of only `Depends on: ['Tn']`.
-- [x] Shell commands support listing, validating, rebasing, merge-approving, and discarding queued PRs.
+- [x] Shell commands support listing, validating, requesting rebase, merge-approving, and discarding queued PRs.
 - [x] Telegram can list queued PRs and report validation/merge status.
 - [x] Stale branches, missing patch artifacts, and deleted worktrees are reconciled without corrupting the queue.
 
@@ -292,7 +292,7 @@
 - [x] Mobile navigation confines overflow to an intentional visible horizontal scroll container or wraps route groups without hidden off-screen controls at 390px width.
 - [x] Web snapshot polling uses route-appropriate payloads so Dashboard refresh does not require multi-megabyte `/api/status` responses containing full GOALS raw text/history data.
 - [x] Web PR Queue route lists queued local PR packets with task id, GOALS refs, branch, changed files, validation status, QA notes, and merge preflight status.
-- [x] Web PR Queue detail view shows per-file diff, validation logs, blockers, dependency detail, and explicit read-only disabled validate/merge/discard/rebase affordances.
+- [x] Web PR Queue detail view shows per-file diff, validation logs, blockers, dependency detail, and guarded validate/merge/discard/rebase controls.
 
 ### P0-X. Unattended Operations Follow-Up
 
@@ -342,7 +342,7 @@
 - [x] The CLI can optionally launch or serve the web console from a documented command.
 - [x] Web health and startup diagnostics report missing FastAPI/uvicorn dependencies and broken virtual environments.
 - [x] UI state clearly distinguishes fallback/demo data from real API data.
-- [ ] Web PR Queue browser controls can validate, merge, discard, and rebase queued packets with the same safety gates as shell commands.
+- [x] Web PR Queue browser controls can validate, approve merge, discard, and request rebase for queued packets through shared packet helper gates plus web opt-in, LAN, and confirmation gates.
 - [x] Authentication plan exists before use outside trusted private networks.
 - [x] A personal Runbook panel renders venv activation, shell start, web serve, status, stop, merge, discard, diagnostics, and recommended long-run commands for the active repo.
 - [x] Each run writes a concise `WORK_SUMMARY.md` suitable for daily work logs without exposing raw secrets or long transcripts.

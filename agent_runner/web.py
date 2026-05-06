@@ -51,7 +51,13 @@ from .gitops import (
     worktree_resolution_actions,
     WorktreeSafetyError,
 )
-from .pr_queue import PrQueueMergeError, merge_review_packet
+from .pr_queue import (
+    PrQueueMergeError,
+    discard_review_packet,
+    merge_review_packet,
+    rebase_review_packet,
+    validate_review_packet_async,
+)
 from .prompts import (
     DEV_INSTRUCTIONS_DEFAULT,
     DEV_TASK_TEMPLATE_DEFAULT,
@@ -1741,6 +1747,7 @@ def _pr_queue_goal_ref(item: Any) -> str:
 def _pr_queue_run_dir(repo_root: Path, packet: dict[str, Any]) -> Path | None:
     run_id = _pick_text(packet.get("run_id"), packet.get("runId"))
     run_dir_text = _pick_text(packet.get("run_dir"), packet.get("runDir"))
+    agent_runs_root = (repo_root / ".AgentCLI" / "agent_runs").resolve()
     candidates: list[Path] = []
     if run_dir_text:
         candidates.append(Path(run_dir_text).expanduser())
@@ -1751,7 +1758,7 @@ def _pr_queue_run_dir(repo_root: Path, packet: dict[str, Any]) -> Path | None:
             resolved = candidate.resolve()
         except Exception:
             resolved = candidate
-        if resolved.exists() and resolved.is_dir():
+        if resolved.exists() and resolved.is_dir() and _path_is_within(resolved, agent_runs_root):
             return resolved
     return None
 
@@ -2104,6 +2111,105 @@ def _pr_queue_blocking_reasons(packet: dict[str, Any], validation: dict[str, Any
     return reasons
 
 
+def _pr_queue_state_task_status(state: dict[str, Any], task_id: str) -> str:
+    task_id_text = _pick_text(task_id)
+    if not task_id_text:
+        return ""
+
+    def contains(values: Any) -> bool:
+        if not isinstance(values, list):
+            return False
+        for item in values:
+            if _pick_text(item) == task_id_text:
+                return True
+            if isinstance(item, dict) and _pick_text(item.get("id"), item.get("task_id"), item.get("taskId")) == task_id_text:
+                return True
+        return False
+
+    if contains(state.get("done")):
+        return "done"
+    if contains(state.get("failed")):
+        return "failed"
+    if contains(state.get("warnings")):
+        return "warning"
+    if contains(state.get("pending_review")):
+        return "pending_review"
+    return "pending"
+
+
+def _pr_queue_dependency_details(run_dir: Path | None, task_ids: list[str]) -> list[dict[str, Any]]:
+    if run_dir is None:
+        return []
+    tasks: list[TaskItem] = []
+    backlog_json = run_dir / "BACKLOG.json"
+    backlog_md = run_dir / "BACKLOG.md"
+    if backlog_json.exists():
+        try:
+            tasks = load_backlog_json(backlog_json)
+        except Exception:
+            tasks = []
+    if not tasks and backlog_md.exists():
+        try:
+            tasks = parse_backlog_md(backlog_md)
+        except Exception:
+            tasks = []
+    if not tasks:
+        return []
+
+    state_payload: dict[str, Any] = {}
+    state_path = run_dir / "STATE.json"
+    if state_path.exists():
+        try:
+            state_payload = dict(load_state(state_path))
+        except Exception:
+            state_payload = {}
+
+    by_id = {str(task.id): task for task in tasks}
+    selected_ids = [item for item in task_ids if item]
+    if not selected_ids:
+        selected_ids = list(by_id.keys())[:1]
+    details: list[dict[str, Any]] = []
+    for task_id in selected_ids[:20]:
+        task = by_id.get(task_id)
+        depends_on = list(task.depends_on) if task else []
+        dependencies: list[dict[str, Any]] = []
+        for dep_id in depends_on[:20]:
+            dep_task = by_id.get(dep_id)
+            dependencies.append(
+                {
+                    "id": dep_id,
+                    "taskId": dep_id,
+                    "title": dep_task.title if dep_task else "",
+                    "status": _pr_queue_state_task_status(state_payload, dep_id) if dep_task else "missing",
+                    "missing": dep_task is None,
+                }
+            )
+        dependents = [
+            {
+                "id": item.id,
+                "taskId": item.id,
+                "title": item.title,
+                "status": _pr_queue_state_task_status(state_payload, item.id),
+            }
+            for item in tasks
+            if task_id in item.depends_on
+        ][:20]
+        details.append(
+            {
+                "id": task_id,
+                "taskId": task_id,
+                "title": task.title if task else "",
+                "status": _pr_queue_state_task_status(state_payload, task_id) if task else "missing",
+                "missing": task is None,
+                "dependsOn": depends_on,
+                "depends_on": depends_on,
+                "dependencies": dependencies,
+                "dependents": dependents,
+            }
+        )
+    return details
+
+
 def _pr_queue_packet_payload(repo_root: Path, path: Path, packet: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
     run_dir = _pr_queue_run_dir(repo_root, packet)
     changed_files, diff_artifacts = _pr_queue_changed_files(repo_root, packet, run_dir)
@@ -2113,6 +2219,7 @@ def _pr_queue_packet_payload(repo_root: Path, path: Path, packet: dict[str, Any]
     goal_refs = [_pr_queue_goal_ref(item) for item in goal_trace]
     goal_refs = [item for item in goal_refs if item][:PR_QUEUE_MAX_GOAL_REFS]
     task_ids = _pr_queue_string_list(_pick_value(packet.get("task_ids"), packet.get("taskIds")), limit=20)
+    dependency_details = _pr_queue_dependency_details(run_dir, task_ids)
     commits = _pr_queue_object_list(_pick_value(packet.get("commits")), limit=PR_QUEUE_MAX_COMMITS)
     qa_notes = _pr_queue_string_list(_pick_value(packet.get("qa_notes"), packet.get("qaNotes")), limit=PR_QUEUE_MAX_NOTES)
     blocking_reasons = _pr_queue_blocking_reasons(packet, validation, preflight, changed_files)
@@ -2129,6 +2236,8 @@ def _pr_queue_packet_payload(repo_root: Path, path: Path, packet: dict[str, Any]
         "run_id": _pick_text(packet.get("run_id"), packet.get("runId")),
         "taskIds": task_ids,
         "task_ids": task_ids,
+        "dependencyDetails": dependency_details,
+        "dependency_details": dependency_details,
         "goalTrace": goal_trace,
         "goal_trace": goal_trace,
         "goalRefs": goal_refs,
@@ -7818,7 +7927,7 @@ def create_app(
 
     def _pr_queue_action_disabled(action: str) -> Any:
         control = _runner_control_snapshot().get("runner_control", {})
-        message = str(LAN_SAFETY_MUTATION_DISABLED_MESSAGE if lan_safety_active else control.get("message") or "PR queue merge actions are disabled.")
+        message = str(LAN_SAFETY_MUTATION_DISABLED_MESSAGE if lan_safety_active else control.get("message") or "PR queue actions are disabled.")
         details = {
             "enabled": bool(control.get("enabled")),
             "source": control.get("source", ""),
@@ -7846,46 +7955,236 @@ def create_app(
             return None
         return payload if isinstance(payload, dict) else None
 
-    @app.post("/api/pr-queue/merge")
-    @app.post("/api/pr_queue/merge")
-    async def api_pr_queue_merge(request: Request) -> Any:
-        if not controls_enabled:
-            return _pr_queue_action_disabled("merge")
-        if not control_lock.acquire(blocking=False):
+    def _pr_queue_action_packet_id(body: dict[str, Any]) -> str:
+        return _pick_text(body.get("packetId"), body.get("packet_id"), body.get("id"))
+
+    def _pr_queue_decision_confirmation_phrase(action: str, packet_id: str) -> str:
+        normalized = str(action or "").strip().upper()
+        if normalized not in {"DISCARD", "REBASE"}:
+            normalized = "MERGE"
+        return f"{normalized} PR {packet_id}"
+
+    def _pr_queue_action_confirmation_response(action: str, packet_id: str, provided: str) -> Any:
+        expected = _pr_queue_decision_confirmation_phrase(action, packet_id)
+        code = "pr_queue_confirmation_required" if not provided else "pr_queue_confirmation_mismatch"
+        message = "A PR queue confirmation phrase is required." if not provided else "The PR queue confirmation phrase did not match."
+        return _pr_queue_action_response(
+            action=action,
+            status_code=400,
+            ok=False,
+            status="invalid_request",
+            message=message,
+            error_code=code,
+            details={
+                "packet_id": packet_id,
+                "expected_phrase": expected,
+            },
+            busy_override=False,
+        )
+
+    def _pr_queue_action_missing_packet_response(action: str) -> Any:
+        return _pr_queue_action_response(
+            action=action,
+            status_code=400,
+            ok=False,
+            status="invalid_request",
+            message="A PR packet id is required.",
+            error_code="pr_queue_packet_id_required",
+            busy_override=False,
+        )
+
+    def _pr_queue_action_invalid_json_response(action: str) -> Any:
+        return _pr_queue_action_response(
+            action=action,
+            status_code=400,
+            ok=False,
+            status="error",
+            message=f"PR queue {action} request body must be JSON.",
+            error_code="invalid_json",
+            busy_override=False,
+        )
+
+    def _pr_queue_action_busy_response(action: str) -> Any:
+        return _pr_queue_action_response(
+            action=action,
+            status_code=409,
+            ok=False,
+            status="busy",
+            message=f"A PR queue {action} request is already in flight.",
+            error_code="pr_queue_actions_busy",
+            busy_override=True,
+        )
+
+    def _pr_queue_action_exception_response(action: str, packet_id: str, ex: Exception) -> Any:
+        if isinstance(ex, FileNotFoundError):
             return _pr_queue_action_response(
-                action="merge",
+                action=action,
+                status_code=404,
+                ok=False,
+                status="missing",
+                message=str(ex) or "PR packet not found.",
+                error_code="pr_queue_packet_missing",
+                details={"packet_id": packet_id},
+                busy_override=False,
+            )
+        if isinstance(ex, RuntimeError):
+            return _pr_queue_action_response(
+                action=action,
                 status_code=409,
                 ok=False,
-                status="busy",
-                message="A PR queue merge request is already in flight.",
-                error_code="pr_queue_actions_busy",
-                busy_override=True,
+                status="blocked",
+                message=str(ex),
+                error_code=f"pr_queue_{action}_blocked",
+                details={"packet_id": packet_id},
+                busy_override=False,
             )
+        return _pr_queue_action_response(
+            action=action,
+            status_code=500,
+            ok=False,
+            status="error",
+            message=f"PR queue {action} failed: {ex}",
+            error_code=f"pr_queue_{action}_failed",
+            details={"packet_id": packet_id},
+            busy_override=False,
+        )
+
+    @app.post("/api/pr-queue/validate")
+    @app.post("/api/pr_queue/validate")
+    async def api_pr_queue_validate(request: Request) -> Any:
+        action = "validate"
+        if not controls_enabled:
+            return _pr_queue_action_disabled(action)
+        if not control_lock.acquire(blocking=False):
+            return _pr_queue_action_busy_response(action)
 
         try:
             body = await _pr_queue_action_body(request)
             if body is None:
-                return _pr_queue_action_response(
-                    action="merge",
-                    status_code=400,
-                    ok=False,
-                    status="error",
-                    message="PR queue merge request body must be JSON.",
-                    error_code="invalid_json",
-                    busy_override=False,
-                )
+                return _pr_queue_action_invalid_json_response(action)
 
-            packet_id = _pick_text(body.get("packetId"), body.get("packet_id"), body.get("id"))
+            packet_id = _pr_queue_action_packet_id(body)
             if not packet_id:
-                return _pr_queue_action_response(
-                    action="merge",
-                    status_code=400,
-                    ok=False,
-                    status="invalid_request",
-                    message="A PR packet id is required.",
-                    error_code="pr_queue_packet_id_required",
-                    busy_override=False,
-                )
+                return _pr_queue_action_missing_packet_response(action)
+
+            full = bool(_coerce_optional_bool(_pick_value(body.get("full"), body.get("fullValidation"), body.get("full_validation"))) or False)
+            try:
+                result = await validate_review_packet_async(repo_root, packet_id, full=full)
+            except Exception as ex:
+                return _pr_queue_action_exception_response(action, packet_id, ex)
+
+            result_status = str(result.get("status") or "validation_complete").strip() or "validation_complete"
+            return _pr_queue_action_response(
+                action=action,
+                status_code=200,
+                ok=True,
+                status=result_status,
+                message=f"PR packet validation completed: {result_status}.",
+                result=result,
+                busy_override=False,
+            )
+        finally:
+            control_lock.release()
+
+    @app.post("/api/pr-queue/discard")
+    @app.post("/api/pr_queue/discard")
+    async def api_pr_queue_discard(request: Request) -> Any:
+        action = "discard"
+        if not controls_enabled:
+            return _pr_queue_action_disabled(action)
+        if not control_lock.acquire(blocking=False):
+            return _pr_queue_action_busy_response(action)
+
+        try:
+            body = await _pr_queue_action_body(request)
+            if body is None:
+                return _pr_queue_action_invalid_json_response(action)
+
+            packet_id = _pr_queue_action_packet_id(body)
+            if not packet_id:
+                return _pr_queue_action_missing_packet_response(action)
+
+            confirmation = _pick_text(body.get("confirmation"), body.get("confirm"), body.get("phrase"), body.get("token"))
+            if confirmation != _pr_queue_decision_confirmation_phrase(action, packet_id):
+                return _pr_queue_action_confirmation_response(action, packet_id, confirmation)
+
+            reason = _pick_text(body.get("reason"), "operator_discarded")
+            try:
+                result = discard_review_packet(repo_root, packet_id, reason=reason)
+            except Exception as ex:
+                return _pr_queue_action_exception_response(action, packet_id, ex)
+
+            result_status = str(result.get("status") or "discarded").strip() or "discarded"
+            return _pr_queue_action_response(
+                action=action,
+                status_code=200,
+                ok=True,
+                status=result_status,
+                message="PR packet discarded without changing the source repository.",
+                result=result,
+                busy_override=False,
+            )
+        finally:
+            control_lock.release()
+
+    @app.post("/api/pr-queue/rebase")
+    @app.post("/api/pr_queue/rebase")
+    async def api_pr_queue_rebase(request: Request) -> Any:
+        action = "rebase"
+        if not controls_enabled:
+            return _pr_queue_action_disabled(action)
+        if not control_lock.acquire(blocking=False):
+            return _pr_queue_action_busy_response(action)
+
+        try:
+            body = await _pr_queue_action_body(request)
+            if body is None:
+                return _pr_queue_action_invalid_json_response(action)
+
+            packet_id = _pr_queue_action_packet_id(body)
+            if not packet_id:
+                return _pr_queue_action_missing_packet_response(action)
+
+            confirmation = _pick_text(body.get("confirmation"), body.get("confirm"), body.get("phrase"), body.get("token"))
+            if confirmation != _pr_queue_decision_confirmation_phrase(action, packet_id):
+                return _pr_queue_action_confirmation_response(action, packet_id, confirmation)
+
+            reason = _pick_text(body.get("reason"), "operator_rebase_requested")
+            try:
+                result = rebase_review_packet(repo_root, packet_id, reason=reason)
+            except Exception as ex:
+                return _pr_queue_action_exception_response(action, packet_id, ex)
+
+            result_status = str(result.get("status") or "review_required").strip() or "review_required"
+            return _pr_queue_action_response(
+                action=action,
+                status_code=200,
+                ok=True,
+                status=result_status,
+                message="PR packet rebase request recorded; rerun validation after updating the branch.",
+                result=result,
+                busy_override=False,
+            )
+        finally:
+            control_lock.release()
+
+    @app.post("/api/pr-queue/merge")
+    @app.post("/api/pr_queue/merge")
+    async def api_pr_queue_merge(request: Request) -> Any:
+        action = "merge"
+        if not controls_enabled:
+            return _pr_queue_action_disabled(action)
+        if not control_lock.acquire(blocking=False):
+            return _pr_queue_action_busy_response(action)
+
+        try:
+            body = await _pr_queue_action_body(request)
+            if body is None:
+                return _pr_queue_action_invalid_json_response(action)
+
+            packet_id = _pr_queue_action_packet_id(body)
+            if not packet_id:
+                return _pr_queue_action_missing_packet_response(action)
 
             approval_phrase = _pick_text(body.get("confirmation"), body.get("confirm"), body.get("phrase"), body.get("token"))
 
@@ -7893,7 +8192,7 @@ def create_app(
                 result = merge_review_packet(repo_root, packet_id, approval_phrase=approval_phrase)
             except PrQueueMergeError as ex:
                 return _pr_queue_action_response(
-                    action="merge",
+                    action=action,
                     status_code=ex.status_code,
                     ok=False,
                     status=ex.status,
@@ -7904,7 +8203,7 @@ def create_app(
                 )
             except Exception as ex:
                 return _pr_queue_action_response(
-                    action="merge",
+                    action=action,
                     status_code=500,
                     ok=False,
                     status="error",
@@ -7915,7 +8214,7 @@ def create_app(
                 )
 
             return _pr_queue_action_response(
-                action="merge",
+                action=action,
                 status_code=200,
                 ok=True,
                 status="approved",
@@ -8906,7 +9205,7 @@ def main(argv: list[str] | None = None) -> int:
         "--trusted-network",
         action="store_true",
         default=None,
-        help="Allow runner controls on non-loopback binds when the network is trusted.",
+        help="Mark a non-loopback bind as trusted; mutating controls still require the trusted-operator/auth gate.",
     )
     args = parser.parse_args(argv)
 

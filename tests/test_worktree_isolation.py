@@ -704,6 +704,7 @@ class WorktreeIsolationTests(unittest.TestCase):
             "packet_id": result["packet_id"],
             "goal_trace": goal_trace,
             "source_head_before": source_head_before,
+            "branch_head": branch_head,
         }
 
     def test_default_worktree_dir_is_outside_source_repo(self) -> None:
@@ -2185,6 +2186,7 @@ class WorktreeIsolationTests(unittest.TestCase):
                 {
                     "gate": "build",
                     "repo": Path(repo).resolve(),
+                    "head": git_head(Path(repo)),
                     "command_repo": Path(command_repo).resolve() if command_repo is not None else None,
                 }
             )
@@ -2223,6 +2225,7 @@ class WorktreeIsolationTests(unittest.TestCase):
                 {
                     "gate": "test",
                     "repo": Path(repo).resolve(),
+                    "head": git_head(Path(repo)),
                     "command_repo": Path(command_repo).resolve() if command_repo is not None else None,
                 }
             )
@@ -2265,6 +2268,8 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertFalse(_is_relative_to(worktree_dir, self.repo))
         self.assertEqual(worktree_dir, calls[0]["repo"])
         self.assertEqual(worktree_dir, calls[1]["repo"])
+        self.assertEqual(packet["branch_head"], calls[0]["head"])
+        self.assertEqual(packet["branch_head"], calls[1]["head"])
         self.assertEqual(self.repo.resolve(), calls[0]["command_repo"])
         self.assertEqual(self.repo.resolve(), calls[1]["command_repo"])
         self.assertEqual(packet["goal_trace"], result["validation_records"][0]["goal_trace"])

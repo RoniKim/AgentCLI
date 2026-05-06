@@ -446,7 +446,7 @@
       },
       prQueue: {
         title: 'PR Queue',
-        subtitle: 'Read-only local PR packet review',
+        subtitle: 'Local PR packet review and guarded decisions',
         queueSummary: 'Queue summary',
         packetList: 'Packets',
         packetDetail: 'Packet detail',
@@ -464,18 +464,50 @@
         validationLogs: 'Validation logs',
         mergePreflight: 'Merge preflight',
         blockingReasons: 'Blocking reasons',
+        dependencyDetail: 'Dependency detail',
+        dependencies: 'Dependencies',
+        dependents: 'Dependents',
         diff: 'Diff',
         diffArtifacts: 'Diff artifacts',
         commits: 'Commits',
-        readOnly: 'Read-only',
-        actionsDisabled: 'Validate, merge, discard, and rebase are disabled here.',
+        guarded: 'Guarded',
+        actionsDisabled: 'Validate, approve merge, discard, and request rebase require runner controls.',
+        actionsEnabled: 'Validate, approve merge, discard, and request rebase use guarded server gates plus confirmation where applicable.',
+        actionUnavailable: 'PR queue action unavailable',
+        actionFailed: 'PR queue action failed',
+        actionFailedHttp: 'PR queue action failed (HTTP {status}).',
+        actionInFlight: 'PR queue action in flight',
+        actionComplete: 'PR queue action complete',
+        confirmationRequired: 'Confirmation required',
+        confirmationPhrase: 'Confirmation phrase',
+        exactMergeConfirmation: 'Type {confirmation} exactly to approve this packet.',
+        exactActionConfirmation: 'Type {confirmation} exactly to confirm this packet decision.',
+        mergeConfirmationPlaceholder: 'MERGE PR {packetId}',
+        discardConfirmationPlaceholder: 'DISCARD PR {packetId}',
+        rebaseConfirmationPlaceholder: 'REBASE PR {packetId}',
+        packetFinalized: 'This packet has already been finalized.',
+        packetMissing: 'Select a PR packet first.',
+        validateSummary: 'Run the configured validation plan for this packet.',
+        validateFullSummary: 'Run the full validation plan for this packet.',
+        mergeSummary: 'Approve this packet for merge without auto-committing source changes.',
+        discardSummary: 'Discard this queued packet without changing the source repository.',
+        rebaseSummary: 'Record a rebase request and reset validation to pending.',
+        validateFull: 'Full validation',
+        reason: 'Reason',
+        reasonPlaceholder: 'Optional operator reason',
+        runValidation: 'Run validation',
+        approving: 'Approving...',
+        validating: 'Validating...',
+        discarding: 'Discarding...',
+        rebasing: 'Recording...',
         validateAction: 'Validate',
-        mergeAction: 'Merge',
+        mergeAction: 'Approve merge',
         discardAction: 'Discard',
-        rebaseAction: 'Rebase',
+        rebaseAction: 'Request rebase',
         noQaNotes: 'No QA notes were recorded.',
         noValidationLogs: 'No validation logs were published.',
         noBlockingReasons: 'No blocking reasons are recorded.',
+        noDependencyDetail: 'No dependency detail is available.',
         noDiff: 'No per-file diff data is available.',
         noGoalRefs: 'No GOALS refs recorded.',
         validationPassed: 'validation passed',
@@ -1275,7 +1307,7 @@
       },
       prQueue: {
         title: 'PR 큐',
-        subtitle: '읽기 전용 로컬 PR 패킷 검토',
+        subtitle: '로컬 PR 패킷 검토 및 보호된 결정',
         queueSummary: '큐 요약',
         packetList: '패킷',
         packetDetail: '패킷 상세',
@@ -1293,18 +1325,50 @@
         validationLogs: '검증 로그',
         mergePreflight: '병합 사전 점검',
         blockingReasons: '차단 사유',
+        dependencyDetail: '의존성 상세',
+        dependencies: '의존 항목',
+        dependents: '후속 항목',
         diff: '차이',
         diffArtifacts: '차이 산출물',
         commits: '커밋',
-        readOnly: '읽기 전용',
-        actionsDisabled: '검증, 병합, 폐기, 리베이스는 여기서 비활성화되어 있습니다.',
+        guarded: '보호됨',
+        actionsDisabled: '검증, 병합 승인, 폐기, 리베이스 요청은 실행기 제어가 필요합니다.',
+        actionsEnabled: '검증, 병합 승인, 폐기, 리베이스 요청은 보호된 서버 게이트와 필요한 확인 문구를 사용합니다.',
+        actionUnavailable: 'PR 큐 작업을 사용할 수 없습니다',
+        actionFailed: 'PR 큐 작업 실패',
+        actionFailedHttp: 'PR 큐 작업 실패(HTTP {status}).',
+        actionInFlight: 'PR 큐 작업 진행 중',
+        actionComplete: 'PR 큐 작업 완료',
+        confirmationRequired: '확인 필요',
+        confirmationPhrase: '확인 문구',
+        exactMergeConfirmation: '{confirmation}를 정확히 입력하면 이 패킷을 승인합니다.',
+        exactActionConfirmation: '{confirmation}를 정확히 입력하면 이 패킷 결정을 확인합니다.',
+        mergeConfirmationPlaceholder: 'MERGE PR {packetId}',
+        discardConfirmationPlaceholder: 'DISCARD PR {packetId}',
+        rebaseConfirmationPlaceholder: 'REBASE PR {packetId}',
+        packetFinalized: '이 패킷은 이미 최종 처리되었습니다.',
+        packetMissing: '먼저 PR 패킷을 선택하세요.',
+        validateSummary: '이 패킷에 설정된 검증 계획을 실행합니다.',
+        validateFullSummary: '이 패킷에 전체 검증 계획을 실행합니다.',
+        mergeSummary: '소스 변경을 자동 커밋하지 않고 이 패킷의 병합을 승인합니다.',
+        discardSummary: '소스 저장소를 변경하지 않고 대기 중인 패킷을 폐기합니다.',
+        rebaseSummary: '리베이스 요청을 기록하고 검증을 대기 상태로 초기화합니다.',
+        validateFull: '전체 검증',
+        reason: '사유',
+        reasonPlaceholder: '선택 입력 운영자 사유',
+        runValidation: '검증 실행',
+        approving: '승인 중...',
+        validating: '검증 중...',
+        discarding: '폐기 중...',
+        rebasing: '기록 중...',
         validateAction: '검증',
-        mergeAction: '병합',
+        mergeAction: '병합 승인',
         discardAction: '폐기',
-        rebaseAction: '리베이스',
+        rebaseAction: '리베이스 요청',
         noQaNotes: '기록된 QA 메모가 없습니다.',
         noValidationLogs: '게시된 검증 로그가 없습니다.',
         noBlockingReasons: '기록된 차단 사유가 없습니다.',
+        noDependencyDetail: '사용 가능한 의존성 상세가 없습니다.',
         noDiff: '파일별 차이 데이터를 사용할 수 없습니다.',
         noGoalRefs: '기록된 GOALS 참조가 없습니다.',
         validationPassed: '검증 통과',
@@ -7884,6 +7948,32 @@
     };
   }
 
+  function normalizePrQueueDependencyDetail(detail) {
+    const raw = toObject(detail);
+    const id = toText(raw.id || raw.taskId || raw.task_id, '');
+    const normalizeLink = (item) => {
+      const link = toObject(item);
+      const linkId = toText(link.id || link.taskId || link.task_id, '');
+      return {
+        id: linkId,
+        taskId: linkId,
+        title: toText(link.title, ''),
+        status: toText(link.status, 'pending'),
+        missing: Boolean(link.missing),
+      };
+    };
+    return {
+      id,
+      taskId: id,
+      title: toText(raw.title, ''),
+      status: toText(raw.status, 'pending'),
+      missing: Boolean(raw.missing),
+      dependsOn: toArray(raw.dependsOn || raw.depends_on).map((item) => toText(item, '')).filter(Boolean),
+      dependencies: toArray(raw.dependencies).map(normalizeLink).filter((item) => item.id),
+      dependents: toArray(raw.dependents).map(normalizeLink).filter((item) => item.id),
+    };
+  }
+
   function normalizePrQueueValidation(validation, packet = {}) {
     const raw = toObject(validation);
     const packetRaw = toObject(packet);
@@ -7905,12 +7995,14 @@
     const changedFiles = toArray(raw.changedFiles || raw.changed_files || raw.diffFiles || raw.diff_files).map(normalizeWorktreeDiffFile);
     const diffArtifacts = toArray(raw.diffArtifacts || raw.diff_artifacts).map(normalizePrQueueArtifact);
     const blockers = toArray(raw.blockingReasons || raw.blocking_reasons).map(normalizePrQueueBlockingReason).filter((item) => item.message || item.detail);
+    const dependencyDetails = toArray(raw.dependencyDetails || raw.dependency_details).map(normalizePrQueueDependencyDetail).filter((item) => item.id);
     return {
       id,
       packetId: id,
       status: toText(raw.status, 'pr_queued'),
       runId: toText(raw.runId || raw.run_id, ''),
       taskIds: toArray(raw.taskIds || raw.task_ids).map((item) => toText(item, '')).filter(Boolean),
+      dependencyDetails,
       goalTrace: toArray(raw.goalTrace || raw.goal_trace),
       goalRefs: toArray(raw.goalRefs || raw.goal_refs).map((item) => toText(item, '')).filter(Boolean),
       branch: toText(raw.branch, ''),
@@ -8960,6 +9052,7 @@
       prompts: [],
       promptEditor: createBlankPromptEditor(),
       prQueue: adaptPrQueue({ items: [], state: 'empty', message: t('prQueue.noPackets') }),
+      prQueueAction: null,
       worktreeDiagnostics: normalizeWorktreeDiagnostics({}),
       worktreeDiagnosticsFilter: normalizeWorktreeDiagnosticsFilter({}),
       worktreeMerge: {
@@ -9556,6 +9649,7 @@
         { t: minutesAgo(12), kind: 'stalled', text: 'Offline fallback is not live data.', run: 'run_offline_20260426_000000' },
       ],
       prQueue: adaptPrQueue({ items: [], state: 'empty', message: t('prQueue.noPackets') }),
+      prQueueAction: null,
       progress: {
         ...clone(blank.progress),
         latest_run_dir: '',
@@ -9630,6 +9724,12 @@
     renderRunbook,
     setPrQueueSelection,
     loadPrQueueDetail,
+    normalizePrQueueAction,
+    prQueueActionEnabled,
+    prQueueActionDisabledReason,
+    prQueueActionPresentation,
+    openPrQueueActionModal,
+    applyPrQueueAction,
     setLocale,
     currentTopbarIdentity,
     identityRunnerModeLabel,
@@ -10589,6 +10689,149 @@
     return status === 'blocked' ? 'chip--warn' : status === 'ready' ? 'chip--accent' : 'chip--info';
   }
 
+  function normalizePrQueueAction(action) {
+    const normalized = String(action || 'validate').toLowerCase();
+    if (normalized === 'merge' || normalized === 'discard' || normalized === 'rebase') {
+      return normalized;
+    }
+    return 'validate';
+  }
+
+  function prQueueActionLabel(action, busy = false) {
+    const normalized = normalizePrQueueAction(action);
+    if (busy) {
+      if (normalized === 'merge') return t('prQueue.approving');
+      if (normalized === 'discard') return t('prQueue.discarding');
+      if (normalized === 'rebase') return t('prQueue.rebasing');
+      return t('prQueue.validating');
+    }
+    if (normalized === 'merge') return t('prQueue.mergeAction');
+    if (normalized === 'discard') return t('prQueue.discardAction');
+    if (normalized === 'rebase') return t('prQueue.rebaseAction');
+    return t('prQueue.validateAction');
+  }
+
+  function prQueueActionConfirmationPhrase(action, packetId) {
+    const normalized = normalizePrQueueAction(action).toUpperCase();
+    return `${normalized} PR ${toText(packetId, '').trim()}`;
+  }
+
+  function prQueueMergeConfirmationPhrase(packetId) {
+    return prQueueActionConfirmationPhrase('merge', packetId);
+  }
+
+  function prQueueActionNeedsConfirmation(action) {
+    return normalizePrQueueAction(action) !== 'validate';
+  }
+
+  function prQueueActionRequestPath(action) {
+    const normalized = normalizePrQueueAction(action);
+    if (normalized === 'merge') return '/api/pr-queue/merge';
+    if (normalized === 'discard') return '/api/pr-queue/discard';
+    if (normalized === 'rebase') return '/api/pr-queue/rebase';
+    return '/api/pr-queue/validate';
+  }
+
+  function prQueueActionSummary(action, packet = currentPrQueuePacket(), actionState = state.prQueueAction) {
+    const normalized = normalizePrQueueAction(action);
+    const fullValidation = Boolean(toObject(actionState).full);
+    if (normalized === 'merge') return t('prQueue.mergeSummary');
+    if (normalized === 'discard') return t('prQueue.discardSummary');
+    if (normalized === 'rebase') return t('prQueue.rebaseSummary');
+    return fullValidation ? t('prQueue.validateFullSummary') : t('prQueue.validateSummary');
+  }
+
+  function prQueueControlsEnabled(control = currentLiveRunRunnerControl()) {
+    const current = toObject(control);
+    const controllerAvailable = current.controllerAvailable ?? current.controller_available ?? true;
+    const statusReason = toText(current.status?.reason, '');
+    return Boolean(current.enabled && controllerAvailable && !current.busy && !runnerControlBusyAction(current) && !statusReason.startsWith('status_error:'));
+  }
+
+  function prQueueControlsDisabledReason(control = currentLiveRunRunnerControl()) {
+    const current = toObject(control);
+    const controllerAvailable = current.controllerAvailable ?? current.controller_available ?? true;
+    if (current.busy || runnerControlBusyAction(current)) {
+      return t('prQueue.actionInFlight');
+    }
+    const statusReason = toText(current.status?.reason, '');
+    if (statusReason.startsWith('status_error:')) {
+      return redactionAwareText(current.lastError || statusReason, '') || t('runner.backendError');
+    }
+    if (!current.enabled) {
+      return redactionAwareText(current.message, t('prQueue.actionsDisabled'));
+    }
+    if (!controllerAvailable) {
+      return redactionAwareText(current.message, t('runner.controllerUnavailableMessage'));
+    }
+    return redactionAwareText(current.message, t('prQueue.actionsDisabled'));
+  }
+
+  function prQueuePacketFinalized(packet) {
+    const status = toText(packet?.status, '').toLowerCase();
+    return status === 'merged' || status === 'discarded';
+  }
+
+  function prQueueActionEnabled(packet = currentPrQueuePacket(), action = 'validate') {
+    const item = normalizePrQueuePacket(packet);
+    const normalized = normalizePrQueueAction(action);
+    if (!item.id || !prQueueControlsEnabled()) {
+      return false;
+    }
+    if (normalized === 'discard') {
+      return toText(item.status, '').toLowerCase() !== 'merged';
+    }
+    if (normalized === 'rebase') {
+      return !prQueuePacketFinalized(item);
+    }
+    return true;
+  }
+
+  function prQueueActionDisabledReason(packet = currentPrQueuePacket(), action = 'validate') {
+    const item = normalizePrQueuePacket(packet);
+    if (!item.id) {
+      return t('prQueue.packetMissing');
+    }
+    if (!prQueueControlsEnabled()) {
+      return prQueueControlsDisabledReason();
+    }
+    if (!prQueueActionEnabled(item, action)) {
+      return t('prQueue.packetFinalized');
+    }
+    return '';
+  }
+
+  function prQueueActionPresentation(packet = currentPrQueuePacket(), action = 'validate') {
+    const item = normalizePrQueuePacket(packet);
+    const normalized = normalizePrQueueAction(action);
+    const actionState = toObject(state.prQueueAction);
+    if (actionState.submitting && actionState.action === normalized && actionState.packetId === item.id) {
+      return actionPresentation(`pr-queue-${normalized}`, 'busy', t('prQueue.actionInFlight'));
+    }
+    if (!prQueueActionEnabled(item, normalized)) {
+      return actionPresentation(`pr-queue-${normalized}`, 'disabled', prQueueActionDisabledReason(item, normalized));
+    }
+    return actionPresentation(`pr-queue-${normalized}`, 'confirmation', prQueueActionSummary(normalized, item));
+  }
+
+  function prQueueActionButtonClass(packet = currentPrQueuePacket(), action = 'validate', baseClass = 'button--quiet') {
+    return actionButtonClass(prQueueActionPresentation(packet, action), baseClass);
+  }
+
+  function prQueueActionButtonAttrs(packet = currentPrQueuePacket(), action = 'validate') {
+    const presentation = prQueueActionPresentation(packet, action);
+    const reason = prQueueActionDisabledReason(packet, action);
+    const item = normalizePrQueuePacket(packet);
+    const attrs = [
+      `data-pr-queue-action="${escapeHTML(normalizePrQueueAction(action))}"`,
+      `data-pr-queue-packet="${escapeHTML(item.id)}"`,
+    ];
+    if (reason && presentation.status === 'disabled') {
+      attrs.push(`title="${escapeHTML(reason)}"`);
+    }
+    return actionButtonAttrs(presentation, attrs.join(' '));
+  }
+
   function currentPrQueuePacket() {
     const queue = state.prQueue || {};
     const selectedId = toText(state.prQueueSelectedId || queue.selectedId || queue.items?.[0]?.id || '', '');
@@ -10636,6 +10879,32 @@
       <div class="pr-queue-subsection">
         <div class="pr-queue-subsection__title">${escapeHTML(title)}</div>
         <div class="pr-queue-subsection__body">${body}</div>
+      </div>
+    `;
+  }
+
+  function renderPrQueueDependencyDetails(packet) {
+    const details = toArray(normalizePrQueuePacket(packet).dependencyDetails);
+    if (!details.length) {
+      return `<div class="summary-note">${escapeHTML(t('prQueue.noDependencyDetail'))}</div>`;
+    }
+    return `
+      <div class="compact-list">
+        ${details.map((detail) => {
+          const dependencies = detail.dependencies.length
+            ? detail.dependencies.map((item) => `${item.id}${item.title ? ` - ${item.title}` : ''} (${item.status})`).join(', ')
+            : t('common.none');
+          const dependents = detail.dependents.length
+            ? detail.dependents.map((item) => `${item.id}${item.title ? ` - ${item.title}` : ''} (${item.status})`).join(', ')
+            : t('common.none');
+          const meta = [
+            detail.title || t('common.unknown'),
+            detail.status,
+            `${t('prQueue.dependencies')}: ${dependencies}`,
+            `${t('prQueue.dependents')}: ${dependents}`,
+          ].filter(Boolean).join(' | ');
+          return compactFactItem(detail.id, meta);
+        }).join('')}
       </div>
     `;
   }
@@ -10736,6 +11005,7 @@
     const goalRefs = item.goalRefs.length
       ? `<div class="compact-list">${item.goalRefs.map((goal) => compactFactItem(t('prQueue.goals'), goal)).join('')}</div>`
       : `<div class="summary-note">${escapeHTML(t('prQueue.noGoalRefs'))}</div>`;
+    const dependencyDetails = renderPrQueueDependencyDetails(item);
     const diffFiles = item.diffFiles.length
       ? `<div class="review-files">${item.diffFiles.map((file) => renderWorktreeDiffFile(file)).join('')}</div>`
       : `<div class="summary-note">${escapeHTML(t('prQueue.noDiff'))}</div>`;
@@ -10758,6 +11028,15 @@
       detailCard(t('prQueue.packetPath'), item.packetPath || '--', 'runner-control__value--muted'),
       detailCard(t('common.status'), item.status || 'pr_queued', 'runner-control__value--muted'),
     ].join('');
+    const actionNote = prQueueControlsEnabled() ? t('prQueue.actionsEnabled') : prQueueControlsDisabledReason();
+    const actionButtons = [
+      { action: 'validate', label: t('prQueue.validateAction'), base: 'button--primary' },
+      { action: 'merge', label: t('prQueue.mergeAction'), base: 'button--primary' },
+      { action: 'discard', label: t('prQueue.discardAction'), base: 'button--danger' },
+      { action: 'rebase', label: t('prQueue.rebaseAction'), base: 'button--quiet' },
+    ]
+      .map((entry) => `<button type="button" class="button ${prQueueActionButtonClass(item, entry.action, entry.base)}" ${prQueueActionButtonAttrs(item, entry.action)}>${escapeHTML(entry.label)}</button>`)
+      .join('');
     return `
       <div class="pr-queue-detail" data-pr-queue-detail="${escapeHTML(item.id)}">
         <div class="pr-queue-detail__head">
@@ -10766,22 +11045,20 @@
             <div class="summary-note">${escapeHTML([item.runId, item.updatedAt || item.createdAt].filter(Boolean).join(' | '))}</div>
           </div>
           <div class="pr-queue-detail__chips">
-            ${chip(t('prQueue.readOnly'), 'chip--info')}
+            ${chip(t('prQueue.guarded'), 'chip--info')}
             ${chip(prQueueValidationLabel(item.validationStatus), prQueueValidationChipClass(item.validationStatus))}
             ${chip(prQueuePreflightLabel(item), prQueuePreflightChipClass(item))}
           </div>
         </div>
         <div class="runner-control__details pr-queue-detail__facts">${facts}</div>
-        <div class="pr-queue-actions" aria-label="${escapeHTML(t('prQueue.actionsDisabled'))}">
-          <button type="button" class="button button--quiet" disabled aria-disabled="true">${escapeHTML(t('prQueue.validateAction'))}</button>
-          <button type="button" class="button button--quiet" disabled aria-disabled="true">${escapeHTML(t('prQueue.mergeAction'))}</button>
-          <button type="button" class="button button--quiet" disabled aria-disabled="true">${escapeHTML(t('prQueue.discardAction'))}</button>
-          <button type="button" class="button button--quiet" disabled aria-disabled="true">${escapeHTML(t('prQueue.rebaseAction'))}</button>
-          <span class="summary-note">${escapeHTML(t('prQueue.actionsDisabled'))}</span>
+        <div class="pr-queue-actions" aria-label="${escapeHTML(t('prQueue.actionsEnabled'))}">
+          ${actionButtons}
+          <span class="summary-note">${escapeHTML(actionNote)}</span>
         </div>
         <div class="pr-queue-detail-grid">
           ${renderPrQueueSubsection(t('prQueue.goals'), goalRefs)}
           ${renderPrQueueSubsection(t('prQueue.qaNotes'), qaNotes)}
+          ${renderPrQueueSubsection(t('prQueue.dependencyDetail'), dependencyDetails)}
           ${renderPrQueueSubsection(t('prQueue.blockingReasons'), blockers)}
           ${renderPrQueueSubsection(t('prQueue.commits'), commits)}
         </div>
@@ -10832,7 +11109,7 @@
       'pr-queue',
       t('prQueue.title'),
       t('prQueue.subtitle'),
-      `<span class="status-chip status-chip--idle"><span class="status-chip__label">${escapeHTML(t('prQueue.readOnly'))}</span><span class="status-chip__meta">${escapeHTML(t('prQueue.actionsDisabled'))}</span></span>`,
+      `<span class="status-chip status-chip--idle"><span class="status-chip__label">${escapeHTML(t('prQueue.guarded'))}</span><span class="status-chip__meta">${escapeHTML(prQueueControlsEnabled() ? t('prQueue.actionsEnabled') : prQueueControlsDisabledReason())}</span></span>`,
       body
     );
   }
@@ -15019,6 +15296,7 @@
     state.paletteOpen = false;
     state.goalEditor = null;
     state.stopOpen = false;
+    state.prQueueAction = null;
     renderOverlay();
   }
 
@@ -15246,6 +15524,283 @@
         errorDetails: details,
       };
       renderWorktreeActionOverlay();
+    }
+  }
+
+  function openPrQueueActionModal(action = 'validate', packetId = '') {
+    const normalized = normalizePrQueueAction(action);
+    const selectedId = toText(packetId || state.prQueueSelectedId || currentPrQueuePacket()?.id, '').trim();
+    const packet = selectedId
+      ? (toArray(state.prQueue?.items).map(normalizePrQueuePacket).find((item) => item.id === selectedId) || currentPrQueuePacket())
+      : currentPrQueuePacket();
+    const item = normalizePrQueuePacket(packet);
+    if (!prQueueActionEnabled(item, normalized)) {
+      return;
+    }
+    state.prQueueAction = {
+      action: normalized,
+      packetId: item.id,
+      confirmation: '',
+      reason: '',
+      full: false,
+      error: '',
+      submitting: false,
+    };
+    state.paletteOpen = false;
+    state.goalEditor = null;
+    state.stopOpen = false;
+    state.worktreeAction = null;
+    renderOverlay();
+  }
+
+  function closePrQueueActionModal() {
+    if (!state.prQueueAction || state.prQueueAction.submitting) {
+      return;
+    }
+    state.prQueueAction = null;
+    renderOverlay();
+    renderShell({ preserveScroll: true });
+  }
+
+  function updatePrQueueActionField(field, value) {
+    if (!state.prQueueAction) {
+      return;
+    }
+    state.prQueueAction = {
+      ...state.prQueueAction,
+      [field]: field === 'full' ? Boolean(value) : value,
+      error: '',
+    };
+    renderPrQueueActionOverlay();
+  }
+
+  function prQueueActionConfirmEnabled(packet, actionState) {
+    const action = normalizePrQueueAction(actionState.action);
+    if (!prQueueActionEnabled(packet, action) || actionState.submitting) {
+      return false;
+    }
+    if (!prQueueActionNeedsConfirmation(action)) {
+      return true;
+    }
+    return toText(actionState.confirmation, '').trim() === prQueueActionConfirmationPhrase(action, actionState.packetId);
+  }
+
+  function renderPrQueueActionOverlay() {
+    const actionState = toObject(state.prQueueAction);
+    const action = normalizePrQueueAction(actionState.action);
+    const packetId = toText(actionState.packetId || state.prQueueSelectedId, '').trim();
+    const packet = normalizePrQueuePacket(
+      toArray(state.prQueue?.items).map(normalizePrQueuePacket).find((item) => item.id === packetId) ||
+        (currentPrQueuePacket()?.id === packetId ? currentPrQueuePacket() : null)
+    );
+    const confirmation = prQueueActionConfirmationPhrase(action, packetId);
+    const actionEnabled = prQueueActionEnabled(packet, action);
+    const confirmEnabled = prQueueActionConfirmEnabled(packet, actionState);
+    const title = prQueueActionLabel(action);
+    const summary = prQueueActionSummary(action, packet, actionState);
+    const instruction = prQueueActionNeedsConfirmation(action)
+      ? t(action === 'merge' ? 'prQueue.exactMergeConfirmation' : 'prQueue.exactActionConfirmation', { confirmation })
+      : summary;
+    const detailCards = [
+      { label: t('prQueue.packetDetail'), value: packet.id || packetId || '--' },
+      { label: t('prQueue.branch'), value: packet.branch || '--' },
+      { label: t('prQueue.validation'), value: prQueueValidationLabel(packet.validationStatus) },
+      { label: t('common.status'), value: packet.status || 'pr_queued' },
+      { label: t('prQueue.packetPath'), value: packet.packetPath || '--' },
+    ];
+    const detailHTML = detailCards.map((item) => detailCard(item.label, item.value)).join('');
+    const overlayPresentation = actionState.submitting
+      ? actionPresentation(`pr-queue-${action}`, 'busy', t('prQueue.actionInFlight'))
+      : actionState.error
+        ? actionPresentation(`pr-queue-${action}`, 'failure', actionState.error)
+        : !actionEnabled
+          ? actionPresentation(`pr-queue-${action}`, 'disabled', prQueueActionDisabledReason(packet, action))
+          : actionPresentation(`pr-queue-${action}`, 'confirmation', summary);
+    const confirmPresentation = actionState.submitting
+      ? actionPresentation(`pr-queue-${action}`, 'busy', t('prQueue.actionInFlight'))
+      : actionState.error
+        ? actionPresentation(`pr-queue-${action}`, 'failure', actionState.error, { disabled: !confirmEnabled })
+        : actionPresentation(`pr-queue-${action}`, 'confirmation', instruction, { disabled: !confirmEnabled });
+    const confirmationPlaceholderKey = action === 'discard'
+      ? 'prQueue.discardConfirmationPlaceholder'
+      : action === 'rebase'
+        ? 'prQueue.rebaseConfirmationPlaceholder'
+        : 'prQueue.mergeConfirmationPlaceholder';
+    const confirmationHTML = prQueueActionNeedsConfirmation(action)
+      ? `
+        <div class="modal-banner section-banner section-banner--info pr-queue-action__warning">
+          <span class="dot" style="background: currentColor;"></span>
+          <div>
+            <div class="section-banner__title">${escapeHTML(t('prQueue.confirmationRequired'))}</div>
+            <div class="section-banner__copy">${escapeHTML(instruction)}</div>
+          </div>
+        </div>
+        <div class="modal-field pr-queue-action__field">
+          <div class="modal-field__label">${escapeHTML(t('prQueue.confirmationPhrase'))}</div>
+          <input
+            type="text"
+            class="field-control pr-queue-action__input"
+            aria-label="${escapeHTML(t('prQueue.confirmationPhrase'))}"
+            data-pr-queue-action-confirmation
+            value="${escapeHTML(actionState.confirmation || '')}"
+            placeholder="${escapeHTML(t(confirmationPlaceholderKey, { packetId }))}"
+            autocomplete="off"
+            ${actionState.submitting ? 'disabled' : ''}
+          >
+        </div>
+      `
+      : '';
+    const validateOptionsHTML = action === 'validate'
+      ? `
+        <label class="check-row pr-queue-action__check">
+          <input type="checkbox" data-pr-queue-action-full ${actionState.full ? 'checked' : ''} ${actionState.submitting ? 'disabled' : ''}>
+          <span>${escapeHTML(t('prQueue.validateFull'))}</span>
+        </label>
+      `
+      : '';
+    const reasonHTML = action === 'discard' || action === 'rebase'
+      ? `
+        <div class="modal-field pr-queue-action__field">
+          <div class="modal-field__label">${escapeHTML(t('prQueue.reason'))}</div>
+          <textarea
+            class="field-control field-control--textarea"
+            rows="3"
+            aria-label="${escapeHTML(t('prQueue.reason'))}"
+            data-pr-queue-action-reason
+            placeholder="${escapeHTML(t('prQueue.reasonPlaceholder'))}"
+            ${actionState.submitting ? 'disabled' : ''}
+          >${escapeHTML(actionState.reason || '')}</textarea>
+        </div>
+      `
+      : '';
+    const actionLabel = action === 'validate' && !actionState.submitting ? t('prQueue.runValidation') : prQueueActionLabel(action, actionState.submitting);
+    const baseButtonClass = action === 'discard' ? 'button--danger' : action === 'rebase' ? 'button--quiet' : 'button--primary';
+    overlayRoot().innerHTML = `
+      <div class="overlay overlay--tight" data-overlay="pr-queue-action">
+        <div class="overlay__panel overlay__panel--modal">
+          <div class="overlay__head">
+            <span class="overlay__title">${escapeHTML(title)}</span>
+            <span class="overlay__sub">${escapeHTML(actionState.submitting ? t('prQueue.actionInFlight') : t('prQueue.confirmationRequired'))}</span>
+          </div>
+          <div class="overlay__body">
+            <div class="pr-queue-action" data-action-state="${escapeHTML(overlayPresentation.status)}">
+              ${renderActionStateBanner(overlayPresentation, title, actionState.error || summary)}
+              <div class="runner-control__details pr-queue-action__details">
+                ${detailHTML}
+              </div>
+              ${validateOptionsHTML}
+              ${reasonHTML}
+              ${confirmationHTML}
+              ${actionState.error ? `<div class="field-error">${escapeHTML(actionState.error)}</div>` : ''}
+              <div class="modal-copy">${escapeHTML(actionEnabled ? summary : prQueueActionDisabledReason(packet, action))}</div>
+              <div class="modal-actions">
+                <button type="button" class="button button--quiet" data-pr-queue-action-close ${actionState.submitting ? 'disabled' : ''}>${escapeHTML(t('common.cancel'))}</button>
+                <button type="button" class="button ${actionButtonClass(confirmPresentation, baseButtonClass)}" data-pr-queue-action-confirm ${actionButtonAttrs(confirmPresentation)}>${escapeHTML(actionLabel)}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  async function applyPrQueueAction() {
+    const actionState = toObject(state.prQueueAction);
+    const action = normalizePrQueueAction(actionState.action);
+    const packetId = toText(actionState.packetId || state.prQueueSelectedId, '').trim();
+    const packet = normalizePrQueuePacket(
+      toArray(state.prQueue?.items).map(normalizePrQueuePacket).find((item) => item.id === packetId) ||
+        (currentPrQueuePacket()?.id === packetId ? currentPrQueuePacket() : null)
+    );
+    if (!state.prQueueAction || actionState.submitting) {
+      return;
+    }
+    if (!prQueueActionEnabled(packet, action)) {
+      state.prQueueAction = {
+        ...actionState,
+        error: prQueueActionDisabledReason(packet, action) || t('prQueue.actionUnavailable'),
+      };
+      renderPrQueueActionOverlay();
+      return;
+    }
+    const expected = prQueueActionConfirmationPhrase(action, packetId);
+    const provided = toText(actionState.confirmation, '').trim();
+    if (prQueueActionNeedsConfirmation(action) && provided !== expected) {
+      state.prQueueAction = {
+        ...actionState,
+        error: t(action === 'merge' ? 'prQueue.exactMergeConfirmation' : 'prQueue.exactActionConfirmation', { confirmation: expected }),
+      };
+      renderPrQueueActionOverlay();
+      return;
+    }
+
+    state.prQueueAction = {
+      ...actionState,
+      submitting: true,
+      error: '',
+    };
+    renderPrQueueActionOverlay();
+
+    const body = {
+      packetId,
+    };
+    if (prQueueActionNeedsConfirmation(action)) {
+      body.confirmation = provided;
+    }
+    if (action === 'validate') {
+      body.full = Boolean(actionState.full);
+    } else if (action === 'discard' || action === 'rebase') {
+      body.reason = toText(actionState.reason, '').trim();
+    }
+
+    try {
+      const response = await fetch(prQueueActionRequestPath(action), {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch {
+        payload = {};
+      }
+      const normalized = toObject(payload);
+      if (!response.ok || normalized.ok === false) {
+        const message = toText(normalized.message || toObject(normalized.error).message || t('prQueue.actionFailedHttp', { status: response.status }), t('prQueue.actionFailed'));
+        const error = new Error(message);
+        const snapshot = toObject(normalized.snapshot);
+        if (Object.keys(snapshot).length) {
+          error.snapshot = snapshot;
+        }
+        throw error;
+      }
+
+      const snapshot = toObject(normalized.snapshot);
+      if (Object.keys(snapshot).length) {
+        applyServerSnapshot(snapshot);
+      } else {
+        await refreshSnapshot({ silent: true });
+      }
+      state.prQueueSelectedId = packetId;
+      state.prQueueAction = null;
+      renderShell({ preserveScroll: true });
+      await loadPrQueueDetail(packetId, { force: true });
+    } catch (error) {
+      const message = toText(error?.message || error, t('prQueue.actionFailed'));
+      const snapshot = toObject(error?.snapshot);
+      if (Object.keys(snapshot).length) {
+        applyServerSnapshot(snapshot);
+      }
+      state.prQueueAction = {
+        ...actionState,
+        submitting: false,
+        error: message,
+      };
+      renderPrQueueActionOverlay();
     }
   }
 
@@ -20687,6 +21242,7 @@
     prQueue: clone(defaults.prQueue),
     prQueueSelectedId: defaults.prQueue.selectedId || '',
     prQueueDetailRequestSeq: 0,
+    prQueueAction: defaults.prQueueAction || null,
     worktreeMerge: clone(defaults.worktreeMerge),
     worktreeDiagnostics: clone(defaults.worktreeDiagnostics),
     worktreeDiagnosticsFilter: clone(defaults.worktreeDiagnosticsFilter || normalizeWorktreeDiagnosticsFilter({})),
@@ -20884,6 +21440,10 @@
       renderWorktreeActionOverlay();
       return;
     }
+    if (state.prQueueAction) {
+      renderPrQueueActionOverlay();
+      return;
+    }
     if (state.stopOpen) {
       renderStopOverlay();
       return;
@@ -20892,7 +21452,7 @@
   }
 
   function renderShell(options = {}) {
-    if (!options.force && (state.paletteOpen || state.goalEditor || state.stopOpen || state.worktreeAction)) {
+    if (!options.force && (state.paletteOpen || state.goalEditor || state.stopOpen || state.worktreeAction || state.prQueueAction)) {
       return;
     }
     const main = mainRoot();
@@ -21216,6 +21776,7 @@
     state.stopOpen = false;
     state.goalEditor = null;
     state.worktreeAction = null;
+    state.prQueueAction = null;
     renderOverlay();
   }
 
@@ -21238,6 +21799,7 @@
     state.paletteOpen = false;
     state.goalEditor = null;
     state.worktreeAction = null;
+    state.prQueueAction = null;
     renderOverlay();
   }
 
@@ -21330,6 +21892,7 @@
     state.paletteOpen = false;
     state.stopOpen = false;
     state.worktreeAction = null;
+    state.prQueueAction = null;
     renderOverlay();
   }
 
@@ -21349,6 +21912,7 @@
     state.paletteOpen = false;
     state.stopOpen = false;
     state.worktreeAction = null;
+    state.prQueueAction = null;
     renderOverlay();
   }
 
@@ -22032,7 +22596,7 @@
     }
     state.liveLogTimer = window.setInterval(() => {
       if (state.logsPaused || state.activeRun.status !== 'running') {
-        if (!state.paletteOpen && !state.goalEditor && !state.stopOpen && !state.worktreeAction) {
+        if (!state.paletteOpen && !state.goalEditor && !state.stopOpen && !state.worktreeAction && !state.prQueueAction) {
           topbarRoot().innerHTML = renderTopbar();
         }
         return;
@@ -22055,7 +22619,7 @@
       });
       state.logs = state.logs.slice(-72);
 
-      if (!state.paletteOpen && !state.goalEditor && !state.stopOpen && !state.worktreeAction) {
+      if (!state.paletteOpen && !state.goalEditor && !state.stopOpen && !state.worktreeAction && !state.prQueueAction) {
         renderShell({
           preserveScroll: true,
           scrollToBottom: state.activeView === 'logs',
@@ -22326,6 +22890,12 @@
       return;
     }
 
+    const prQueueAction = event.target.closest('[data-pr-queue-action]');
+    if (prQueueAction) {
+      openPrQueueActionModal(prQueueAction.dataset.prQueueAction, prQueueAction.dataset.prQueuePacket);
+      return;
+    }
+
     const history = event.target.closest('[data-history-select]');
     if (history) {
       setHistorySelection(history.dataset.historySelect);
@@ -22551,6 +23121,16 @@
       return;
     }
 
+    if (event.target.matches('[data-pr-queue-action-confirmation]')) {
+      updatePrQueueActionField('confirmation', event.target.value);
+      return;
+    }
+
+    if (event.target.matches('[data-pr-queue-action-reason]')) {
+      updatePrQueueActionField('reason', event.target.value);
+      return;
+    }
+
     if (event.target.matches('[data-log-filter-field]')) {
       updateLogTailFilter(event.target.dataset.logFilterField, event.target.value);
       return;
@@ -22584,6 +23164,11 @@
 
     if (event.target.matches('[data-prompt-backup-select]')) {
       updatePromptEditorMutationField('backupSelection', event.target.value);
+    }
+
+    if (event.target.matches('[data-pr-queue-action-full]')) {
+      updatePrQueueActionField('full', event.target.checked);
+      return;
     }
 
     if (state.stopOpen && event.target.matches('[data-runner-option-field]')) {
@@ -22650,6 +23235,20 @@
       if (event.key === 'Enter') {
         event.preventDefault();
         void applyWorktreeAction();
+        return;
+      }
+      return;
+    }
+
+    if (state.prQueueAction) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closePrQueueActionModal();
+        return;
+      }
+      if (event.key === 'Enter' && !target.matches('textarea')) {
+        event.preventDefault();
+        void applyPrQueueAction();
         return;
       }
       return;
@@ -22761,11 +23360,23 @@
     const worktreeConfirm = event.target.closest('[data-worktree-action-confirm]');
     if (worktreeConfirm) {
       void applyWorktreeAction();
+      return;
+    }
+
+    const prQueueClose = event.target.closest('[data-pr-queue-action-close]');
+    if (prQueueClose) {
+      closePrQueueActionModal();
+      return;
+    }
+
+    const prQueueConfirm = event.target.closest('[data-pr-queue-action-confirm]');
+    if (prQueueConfirm) {
+      void applyPrQueueAction();
     }
   });
 
   document.addEventListener('keydown', (event) => {
-    if (state.paletteOpen || state.goalEditor || state.stopOpen || state.worktreeAction) {
+    if (state.paletteOpen || state.goalEditor || state.stopOpen || state.worktreeAction || state.prQueueAction) {
       return;
     }
     if (event.key === 'Enter' && event.target.matches('[data-config-field][type="text"], [data-config-field][type="number"], [data-goal-field], [data-goal-save-confirmation]')) {
@@ -22781,7 +23392,7 @@
   });
 
   function updateClockChips() {
-    if (state.paletteOpen || state.goalEditor || state.stopOpen || state.worktreeAction) {
+    if (state.paletteOpen || state.goalEditor || state.stopOpen || state.worktreeAction || state.prQueueAction) {
       return;
     }
     topbarRoot().innerHTML = renderTopbar();

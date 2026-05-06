@@ -3769,6 +3769,20 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         }
         _write(packet_path, json.dumps(packet, ensure_ascii=False, indent=2) + "\n")
         _write(
+            self.run_dir / "BACKLOG.json",
+            json.dumps(
+                {
+                    "tasks": [
+                        {"id": "T1", "title": "Prepare PR queue dependency", "prompt": "Prepare dependency", "depends_on": []},
+                        {"id": "T2", "title": "QA reviewed packet detail", "prompt": "Review packet", "depends_on": ["T1"]},
+                    ]
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        _write(
             pr_root / "branch_index.json",
             json.dumps(
                 {
@@ -5729,6 +5743,9 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("abc12345", item["headRef"])
         self.assertEqual("validation_failed", item["validationStatus"])
         self.assertEqual("blocked", item["mergePreflightStatus"])
+        self.assertEqual("T2", item["dependencyDetails"][0]["id"])
+        self.assertEqual(["T1"], item["dependencyDetails"][0]["dependsOn"])
+        self.assertEqual("Prepare PR queue dependency", item["dependencyDetails"][0]["dependencies"][0]["title"])
         self.assertGreaterEqual(len(item["blockingReasons"]), 1)
         self.assertNotIn("changedFiles", item)
 
@@ -5745,6 +5762,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("validation_failed", detail["validation"]["status"])
         self.assertIn("validation log exposed", detail["validation"]["artifacts"][1]["preview"])
         self.assertEqual("web-static", detail["validation"]["records"][0]["name"])
+        self.assertEqual("Prepare PR queue dependency", detail["dependencyDetails"][0]["dependencies"][0]["title"])
         self.assertIn("git apply --check failed", detail["mergePreflight"]["applyCheck"]["message"])
         self.assertTrue(any(reason["kind"] == "merge_preflight" for reason in detail["blockingReasons"]))
         self.assertTrue(detail["diffArtifacts"])
@@ -5774,7 +5792,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual("missing", payload["state"])
 
-    def test_pr_queue_view_renders_read_only_packet_detail(self) -> None:
+    def test_pr_queue_view_renders_guarded_packet_detail(self) -> None:
         self._write_pr_queue_packet()
         status_payload = self.client.get("/api/status").json()
         detail_payload = self.client.get("/api/pr-queue/pr-web-t2").json()
@@ -5793,11 +5811,14 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         main_html = shell["roots"]["main"]
         self.assertEqual("pr-queue", shell["roots"]["view"])
         self.assertIn("PR Queue", shell["title"])
-        self.assertIn("Read-only", main_html)
+        self.assertIn("Guarded", main_html)
         self.assertIn("QA reviewed packet detail", main_html)
         self.assertIn("validation log exposed", main_html)
-        self.assertIn("Validate, merge, discard, and rebase are disabled here.", main_html)
+        self.assertIn("Dependency detail", main_html)
+        self.assertIn("Prepare PR queue dependency", main_html)
+        self.assertIn("Runner controls are disabled until the server is started", main_html)
         self.assertIn("data-pr-queue-select", main_html)
+        self.assertIn("data-pr-queue-action", main_html)
         self.assertEqual([], shell["fetchCalls"])
 
     def test_runbook_view_renders_active_repo_operator_commands(self) -> None:

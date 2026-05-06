@@ -4,7 +4,7 @@
 
 AgentCLI has a FastAPI web console for browser-based local-operator monitoring and guarded repo operations. It is repo-owned code in `web_console/` served by `agent_runner.web`; the exported design files under `docs/Design/project/` are reference input only.
 
-The console is optimized for a trusted local repository workflow: read-only snapshots are the default, while config, prompt, goals, runner, PR queue merge, and worktree mutation routes require explicit server opt-in and confirmation where applicable.
+The console is optimized for a trusted local repository workflow: read-only snapshots are the default, while config, prompt, goals, runner, PR queue decisions, and worktree mutation routes require explicit server opt-in and confirmation where applicable.
 
 ## Operating Model
 
@@ -20,7 +20,7 @@ AgentCLI Web currently runs as `one repo, one web instance`.
 Verified on 2026-05-06 with local API, unit, and checked-in browser smoke coverage:
 
 - Static console serving works from `agent_runner.web`.
-- Live FastAPI routes cover `/api/health`, `/api/status`, `/api/progress`, `/api/history`, `/api/reports/export`, `/api/experience`, `/api/logs`, `/api/logs/tail`, `/api/logs/live`, `/api/artifacts/open`, `/api/worktree`, `/api/worktree/diagnostics`, guarded `/api/config`, `/api/config/restore`, `/api/config/save`, `/api/prompts`, `/api/prompts/read`, `/api/prompts/content`, `/api/prompts/save`, `/api/prompts/restore`, `/api/goals`, `/api/goals/save`, `/api/runner/status`, `/api/runner/start`, `/api/runner/stop`, `/api/runner/reload`, `/api/runner/restart`, `/api/worktree/merge`, `/api/worktree/discard`, `/api/pr-queue`, `/api/pr-queue/{packet_id}`, `/api/pr-queue/merge`, and `/api/pr_queue/merge`.
+- Live FastAPI routes cover `/api/health`, `/api/status`, `/api/progress`, `/api/history`, `/api/reports/export`, `/api/experience`, `/api/logs`, `/api/logs/tail`, `/api/logs/live`, `/api/artifacts/open`, `/api/worktree`, `/api/worktree/diagnostics`, guarded `/api/config`, `/api/config/restore`, `/api/config/save`, `/api/prompts`, `/api/prompts/read`, `/api/prompts/content`, `/api/prompts/save`, `/api/prompts/restore`, `/api/goals`, `/api/goals/save`, `/api/runner/status`, `/api/runner/start`, `/api/runner/stop`, `/api/runner/reload`, `/api/runner/restart`, `/api/worktree/merge`, `/api/worktree/discard`, `/api/pr-queue`, `/api/pr-queue/{packet_id}`, `/api/pr-queue/validate`, `/api/pr-queue/merge`, `/api/pr-queue/discard`, `/api/pr-queue/rebase`, `/api/pr_queue/validate`, `/api/pr_queue/merge`, `/api/pr_queue/discard`, and `/api/pr_queue/rebase`.
 - `/api/health` exposes web diagnostics for FastAPI/uvicorn availability and repo `.venv` health, including missing executables and stale `pyvenv.cfg` base paths; startup dependency failures include the same diagnostic issue codes when the HTTP app cannot start.
 - The Runbook route renders active-repo commands for venv activation, shell/web startup, status/stop, worktree merge/discard, PR queue review, diagnostics, and long unattended runs.
 - Completed run report generation also writes `WORK_SUMMARY.md`, a short daily-work-log Markdown artifact without raw logs, prompts, transcripts, or diffs.
@@ -35,7 +35,7 @@ Verified on 2026-05-06 with local API, unit, and checked-in browser smoke covera
 - The explicit prompt-read path stays available for the editor flow after a user selects a prompt; the inventory view remains redacted and the raw-content path is only used by that explicit editor request.
 - The UI has first-pass routes for Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, and Worktree Review.
 - The shell now exposes `/worktree` for the same diagnostics summary.
-- PR queue merge approval is now gated by a validated packet, an exact `MERGE PR <packet_id>` confirmation phrase, and the same mutating-control/LAN safety rules as other write actions.
+- PR Queue browser controls can validate, approve merge, discard, and request rebase for queued packets through guarded backend routes. Merge approval requires a validated packet plus exact `MERGE PR <packet_id>`; discard and rebase require exact `DISCARD PR <packet_id>` / `REBASE PR <packet_id>` confirmation phrases; every browser PR Queue decision uses shared packet helper gates plus the web opt-in, LAN, and confirmation gates.
 - Checked-in Playwright smoke coverage now exercises Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, EN/KO Dashboard and Config locale switching, and a mobile-width viewport.
 - Runner controls are disabled by default and require explicit opt-in.
 - Config saves now reuse that opt-in and create a timestamped backup before atomic disk writes.
@@ -46,7 +46,6 @@ Verified on 2026-05-06 with local API, unit, and checked-in browser smoke covera
 Known remaining scope:
 
 - Instance Health remains tracked in `.doc/GOALS.md` P1.
-- Browser PR Queue detail is currently read-oriented: it shows packet data, validation logs, merge preflight, blockers, and disabled action affordances; shell commands and guarded backend routes remain the operational path for mutating queue decisions.
 - There is no implemented authentication layer yet. Treat LAN binds as trusted-network-only until [AUTHENTICATION_PLAN.md](AUTHENTICATION_PLAN.md) is implemented.
 
 ## Web Server Flags
