@@ -3681,6 +3681,54 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         ])
         return normalized, rendered["roots"]["main"], rendered["title"]
 
+    def test_command_palette_operator_commands_expose_readonly_and_disabled_state(self) -> None:
+        status_payload = self.client.get("/api/status").json()
+        normalized = _run_adapter_harness([
+            {"kind": "call", "name": "normalizeSnapshot", "args": [status_payload]},
+        ])[0]
+        results = _run_adapter_harness([
+            {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+            {"kind": "call", "name": "inspectCommandPaletteCommands", "args": []},
+        ])
+        commands = results[1]
+
+        def find_action(action: str, title_fragment: str = "") -> dict[str, object]:
+            for command in commands:
+                if command.get("action") != action:
+                    continue
+                if title_fragment and title_fragment not in str(command.get("title", "")):
+                    continue
+                return command
+            self.fail(f"Missing command palette action: {action} {title_fragment}")
+
+        readonly_actions = [
+            ("nav-runbook", "Runbook"),
+            ("nav-pr-queue", "PR Queue"),
+            ("nav-worktree", "diagnostics"),
+            ("nav-history", "Run History"),
+            ("nav-config", "Config changes"),
+        ]
+        for action, title_fragment in readonly_actions:
+            command = find_action(action, title_fragment)
+            self.assertTrue(command["readOnly"], command)
+            self.assertFalse(command["disabled"], command)
+            self.assertEqual("READ ONLY", command["statusLabel"])
+
+        save_command = find_action("save-config")
+        self.assertTrue(save_command["disabled"], save_command)
+        self.assertEqual("DISABLED", save_command["statusLabel"])
+        self.assertTrue(save_command["disabledReason"] or save_command["meta"], save_command)
+
+        reset_command = find_action("reset-config")
+        self.assertIn(reset_command["statusLabel"], {"DISABLED", "Config change surface"})
+        self.assertTrue(reset_command["disabledReason"] or reset_command["meta"], reset_command)
+
+        for action in ("open-stop", "runner-start", "runner-stop", "runner-reload", "runner-restart"):
+            command = find_action(action)
+            self.assertTrue(command["disabled"], command)
+            self.assertEqual("DISABLED", command["statusLabel"])
+            self.assertTrue(command["disabledReason"] or command["meta"], command)
+
     def _api_log_tail(self, **params: object) -> dict[str, object]:
         response = self.client.get("/api/logs/tail", params=params)
         self.assertEqual(200, response.status_code)

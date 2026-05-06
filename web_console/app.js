@@ -204,6 +204,12 @@
         goTo: 'Go to {view}',
         navKind: 'NAV',
         actionKind: 'ACTION',
+        operatorKind: 'OP',
+        readOnlyState: 'READ ONLY',
+        disabledState: 'DISABLED',
+        safeRunnerControl: 'Safe runner control',
+        readOnlySurface: 'Read-only operator surface',
+        configChangeSurface: 'Config change surface',
         refreshStatus: 'Refresh read-only snapshot',
         stopCurrentRun: 'Stop current run',
         startRunner: 'Start runner',
@@ -213,8 +219,13 @@
         pauseLiveTail: 'Pause live tail',
         resumeLiveTail: 'Resume live tail',
         openWorktreeReview: 'Open Worktree Review',
+        openDiagnostics: 'Open diagnostics',
         openPrQueue: 'Open PR Queue',
         openRunbook: 'Open Runbook',
+        openRunHistory: 'Open Run History',
+        openConfigChanges: 'Open Config changes',
+        saveConfigChanges: 'Save Config changes',
+        resetConfigChanges: 'Reset Config draft',
         openMobilePreview: 'Open mobile workflow',
         openLandingPreview: 'Open Landing preview',
       },
@@ -1138,6 +1149,12 @@
         goTo: '{view}로 이동',
         navKind: '이동',
         actionKind: '작업',
+        operatorKind: '운영',
+        readOnlyState: '읽기 전용',
+        disabledState: '비활성화',
+        safeRunnerControl: '확인 기반 실행기 제어',
+        readOnlySurface: '읽기 전용 운영 화면',
+        configChangeSurface: '설정 변경 화면',
         refreshStatus: '읽기 전용 스냅샷 새로고침',
         stopCurrentRun: '현재 실행 중지',
         startRunner: '실행기 시작',
@@ -1147,8 +1164,13 @@
         pauseLiveTail: '라이브 tail 일시정지',
         resumeLiveTail: '라이브 tail 재개',
         openWorktreeReview: '워크트리 검토 열기',
+        openDiagnostics: '진단 열기',
         openPrQueue: 'PR 큐 열기',
         openRunbook: '런북 열기',
+        openRunHistory: '실행 기록 열기',
+        openConfigChanges: '설정 변경 열기',
+        saveConfigChanges: '설정 변경 저장',
+        resetConfigChanges: '설정 초안 초기화',
         openMobilePreview: '모바일 워크플로 열기',
         openLandingPreview: '랜딩 미리보기 열기',
       },
@@ -9923,6 +9945,7 @@
     syncGoalSaveArtifacts,
     saveGoalDraft,
     handleAction,
+    inspectCommandPaletteCommands,
     renderLogRow,
   };
 
@@ -20691,6 +20714,7 @@
     const commands = renderPaletteCommands().filter(paletteMatches);
     const command = commands[index];
     if (!command) return;
+    if (command.disabled) return;
     if (command.kind === 'nav') {
       closePalette();
       setView(command.view);
@@ -20710,15 +20734,7 @@
     list.innerHTML = commands.length
       ? commands
           .map((command, index) => `
-            <button
-              type="button"
-              class="palette-item ${index === selectedIndex ? 'palette-item--active' : ''}"
-              data-palette-index="${index}"
-            >
-              <span class="palette-item__kind">${escapeHTML(command.kindLabel || command.kind)}</span>
-              <span class="palette-item__title">${escapeHTML(command.title)}</span>
-              <span class="palette-item__shortcut">${escapeHTML(command.shortcut || '')}</span>
-            </button>
+            ${renderPaletteCommandItem(command, index, selectedIndex)}
           `)
           .join('')
       : `<div class="palette-item"><span class="palette-item__kind">${escapeHTML(t('common.none'))}</span><span class="palette-item__title">${escapeHTML(t('palette.noMatches'))}</span><span class="palette-item__shortcut"></span></div>`;
@@ -21305,11 +21321,111 @@
   function paletteMatches(command) {
     const query = state.paletteQuery.trim().toLowerCase();
     if (!query) return true;
-    const haystack = [command.title, command.shortcut, command.kind, command.view, command.action]
+    const haystack = [command.title, command.shortcut, command.kind, command.view, command.action, command.meta, command.disabledReason, command.statusLabel]
       .filter(Boolean)
       .join(' ')
       .toLowerCase();
     return haystack.includes(query);
+  }
+
+  function paletteConfigResetDisabledReason(diffs = getConfigDiffs()) {
+    if (configSaveInFlight()) {
+      return t('config.saveInProgress');
+    }
+    if (configRestoreInFlight()) {
+      return t('config.restoreInProgress');
+    }
+    if (!diffs.length) {
+      return t('config.noConfigChanges');
+    }
+    return '';
+  }
+
+  function paletteRunnerCommand(action, title, shortcut, commandAction = `runner-${action}`) {
+    const presentation = runnerControlActionPresentation(action);
+    const disabledReason = presentation.disabled ? runnerControlActionDisabledReason(action) || presentation.message : '';
+    const busy = Boolean(presentation.busy);
+    return {
+      kind: 'action',
+      kindLabel: t('palette.operatorKind'),
+      action: commandAction,
+      title,
+      shortcut,
+      disabled: Boolean(presentation.disabled),
+      busy,
+      disabledReason,
+      statusLabel: presentation.disabled ? t('palette.disabledState') : t('palette.safeRunnerControl'),
+      meta: presentation.disabled ? disabledReason : t('palette.safeRunnerControl'),
+    };
+  }
+
+  function paletteCommandStatusLabel(command) {
+    if (command.disabled) {
+      return command.statusLabel || t('palette.disabledState');
+    }
+    if (command.readOnly) {
+      return command.statusLabel || t('palette.readOnlyState');
+    }
+    return command.statusLabel || '';
+  }
+
+  function paletteCommandMeta(command) {
+    if (command.disabled) {
+      return command.disabledReason || command.meta || t('palette.disabledState');
+    }
+    if (command.readOnly) {
+      return command.readOnlyReason || command.meta || t('palette.readOnlySurface');
+    }
+    return command.meta || '';
+  }
+
+  function renderPaletteCommandItem(command, index, selectedIndex) {
+    const disabled = Boolean(command.disabled);
+    const readOnly = Boolean(command.readOnly);
+    const statusLabel = paletteCommandStatusLabel(command);
+    const meta = paletteCommandMeta(command);
+    const className = [
+      'palette-item',
+      index === selectedIndex ? 'palette-item--active' : '',
+      disabled ? 'palette-item--disabled' : '',
+      readOnly ? 'palette-item--read-only' : '',
+    ].filter(Boolean).join(' ');
+    const attrs = [
+      `data-palette-index="${index}"`,
+      `data-palette-disabled="${disabled ? 'true' : 'false'}"`,
+      `data-palette-read-only="${readOnly ? 'true' : 'false'}"`,
+      `data-action-state="${disabled ? 'disabled' : readOnly ? 'read-only' : 'ready'}"`,
+      `data-action-kind="${escapeHTML(command.action || command.view || command.kind || 'palette')}"`,
+    ];
+    if (command.action) {
+      attrs.push(`data-palette-action="${escapeHTML(command.action)}"`);
+    }
+    if (command.view) {
+      attrs.push(`data-palette-view="${escapeHTML(command.view)}"`);
+    }
+    if (disabled) {
+      attrs.push('disabled aria-disabled="true"');
+    }
+    if (meta) {
+      attrs.push(`title="${escapeHTML(meta)}"`);
+    }
+    return `
+      <button
+        type="button"
+        class="${className}"
+        ${attrs.join(' ')}
+      >
+        <span class="palette-item__kind">${escapeHTML(command.kindLabel || command.kind)}</span>
+        <span class="palette-item__body">
+          <span class="palette-item__title">${escapeHTML(command.title)}</span>
+          ${meta ? `<span class="palette-item__meta">${escapeHTML(meta)}</span>` : ''}
+        </span>
+        <span class="palette-item__trailing">
+          <span class="palette-item__shortcut">${escapeHTML(command.shortcut || '')}</span>
+          ${statusLabel ? `<span class="palette-item__status">${escapeHTML(statusLabel)}</span>` : ''}
+        </span>
+      </button>
+    `;
   }
 
   function renderPaletteCommands() {
@@ -21320,21 +21436,74 @@
       title: t('palette.goTo', { view: viewLabel(view) }),
       shortcut: VIEW_SHORTCUTS[view],
     }));
+    const diffs = getConfigDiffs();
+    const invalidDiffs = diffs.filter((diff) => diff.error);
+    const configSaveReason = configSaveDisabledReason(diffs, invalidDiffs);
+    const configResetReason = paletteConfigResetDisabledReason(diffs);
+    const readOnlyOperator = {
+      kind: 'action',
+      kindLabel: t('palette.operatorKind'),
+      readOnly: true,
+      statusLabel: t('palette.readOnlyState'),
+      meta: t('palette.readOnlySurface'),
+    };
     const actionCommands = [
-      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'refresh-status', title: t('palette.refreshStatus'), shortcut: 'refresh' },
-      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'open-stop', title: t('palette.stopCurrentRun'), shortcut: 'stop' },
-      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-start', title: t('palette.startRunner'), shortcut: 'start' },
-      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-stop', title: t('palette.stopRunner'), shortcut: 'stop' },
-      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-reload', title: t('palette.reloadRunner'), shortcut: 'reload' },
-      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'runner-restart', title: t('palette.restartRunner'), shortcut: 'restart' },
+      { ...readOnlyOperator, action: 'refresh-status', title: t('palette.refreshStatus'), shortcut: 'refresh' },
+      { ...readOnlyOperator, action: 'nav-runbook', title: t('palette.openRunbook'), shortcut: 'runbook' },
+      { ...readOnlyOperator, action: 'nav-pr-queue', title: t('palette.openPrQueue'), shortcut: 'pr queue' },
+      { ...readOnlyOperator, action: 'nav-worktree', title: t('palette.openDiagnostics'), shortcut: 'diagnostics' },
+      { ...readOnlyOperator, action: 'nav-history', title: t('palette.openRunHistory'), shortcut: 'history' },
+      { ...readOnlyOperator, action: 'nav-config', title: t('palette.openConfigChanges'), shortcut: 'config changes', meta: t('palette.configChangeSurface') },
+      {
+        kind: 'action',
+        kindLabel: t('palette.operatorKind'),
+        action: 'save-config',
+        title: t('palette.saveConfigChanges'),
+        shortcut: 'save config',
+        disabled: Boolean(configSaveReason),
+        disabledReason: configSaveReason,
+        statusLabel: configSaveReason ? t('palette.disabledState') : t('palette.configChangeSurface'),
+        meta: configSaveReason || t('config.saveCreatesBackup'),
+      },
+      {
+        kind: 'action',
+        kindLabel: t('palette.operatorKind'),
+        action: 'reset-config',
+        title: t('palette.resetConfigChanges'),
+        shortcut: 'reset config',
+        disabled: Boolean(configResetReason),
+        disabledReason: configResetReason,
+        statusLabel: configResetReason ? t('palette.disabledState') : t('palette.configChangeSurface'),
+        meta: configResetReason || t('palette.configChangeSurface'),
+      },
+      paletteRunnerCommand('stop', t('palette.stopCurrentRun'), 'stop current', 'open-stop'),
+      paletteRunnerCommand('start', t('palette.startRunner'), 'start'),
+      paletteRunnerCommand('stop', t('palette.stopRunner'), 'stop'),
+      paletteRunnerCommand('reload', t('palette.reloadRunner'), 'reload'),
+      paletteRunnerCommand('restart', t('palette.restartRunner'), 'restart'),
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'toggle-logs', title: isLiveTailPaused() ? t('palette.resumeLiveTail') : t('palette.pauseLiveTail'), shortcut: 'logs' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-worktree', title: t('palette.openWorktreeReview'), shortcut: 'worktree' },
-      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-pr-queue', title: t('palette.openPrQueue'), shortcut: 'pr queue' },
-      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-runbook', title: t('palette.openRunbook'), shortcut: 'runbook' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-mobile', title: t('palette.openMobilePreview'), shortcut: 'mobile' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-landing', title: t('palette.openLandingPreview'), shortcut: 'landing' },
     ];
     return navCommands.concat(actionCommands);
+  }
+
+  function inspectCommandPaletteCommands() {
+    return renderPaletteCommands().map((command) => ({
+      kind: command.kind,
+      kindLabel: command.kindLabel || command.kind,
+      action: command.action || '',
+      view: command.view || '',
+      title: command.title || '',
+      shortcut: command.shortcut || '',
+      disabled: Boolean(command.disabled),
+      readOnly: Boolean(command.readOnly),
+      busy: Boolean(command.busy),
+      statusLabel: paletteCommandStatusLabel(command),
+      disabledReason: command.disabledReason || '',
+      meta: paletteCommandMeta(command),
+    }));
   }
 
   function renderPaletteOverlay() {
@@ -21343,15 +21512,7 @@
     const listHTML = commands.length
       ? commands
           .map((command, index) => `
-            <button
-              type="button"
-              class="palette-item ${index === selectedIndex ? 'palette-item--active' : ''}"
-              data-palette-index="${index}"
-            >
-              <span class="palette-item__kind">${escapeHTML(command.kindLabel || command.kind)}</span>
-              <span class="palette-item__title">${escapeHTML(command.title)}</span>
-              <span class="palette-item__shortcut">${escapeHTML(command.shortcut || '')}</span>
-            </button>
+            ${renderPaletteCommandItem(command, index, selectedIndex)}
           `)
           .join('')
       : `<div class="palette-item"><span class="palette-item__kind">${escapeHTML(t('common.none'))}</span><span class="palette-item__title">${escapeHTML(t('palette.noMatches'))}</span><span class="palette-item__shortcut"></span></div>`;
@@ -21495,15 +21656,7 @@
     list.innerHTML = commands.length
       ? commands
           .map((command, index) => `
-            <button
-              type="button"
-              class="palette-item ${index === selectedIndex ? 'palette-item--active' : ''}"
-              data-palette-index="${index}"
-            >
-              <span class="palette-item__kind">${escapeHTML(command.kindLabel || command.kind)}</span>
-              <span class="palette-item__title">${escapeHTML(command.title)}</span>
-              <span class="palette-item__shortcut">${escapeHTML(command.shortcut || '')}</span>
-            </button>
+            ${renderPaletteCommandItem(command, index, selectedIndex)}
           `)
           .join('')
       : `<div class="palette-item"><span class="palette-item__kind">${escapeHTML(t('common.none'))}</span><span class="palette-item__title">${escapeHTML(t('palette.noMatches'))}</span><span class="palette-item__shortcut"></span></div>`;
@@ -22391,9 +22544,10 @@
   }
 
   function resetConfig() {
-    if (configSaveInFlight()) return;
+    if (configMutationInFlight()) return;
     state.configDraft = deepMerge(clone(state.configContract?.values || defaults.configContract.values || {}), null);
     resetConfigSaveState();
+    resetConfigRestoreState();
     renderShell({ preserveScroll: true });
   }
 
@@ -22419,6 +22573,7 @@
     const commands = renderPaletteCommands().filter(paletteMatches);
     const command = commands[index];
     if (!command) return;
+    if (command.disabled) return;
     if (command.kind === 'nav') {
       closePalette();
       setView(command.view);
@@ -23300,6 +23455,7 @@
         t: 'prompts',
         r: 'history',
         n: 'notifications',
+        u: 'runbook',
         w: 'worktree',
         h: 'landing',
         m: 'mobile',

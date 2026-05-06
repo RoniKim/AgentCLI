@@ -42,6 +42,44 @@ class WebConsoleStaticTests(unittest.TestCase):
         self.assertIn("artifact-open-separator", self.app_js)
         self.assertIn(".artifact-open-link", self.styles_css)
 
+    def test_command_palette_operator_actions_have_stateful_rows(self) -> None:
+        app_tokens = [
+            "function inspectCommandPaletteCommands",
+            "paletteRunnerCommand('start'",
+            "paletteRunnerCommand('stop'",
+            "paletteRunnerCommand('reload'",
+            "paletteRunnerCommand('restart'",
+            "action: 'nav-runbook', title: t('palette.openRunbook')",
+            "action: 'nav-pr-queue', title: t('palette.openPrQueue')",
+            "action: 'nav-worktree', title: t('palette.openDiagnostics')",
+            "action: 'nav-history', title: t('palette.openRunHistory')",
+            "action: 'nav-config', title: t('palette.openConfigChanges')",
+            "action: 'save-config'",
+            "action: 'reset-config'",
+            "data-palette-disabled",
+            "data-palette-read-only",
+            "data-action-state",
+            "if (command.disabled) return;",
+            "t('palette.readOnlyState')",
+            "t('palette.disabledState')",
+            "u: 'runbook'",
+        ]
+        style_tokens = [
+            ".palette-item--disabled",
+            ".palette-item--read-only",
+            ".palette-item__meta",
+            ".palette-item__status",
+            ".palette-item__trailing",
+        ]
+
+        for token in app_tokens:
+            self.assertIn(token, self.app_js)
+        for token in style_tokens:
+            self.assertIn(token, self.styles_css)
+        render_list = re.search(r"function renderPaletteList\(\) \{(?P<body>.*?)\n  \}", self.app_js, flags=re.S)
+        self.assertIsNotNone(render_list)
+        self.assertIn("renderPaletteCommandItem(command, index, selectedIndex)", render_list.group("body"))
+
     def test_role_metadata_and_pipeline_contract_cover_pl_and_plugin_specs(self) -> None:
         expected_tokens = [
             "const BUILTIN_ROLE_OPTIONS = ['PM', 'PL', 'Security', 'Dev', 'QA'];",
