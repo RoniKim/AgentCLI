@@ -340,7 +340,7 @@
 - [ ] Web report export can create Markdown and JSON summaries for a selected run.
 - [ ] The browser can open local artifact paths through a documented safe helper instead of exposing raw filesystem mutation.
 - [x] The CLI can optionally launch or serve the web console from a documented command.
-- [ ] Web console exposes diagnostics for missing FastAPI/uvicorn dependencies and broken virtual environments.
+- [x] Web console exposes diagnostics for missing FastAPI/uvicorn dependencies and broken virtual environments.
 - [x] UI state clearly distinguishes fallback/demo data from real API data.
 - [ ] Web PR Queue browser controls can validate, merge, discard, and rebase queued packets with the same safety gates as shell commands.
 - [ ] Authentication plan exists before use outside trusted private networks.

@@ -3809,6 +3809,12 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         health_payload = health.json()
         self.assertTrue(health_payload["ok"])
         self.assertTrue(health_payload["latest_run_dir"].endswith("20260426-120000"))
+        diagnostics = health_payload["diagnostics"]
+        self.assertIn(diagnostics["status"], {"ok", "warning"})
+        self.assertEqual(0, diagnostics["summary"]["dependencyIssues"])
+        self.assertIn("fastapi", {item["name"] for item in diagnostics["dependencies"]})
+        self.assertIn("uvicorn", {item["name"] for item in diagnostics["dependencies"]})
+        self.assertEqual("missing_repo_venv", diagnostics["issues"][0]["code"])
 
         status = self.client.get("/api/status")
         self.assertEqual(200, status.status_code)
@@ -3974,6 +3980,40 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         kinds = {item["kind"] for item in payload["notifications"]}
         self.assertIn("run_start", kinds)
         self.assertIn("task_done", kinds)
+
+    def test_health_diagnostics_report_broken_repo_virtualenv(self) -> None:
+        venv_dir = self.repo / ".venv"
+        venv_dir.mkdir(parents=True, exist_ok=True)
+        (venv_dir / "pyvenv.cfg").write_text(
+            "home = Z:\\missing-python-home\nexecutable = Z:\\missing-python-home\\python.exe\n",
+            encoding="utf-8",
+        )
+
+        payload = self.client.get("/api/health").json()
+        diagnostics = payload["diagnostics"]
+        issue_codes = {item["code"] for item in diagnostics["issues"]}
+
+        self.assertEqual("error", diagnostics["status"])
+        self.assertEqual(0, diagnostics["summary"]["dependencyIssues"])
+        self.assertIn("missing_venv_python", issue_codes)
+        self.assertIn("missing_venv_base_path", issue_codes)
+        self.assertTrue(diagnostics["venv"]["exists"])
+
+    def test_web_diagnostics_report_missing_fastapi_and_uvicorn(self) -> None:
+        from agent_runner import web as web_module
+
+        with (
+            patch.object(web_module, "FastAPI", None),
+            patch.object(web_module, "FileResponse", None),
+            patch.object(web_module, "uvicorn", None),
+        ):
+            diagnostics = web_module.build_web_diagnostics(self.repo)
+
+        issue_codes = {item["code"] for item in diagnostics["issues"]}
+        self.assertEqual("error", diagnostics["status"])
+        self.assertEqual(2, diagnostics["summary"]["dependencyIssues"])
+        self.assertIn("missing_fastapi", issue_codes)
+        self.assertIn("missing_uvicorn", issue_codes)
 
     def test_api_experience_and_history_panel_show_explicit_unavailable_state_when_db_missing(self) -> None:
         experience_response = self.client.get("/api/experience")

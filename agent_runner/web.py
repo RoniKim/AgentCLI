@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from importlib import metadata as importlib_metadata
 import ipaddress
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -5319,11 +5320,196 @@ def status_snapshot_for_scope(snapshot: dict[str, Any], *, scope: str = "full") 
     return _web_payloads.status_snapshot_for_scope(snapshot, scope=scope)
 
 
+def _module_dependency_diagnostic(name: str, module_obj: Any, *, required_for: str) -> dict[str, Any]:
+    available = module_obj is not None
+    version = ""
+    try:
+        version = importlib_metadata.version(name)
+    except Exception:
+        version = ""
+    return {
+        "name": name,
+        "available": available,
+        "version": version,
+        "status": "ok" if available else "error",
+        "requiredFor": required_for,
+        "required_for": required_for,
+        "message": (
+            f"{name} is available."
+            if available
+            else f"{name} is not installed. Install project requirements inside the repo virtual environment."
+        ),
+    }
+
+
+def _parse_pyvenv_cfg(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip().lower()] = value.strip()
+    except Exception:
+        return {}
+    return values
+
+
+def _path_exists_from_cfg(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    try:
+        return Path(text).expanduser().exists()
+    except Exception:
+        return False
+
+
+def _repo_venv_diagnostic(repo: Path) -> dict[str, Any]:
+    repo_root = Path(repo).expanduser().resolve()
+    venv_dir = repo_root / ".venv"
+    windows_python = venv_dir / "Scripts" / "python.exe"
+    posix_python = venv_dir / "bin" / "python"
+    python_path = windows_python if os.name == "nt" else posix_python
+    fallback_python = posix_python if os.name == "nt" else windows_python
+    cfg_path = venv_dir / "pyvenv.cfg"
+    cfg = _parse_pyvenv_cfg(cfg_path) if cfg_path.exists() else {}
+    issues: list[dict[str, Any]] = []
+
+    if not venv_dir.exists():
+        issues.append(
+            {
+                "code": "missing_repo_venv",
+                "severity": "warning",
+                "message": "Repo .venv directory is missing.",
+                "path": venv_dir.as_posix(),
+            }
+        )
+    elif not venv_dir.is_dir():
+        issues.append(
+            {
+                "code": "invalid_repo_venv",
+                "severity": "error",
+                "message": "Repo .venv path exists but is not a directory.",
+                "path": venv_dir.as_posix(),
+            }
+        )
+
+    if venv_dir.exists() and not python_path.exists() and not fallback_python.exists():
+        issues.append(
+            {
+                "code": "missing_venv_python",
+                "severity": "error",
+                "message": "No Python executable was found under .venv.",
+                "path": python_path.as_posix(),
+            }
+        )
+    if venv_dir.exists() and not cfg_path.exists():
+        issues.append(
+            {
+                "code": "missing_pyvenv_cfg",
+                "severity": "warning",
+                "message": ".venv exists but pyvenv.cfg is missing.",
+                "path": cfg_path.as_posix(),
+            }
+        )
+
+    base_values = {
+        "home": cfg.get("home", ""),
+        "executable": cfg.get("executable", ""),
+        "base_executable": cfg.get("base-executable", ""),
+        "baseExecutable": cfg.get("base-executable", ""),
+    }
+    for key, value in base_values.items():
+        if not value or _path_exists_from_cfg(value):
+            continue
+        issues.append(
+            {
+                "code": "missing_venv_base_path",
+                "severity": "warning",
+                "message": f"pyvenv.cfg points to a missing base path: {key}.",
+                "path": value,
+            }
+        )
+
+    status = "error" if any(item["severity"] == "error" for item in issues) else "warning" if issues else "ok"
+    return {
+        "status": status,
+        "exists": venv_dir.exists() and venv_dir.is_dir(),
+        "path": venv_dir.as_posix(),
+        "python": {
+            "path": python_path.as_posix(),
+            "exists": python_path.exists(),
+            "fallbackPath": fallback_python.as_posix(),
+            "fallback_path": fallback_python.as_posix(),
+            "fallbackExists": fallback_python.exists(),
+            "fallback_exists": fallback_python.exists(),
+        },
+        "pyvenvCfg": {
+            "path": cfg_path.as_posix(),
+            "exists": cfg_path.exists(),
+            "home": cfg.get("home", ""),
+            "executable": cfg.get("executable", ""),
+            "baseExecutable": cfg.get("base-executable", ""),
+            "base_executable": cfg.get("base-executable", ""),
+        },
+        "pyvenv_cfg": {
+            "path": cfg_path.as_posix(),
+            "exists": cfg_path.exists(),
+            "home": cfg.get("home", ""),
+            "executable": cfg.get("executable", ""),
+            "base_executable": cfg.get("base-executable", ""),
+        },
+        "issues": issues,
+    }
+
+
+def build_web_diagnostics(repo: Path | str | None = None) -> dict[str, Any]:
+    repo_root = Path(repo).expanduser().resolve() if repo is not None else Path.cwd().resolve()
+    dependencies = [
+        _module_dependency_diagnostic("fastapi", FastAPI if FileResponse is not None else None, required_for="web_app"),
+        _module_dependency_diagnostic("uvicorn", uvicorn, required_for="web_server"),
+    ]
+    venv = _repo_venv_diagnostic(repo_root)
+    issues: list[dict[str, Any]] = []
+    for dep in dependencies:
+        if dep["available"]:
+            continue
+        issues.append(
+            {
+                "code": f"missing_{dep['name']}",
+                "severity": "error",
+                "message": dep["message"],
+                "path": "",
+            }
+        )
+    issues.extend(list(venv.get("issues") or []))
+    status = "error" if any(item["severity"] == "error" for item in issues) else "warning" if issues else "ok"
+    dependency_issue_count = sum(1 for dep in dependencies if not dep["available"])
+    venv_issue_count = len(venv.get("issues") or [])
+    return {
+        "status": status,
+        "ok": status != "error",
+        "dependencies": dependencies,
+        "venv": venv,
+        "issues": issues,
+        "summary": {
+            "dependencyIssues": dependency_issue_count,
+            "dependency_issues": dependency_issue_count,
+            "venvIssues": venv_issue_count,
+            "venv_issues": venv_issue_count,
+            "totalIssues": len(issues),
+            "total_issues": len(issues),
+        },
+    }
+
+
 def build_health(repo: Path | str | None = None) -> dict[str, Any]:
     snapshot = build_snapshot(repo)
     progress = snapshot.get("progress", {}) if isinstance(snapshot.get("progress"), dict) else {}
     runner_control = snapshot.get("runner_control", {}) if isinstance(snapshot.get("runner_control"), dict) else {}
     web_instance = snapshot.get("web_instance", {}) if isinstance(snapshot.get("web_instance"), dict) else {}
+    diagnostics = build_web_diagnostics(repo)
     return {
         "ok": bool(snapshot.get("ok", False)),
         "repo": snapshot.get("repo", {}),
@@ -5332,6 +5518,8 @@ def build_health(repo: Path | str | None = None) -> dict[str, Any]:
         "runner_control": runner_control,
         "web_instance": web_instance,
         "webInstance": web_instance,
+        "diagnostics": diagnostics,
+        "web_diagnostics": diagnostics,
         "timestamp": now_iso(),
     }
 
@@ -7256,12 +7444,15 @@ def create_app(
     def api_health() -> dict[str, Any]:
         snap = _snapshot()
         progress = snap.get("progress", {}) if isinstance(snap.get("progress"), dict) else {}
+        diagnostics = build_web_diagnostics(repo_root)
         return {
             "ok": bool(snap.get("ok", False)),
             "repo": snap.get("repo", {}),
             "latest_run_dir": snap.get("latest_run_dir"),
             "status": progress.get("run_status", "idle"),
             "runner_control": snap.get("runner_control", {}),
+            "diagnostics": diagnostics,
+            "web_diagnostics": diagnostics,
             "timestamp": now_iso(),
         }
 

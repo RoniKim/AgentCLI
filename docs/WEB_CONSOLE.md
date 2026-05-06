@@ -21,6 +21,7 @@ Verified on 2026-05-06 with local API, unit, and checked-in browser smoke covera
 
 - Static console serving works from `agent_runner.web`.
 - Live FastAPI routes cover `/api/health`, `/api/status`, `/api/progress`, `/api/history`, `/api/logs`, `/api/logs/tail`, `/api/logs/live`, `/api/worktree`, `/api/worktree/diagnostics`, guarded `/api/config`, `/api/config/restore`, `/api/config/save`, `/api/prompts`, `/api/prompts/read`, `/api/prompts/content`, `/api/prompts/save`, `/api/prompts/restore`, `/api/goals`, `/api/goals/save`, `/api/runner/status`, `/api/runner/start`, `/api/runner/stop`, `/api/runner/reload`, `/api/runner/restart`, `/api/worktree/merge`, `/api/worktree/discard`, and `/api/pr-queue/merge`.
+- `/api/health` exposes web diagnostics for FastAPI/uvicorn availability and repo `.venv` health, including missing executables and stale `pyvenv.cfg` base paths.
 - Backup creation happens inside save/restore flows; there is no standalone `/api/*/backup` route family.
 - Read-only worktree diagnostics now scan `.AgentCLI/agent_runs`, the central pending marker, patch paths, cleanup-failed artifacts, and generated worktree directories without deleting anything by default.
 - Additional read-only contracts now cover Goals metadata and backend log tailing.
@@ -64,6 +65,7 @@ python -m pip install -r requirements.txt
 ```
 
 The web server requires `fastapi` and `uvicorn`. If the venv points to a missing base Python, recreate the venv or repair it before serving.
+The `/api/health` diagnostics payload reports missing `fastapi`, missing `uvicorn`, missing `.venv`, missing `.venv` Python executables, and broken `pyvenv.cfg` base paths.
 
 ## Localhost
 
