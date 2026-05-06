@@ -1216,6 +1216,132 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
                 ) from exc
 
             snapshot = self._read_snapshot()
+            failed_patch_path = (self.latest_run_dir / "failed-worktree.patch").as_posix()
+            failed_pending_file = (self.latest_run_dir / "WORKTREE_MERGE_PENDING.json").as_posix()
+            snapshot["worktree"] = {
+                "status": "pending review",
+                "mode": "manual",
+                "reviewRequired": True,
+                "reviewRequiredMessage": "git apply --check failed; pending state is recoverable.",
+                "sourceRepo": self.repo.as_posix(),
+                "sourceBranch": "main",
+                "branch": "main",
+                "baseRef": "main",
+                "headRef": "abc12345",
+                "worktreeDir": self.worktree_dir.as_posix(),
+                "patchPath": failed_patch_path,
+                "pendingFile": failed_pending_file,
+                "statusFile": failed_pending_file,
+                "cleanupState": "pending",
+                "cleanupMessage": "Cleanup has not run yet.",
+                "summary": "Patch apply failure requires operator review.",
+                "risk": "The source repository was not changed; inspect failed hunks before retry.",
+                "changedFiles": [
+                    {
+                        "path": "src/large.txt",
+                        "summary": "Text patch failed to apply.",
+                        "kind": "modified",
+                        "hunks": [
+                            {
+                                "header": "@@ -1,4 +1,4 @@",
+                                "oldStart": 1,
+                                "oldCount": 4,
+                                "newStart": 1,
+                                "newCount": 4,
+                                "lines": ["-old line 1", "+new line 1"],
+                                "truncated": False,
+                            }
+                        ],
+                        "lineCount": 2,
+                    }
+                ],
+                "preflight": {
+                    "sourceRepoState": "dirty",
+                    "sourceRepoDirty": True,
+                    "sourceHead": "abc12345",
+                    "expectedBaseRef": "main",
+                    "patchHash": "f" * 64,
+                    "pendingMarkerPath": failed_pending_file,
+                    "applyCheck": {
+                        "command": "git apply --check --binary --whitespace=nowarn",
+                        "rc": 1,
+                        "ok": False,
+                        "status": "failed",
+                        "message": "git apply --check failed.",
+                        "output": "error: patch failed: src/large.txt:1",
+                        "failedFiles": [
+                            {
+                                "path": "src/large.txt",
+                                "line": 1,
+                                "reason": "patch failed",
+                            }
+                        ],
+                        "failedHunks": [
+                            {
+                                "path": "src/large.txt",
+                                "line": 1,
+                                "reason": "patch failed",
+                                "header": "@@ -1,4 +1,4 @@",
+                                "lines": ["-old line 1", "+new line 1"],
+                                "truncated": False,
+                            }
+                        ],
+                    },
+                },
+                "applyCheck": {
+                    "command": "git apply --check --binary --whitespace=nowarn",
+                    "rc": 1,
+                    "ok": False,
+                    "status": "failed",
+                    "message": "git apply --check failed.",
+                    "output": "error: patch failed: src/large.txt:1",
+                    "failedFiles": [
+                        {
+                            "path": "src/large.txt",
+                            "line": 1,
+                            "reason": "patch failed",
+                        }
+                    ],
+                    "failedHunks": [
+                        {
+                            "path": "src/large.txt",
+                            "line": 1,
+                            "reason": "patch failed",
+                            "header": "@@ -1,4 +1,4 @@",
+                            "lines": ["-old line 1", "+new line 1"],
+                            "truncated": False,
+                        }
+                    ],
+                },
+                "sourceRepoDirty": True,
+                "pendingMarkerPath": failed_pending_file,
+                "checklist": ["Inspect failed hunks", "Retry only after source state is clean"],
+                "runDir": self.latest_run_dir.as_posix(),
+                "runnerRc": 1,
+                "lastRc": 1,
+            }
+
+            page.evaluate(
+                """(snapshot) => {
+                    const adapters = window.__AGENTCLI_ADAPTERS__;
+                    const normalized = adapters.normalizeSnapshot(snapshot);
+                    adapters.applySnapshotModel(normalized);
+                    adapters.setView('worktree');
+                    adapters.renderShell({ force: true, preserveScroll: false });
+                }""",
+                snapshot,
+            )
+
+            self.expect(page.locator("#main")).to_have_attribute("data-view", "worktree")
+            self.expect(page.locator("#main")).to_contain_text("Merge preflight")
+            self.expect(page.locator("#main")).to_contain_text("git apply --check failed.")
+            self.expect(page.locator("#main")).to_contain_text("Failed files")
+            self.expect(page.locator("#main")).to_contain_text("src/large.txt")
+            self.expect(page.locator("#main")).to_contain_text("Failed hunks")
+            self.expect(page.locator("#main")).to_contain_text("@@ -1,4 +1,4 @@")
+            self.expect(page.locator("#main")).to_contain_text("patch failed")
+            self._assert_no_browser_errors(page)
+
             cleanup_worktree = self._tmp / "cleanup-failed-smoke"
             orphaned_worktree = self._tmp / "orphaned-smoke"
             locked_path = (cleanup_worktree / "nested" / "locked.txt").as_posix()
