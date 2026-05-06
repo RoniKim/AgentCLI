@@ -17,6 +17,11 @@ PIPELINE_STAGE_ORDER: tuple[str, ...] = ("PM", "PL", "Security", "Dev", "QA", "R
 BUILTIN_ROLE_SPECS: tuple[str, ...] = tuple(stage for stage in PIPELINE_STAGE_ORDER if stage != "Reporter")
 DEFAULT_ROLE_SPECS: tuple[str, ...] = ("PM", "Dev", "QA")
 ENTERPRISE_ROLE_SPECS: tuple[str, ...] = ("PM", "Security", "Dev", "QA")
+ENTERPRISE_BUDGET_FLOORS: dict[str, int] = {
+    "max_total_escalations_per_run": 5,
+    "max_total_continuations_per_run": 5,
+    "max_total_repair_attempts_per_run": 3,
+}
 ATTEMPT_STARTED_MARKER = "STARTED"
 ATTEMPT_FINISHED_MARKER = "FINISHED"
 

@@ -2386,6 +2386,8 @@ def _dashboard_config_contract_payload(config_contract: Any) -> dict[str, Any]:
         "groups": [],
         "restart_required_paths": [],
         "backups": [],
+        "profile_effective": raw.get("profile_effective", {}),
+        "profileEffective": raw.get("profileEffective", raw.get("profile_effective", {})),
         "redaction": {
             "placeholder": redaction.get("placeholder", "[redacted]"),
             "paths": list(redaction.get("paths") or []),

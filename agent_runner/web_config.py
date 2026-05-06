@@ -16,7 +16,12 @@ from .config import (
     normalize_config_value,
     validate_roles_value,
 )
-from .runtime_contract import CODEX_MODEL_FIELD_SPECS, PIPELINE_ROLE_FIELD_SPEC
+from .runtime_contract import (
+    CODEX_MODEL_FIELD_SPECS,
+    ENTERPRISE_BUDGET_FLOORS,
+    PIPELINE_ROLE_FIELD_SPEC,
+    enterprise_role_string,
+)
 from .shared import coerce_roles_arg
 from .utils import atomic_write_json
 
@@ -45,7 +50,16 @@ CONFIG_CONTRACT_GROUPS: list[dict[str, Any]] = [
     {
         "id": "project",
         "title": "Project",
-        "paths": ["repo", "profile", "execution_backend", "roles", "security.enabled"],
+        "paths": [
+            "repo",
+            "profile",
+            "execution_backend",
+            "roles",
+            "policy.enabled",
+            "policy_scan_scope",
+            "security.enabled",
+            "security_scan_scope",
+        ],
     },
     {
         "id": "runner",
@@ -219,7 +233,10 @@ CONFIG_CONTRACT_FIELDS: list[dict[str, Any]] = [
     {"path": "profile", "group": "project", "kind": "enum", "label": "Profile", "restart": True, "options": ["personal", "enterprise"], "allow_empty": False, "desc": "Default safety profile used to derive runner limits.", "hint": "Enterprise raises several guardrails."},
     {"path": "execution_backend", "group": "project", "kind": "enum", "label": "Execution backend", "restart": True, "options": ["codex", "claudecode"], "allow_empty": False, "desc": "Backend used for Dev and QA stages.", "hint": "codex = OpenAI Codex CLI, claudecode = Claude Code."},
     PIPELINE_ROLE_FIELD_SPEC,
+    {"path": "policy.enabled", "group": "project", "kind": "bool", "label": "Policy scan", "allow_empty": True, "desc": "Enable policy scanning before task execution.", "hint": "Enterprise profile enables policy scanning."},
+    {"path": "policy_scan_scope", "group": "project", "kind": "enum", "label": "Policy scan scope", "options": ["", "quick", "staged", "full"], "allow_empty": True, "desc": "Override scan scope for policy checks.", "hint": "Empty inherits scan_scope."},
     {"path": "security.enabled", "group": "project", "kind": "bool", "label": "Security enabled", "allow_empty": True, "desc": "Enable the Security stage in the pipeline.", "hint": "Security stage requires Security in roles."},
+    {"path": "security_scan_scope", "group": "project", "kind": "enum", "label": "Security scan scope", "options": ["", "quick", "staged", "full"], "allow_empty": True, "desc": "Override scan scope for Security stage checks.", "hint": "Enterprise profile enables the Security stage and security scan."},
     {"path": "autopilot", "group": "runner", "kind": "bool", "label": "Autopilot", "allow_empty": True, "desc": "Skip interactive confirmation prompts.", "hint": "When off, the runner pauses between stages."},
     {"path": "continuous", "group": "runner", "kind": "bool", "label": "Continuous", "allow_empty": True, "desc": "Keep chaining cycles without manual stopping.", "hint": "Best paired with autopilot for unattended runs."},
     {"path": "iterations", "group": "runner", "kind": "number", "label": "Iterations", "min": 1, "allow_empty": False, "desc": "Maximum run iterations.", "hint": "One iteration equals one PM -> PL -> Dev -> QA cycle."},
@@ -376,6 +393,15 @@ def _config_path_get(tree: Any, path: str) -> Any:
     return current
 
 
+def _config_has_path(tree: Any, path: str) -> bool:
+    current = tree
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current[part]
+    return True
+
+
 def _config_path_set(tree: dict[str, Any], path: str, value: Any) -> None:
     current = tree
     parts = path.split(".")
@@ -410,6 +436,64 @@ def _normalize_config_contract_value(value: Any, spec: dict[str, Any]) -> Any:
     return normalize_config_value(value, spec, str(spec.get("path") or ""))
 
 
+def _apply_enterprise_profile_defaults(normalized: dict[str, Any], raw_cfg: dict[str, Any]) -> dict[str, Any]:
+    profile = str(normalized.get("profile") or "personal").strip().lower()
+    if profile != "enterprise":
+        normalized["profile"] = "personal"
+        return normalized
+
+    if not _config_has_path(raw_cfg, "roles"):
+        normalized["roles"] = enterprise_role_string()
+    policy = normalized.get("policy") if isinstance(normalized.get("policy"), dict) else {}
+    policy["enabled"] = True
+    normalized["policy"] = policy
+    normalized["no_policy_scan"] = False
+
+    security = normalized.get("security") if isinstance(normalized.get("security"), dict) else {}
+    security["enabled"] = True
+    normalized["security"] = security
+
+    budgets = normalized.get("budgets") if isinstance(normalized.get("budgets"), dict) else {}
+    for key, floor in ENTERPRISE_BUDGET_FLOORS.items():
+        try:
+            current = int(budgets.get(key) or 0)
+        except Exception:
+            current = 0
+        budgets[key] = max(current, int(floor))
+    normalized["budgets"] = budgets
+    normalized["profile"] = "enterprise"
+    return normalized
+
+
+def _build_profile_effective_payload(raw_cfg: dict[str, Any], normalized_launch: dict[str, Any]) -> dict[str, Any]:
+    profile = str(normalized_launch.get("profile") or "personal").strip().lower() or "personal"
+    roles_value = normalize_config_list_value(normalized_launch.get("roles"), item_kind="text")
+    policy = normalized_launch.get("policy") if isinstance(normalized_launch.get("policy"), dict) else {}
+    security = normalized_launch.get("security") if isinstance(normalized_launch.get("security"), dict) else {}
+    budgets = normalized_launch.get("budgets") if isinstance(normalized_launch.get("budgets"), dict) else {}
+    budget_floors = {key: int(ENTERPRISE_BUDGET_FLOORS[key]) for key in ENTERPRISE_BUDGET_FLOORS}
+    budget_values = {key: int(budgets.get(key) or 0) for key in budget_floors}
+    enterprise = profile == "enterprise"
+    payload = {
+        "profile": profile,
+        "enterprise": enterprise,
+        "roles": roles_value,
+        "security_stage_inserted": bool(enterprise and not _config_has_path(raw_cfg, "roles") and "Security" in roles_value),
+        "securityStageInserted": bool(enterprise and not _config_has_path(raw_cfg, "roles") and "Security" in roles_value),
+        "policy_enabled": bool(policy.get("enabled", False)),
+        "policyEnabled": bool(policy.get("enabled", False)),
+        "security_enabled": bool(security.get("enabled", False)),
+        "securityEnabled": bool(security.get("enabled", False)),
+        "budget_floors": budget_floors,
+        "budgetFloors": budget_floors,
+        "budget_values": budget_values,
+        "budgetValues": budget_values,
+        "budget_floor_enforced": bool(enterprise and all(budget_values[key] >= floor for key, floor in budget_floors.items())),
+        "budgetFloorEnforced": bool(enterprise and all(budget_values[key] >= floor for key, floor in budget_floors.items())),
+    }
+    return payload
+
+
 def _normalize_config_for_launch(cfg: dict[str, Any]) -> dict[str, Any]:
     normalized = _merge_config_tree(CLI_DEFAULTS, cfg)
     if not isinstance(normalized, dict):
@@ -418,6 +502,10 @@ def _normalize_config_for_launch(cfg: dict[str, Any]) -> dict[str, Any]:
         path = str(spec.get("path") or "")
         if not path:
             continue
+        if path == "policy.enabled" and not _config_has_path(cfg, path):
+            _config_path_set(normalized, path, not bool(normalized.get("no_policy_scan", False)))
+        if path == "policy.enabled":
+            normalized["no_policy_scan"] = not bool(_config_path_get(normalized, path))
         _config_path_set(normalized, path, normalize_config_value(_config_path_get(normalized, path), spec, path))
     for path in (
         "gitops.untracked_exclude_globs",
@@ -435,6 +523,7 @@ def _normalize_config_for_launch(cfg: dict[str, Any]) -> dict[str, Any]:
             continue
         _config_path_set(normalized, path, normalize_config_list_value(current, item_kind="text"))
     normalized["roles"] = coerce_roles_arg(normalized.get("roles"))
+    normalized = _apply_enterprise_profile_defaults(normalized, cfg if isinstance(cfg, dict) else {})
     return normalized
 
 
@@ -497,6 +586,10 @@ def _build_config_contract(
 
         raw_value = _config_path_get(effective_cfg, path)
         raw_default = _config_path_get(default_cfg, path)
+        if path == "policy.enabled":
+            if not _config_has_path(cfg, path):
+                raw_value = not bool(effective_cfg.get("no_policy_scan", False))
+            raw_default = not bool(default_cfg.get("no_policy_scan", False))
         normalized_value = _normalize_config_contract_value(raw_value, spec)
         normalized_default = _normalize_config_contract_value(raw_default, spec)
         _config_path_set(values, path, normalized_value)
@@ -521,6 +614,7 @@ def _build_config_contract(
             _config_path_set(redacted_values, path, REDACTED_VALUE)
         if _config_path_get(redacted_defaults, path) not in (None, "", False):
             _config_path_set(redacted_defaults, path, REDACTED_VALUE)
+    profile_effective = _build_profile_effective_payload(cfg if isinstance(cfg, dict) else {}, _normalize_config_for_launch(cfg))
 
     return {
         "path": cfg_path.as_posix(),
@@ -533,6 +627,8 @@ def _build_config_contract(
         "redaction": redaction,
         "restart_required_paths": restart_required_paths,
         "backups": backups,
+        "profile_effective": profile_effective,
+        "profileEffective": profile_effective,
         "meta": {
             "path": cfg_path.as_posix(),
             "source": cfg_source,

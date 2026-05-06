@@ -5,7 +5,13 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
-from .runtime_contract import BUILTIN_ROLE_SPECS, CODEX_MODEL_DEFAULTS, default_role_string, enterprise_role_string
+from .runtime_contract import (
+    BUILTIN_ROLE_SPECS,
+    CODEX_MODEL_DEFAULTS,
+    ENTERPRISE_BUDGET_FLOORS,
+    default_role_string,
+    enterprise_role_string,
+)
 from .config import (
     app_home,
     legacy_config_path,
@@ -1041,7 +1047,7 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
             eff["profile"] = "personal"
             return
 
-        if "roles" not in explicit_args and not eff.get("roles"):
+        if "roles" not in explicit_args and not _config_has_path("roles"):
             eff["roles"] = enterprise_role_string()
         if "qa_always" not in explicit_args:
             eff["qa_always"] = True
@@ -1051,12 +1057,14 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
             eff["security"]["enabled"] = True
 
         budgets = eff.get("budgets", {})
-        if "budget_max_total_escalations_per_run" not in explicit_args:
-            budgets["max_total_escalations_per_run"] = max(int(budgets.get("max_total_escalations_per_run") or 0), 5)
-        if "budget_max_total_continuations_per_run" not in explicit_args:
-            budgets["max_total_continuations_per_run"] = max(int(budgets.get("max_total_continuations_per_run") or 0), 5)
-        if "budget_max_total_repair_attempts_per_run" not in explicit_args:
-            budgets["max_total_repair_attempts_per_run"] = max(int(budgets.get("max_total_repair_attempts_per_run") or 0), 3)
+        budget_cli_keys = {
+            "max_total_escalations_per_run": "budget_max_total_escalations_per_run",
+            "max_total_continuations_per_run": "budget_max_total_continuations_per_run",
+            "max_total_repair_attempts_per_run": "budget_max_total_repair_attempts_per_run",
+        }
+        for budget_key, floor in ENTERPRISE_BUDGET_FLOORS.items():
+            if budget_cli_keys.get(budget_key) not in explicit_args:
+                budgets[budget_key] = max(int(budgets.get(budget_key) or 0), int(floor))
         eff["budgets"] = budgets
         eff["profile"] = "enterprise"
 
