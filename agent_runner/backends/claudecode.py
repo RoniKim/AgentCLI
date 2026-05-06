@@ -61,6 +61,7 @@ from ..gitops import (
     create_worktree,
     remove_worktree,
     handle_worktree_patch,
+    read_pending_worktree_merge,
     check_and_remove_stale_git_lock,
     ensure_clean_working_tree,
 )
@@ -92,7 +93,8 @@ from ..experience import (
     ExperienceRedactionSettings,
     render_pm_experience_summary_from_run,
 )
-from ..reporting import collect_shutdown_context, build_local_shutdown_report
+from ..reporting import collect_shutdown_context, build_local_shutdown_report, write_run_report_artifacts
+from ..pr_queue import queue_review_packet
 from ..pipeline import PipelineManager, make_stages
 from ..pipeline.shared_runtime import (
     SharedCycleDeps,
@@ -213,6 +215,7 @@ from ..goals import (
     parse_goals_completion,
     update_goals_checkboxes,
     write_completion_status,
+    resolve_completion_final_reason,
     build_goals_refresh_prompt,
     parse_and_append_refreshed_goals,
     GOALS_GENERATION_INSTRUCTION,
@@ -3605,20 +3608,19 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         if _goals_on:
             try:
                 _gp_eval, _gt_eval = read_goals(repo)
-                if _gt_eval:
-                    comp_status = parse_goals_completion(_gt_eval, completion_level=goals_completion_level)
-                    unresolved = _count_unresolved_failures(repo, done_set)
-                    write_completion_status(run_dir, comp_status, failed_unresolved=unresolved,
-                                           stop_reason="cycle_end")
-                    if comp_status.get("project_complete") and unresolved == 0:
-                        eprint(f"[GOALS] PROJECT COMPLETE - all goals met (level={goals_completion_level}), no unresolved failures.")
-                        metrics.event("project_complete", cycle=cycle_idx, goals=comp_status)
-                        return 0, STOP_REASON_PROJECT_COMPLETE, done_delta, ran_tasks
-                    else:
-                        p0d = comp_status.get("p0_done", 0)
-                        p0t = comp_status.get("p0_total", 0)
-                        unmet = comp_status.get("unmet_p0", [])
-                        eprint(f"[GOALS] P0: {p0d}/{p0t} | unresolved failures: {unresolved} | unmet: {unmet[:3]}")
+                comp_status = parse_goals_completion(_gt_eval or "", completion_level=goals_completion_level)
+                unresolved = _count_unresolved_failures(repo, done_set)
+                write_completion_status(run_dir, comp_status, failed_unresolved=unresolved,
+                                       stop_reason="cycle_end")
+                if comp_status.get("project_complete") and unresolved == 0:
+                    eprint(f"[GOALS] PROJECT COMPLETE - all goals met (level={goals_completion_level}), no unresolved failures.")
+                    metrics.event("project_complete", cycle=cycle_idx, goals=comp_status)
+                    return 0, STOP_REASON_PROJECT_COMPLETE, done_delta, ran_tasks
+                else:
+                    p0d = comp_status.get("p0_done", 0)
+                    p0t = comp_status.get("p0_total", 0)
+                    unmet = comp_status.get("unmet_p0", [])
+                    eprint(f"[GOALS] P0: {p0d}/{p0t} | unresolved failures: {unresolved} | unmet: {unmet[:3]}")
             except Exception as comp_ex:
                 eprint(f"[WARN] Completion evaluation failed: {comp_ex}")
 
@@ -3750,6 +3752,24 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             report_path.write_text(local_md, encoding="utf-8", errors="replace")
         except Exception as _report_ex:
             eprint(f"[WARN] Failed to write local shutdown report: {_report_ex}")
+        try:
+            report_artifacts = write_run_report_artifacts(
+                repo=repo,
+                run_dir=run_dir,
+                stop_reason=stop_reason,
+                last_task_id=last_task_id,
+            )
+            if report_artifacts:
+                ctx_obj["qa_validation_report"] = report_artifacts.get("qa_validation_report", {})
+                ctx_obj["final_run_report"] = report_artifacts.get("final_run_report", {})
+                ctx_obj["operations_summary"] = report_artifacts.get("operations_summary", {})
+                ctx_obj["report_artifacts"] = report_artifacts.get("artifacts", {})
+                try:
+                    ctx_path.write_text(json.dumps(ctx_obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+        except Exception as _report_artifacts_ex:
+            eprint(f"[WARN] Failed to write run reports: {_report_artifacts_ex}")
         # Try PM-authored report via Claude SDK
         reporter_instructions = store.get("reporter_instructions", REPORTER_INSTRUCTIONS_DEFAULT)
         try:
@@ -4241,6 +4261,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         except Exception:
             detected_reason = ""
         final_reason = choose_stop_reason([last_reason, detected_reason]) or last_reason
+        if last_rc == 0 and final_reason in {"", "ok"}:
+            resolved_final_reason = resolve_completion_final_reason(run_dir, final_reason, last_rc=last_rc)
+            if resolved_final_reason != final_reason:
+                final_reason = resolved_final_reason
+                last_reason = resolved_final_reason
         report_path = run_dir / "SHUTDOWN_REPORT.md"
         if not report_path.exists():
             try:
@@ -4276,6 +4301,78 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             pending_merge = run_dir / "WORKTREE_MERGE_PENDING.json"
             apply_failure = run_dir / "WORKTREE_APPLY_FAILURE.md"
             if pending_merge.exists():
+                try:
+                    pending_payload = read_pending_worktree_merge(pending_merge)
+                except Exception:
+                    pending_payload = {}
+                try:
+                    state_payload = load_state(state_path)
+                except Exception:
+                    state_payload = {}
+                done_task_ids = [
+                    str(task_id).strip()
+                    for task_id in list(state_payload.get("done", []) or [])
+                    if str(task_id).strip()
+                ]
+                queue_result: dict[str, object] | None = None
+                try:
+                    queue_result = queue_review_packet(
+                        source_repo,
+                        run_id=run_dir.name,
+                        task_ids=done_task_ids,
+                        base_ref=str(pending_payload.get("base_ref") or source_base_ref or "HEAD"),
+                        head_ref=str(pending_payload.get("head_ref") or git_head(source_repo)),
+                        branch=str(pending_payload.get("branch") or pending_payload.get("source_branch") or ""),
+                        source_head_before=source_base_ref,
+                        source_head_after=git_head(source_repo),
+                        worktree_dir=worktree_dir.as_posix(),
+                        validation_status=locals().get("task_validation_status", "validation_pending") if last_rc == 0 else "validation_pending",
+                        validation_artifacts=[
+                            str(value).strip()
+                            for value in (
+                                pending_payload.get("patch_path"),
+                                run_dir / "worktree.patch",
+                                pending_payload.get("pending_file"),
+                            )
+                            if value is not None and str(value).strip()
+                        ],
+                        qa_notes=[],
+                        goal_trace=list(pending_payload.get("goal_trace") or pending_payload.get("goalTrace") or []),
+                        changed_files=pending_payload.get("changed_files") or pending_payload.get("changedFiles") or [],
+                        merge_preflight=pending_payload.get("preflight") or pending_payload.get("apply_check") or {},
+                        status="pr_queued",
+                    )
+                except Exception as _pq_ex:
+                    queue_result = {
+                        "ok": False,
+                        "status": "pr_queue_failed",
+                        "recoverable": False,
+                        "recoverable_reason": str(_pq_ex),
+                        "packet_path": "",
+                        "branch_index_path": "",
+                        "packet_id": "",
+                    }
+                    eprint(f"[WARN] Failed to queue review packet for Claude isolated worktree: {_pq_ex}")
+                    metrics.event(
+                        "worktree_review_packet_failed",
+                        run_id=run_dir.name,
+                        backend="claudecode",
+                        error=str(_pq_ex),
+                        worktree=worktree_dir.as_posix(),
+                    )
+                    if final_reason in {"", "ok"}:
+                        final_reason = "pr_queue_failed"
+                else:
+                    if queue_result.get("recoverable"):
+                        final_reason = str(queue_result.get("status") or final_reason or "review_required")
+                    eprint("")
+                    eprint("[INFO] Review packet queued for Claude isolated worktree.")
+                    eprint(f" - packet:  {queue_result.get('packet_path')}")
+                    eprint(f" - branch index: {queue_result.get('branch_index_path')}")
+                    eprint(f" - worktree: {worktree_dir}")
+                    if queue_result.get("recoverable"):
+                        eprint(f" - status:   {queue_result.get('status')} ({queue_result.get('recoverable_reason') or 'recoverable'})")
+                    eprint("")
                 eprint("")
                 eprint("[ACTION REQUIRED] Worktree merge pending.")
                 eprint(f" - worktree: {worktree_dir}")

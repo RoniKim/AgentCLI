@@ -15,6 +15,7 @@ The user reviews/edits, and subsequent cycles converge toward those goals.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from pathlib import Path
@@ -329,7 +330,7 @@ def classify_goals_completion_status(
     project_complete = bool(status.get("project_complete", False)) and failed_unresolved == 0
     if not has_goals:
         completion_status = "no_goals"
-        completion_reason = "ok"
+        completion_reason = GOALS_INCOMPLETE_STATUS
     elif project_complete:
         completion_status = STOP_REASON_PROJECT_COMPLETE
         completion_reason = STOP_REASON_PROJECT_COMPLETE
@@ -370,6 +371,41 @@ def write_completion_status(run_dir: Path, status: Dict[str, Any], *,
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
                    encoding="utf-8", errors="replace")
     return out
+
+
+def resolve_completion_final_reason(run_dir: Path, final_reason: str, *, last_rc: int = 0) -> str:
+    """Promote explicit GOALS completion artifacts into terminal run reasons.
+
+    Missing or invalid GOALS remain incomplete: they may keep the diagnostic
+    completion_status value `no_goals`, but their completion_reason must still
+    prevent a successful `ok` terminal reason.
+    """
+    reason = str(final_reason or "").strip()
+    if int(last_rc or 0) != 0 or reason not in {"", "ok"}:
+        return reason
+    try:
+        payload = json.loads((Path(run_dir) / "COMPLETION_STATUS.json").read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return reason
+    if not isinstance(payload, dict):
+        return reason
+    completion_status = str(
+        payload.get("completion_status")
+        or payload.get("completionStatus")
+        or ""
+    ).strip().lower()
+    completion_reason = str(
+        payload.get("completion_reason")
+        or payload.get("completionReason")
+        or ""
+    ).strip().lower()
+    if completion_reason in {GOALS_INCOMPLETE_STATUS, STOP_REASON_PROJECT_COMPLETE}:
+        return completion_reason
+    if completion_status in {GOALS_INCOMPLETE_STATUS, STOP_REASON_PROJECT_COMPLETE}:
+        return completion_status
+    if completion_status == "no_goals":
+        return GOALS_INCOMPLETE_STATUS
+    return reason
 
 
 def _goal_gate_task_text(task: Dict[str, Any]) -> Dict[str, str]:

@@ -1,5 +1,8 @@
 import unittest
+import inspect
 
+import agent_runner.cycle as cycle_module
+import agent_runner.backends.claudecode as claudecode_module
 from agent_runner.backends.claudecode import (
     _build_claude_failure_outcome,
     _record_claude_failure_result,
@@ -44,6 +47,19 @@ class ClaudeFailureSchemaTests(unittest.TestCase):
             "validationStatus",
         ):
             self.assertIn(key, payload)
+
+    def test_claude_backend_uses_shared_completion_report_and_pr_queue_helpers(self) -> None:
+        claude_source = inspect.getsource(claudecode_module)
+        codex_source = inspect.getsource(cycle_module)
+
+        for source in (claude_source, codex_source):
+            self.assertIn("resolve_completion_final_reason(", source)
+            self.assertIn('parse_goals_completion(_gt_eval or ""', source)
+
+        self.assertIn("write_run_report_artifacts(", claude_source)
+        self.assertIn("queue_review_packet(", claude_source)
+        self.assertIn("read_pending_worktree_merge(", claude_source)
+        self.assertIn("worktree_review_packet_failed", claude_source)
 
     def test_blocked_env_helper_matches_shared_helpers(self) -> None:
         validation_artifact = "C:/tmp/tasks/T1/attempt_01/validation.json"

@@ -161,13 +161,12 @@ from .backlog_utils import (
     record_history,
 )
 from .goals import (
-    classify_goals_completion_status,
-    GOALS_INCOMPLETE_STATUS,
     read_goals,
     format_goals_block,
     parse_goals_completion,
     update_goals_checkboxes,
     write_completion_status,
+    resolve_completion_final_reason,
     build_goals_refresh_prompt,
     parse_and_append_refreshed_goals,
     GOALS_GENERATION_INSTRUCTION,
@@ -3797,20 +3796,19 @@ async def main_async(args: argparse.Namespace) -> int:
             if _goals_on:
                 try:
                     _gp_eval, _gt_eval = read_goals(repo)
-                    if _gt_eval:
-                        comp_status = parse_goals_completion(_gt_eval, completion_level=goals_completion_level)
-                        unresolved = _count_unresolved_failures(repo, done_set)
-                        write_completion_status(run_dir, comp_status, failed_unresolved=unresolved,
-                                               stop_reason="cycle_end")
-                        if comp_status.get("project_complete") and unresolved == 0:
-                            eprint(f"[GOALS] PROJECT COMPLETE - all goals met (level={goals_completion_level}), no unresolved failures.")
-                            metrics.event("project_complete", cycle=cycle_idx, goals=comp_status)
-                            return 0, STOP_REASON_PROJECT_COMPLETE, done_delta, ran_tasks
-                        else:
-                            p0d = comp_status.get("p0_done", 0)
-                            p0t = comp_status.get("p0_total", 0)
-                            unmet = comp_status.get("unmet_p0", [])
-                            eprint(f"[GOALS] P0: {p0d}/{p0t} | unresolved failures: {unresolved} | unmet: {unmet[:3]}")
+                    comp_status = parse_goals_completion(_gt_eval or "", completion_level=goals_completion_level)
+                    unresolved = _count_unresolved_failures(repo, done_set)
+                    write_completion_status(run_dir, comp_status, failed_unresolved=unresolved,
+                                           stop_reason="cycle_end")
+                    if comp_status.get("project_complete") and unresolved == 0:
+                        eprint(f"[GOALS] PROJECT COMPLETE - all goals met (level={goals_completion_level}), no unresolved failures.")
+                        metrics.event("project_complete", cycle=cycle_idx, goals=comp_status)
+                        return 0, STOP_REASON_PROJECT_COMPLETE, done_delta, ran_tasks
+                    else:
+                        p0d = comp_status.get("p0_done", 0)
+                        p0t = comp_status.get("p0_total", 0)
+                        unmet = comp_status.get("unmet_p0", [])
+                        eprint(f"[GOALS] P0: {p0d}/{p0t} | unresolved failures: {unresolved} | unmet: {unmet[:3]}")
                 except Exception as comp_ex:
                     eprint(f"[WARN] Completion evaluation failed: {comp_ex}")
 
@@ -4354,22 +4352,10 @@ async def main_async(args: argparse.Namespace) -> int:
                 detected_reason = ""
             final_reason = choose_stop_reason([last_reason, detected_reason]) or last_reason
             if last_rc == 0 and final_reason in {"", "ok"}:
-                try:
-                    completion_status = ""
-                    completion_payload = _load_json_if_exists(run_dir / "COMPLETION_STATUS.json", {})
-                    if isinstance(completion_payload, dict):
-                        completion_status = str(
-                            completion_payload.get("completion_status")
-                            or completion_payload.get("completionStatus")
-                            or completion_payload.get("completion_reason")
-                            or completion_payload.get("completionReason")
-                            or ""
-                        ).strip().lower()
-                    if completion_status in {GOALS_INCOMPLETE_STATUS, STOP_REASON_PROJECT_COMPLETE}:
-                        final_reason = completion_status
-                        last_reason = completion_status
-                except Exception:
-                    pass
+                resolved_final_reason = resolve_completion_final_reason(run_dir, final_reason, last_rc=last_rc)
+                if resolved_final_reason != final_reason:
+                    final_reason = resolved_final_reason
+                    last_reason = resolved_final_reason
             report_path = run_dir / "SHUTDOWN_REPORT.md"
             if final_reason == STOP_REASON_STOP_FILE or not report_path.exists():
                 try:

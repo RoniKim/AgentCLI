@@ -658,7 +658,7 @@ def _redact_web_runner_start_options(start_options: dict[str, Any]) -> dict[str,
 def _redact_web_runner_status_payload(status: dict[str, Any], *, redact_start_options: bool = False) -> dict[str, Any]:
     redacted = deepcopy(status)
     redaction_fields: list[str] = []
-    for key in ("config_path", "configPath"):
+    for key in ("config_path", "configPath", "repo", "repoPath", "run_dir", "runDir", "worktree_dir", "worktreeDir"):
         if redacted.get(key) not in (None, "", False):
             redacted[key] = REDACTED_VALUE
             redaction_fields.append(key)
@@ -704,7 +704,7 @@ def _redact_web_runner_control(control: dict[str, Any], *, redact_start_options:
     if isinstance(status, dict):
         status_copy = _redact_web_runner_status_payload(status, redact_start_options=redact_start_options)
         redacted["status"] = status_copy
-        for key in ("config_path", "configPath"):
+        for key in ("config_path", "configPath", "repo", "repoPath", "run_dir", "runDir", "worktree_dir", "worktreeDir"):
             if status.get(key) not in (None, "", False):
                 redaction_fields.append(f"status.{key}")
             if redact_start_options and isinstance(status.get("start_options"), dict):
@@ -764,7 +764,7 @@ def _redact_web_runner_result(result: dict[str, Any]) -> dict[str, Any]:
                 if key_text in {"config_path", "configPath"}:
                     redacted_value[key] = REDACTED_VALUE if item not in (None, "", False) else item
                 elif key_text in {"repo", "repoPath", "run_dir", "runDir", "worktree_dir", "worktreeDir"}:
-                    redacted_value[key] = _path_text(item)
+                    redacted_value[key] = REDACTED_VALUE if item not in (None, "", False) else item
                 elif key_text in {"start_options", "startOptions"} and isinstance(item, dict):
                     redacted_value[key] = _redact_web_runner_start_options(item)
                 else:

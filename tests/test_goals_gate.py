@@ -17,7 +17,15 @@ if str(ROOT) not in sys.path:
 
 
 import agent_runner.goals as goals_module
-from agent_runner.goals import gate_pm_tasks_against_goals, update_goals_checkboxes
+from agent_runner.goals import (
+    GOALS_INCOMPLETE_STATUS,
+    classify_goals_completion_status,
+    gate_pm_tasks_against_goals,
+    parse_goals_completion,
+    resolve_completion_final_reason,
+    update_goals_checkboxes,
+    write_completion_status,
+)
 from agent_runner.backlog_utils import normalize_backlog_tasks, postprocess_pm_output_tasks
 from agent_runner.gitops import create_task_branch, format_task_commit_message
 from agent_runner.metrics import MetricsLogger
@@ -65,6 +73,19 @@ class GoalsGateTests(unittest.TestCase):
                 "done_when": "The Ship web console gate goal is satisfied and documented.",
             },
         ]
+
+    def test_no_goals_completion_reason_blocks_ok_terminal_reason(self) -> None:
+        status = parse_goals_completion("", completion_level="all")
+        completion = classify_goals_completion_status(status)
+
+        self.assertFalse(status["has_goals"])
+        self.assertFalse(completion["project_complete"])
+        self.assertEqual("no_goals", completion["completion_status"])
+        self.assertEqual(GOALS_INCOMPLETE_STATUS, completion["completion_reason"])
+
+        write_completion_status(self.run_dir, status, stop_reason="cycle_end")
+        self.assertEqual(GOALS_INCOMPLETE_STATUS, resolve_completion_final_reason(self.run_dir, "ok", last_rc=0))
+        self.assertEqual("ok", resolve_completion_final_reason(self.run_dir, "ok", last_rc=1))
 
     def test_goals_auto_check_uses_atomic_write_for_matching_tasks(self) -> None:
         with patch("agent_runner.goals.atomic_write_text", wraps=real_atomic_write_text) as atomic_write:

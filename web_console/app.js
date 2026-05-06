@@ -8350,12 +8350,21 @@
         ?? rawSnapshotRefresh.freshnessTimestamp
         ?? rawSnapshotRefresh.freshness_timestamp
     ) ?? nowMs();
+    const liveStale = toObject(liveRun.stale);
+    const snapshotStaleReasons = Array.from(new Set([
+      ...toArray(rawSnapshotRefresh.staleReasons || rawSnapshotRefresh.stale_reasons)
+        .map((reason) => toText(reason, ''))
+        .filter(Boolean),
+      ...toArray(liveStale.reasons)
+        .map((reason) => toText(reason, ''))
+        .filter(Boolean),
+    ]));
     const snapshotRefresh = {
       status: toText(rawSnapshotRefresh.status, 'ready'),
       lastUpdatedAt: snapshotLastUpdatedAt,
       lastSuccessAt: nowMs(),
-      stale: false,
-      staleReasons: [],
+      stale: Boolean(rawSnapshotRefresh.stale || rawSnapshotRefresh.value || liveStale.value || snapshotStaleReasons.length),
+      staleReasons: snapshotStaleReasons,
       latestRunDir: toText(rawSnapshotRefresh.latestRunDir || rawSnapshotRefresh.latest_run_dir || raw.latest_run_dir, ''),
     };
 
@@ -19018,6 +19027,8 @@
     const liveRun = currentLiveRun();
     const liveNotifications = currentLiveRunNotifications(liveRun);
     const liveControl = currentLiveRunRunnerControl(liveRun);
+    const liveControlStatus = toObject(liveControl.status);
+    const telegramConfig = toObject(state.config?.telegram);
     const notificationItems = toArray(liveNotifications.items || state.notifications).map((item) => {
       const normalized = normalizeNotification(item);
       return {
@@ -19080,12 +19091,12 @@
         items: filtered.filter((item) => normalizeNotificationSeverity(item.severity, item.kind) === severity),
       }))
       .filter((group) => group.items.length);
-    const configuredEvents = fmtList(state.config?.telegram?.notify_events || []);
-    const stalledSeconds = toNumber(state.config?.telegram?.stalled_seconds || 0, 0);
+    const configuredEvents = fmtList(telegramConfig.notify_events || []);
+    const stalledSeconds = toNumber(telegramConfig.stalled_seconds || 0, 0);
     const controlPlaneStatus = liveControl.controllerAvailable
       ? (liveControl.enabled ? (liveControl.busy ? t('runner.working') : t('common.enabled')) : t('common.disabled'))
       : t('common.unavailable');
-    const controlPlaneEvent = liveNotifications.controlPlaneEvent || liveControl.status.lastEvent || liveControl.lastAction || liveControl.lastMessage || '';
+    const controlPlaneEvent = liveNotifications.controlPlaneEvent || liveControlStatus.lastEvent || liveControl.lastAction || liveControl.lastMessage || '';
     const controlPlaneEventLabel = (() => {
       const normalized = toText(controlPlaneEvent, '').toLowerCase();
       if (!normalized) return t('common.none');
@@ -19199,7 +19210,7 @@
 
           ${panel(
             t('notifications.bridgeSettings'),
-            escapeHTML(state.config.telegram.instance_name || 'home-pc-main'),
+            escapeHTML(telegramConfig.instance_name || 'home-pc-main'),
             `
               <div class="compact-list">
                 ${compactFactItem(t('notifications.configuredEvents'), configuredEvents || t('common.none'), 'telegram.notify_events')}
@@ -22516,7 +22527,6 @@
   function routeNeedsExplicitFullSnapshot(nextView, previousView = state.activeView) {
     return (
       snapshotScopeForView(nextView) === 'full' &&
-      snapshotScopeForView(previousView) !== 'full' &&
       routeNeedsSnapshotHydration(nextView)
     );
   }
