@@ -350,7 +350,7 @@
 - [x] Local retention settings and dry-run prune reports manage run directories, logs, diagnostics, and backups without deleting pending worktree review state.
 - [x] TODO management is visible from shell/web status with active TODO path, freshness, PM injection state, and safe preview/edit controls without overriding GOALS-first PM gating.
 - [x] Skills doctor/status shows configured roots, discovered skill count, selected skill ids, missing skill warnings, and fuzzy-match suggestions.
-- [ ] PM/Dev/QA skill injection is covered by tests for disabled, enabled, missing-root, missing-skill, and fuzzy-autofix modes.
+- [x] PM/Dev/QA skill injection is covered by tests for disabled, enabled, missing-root, missing-skill, and fuzzy-autofix modes.
 - [ ] Claude advanced controls expose validated config, diagnostics, and tests for MCP tools, hooks, dynamic permission, strict isolation, and subagent enablement.
 - [ ] Claude backend parity tests cover PR queue, task status, failure policy, validation artifacts, and advanced-control disabled/enabled modes.
 - [ ] MCP mode diagnostics report selected mode, timeout, unavailable tools, and safe fallback behavior without blocking non-MCP runs.
