@@ -1848,6 +1848,19 @@
     controllerReportedError: 'Runner controller reported an error.',
     controlFailed: 'Runner control failed.',
     controlFailedHttp: 'Runner control failed (HTTP {status}).',
+    commandPreview: 'Command preview',
+    commandPreviewSummary: 'Argument array shown exactly as the runner will receive it.',
+    fixStartOptionsBeforeContinuing: 'Fix the highlighted start options before continuing.',
+    invalidRunMode: 'Run mode must be one-shot, continuous, or loop.',
+    continuousMismatch: 'Continuous does not match the selected run mode.',
+    loopMismatch: 'Loop does not match the selected run mode.',
+    oneShotMismatch: 'One-shot does not match the selected run mode.',
+    invalidAutopilot: 'Autopilot must be true or false.',
+    invalidProfile: 'Profile must match an available profile.',
+    invalidBackend: 'Backend must match an available backend.',
+    configPathRequired: 'Config path cannot be empty.',
+    invalidMaxCycles: 'Max cycles must be an integer greater than or equal to 0.',
+    resumeLatestRunDirConflict: 'Resume latest cannot be combined with an explicit run dir.',
   });
   Object.assign(LOCALE_TEXT.en.worktree, {
     actionFailed: 'Worktree action failed.',
@@ -2164,6 +2177,19 @@
       actionFailed: '실행기 작업 실패.',
       confirmationRequired: '확인 필요',
       typeExactConfirmationToEnableAction: '{action} 작업을 활성화하려면 "{confirmation}"를 정확히 입력하세요.',
+      commandPreview: '명령 미리보기',
+      commandPreviewSummary: '실행기가 받을 인자 배열을 그대로 표시합니다.',
+      fixStartOptionsBeforeContinuing: '계속하기 전에 강조된 시작 옵션을 수정하세요.',
+      invalidRunMode: '실행 모드는 one-shot, continuous, loop 중 하나여야 합니다.',
+      continuousMismatch: 'Continuous 값이 선택된 실행 모드와 일치하지 않습니다.',
+      loopMismatch: 'Loop 값이 선택된 실행 모드와 일치하지 않습니다.',
+      oneShotMismatch: 'One-shot 값이 선택된 실행 모드와 일치하지 않습니다.',
+      invalidAutopilot: 'Autopilot은 true 또는 false여야 합니다.',
+      invalidProfile: '프로필은 사용 가능한 프로필 중 하나여야 합니다.',
+      invalidBackend: '백엔드는 사용 가능한 백엔드 중 하나여야 합니다.',
+      configPathRequired: '설정 경로는 비워 둘 수 없습니다.',
+      invalidMaxCycles: '최대 사이클은 0 이상의 정수여야 합니다.',
+      resumeLatestRunDirConflict: '최신 실행 재개는 명시적인 실행 디렉터리와 함께 사용할 수 없습니다.',
     },
     worktree: {
       ...LOCALE_TEXT.en.worktree,
@@ -3694,42 +3720,42 @@
     const loopMaxCycles = loopMaxCyclesText === '' ? NaN : Number(loopMaxCyclesText);
 
     if (rawRunMode && !runModeChoices.includes(rawRunMode)) {
-      addError('run_mode', 'invalid_choice', 'Run mode must be one-shot, continuous, or loop.', { choices: runModeChoices });
+      addError('run_mode', 'invalid_choice', t('runner.invalidRunMode'), { choices: runModeChoices });
     }
     if (continuous !== (runMode === 'continuous' || runMode === 'loop')) {
-      addError('continuous', 'invalid_combination', 'Continuous does not match the selected run mode.');
+      addError('continuous', 'invalid_combination', t('runner.continuousMismatch'));
     }
     if (loop !== (runMode === 'loop')) {
-      addError('loop', 'invalid_combination', 'Loop does not match the selected run mode.');
+      addError('loop', 'invalid_combination', t('runner.loopMismatch'));
     }
     if (oneShot !== (runMode === 'one-shot')) {
-      addError('one_shot', 'invalid_combination', 'One-shot does not match the selected run mode.');
+      addError('one_shot', 'invalid_combination', t('runner.oneShotMismatch'));
     }
     const autopilot = Boolean(current.autopilot);
     if (typeof current.autopilot !== 'boolean' && current.autopilot != null) {
-      addError('autopilot', 'invalid_choice', 'Autopilot must be true or false.', { choices: [true, false] });
+      addError('autopilot', 'invalid_choice', t('runner.invalidAutopilot'), { choices: [true, false] });
     }
     const profile = toText(current.profile, 'personal').trim().toLowerCase() || 'personal';
     if (!profileChoices.includes(profile)) {
-      addError('profile', 'invalid_choice', 'Profile must be personal or enterprise.', { choices: profileChoices });
+      addError('profile', 'invalid_choice', t('runner.invalidProfile'), { choices: profileChoices });
     }
     const backend = toText(current.execution_backend || current.executionBackend || current.backend, 'codex').trim().toLowerCase() || 'codex';
     if (!backendChoices.includes(backend)) {
-      addError('execution_backend', 'invalid_choice', 'Backend must be codex or claudecode.', { choices: backendChoices });
+      addError('execution_backend', 'invalid_choice', t('runner.invalidBackend'), { choices: backendChoices });
     }
     if (!configPathRedacted && !configPath) {
-      addError('config_path', 'required', 'Config path cannot be empty.');
+      addError('config_path', 'required', t('runner.configPathRequired'));
     }
     if (loopMaxCyclesText !== '' && (!Number.isFinite(loopMaxCycles) || loopMaxCycles < 0)) {
-      addError('loop_max_cycles', 'invalid_value', 'Max cycles must be an integer greater than or equal to 0.');
+      addError('loop_max_cycles', 'invalid_value', t('runner.invalidMaxCycles'));
     }
     if (runDir && resumeLatest) {
-      addError('resume_latest', 'invalid_combination', 'Resume latest cannot be combined with an explicit run dir.');
+      addError('resume_latest', 'invalid_combination', t('runner.resumeLatestRunDirConflict'));
     }
 
     return {
       valid: errors.length === 0,
-      message: errors.length === 0 ? '' : 'Fix the highlighted start options before continuing.',
+      message: errors.length === 0 ? '' : t('runner.fixStartOptionsBeforeContinuing'),
       errorCount: errors.length,
       errors,
       fieldErrors,
@@ -15963,16 +15989,16 @@
     const previewHTML = `
       <div class="runner-control__preview">
         <div class="runner-control__preview-head">
-          <div class="runner-control__preview-title">Command preview</div>
-          <div class="summary-note">Argument array shown exactly as the runner will receive it.</div>
+          <div class="runner-control__preview-title">${escapeHTML(t('runner.commandPreview'))}</div>
+          <div class="summary-note">${escapeHTML(t('runner.commandPreviewSummary'))}</div>
         </div>
-        <div class="runner-control__argv" role="list" aria-label="Command preview">
+        <div class="runner-control__argv" role="list" aria-label="${escapeHTML(t('runner.commandPreview'))}">
           ${argvPreview.map((token) => `<span class="runner-control__argv-token" role="listitem">${escapeHTML(token || '""')}</span>`).join('')}
         </div>
       </div>
     `;
     const validationSummary = !validationState.valid
-      ? `<div class="field-error runner-control__validation-error">${escapeHTML(validationState.message || 'Fix the highlighted start options before continuing.')}</div>`
+      ? `<div class="field-error runner-control__validation-error">${escapeHTML(validationState.message || t('runner.fixStartOptionsBeforeContinuing'))}</div>`
       : '';
     const maxCyclesControl = `
       <input
@@ -18826,12 +18852,12 @@
         ? t('runner.stopTimedOut')
         : finalizedState
           ? t('runner.actionComplete')
-          : state.stopError
-            ? t('runner.actionFailed')
+            : state.stopError
+              ? t('runner.actionFailed')
             : !actionEnabled
               ? t('runner.actionDisabled')
               : startAction && startOptionsValidation && !startOptionsValidation.valid
-                ? 'Fix the highlighted start options before continuing.'
+                ? t('runner.fixStartOptionsBeforeContinuing')
                 : t('runner.confirmationRequired');
     const stopErrorText = redactionAwareText(state.stopError, t('runner.controlFailed'));
     const bannerMessage = state.stopSubmitting
@@ -18845,7 +18871,7 @@
             : !actionEnabled
               ? runnerControlActionDisabledReason(action)
               : startAction && startOptionsValidation && !startOptionsValidation.valid
-              ? startOptionsValidation.message || 'Fix the highlighted start options before continuing.'
+              ? startOptionsValidation.message || t('runner.fixStartOptionsBeforeContinuing')
                 : redactionAwareText(control.message, actionSummary);
     const overlayPresentation = state.stopSubmitting
       ? actionPresentation(`runner-${action}`, 'busy', bannerMessage)
@@ -20117,7 +20143,7 @@
     const startAction = action !== 'stop';
     const startOptionsValidation = startAction ? runnerControlStartOptionsValidation(state.runnerControl, state.stopStartOptions) : null;
     if (startAction && !startOptionsValidation.valid) {
-      state.stopError = startOptionsValidation.message || 'Fix the highlighted start options before continuing.';
+      state.stopError = startOptionsValidation.message || t('runner.fixStartOptionsBeforeContinuing');
       renderStopOverlay();
       return;
     }

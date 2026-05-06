@@ -8,7 +8,7 @@ from typing import Any, Optional, Sequence
 
 from .cli import DEFAULTS as CLI_DEFAULTS, _build_parser
 from .gitops import WORKTREE_MERGE_PENDING, WORKTREE_MERGE_PENDING_MD
-from .runtime_contract import CODEX_MODEL_DEFAULTS
+from .runtime_contract import CODEX_MODEL_DEFAULTS, PIPELINE_ROLE_HINT
 from .utils import _KNOWN_STOP_REASONS
 
 
@@ -1250,6 +1250,17 @@ def validate_web_console_doc(repo: Path, text: str) -> list[str]:
 
     status_section = _section_text(text, "## Current Status")
     if status_section is not None:
+        lowered_status = status_section.lower()
+        if "not yet a complete operational web runner" in lowered_status or "alpha shell" in lowered_status:
+            errors.append(f"{doc_label}: stale alpha web-runner status claim")
+        if "translation polish" in lowered_status:
+            errors.append(f"{doc_label}: stale translation-polish blocker claim")
+        if "remaining gap is real-process end-to-end validation" in lowered_status:
+            errors.append(f"{doc_label}: stale runner-control validation gap claim")
+        if "broader playwright coverage beyond the checked-in smoke path" in lowered_status:
+            errors.append(f"{doc_label}: stale Playwright coverage gap claim")
+        if PIPELINE_ROLE_HINT not in status_section:
+            errors.append(f"{doc_label}: built-in role order must match runtime PIPELINE_ROLE_HINT")
         summary_lines = [
             line
             for line in status_section.splitlines()

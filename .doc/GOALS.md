@@ -292,7 +292,7 @@
 - [x] Mobile navigation confines overflow to an intentional visible horizontal scroll container or wraps route groups without hidden off-screen controls at 390px width.
 - [x] Web snapshot polling uses route-appropriate payloads so Dashboard refresh does not require multi-megabyte `/api/status` responses containing full GOALS raw text/history data.
 - [x] Web PR Queue route lists queued local PR packets with task id, GOALS refs, branch, changed files, validation status, QA notes, and merge preflight status.
-- [x] Web PR Queue detail view shows per-file diff, validation logs, blockers, dependency detail, and explicit read-only vs mutating validate/merge/discard affordances.
+- [x] Web PR Queue detail view shows per-file diff, validation logs, blockers, dependency detail, and explicit read-only disabled validate/merge/discard/rebase affordances.
 
 ### P0-X. Unattended Operations Follow-Up
 
@@ -342,6 +342,7 @@
 - [x] The CLI can optionally launch or serve the web console from a documented command.
 - [ ] Web console exposes diagnostics for missing FastAPI/uvicorn dependencies and broken virtual environments.
 - [x] UI state clearly distinguishes fallback/demo data from real API data.
+- [ ] Web PR Queue browser controls can validate, merge, discard, and rebase queued packets with the same safety gates as shell commands.
 - [ ] Authentication plan exists before use outside trusted private networks.
 - [ ] A personal Runbook panel renders venv activation, shell start, web serve, status, stop, merge, discard, diagnostics, and recommended long-run commands for the active repo.
 - [ ] Each run writes a concise `WORK_SUMMARY.md` suitable for daily work logs without exposing raw secrets or long transcripts.

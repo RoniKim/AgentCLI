@@ -1840,3 +1840,41 @@ def test_api_logs_tail_contract_distinguishes_missing_empty_and_malformed_source
         "entry_lines": [2],
         "entry_messages": ["task end"],
     }
+
+
+def test_api_logs_contract_protects_default_logs_payload(endpoint_fixture: EndpointFixture) -> None:
+    _write(
+        endpoint_fixture.run_dir / "logs" / "run.log",
+        "2026-04-26T12:00:10Z [INFO] PM T-023 run started\n",
+    )
+
+    with endpoint_fixture.create_client() as client:
+        payload = client.get("/api/logs").json()
+
+    source = payload["source"]
+    assert isinstance(source, dict)
+    assert {
+        "source_id": payload["source_id"],
+        "selected_source_id": payload["selected_source_id"],
+        "entries_source_id": payload["entries_source_id"],
+        "entries_source_kind": payload["entries_source_kind"],
+        "source_name": source["name"],
+        "source_available": source["available"],
+        "sources": [item["id"] for item in payload["sources"]],
+        "entry_messages": [entry["msg"] for entry in payload["entries"]],
+        "last_line_message": payload["last_line"]["msg"],
+        "eof": payload["eof"],
+        "redaction": payload["redaction"],
+    } == {
+        "source_id": "run_log",
+        "selected_source_id": "run_log",
+        "entries_source_id": "run_log",
+        "entries_source_kind": "log",
+        "source_name": "run.log",
+        "source_available": True,
+        "sources": ["run_log", "error_log", "events_jsonl", "cycle_summary", "backend_transcript"],
+        "entry_messages": ["2026-04-26T12:00:10Z [INFO] PM T-023 run started"],
+        "last_line_message": "2026-04-26T12:00:10Z [INFO] PM T-023 run started",
+        "eof": False,
+        "redaction": {},
+    }

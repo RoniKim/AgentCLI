@@ -1,10 +1,10 @@
 # AgentCLI Web Console
 
-> Last verified: 2026-04-29 (against live FastAPI route inventory).
+> Last verified: 2026-05-06 (against live FastAPI route inventory and GOALS verification).
 
-AgentCLI has an alpha FastAPI web console for browser-based monitoring. It is repo-owned code in `web_console/` served by `agent_runner.web`; the exported design files under `docs/Design/project/` are reference input only.
+AgentCLI has a FastAPI web console for browser-based local-operator monitoring and guarded repo operations. It is repo-owned code in `web_console/` served by `agent_runner.web`; the exported design files under `docs/Design/project/` are reference input only.
 
-This is not yet a complete operational web runner. Treat the current implementation as an alpha shell with read-only snapshots plus early runner-control plumbing.
+The console is optimized for a trusted local repository workflow: read-only snapshots are the default, while config, prompt, goals, runner, PR queue merge, and worktree mutation routes require explicit server opt-in and confirmation where applicable.
 
 ## Operating Model
 
@@ -17,7 +17,7 @@ AgentCLI Web currently runs as `one repo, one web instance`.
 
 ## Current Status
 
-Verified on 2026-04-26 with a local server and Playwright:
+Verified on 2026-05-06 with local API, unit, and checked-in browser smoke coverage:
 
 - Static console serving works from `agent_runner.web`.
 - Live FastAPI routes cover `/api/health`, `/api/status`, `/api/progress`, `/api/history`, `/api/logs`, `/api/logs/tail`, `/api/logs/live`, `/api/worktree`, `/api/worktree/diagnostics`, guarded `/api/config`, `/api/config/restore`, `/api/config/save`, `/api/prompts`, `/api/prompts/read`, `/api/prompts/content`, `/api/prompts/save`, `/api/prompts/restore`, `/api/goals`, `/api/goals/save`, `/api/runner/status`, `/api/runner/start`, `/api/runner/stop`, `/api/runner/reload`, `/api/runner/restart`, `/api/worktree/merge`, `/api/worktree/discard`, and `/api/pr-queue/merge`.
@@ -32,16 +32,14 @@ Verified on 2026-04-26 with a local server and Playwright:
 - Checked-in Playwright smoke coverage now exercises Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, EN/KO Dashboard and Config locale switching, and a mobile-width viewport.
 - Runner controls are disabled by default and require explicit opt-in.
 - Config saves now reuse that opt-in and create a timestamped backup before atomic disk writes.
-- Config rendering now tolerates `roles` as strings or arrays and preserves built-in order `PM, Security, Dev, QA`.
+- Config rendering now tolerates `roles` as strings or arrays and uses the runtime role hint: Built-in order: PM, PL, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.
 - Empty timestamped run directories are ignored so they do not appear as active runs.
 - Completed runs with final reason `ok`, `prepared_only`, `project_complete`, or `all_tasks_done` are no longer displayed as still running.
 
-Known blockers:
+Known remaining scope:
 
-- Logs view live-tail, pause/resume, filtering, copy, and download are fully wired (see `web_console/app.js` `isLiveTailPaused`, level/stage/task/search filters in `web.py`); remaining work is broader UX polish.
-- Default English/Korean locale toggle is implemented (`setLocale` in `app.js`); a few views and copy strings still need translation polish.
-- Runner controls: T1/T2 durable runner-control events were merged 2026-04-28 (commits bc57841, c0557d1). The remaining gap is real-process end-to-end validation and stop-timeout edge-case coverage.
-- The UI still needs broader Playwright coverage beyond the checked-in smoke path.
+- Run History comparison, Notifications read/unread workflow, report export, local artifact opening helpers, and Runbook/Instance Health panels remain tracked in `.doc/GOALS.md` P1.
+- Browser PR Queue detail is currently read-oriented: it shows packet data, validation logs, merge preflight, blockers, and disabled action affordances; shell commands and guarded backend routes remain the operational path for mutating queue decisions.
 - There is no authentication layer. Treat LAN binds as trusted-network-only until authentication exists.
 
 ## Web Server Flags
@@ -155,7 +153,7 @@ python -B -m unittest discover -s tests -p "test_worktree*.py"
 python -B .\tests\web_console_playwright_smoke.py
 ```
 
-The web smoke path should cover the primary views, Dashboard and Config locale switching, prompt read loading, worktree review, and the mobile-width layout before marking the product complete.
+The web smoke path covers the primary views, Dashboard and Config locale switching, prompt read loading, worktree review, and the mobile-width layout. Install Playwright locally before using the browser smoke command as a release gate.
 
 ## Worktree Diagnostics
 

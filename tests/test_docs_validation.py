@@ -164,6 +164,25 @@ class DocsValidationTests(unittest.TestCase):
 
         self.assertTrue(any("stale web server flag" in error for error in errors), errors)
 
+    def test_web_console_doc_rejects_stale_status_and_role_order(self) -> None:
+        text = (ROOT / "docs" / "WEB_CONSOLE.md").read_text(encoding="utf-8")
+        stale_status = text.replace(
+            "Verified on 2026-05-06 with local API, unit, and checked-in browser smoke coverage:",
+            "Verified on 2026-04-26 with a local server and Playwright:\n\nThis is not yet a complete operational web runner. Treat the current implementation as an alpha shell.",
+            1,
+        )
+        stale_roles = text.replace(
+            "PM, PL, Security, Dev, QA",
+            "PM, Security, Dev, QA",
+            1,
+        )
+
+        status_errors = validate_web_console_doc(ROOT, stale_status)
+        role_errors = validate_web_console_doc(ROOT, stale_roles)
+
+        self.assertTrue(any("stale alpha web-runner status claim" in error for error in status_errors), status_errors)
+        self.assertTrue(any("built-in role order" in error for error in role_errors), role_errors)
+
     def test_case_mismatched_paths_are_rejected(self) -> None:
         temp_root = ROOT / ".test-scratch" / "docs-validation-case-mismatch"
         shutil.rmtree(temp_root, ignore_errors=True)

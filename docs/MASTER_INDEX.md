@@ -1,7 +1,7 @@
 # AgentCLI 문서 인덱스
 
-> 마지막 갱신: 2026-04-30
-> Web Operational UX QA 후속 문서 반영 + PM/Dev/QA 컨텍스트 갱신
+> 마지막 갱신: 2026-05-06
+> Web Console 상태 문구와 런타임 role order 검증 반영
 > 모든 항목은 코드와 실제 파일 inventory + file:line 단위 대조 완료
 
 ---
@@ -32,7 +32,7 @@
 | [ADVANCED_FEATURES.md](ADVANCED_FEATURES.md) | ⚠️ 업데이트 필요 | HIGH | 매칭 임계값 80%·키 이름 정정 |
 | [CUSTOMIZATION.md](CUSTOMIZATION.md) | ⚠️ 업데이트 필요 | MEDIUM | Skills 기본값 4건 |
 | [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) | ⚠️ 업데이트 필요 | MEDIUM | L5 watchdog·신규 모듈 반영 |
-| [WEB_CONSOLE.md](WEB_CONSOLE.md) | ⚠️ 업데이트 필요 | HIGH | 이미 구현된 기능을 미구현으로 잘못 안내 |
+| [WEB_CONSOLE.md](WEB_CONSOLE.md) | ✅ OK | HIGH | FastAPI route inventory + runtime role order 검증 |
 | [TELEGRAM.md](TELEGRAM.md) | ✅ OK | MEDIUM | 13개 명령·11개 CLI 플래그 정합 |
 | [WORKTREE_MERGE_FAILURE_20260428.md](WORKTREE_MERGE_FAILURE_20260428.md) | ✅ OK | LOW | 이미 코드화 반영됨 |
 
