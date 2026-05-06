@@ -71,7 +71,16 @@ The web server requires `fastapi` and `uvicorn`. If the venv points to a missing
 
 ```powershell
 cd D:\000.Work\001.Private\000.API\agent_cli
-python -m agent_runner.web `
+.\.venv\Scripts\python.exe agent_cli.py --web `
+  --repo "." `
+  --host 127.0.0.1 `
+  --port 8000
+```
+
+Equivalent module entrypoint:
+
+```powershell
+.\.venv\Scripts\python.exe -m agent_runner.web `
   --repo "." `
   --host 127.0.0.1 `
   --port 8000
@@ -88,7 +97,7 @@ http://127.0.0.1:8000
 Bind to all interfaces only on a trusted network. Do not expose the console on an untrusted LAN until authentication exists:
 
 ```powershell
-python -m agent_runner.web `
+.\.venv\Scripts\python.exe agent_cli.py --web `
   --repo "." `
   --host 0.0.0.0 `
   --port 8000
