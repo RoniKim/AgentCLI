@@ -353,7 +353,7 @@
 - [x] PM/Dev/QA skill injection is covered by tests for disabled, enabled, missing-root, missing-skill, and fuzzy-autofix modes.
 - [x] Claude advanced controls expose validated config, diagnostics, and tests for MCP tools, hooks, dynamic permission, strict isolation, and subagent enablement.
 - [x] Claude backend parity tests cover PR queue, task status, failure policy, validation artifacts, and advanced-control disabled/enabled modes.
-- [ ] MCP mode diagnostics report selected mode, timeout, unavailable tools, and safe fallback behavior without blocking non-MCP runs.
+- [x] MCP mode diagnostics report selected mode, timeout, unavailable tools, and safe fallback behavior without blocking non-MCP runs.
 - [ ] Plugin stage loading has allowlist, strict-mode, failure diagnostics, Web config validation, and tests for allowed, blocked, missing, and load-error stages.
 - [ ] Enterprise profile has tests and Web config visibility for Security stage insertion, policy/security scan enablement, and budget floor enforcement.
 - [ ] Completed runs can persist a lightweight redacted final web-history snapshot for replay without storing raw prompts, raw logs, or full GOALS text.

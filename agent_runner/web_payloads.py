@@ -1546,6 +1546,7 @@ def build_snapshot(
     now_iso = web.now_iso
     _build_config_contract = web._build_config_contract
     _build_claude_advanced_diagnostics = web.build_claude_advanced_diagnostics
+    _build_mcp_diagnostics = web.build_mcp_diagnostics
     _prompt_profile = web._prompt_profile
     resolve_goals_completion_level = web.resolve_goals_completion_level
     _build_goals_payload = web._build_goals_payload
@@ -1659,6 +1660,7 @@ def build_snapshot(
         restore_requires_opt_in=True,
     )
     claude_advanced = _build_claude_advanced_diagnostics(cfg)
+    mcp_diagnostics = _build_mcp_diagnostics(cfg)
     profile = _prompt_profile(cfg)
     goals_completion_level = resolve_goals_completion_level(cfg.get("goals_completion_level"))
     goals = _build_goals_payload(repo_root, completion_level=goals_completion_level)
@@ -2032,6 +2034,12 @@ def build_snapshot(
         "ready" if claude_status == "ok" else "partial" if claude_status == "warning" else "error",
         "" if claude_status == "ok" else fallbackSectionMessage("claude"),
     )
+    mcp_status = str(mcp_diagnostics.get("status") or "unknown").strip().lower()
+    mcp_section_state = buildSectionState(
+        "mcp",
+        "ready" if mcp_status == "ok" else "partial" if mcp_status == "warning" else "error",
+        "" if mcp_status == "ok" else fallbackSectionMessage("mcp"),
+    )
     prompts_section_state = buildSectionState(
         "prompts",
         "ready" if prompt_items else "empty",
@@ -2209,6 +2217,8 @@ def build_snapshot(
         "config_contract": config_contract,
         "claude_advanced": claude_advanced,
         "claudeAdvanced": claude_advanced,
+        "mcp_diagnostics": mcp_diagnostics,
+        "mcpDiagnostics": mcp_diagnostics,
         "prompts": {
             "dir": prompt_payload.get("dir", prompts_dir.as_posix()) if isinstance(prompt_payload, dict) else prompts_dir.as_posix(),
             "exists": prompts_dir.exists(),
@@ -2285,6 +2295,7 @@ def build_snapshot(
             "goals": goals_section_state,
             "config": config_section_state,
             "claude": claude_section_state,
+            "mcp": mcp_section_state,
             "prompts": prompts_section_state,
             "logs": logs_section_state,
             "notifications": notifications_section_state,
@@ -2473,6 +2484,8 @@ def status_snapshot_for_scope(snapshot: dict[str, Any], *, scope: str = "full") 
         "logs": _dashboard_logs_payload(snapshot.get("logs")),
         "config": _dashboard_config_payload(snapshot.get("config"), snapshot.get("config_contract")),
         "config_contract": _dashboard_config_contract_payload(snapshot.get("config_contract")),
+        "mcp_diagnostics": snapshot.get("mcp_diagnostics", {}),
+        "mcpDiagnostics": snapshot.get("mcpDiagnostics", snapshot.get("mcp_diagnostics", {})),
         "prompts": _dashboard_prompts_payload(snapshot.get("prompts")),
         "history": _dashboard_history_payload(snapshot.get("history")),
         "metrics": snapshot.get("metrics", {}),

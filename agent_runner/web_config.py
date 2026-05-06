@@ -66,6 +66,11 @@ CONFIG_CONTRACT_GROUPS: list[dict[str, Any]] = [
         ],
     },
     {
+        "id": "mcp",
+        "title": "MCP",
+        "paths": ["mcp_mode", "mcp_timeout_seconds", "codex_package"],
+    },
+    {
         "id": "quota",
         "title": "Quota",
         "paths": [
@@ -223,6 +228,9 @@ CONFIG_CONTRACT_FIELDS: list[dict[str, Any]] = [
     {"path": "max_consecutive_failed_cycles", "group": "runner", "kind": "number", "label": "Max consecutive failed cycles", "min": 0, "allow_empty": False, "desc": "Stop after this many failed cycles in a row.", "hint": "Prevents the runner from grinding through repeated failures."},
     {"path": "run_tests", "group": "runner", "kind": "bool", "label": "Run tests", "allow_empty": True, "desc": "Run the test suite during QA.", "hint": "Keeps verification inside the task loop."},
     {"path": "budget_reset_per_cycle", "group": "runner", "kind": "bool", "label": "Budget reset per cycle", "allow_empty": True, "desc": "Reset cycle-level budget tracking every cycle.", "hint": "Useful when cycle-level guardrails matter more than the full run."},
+    {"path": "mcp_mode", "group": "mcp", "kind": "enum", "label": "MCP mode", "restart": True, "options": ["npx", "codex", "disabled"], "allow_empty": False, "desc": "Launcher mode for Codex MCP integration.", "hint": "Diagnostics stay non-blocking when the selected launcher is unavailable."},
+    {"path": "mcp_timeout_seconds", "group": "mcp", "kind": "number", "label": "MCP timeout seconds", "restart": True, "min": 0, "allow_empty": False, "desc": "Timeout applied to MCP launcher operations.", "hint": "Zero disables waiting beyond immediate command completion."},
+    {"path": "codex_package", "group": "mcp", "kind": "text", "label": "Codex package", "restart": True, "allow_empty": False, "desc": "Package passed to npx when MCP mode uses npx.", "hint": "Default is @openai/codex@latest."},
     {"path": "quota_check_enabled", "group": "quota", "kind": "bool", "label": "Quota checks", "allow_empty": True, "desc": "Enable quota utilization checks.", "hint": "Disabling this removes the quota guardrails from the runner."},
     {"path": "quota_five_hour_max_utilization", "group": "quota", "kind": "number", "label": "5h max utilization", "min": 0, "max": 100, "allow_empty": False, "desc": "Five-hour quota utilization ceiling.", "hint": "Percent used before the runner stops or pauses."},
     {"path": "quota_seven_day_max_utilization", "group": "quota", "kind": "number", "label": "7d max utilization", "min": 0, "max": 100, "allow_empty": False, "desc": "Seven-day quota utilization ceiling.", "hint": "Percent used before the runner stops or pauses."},

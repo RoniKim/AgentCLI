@@ -29,6 +29,7 @@ from .logger import close_all_loggers, register_structured_logger_cleanup
 from .todo import build_todo_status, ensure_todo_file, read_current_todo, set_current_todo, open_path
 from .skills.status import build_skills_status, format_skills_status_lines
 from .backends.claude_extensions import build_claude_advanced_diagnostics, format_claude_advanced_diagnostics_lines
+from .mcp_diagnostics import build_mcp_diagnostics, format_mcp_diagnostics_lines
 from .preflight import check_runner_start_readiness, format_runner_start_readiness, run_preflight
 from .process_guard import init_process_guard, terminate_all_children
 from .stop_progress import (
@@ -330,6 +331,7 @@ class RunnerShell:
         print(f"reporter_model: {eff.get('reporter_model')}")
         print(f"dev_auto_escalate: {bool(eff.get('dev_auto_escalate'))} (max={eff.get('dev_max_escalations')}, on={eff.get('dev_escalate_on')})")
         print(f"mcp_mode:   {eff.get('mcp_mode')} (package={eff.get('codex_package')})")
+        self._print_mcp_diagnostics(eff)
         print(f"docs_read_mode: {eff.get('docs_read_mode')} (docs_dir={eff.get('docs_dir')})")
         print(f"prompts_dir: {eff.get('prompts_dir')}")
         print(f"execution_backend: {eff.get('execution_backend')}")
@@ -557,6 +559,27 @@ class RunnerShell:
             lines = compact
         for line in lines:
             print(line)
+
+    def _print_mcp_diagnostics(self, eff: Dict[str, Any] | None = None) -> None:
+        source = eff if isinstance(eff, dict) else self.effective()
+        try:
+            diagnostics = build_mcp_diagnostics(source)
+            fallback = diagnostics.get("safe_fallback") if isinstance(diagnostics.get("safe_fallback"), dict) else {}
+            unavailable = diagnostics.get("unavailable_tools") if isinstance(diagnostics.get("unavailable_tools"), list) else []
+            unavailable_text = ",".join(str(item) for item in unavailable) if unavailable else "none"
+            selected_mode = diagnostics.get("selected_mode") or diagnostics.get("selectedMode") or "(default)"
+            effective_mode = diagnostics.get("effective_mode") or diagnostics.get("effectiveMode") or diagnostics.get("mode") or "(unknown)"
+            print(
+                "mcp_diagnostics: "
+                f"status={diagnostics.get('status')} "
+                f"mode={selected_mode}->{effective_mode} "
+                f"timeout={diagnostics.get('timeout_seconds')}s "
+                f"unavailable={unavailable_text} "
+                f"fallback_active={bool(fallback.get('active', False))} "
+                f"non_mcp_blocking={bool(fallback.get('non_mcp_runs_blocked', fallback.get('nonMcpRunsBlocked', False)))}"
+            )
+        except Exception as ex:
+            print(f"mcp_diagnostics: ERROR ({ex})")
 
     def start(self, extra_tokens: list[str]) -> None:
         if not self._start_lock.acquire(blocking=False):
@@ -1026,6 +1049,7 @@ class RunnerShell:
             print(f"goals_completion_level: {eff.get('goals_completion_level')}")
             self._print_todo_status()
             self._print_skills_status(self.run_dir)
+            self._print_mcp_diagnostics(eff)
             print(f"uptime:  {int(data.get('uptime_seconds') or 0)}s")
             print(f"exit:    {data.get('exit_code') if data.get('exit_code') is not None else '(running/unknown)'}")
             print(
@@ -1072,6 +1096,7 @@ class RunnerShell:
         print(f"goals_completion_level: {eff.get('goals_completion_level')}")
         self._print_todo_status()
         self._print_skills_status(run_dir)
+        self._print_mcp_diagnostics(eff)
         print(f"uptime:  {dur}")
         print(f"exit:    {self._runner_exit_code if (not alive) else '(running)'}")
         control_event = read_runner_control_event(run_dir)
@@ -1874,6 +1899,13 @@ class RunnerShell:
         report_lines.append(f"- profile: {eff.get('profile', 'personal')}")
         report_lines.append(f"- policy enabled: {bool((eff.get('policy') or {}).get('enabled', False))}")
         report_lines.append(f"- security enabled: {bool((eff.get('security') or {}).get('enabled', False))}")
+
+        try:
+            mcp_diag = build_mcp_diagnostics(eff)
+            report_lines.append("- mcp diagnostics:")
+            report_lines.extend(format_mcp_diagnostics_lines(mcp_diag, indent="  "))
+        except Exception as ex:
+            report_lines.append(f"- mcp diagnostics: ERROR ({ex})")
 
         # Backend preflight
         backends = eff.get("failover_backends") or [eff.get("execution_backend") or "codex"]
