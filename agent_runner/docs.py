@@ -430,6 +430,27 @@ def validate_web_console_route_claims(text: str, route_inventory: dict[str, tupl
     return errors
 
 
+def validate_web_console_route_inventory_coverage(
+    section_text: str,
+    route_inventory: dict[str, tuple[str, ...]],
+    *,
+    doc_label: str = "docs/WEB_CONSOLE.md",
+    section_label: str = "Current Status",
+) -> list[str]:
+    errors: list[str] = []
+    if "Live FastAPI routes cover" not in section_text:
+        return errors
+
+    missing = sorted(
+        path
+        for path in route_inventory
+        if path.startswith("/api/") and path not in section_text
+    )
+    for path in missing:
+        errors.append(f"{doc_label}: {section_label} route inventory omits live route: {path}")
+    return errors
+
+
 def _section_text(text: str, heading: str) -> str | None:
     lines = text.splitlines()
     start: int | None = None
@@ -1253,9 +1274,19 @@ def validate_web_console_doc(repo: Path, text: str) -> list[str]:
 
     status_section = _section_text(text, "## Current Status")
     if status_section is not None:
+        errors.extend(
+            validate_web_console_route_inventory_coverage(
+                status_section,
+                route_inventory,
+                doc_label=doc_label,
+                section_label="Current Status",
+            )
+        )
         lowered_status = status_section.lower()
         if "not yet a complete operational web runner" in lowered_status or "alpha shell" in lowered_status:
             errors.append(f"{doc_label}: stale alpha web-runner status claim")
+        if "report export" in lowered_status and "remain tracked" in lowered_status:
+            errors.append(f"{doc_label}: stale report-export remaining-scope claim")
         if "translation polish" in lowered_status:
             errors.append(f"{doc_label}: stale translation-polish blocker claim")
         if "remaining gap is real-process end-to-end validation" in lowered_status:

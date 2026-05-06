@@ -16,6 +16,7 @@ from agent_runner.docs import (
     validate_telegram_doc,
     validate_user_facing_docs,
     validate_web_console_doc,
+    validate_web_console_route_inventory_coverage,
     validate_web_console_route_claims,
 )
 
@@ -200,6 +201,25 @@ class DocsValidationTests(unittest.TestCase):
 
         self.assertTrue(any("stale alpha web-runner status claim" in error for error in status_errors), status_errors)
         self.assertTrue(any("built-in role order" in error for error in role_errors), role_errors)
+
+    def test_web_console_doc_rejects_incomplete_route_inventory_and_stale_report_export_scope(self) -> None:
+        text = (ROOT / "docs" / "WEB_CONSOLE.md").read_text(encoding="utf-8")
+        route_inventory = collect_fastapi_route_inventory(ROOT)
+        stale_routes = text.replace("`/api/reports/export`, ", "", 1)
+        stale_scope = text.replace(
+            "Run History comparison, Notifications read/unread workflow, and Instance Health remain tracked",
+            "Run History comparison, Notifications read/unread workflow, report export, and Instance Health remain tracked",
+            1,
+        )
+        stale_status_section = stale_routes.split("## Current Status", 1)[1].split("## Web Server Flags", 1)[0]
+
+        route_errors = validate_web_console_doc(ROOT, stale_routes)
+        direct_route_errors = validate_web_console_route_inventory_coverage(stale_status_section, route_inventory)
+        scope_errors = validate_web_console_doc(ROOT, stale_scope)
+
+        self.assertTrue(any("/api/reports/export" in error for error in route_errors), route_errors)
+        self.assertTrue(any("/api/reports/export" in error for error in direct_route_errors), direct_route_errors)
+        self.assertTrue(any("stale report-export" in error for error in scope_errors), scope_errors)
 
     def test_case_mismatched_paths_are_rejected(self) -> None:
         temp_root = ROOT / ".test-scratch" / "docs-validation-case-mismatch"
