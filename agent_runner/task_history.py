@@ -42,6 +42,13 @@ CREATE TABLE IF NOT EXISTS task_history (
 );
 """
 
+_INDEX_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_task_history_status_id ON task_history(status, id DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_task_history_title_id ON task_history(title, id DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_task_history_task_id_id ON task_history(task_id, id DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_task_history_task_status_id ON task_history(task_status, id DESC);",
+]
+
 # Columns added after initial release — migration is best-effort.
 _MIGRATIONS = [
     "ALTER TABLE task_history ADD COLUMN attempt INTEGER DEFAULT 0;",
@@ -76,6 +83,8 @@ def _connect(repo: Path) -> sqlite3.Connection:
                 conn.execute(sql)
             except sqlite3.OperationalError:
                 pass  # column already exists
+        for sql in _INDEX_SQL:
+            conn.execute(sql)
         conn.commit()
     except Exception:
         conn.close()

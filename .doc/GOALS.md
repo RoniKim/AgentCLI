@@ -361,7 +361,7 @@
 - [x] Instance Health view summarizes process guard state, tracked child PIDs, handle/process diagnostic warnings, web instance lock state, and stale artifact risks.
 - [x] Critical path smoke tests cover backend failover, quota wait, outer-loop reason handling, interrupted attempt recovery, and PR queue reconcile.
 - [x] Local retention dry-run includes `agent_runs`, `PM_CACHE`, logs, diagnostics, and backups while preserving pending review evidence.
-- [ ] Latent risk hardening covers logger rotation, agent run retention, task-history indexes, and analysis-cache size caps.
+- [x] Latent risk hardening covers logger rotation, agent run retention, task-history indexes, and analysis-cache size caps.
 
 ## Completion Criteria
 
