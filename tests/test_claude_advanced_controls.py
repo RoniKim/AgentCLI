@@ -224,6 +224,41 @@ class ClaudeAdvancedControlsTests(unittest.TestCase):
         self.assertTrue(strict_allowed.allowed)
         self.assertIn("outside_task_scope", {event[1].get("reason") for event in metrics.events})
 
+    def test_disabled_advanced_controls_do_not_mutate_claude_options(self) -> None:
+        cfg = _load_claudecode_cfg(
+            self._advanced_args(
+                claudecode_mcp_tools_enabled=False,
+                claudecode_hooks_enabled=False,
+                claudecode_can_use_tool_enabled=False,
+                claudecode_can_use_tool_strict_isolation=False,
+                claudecode_subagents_enabled=False,
+            )
+        )
+        ext_ctx = ClaudeExtensionContext(
+            repo=self.repo,
+            run_dir=self.run_dir,
+            stop_path=self.run_dir / "STOP",
+            logger=FakeLogger(),
+            metrics=FakeMetrics(),
+            args=self._advanced_args(),
+            debug=True,
+            policy_rules=[],
+            current_stage="Dev",
+            current_task_id="T1",
+            current_task_files=["allowed.py"],
+        )
+
+        with patch.dict(sys.modules, {"claude_agent_sdk": _fake_sdk()}):
+            options = _build_options(cfg, repo=self.repo, stage="Dev", ext_ctx=ext_ctx)
+
+        kwargs = options.kwargs
+        self.assertNotIn("mcp_servers", kwargs)
+        self.assertNotIn("hooks", kwargs)
+        self.assertNotIn("can_use_tool", kwargs)
+        self.assertNotIn("agents", kwargs)
+        self.assertNotIn("Task", kwargs["allowed_tools"])
+        self.assertFalse(any(str(tool).startswith("mcp__agentcli__") for tool in kwargs["allowed_tools"]))
+
     def test_web_config_contract_exposes_and_validates_claude_advanced_fields(self) -> None:
         contract = _build_config_contract(
             self.repo,

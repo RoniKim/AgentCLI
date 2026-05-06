@@ -1,5 +1,6 @@
 import unittest
 import inspect
+from pathlib import Path
 
 import agent_runner.cycle as cycle_module
 import agent_runner.backends.claudecode as claudecode_module
@@ -60,6 +61,41 @@ class ClaudeFailureSchemaTests(unittest.TestCase):
         self.assertIn("queue_review_packet(", claude_source)
         self.assertIn("read_pending_worktree_merge(", claude_source)
         self.assertIn("worktree_review_packet_failed", claude_source)
+
+    def test_claude_backend_parity_tests_cover_shared_helpers_and_advanced_modes(self) -> None:
+        claude_source = inspect.getsource(claudecode_module)
+        codex_source = inspect.getsource(cycle_module)
+        parity_markers = (
+            "classify_task_validation_status(",
+            "write_task_validation_artifacts(",
+            "build_failure_outcome(",
+            "should_preserve_for_review(",
+            "record_task_failure_state(",
+            "record_task_failure_result(",
+            "queue_review_packet(",
+            "write_run_report_artifacts(",
+        )
+        for marker in parity_markers:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, codex_source)
+                self.assertIn(marker, claude_source)
+
+        self.assertIn("apply_extensions(ext_ctx, cfg, kwargs, stage)", claude_source)
+        self.assertIn("cfg.mcp_tools_enabled", claude_source)
+        self.assertIn("cfg.hooks_enabled", claude_source)
+        self.assertIn("cfg.can_use_tool_enabled", claude_source)
+        self.assertIn("cfg.subagents_enabled", claude_source)
+
+        tests_root = Path(__file__).resolve().parent
+        failure_tests = (tests_root / "test_claude_failure_schema.py").read_text(encoding="utf-8")
+        advanced_tests = (tests_root / "test_claude_advanced_controls.py").read_text(encoding="utf-8")
+        self.assertIn("_assert_enriched_failure_shape", failure_tests)
+        self.assertIn("build_task_failure_result", failure_tests)
+        self.assertIn("validation_artifact", failure_tests)
+        self.assertIn("test_build_options_applies_mcp_hooks_dynamic_permission_and_subagents", advanced_tests)
+        self.assertIn("test_disabled_advanced_controls_do_not_mutate_claude_options", advanced_tests)
+        for token in ("mcp_servers", "hooks", "can_use_tool", "agents", "strict_isolation"):
+            self.assertIn(token, advanced_tests)
 
     def test_blocked_env_helper_matches_shared_helpers(self) -> None:
         validation_artifact = "C:/tmp/tasks/T1/attempt_01/validation.json"
