@@ -162,6 +162,20 @@ DEFAULTS: Dict[str, Any] = {
         "pm_use_experience_summary": True,
     },
 
+    # Repo-local runtime retention. Retention starts as dry-run reporting only.
+    "retention": {
+        "enabled": True,
+        "max_days": 30,
+        "max_run_dirs": 50,
+        "keep_failed_runs": True,
+        "keep_pending_worktree_runs": True,
+        "prune_logs_over_mb": 100,
+        "include_pm_cache": True,
+        "include_logs": True,
+        "include_diagnostics": True,
+        "include_backups": True,
+    },
+
     # Safety / gates
     "no_policy_scan": False,
     "policy_rules_file": "",
@@ -930,6 +944,30 @@ def _merge_effective(defaults: Dict[str, Any], cfg: Dict[str, Any], args_ns: arg
             eff["telegram"]["stalled_seconds"] = max(60, int(eff.get("telegram_stalled_seconds") or 600))
         except Exception:
             pass
+
+    def _normalize_retention(raw: Any) -> dict[str, Any]:
+        defaults_retention = defaults.get("retention", {}) if isinstance(defaults.get("retention", {}), dict) else {}
+        out: dict[str, Any] = dict(defaults_retention)
+        if isinstance(raw, dict):
+            out.update(raw)
+        for key in (
+            "enabled",
+            "keep_failed_runs",
+            "keep_pending_worktree_runs",
+            "include_pm_cache",
+            "include_logs",
+            "include_diagnostics",
+            "include_backups",
+        ):
+            out[key] = bool(out.get(key, defaults_retention.get(key, True)))
+        for key in ("max_days", "max_run_dirs", "prune_logs_over_mb"):
+            try:
+                out[key] = max(0, int(out.get(key)))
+            except Exception:
+                out[key] = max(0, int(defaults_retention.get(key) or 0))
+        return out
+
+    eff["retention"] = _normalize_retention(eff.get("retention"))
 
     if eff["policy"].get("enabled") is None:
         eff["policy"]["enabled"] = not bool(eff.get("no_policy_scan", False))

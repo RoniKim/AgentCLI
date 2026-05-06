@@ -63,6 +63,7 @@ from .gitops import (
     read_pending_worktree_merge,
     scan_worktree_diagnostics,
 )
+from .local_retention import build_local_retention_dry_run
 
 # prompt_toolkit is an optional dependency at import time (for nicer UX).
 # If it's missing, we fall back to basic input().
@@ -1441,6 +1442,58 @@ class RunnerShell:
             return
         print(f"[OK] Cleanup applied. artifact={applied_path}")
 
+    def _print_retention_dry_run(self, payload: dict[str, Any]) -> None:
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        categories = summary.get("categories") if isinstance(summary.get("categories"), dict) else {}
+        actions = summary.get("actions") if isinstance(summary.get("actions"), dict) else {}
+        print("\n=== Local Retention Dry Run ===")
+        print(f"repo:      {payload.get('repo_root') or self.repo.as_posix() if self.repo else '(unknown)'}")
+        print(f"artifact:  {payload.get('artifact_path') or '-'}")
+        print(
+            "summary:   "
+            f"total={int(summary.get('total') or 0)} "
+            f"delete={int(summary.get('delete_candidates') or 0)} "
+            f"protected={int(summary.get('protected') or 0)}"
+        )
+        if categories:
+            print("categories: " + ", ".join(f"{key}={value}" for key, value in sorted(categories.items())))
+        if actions:
+            print("actions:    " + ", ".join(f"{key}={value}" for key, value in sorted(actions.items())))
+        print("candidates:")
+        for candidate in payload.get("candidates", []):
+            if not isinstance(candidate, dict):
+                continue
+            print(
+                "  - "
+                f"{candidate.get('category') or 'unknown'} "
+                f"{candidate.get('kind') or 'candidate'} "
+                f"action={candidate.get('action') or 'unknown'} "
+                f"protected={bool(candidate.get('protected'))} "
+                f"reason={candidate.get('reason') or 'unknown'} "
+                f"target={candidate.get('relative_path') or candidate.get('path') or '(unknown)'}"
+            )
+        print("================================\n")
+
+    def retention(self, args: list[str]) -> None:
+        del args
+        if not self.repo:
+            print("[ERR] repo is not set; use /repo <path>")
+            return
+        run_dir = self._cleanup_plan_run_dir()
+        if run_dir is None:
+            print("[ERR] Unable to determine a run directory for retention artifacts.")
+            return
+        cfg = self.effective_config().get("retention")
+        payload = build_local_retention_dry_run(
+            self.repo,
+            cfg=cfg if isinstance(cfg, dict) else {},
+            run_dir=run_dir,
+            active_run_dirs=[run_dir],
+            write_artifact=True,
+        )
+        self._print_retention_dry_run(payload)
+        print("[INFO] Dry run only. No files were deleted.")
+
     def cmd_set(self, key: str, raw_value: str) -> None:
         key = key.replace("-", "_").strip()
         if key not in DEFAULTS:
@@ -1521,6 +1574,7 @@ class RunnerShell:
             "  /worktree                  Show worktree diagnostics",
             "  /worktree cleanup          Write a non-mutating cleanup dry-run artifact",
             "  /worktree cleanup apply    Apply the cleanup plan after typing the exact phrase",
+            "  /retention                 Write a local retention dry-run report",
             "  /repo <path>               Set the repo root",
             "  /config [--all]            Show the effective config",
             "  /set <key> <value>         Override a config value for this shell session",
@@ -2004,6 +2058,7 @@ def _build_completer() -> Any:
             "/help": None,
             "/doctor": None,
             "/worktree": {"cleanup": {"apply": None}},
+            "/retention": None,
             "/repo": None,
             "/config": None,
             "/set": set_keys,
@@ -2134,6 +2189,9 @@ def _dispatch(sh: RunnerShell, line: str) -> bool:
         return False
     if cmd in {"/worktree", "/worktree-list", "/worktree-doctor"}:
         sh.worktree(args)
+        return False
+    if cmd == "/retention":
+        sh.retention(args)
         return False
     if cmd == "/repo":
         if not args:

@@ -116,6 +116,47 @@ def _redact_web_log_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return redacted
 
 
+def _redact_web_local_retention_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(payload)
+    path_keys = {
+        "repo_root",
+        "repoRoot",
+        "artifact_path",
+        "artifactPath",
+        "path",
+        "relative_path",
+        "covered_by",
+        "validation_artifact",
+    }
+
+    def redact_paths(value: Any) -> Any:
+        if isinstance(value, dict):
+            result: dict[str, Any] = {}
+            for key, item in value.items():
+                if key in path_keys and item not in (None, "", False):
+                    result[key] = REDACTED_VALUE
+                else:
+                    result[key] = redact_paths(item)
+            return result
+        if isinstance(value, list):
+            return [redact_paths(item) for item in value]
+        return value
+
+    redacted = redact_paths(redacted)
+    redacted["redaction"] = _web_redaction_meta(
+        "repo_root",
+        "artifact_path",
+        "roots",
+        "active_run_dirs",
+        "protected_roots",
+        "candidates.path",
+        "candidates.relative_path",
+        "candidates.pending_review_evidence.path",
+        "candidates.pending_review_evidence.validation_artifact",
+    )
+    return redacted
+
+
 def _redact_web_log_payload(payload: dict[str, Any]) -> dict[str, Any]:
     redacted = deepcopy(payload)
     entries = redacted.get("entries")

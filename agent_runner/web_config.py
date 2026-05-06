@@ -149,6 +149,22 @@ CONFIG_CONTRACT_GROUPS: list[dict[str, Any]] = [
             "goals_completion_level",
         ],
     },
+    {
+        "id": "retention",
+        "title": "Retention",
+        "paths": [
+            "retention.enabled",
+            "retention.max_days",
+            "retention.max_run_dirs",
+            "retention.keep_failed_runs",
+            "retention.keep_pending_worktree_runs",
+            "retention.prune_logs_over_mb",
+            "retention.include_pm_cache",
+            "retention.include_logs",
+            "retention.include_diagnostics",
+            "retention.include_backups",
+        ],
+    },
 ]
 
 CONFIG_CONTRACT_FIELDS: list[dict[str, Any]] = [
@@ -207,6 +223,16 @@ CONFIG_CONTRACT_FIELDS: list[dict[str, Any]] = [
     {"path": "goals_auto_refresh", "group": "goals", "kind": "bool", "label": "Auto-refresh goals", "allow_empty": True, "desc": "Refresh GOALS.md after project completion.", "hint": "Useful for the next run once the current project is complete."},
     {"path": "goals_refresh_max_per_run", "group": "goals", "kind": "number", "label": "Goals refresh max per run", "min": 0, "allow_empty": False, "desc": "Hard cap on goals refresh attempts per run.", "hint": "Zero disables refresh retries."},
     {"path": "goals_completion_level", "group": "goals", "kind": "enum", "label": "Goals completion level", "options": ["p0", "p1", "all"], "allow_empty": False, "desc": "Which goals must be satisfied to treat the project as complete.", "hint": "p0 is legacy, p1 includes P1, all requires every checkbox."},
+    {"path": "retention.enabled", "group": "retention", "kind": "bool", "label": "Retention enabled", "allow_empty": True, "desc": "Enable repo-local dry-run retention reporting.", "hint": "Dry-run reports only; no files are deleted by this setting."},
+    {"path": "retention.max_days", "group": "retention", "kind": "number", "label": "Max artifact age days", "min": 0, "allow_empty": False, "desc": "Age threshold for run, cache, log, diagnostic, and backup prune candidates.", "hint": "Zero disables age-based candidates."},
+    {"path": "retention.max_run_dirs", "group": "retention", "kind": "number", "label": "Max run directories", "min": 0, "allow_empty": False, "desc": "Keep the newest run directories before older runs become prune candidates.", "hint": "Protected pending review runs are always preserved."},
+    {"path": "retention.keep_failed_runs", "group": "retention", "kind": "bool", "label": "Keep failed runs", "allow_empty": True, "desc": "Preserve failed or blocked run directories from prune candidates.", "hint": "Failure artifacts are often needed for follow-up."},
+    {"path": "retention.keep_pending_worktree_runs", "group": "retention", "kind": "bool", "label": "Keep pending worktree runs", "allow_empty": True, "desc": "Preserve pending worktree review, cleanup-failed, and queued PR packet evidence.", "hint": "This prevents retention from deleting operator review state."},
+    {"path": "retention.prune_logs_over_mb", "group": "retention", "kind": "number", "label": "Prune logs over MB", "min": 0, "allow_empty": False, "desc": "Large log files above this size become dry-run prune candidates.", "hint": "Zero disables size-based log candidates."},
+    {"path": "retention.include_pm_cache", "group": "retention", "kind": "bool", "label": "Include PM cache", "allow_empty": True, "desc": "Include .AgentCLI/PM_CACHE files in dry-run retention reports.", "hint": "Cache candidates are reported, not deleted."},
+    {"path": "retention.include_logs", "group": "retention", "kind": "bool", "label": "Include logs", "allow_empty": True, "desc": "Include runtime logs and dev logs in dry-run retention reports.", "hint": "Logs under protected runs inherit the run protection."},
+    {"path": "retention.include_diagnostics", "group": "retention", "kind": "bool", "label": "Include diagnostics", "allow_empty": True, "desc": "Include diagnostic artifacts in dry-run retention reports.", "hint": "Diagnostics under protected runs inherit the run protection."},
+    {"path": "retention.include_backups", "group": "retention", "kind": "bool", "label": "Include backups", "allow_empty": True, "desc": "Include local backup files in dry-run retention reports.", "hint": "Config, prompt, and GOALS backups are reported when stale."},
 ]
 
 

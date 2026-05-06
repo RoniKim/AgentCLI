@@ -71,6 +71,7 @@ from .prompts import (
     REPORTER_INSTRUCTIONS_DEFAULT,
 )
 from .pr_queue import load_branch_index, pr_packet_path, pr_queue_root
+from .local_retention import build_local_retention_dry_run
 from .process_guard import _pid_alive, _pid_create_time_ticks, _pid_executable_path, init_process_guard, terminate_all_children
 from .run_dir import find_latest_run_dir
 from .shared import coerce_roles_arg
@@ -108,6 +109,7 @@ from .web_redaction import (
     _redact_web_history_item,
     _redact_web_history_payload,
     _redact_web_history_summary,
+    _redact_web_local_retention_payload,
     _redact_web_log_entry,
     _redact_web_log_payload,
     _redact_web_notification_item,
@@ -9076,6 +9078,19 @@ def create_app(
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    @app.get("/api/retention/dry-run")
+    def api_retention_dry_run() -> dict[str, Any]:
+        latest_run_dir = find_latest_run_dir(repo_root)
+        active_run_dirs = [latest_run_dir] if latest_run_dir is not None else []
+        payload = build_local_retention_dry_run(
+            repo_root,
+            cfg=cfg.get("retention") if isinstance(cfg.get("retention"), dict) else {},
+            run_dir=latest_run_dir,
+            active_run_dirs=active_run_dirs,
+            write_artifact=False,
+        )
+        return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_local_retention_payload)
 
     @app.get("/api/experience")
     def api_experience() -> dict[str, Any]:
