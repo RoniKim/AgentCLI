@@ -164,6 +164,24 @@ class DocsValidationTests(unittest.TestCase):
 
         self.assertTrue(any("stale web server flag" in error for error in errors), errors)
 
+    def test_authentication_plan_documents_lan_gates_before_auth_exists(self) -> None:
+        auth_plan = (ROOT / "docs" / "AUTHENTICATION_PLAN.md").read_text(encoding="utf-8")
+        web_doc = (ROOT / "docs" / "WEB_CONSOLE.md").read_text(encoding="utf-8")
+
+        required = [
+            "not an active authentication layer",
+            "Confirmation phrases are UX friction only",
+            "LAN requires an authenticated session",
+            "CSRF is blocked",
+            "MVP Acceptance Gates",
+            "Non-Goals",
+        ]
+        for token in required:
+            self.assertIn(token, auth_plan)
+
+        self.assertIn("AUTHENTICATION_PLAN.md", web_doc)
+        self.assertIn("Confirmation phrases and `--trusted-network` are not authentication.", web_doc)
+
     def test_web_console_doc_rejects_stale_status_and_role_order(self) -> None:
         text = (ROOT / "docs" / "WEB_CONSOLE.md").read_text(encoding="utf-8")
         stale_status = text.replace(

@@ -33,6 +33,7 @@
 | [CUSTOMIZATION.md](CUSTOMIZATION.md) | ✅ OK | MEDIUM | Skills 설정 섹션 갱신됨 |
 | [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) | ✅ OK | MEDIUM | watchdog·신규 모듈 구조 반영됨 |
 | [WEB_CONSOLE.md](WEB_CONSOLE.md) | ✅ OK | HIGH | FastAPI route inventory + runtime role order 검증 |
+| [AUTHENTICATION_PLAN.md](AUTHENTICATION_PLAN.md) | ✅ OK | HIGH | LAN/외부 노출 전 인증 설계 기준선 |
 | [TELEGRAM.md](TELEGRAM.md) | ✅ OK | MEDIUM | 13개 명령·11개 CLI 플래그 정합 |
 | [WORKTREE_MERGE_FAILURE_20260428.md](WORKTREE_MERGE_FAILURE_20260428.md) | ✅ OK | LOW | 이미 코드화 반영됨 |
 

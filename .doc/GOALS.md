@@ -343,7 +343,7 @@
 - [x] Web health and startup diagnostics report missing FastAPI/uvicorn dependencies and broken virtual environments.
 - [x] UI state clearly distinguishes fallback/demo data from real API data.
 - [ ] Web PR Queue browser controls can validate, merge, discard, and rebase queued packets with the same safety gates as shell commands.
-- [ ] Authentication plan exists before use outside trusted private networks.
+- [x] Authentication plan exists before use outside trusted private networks.
 - [x] A personal Runbook panel renders venv activation, shell start, web serve, status, stop, merge, discard, diagnostics, and recommended long-run commands for the active repo.
 - [x] Each run writes a concise `WORK_SUMMARY.md` suitable for daily work logs without exposing raw secrets or long transcripts.
 - [x] Web action audit artifacts record local start, stop, restart, config, prompt, goals, and worktree actions with timestamps and results.

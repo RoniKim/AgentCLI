@@ -45,7 +45,7 @@ Known remaining scope:
 
 - Run History comparison, Notifications read/unread workflow, report export, and Instance Health remain tracked in `.doc/GOALS.md` P1.
 - Browser PR Queue detail is currently read-oriented: it shows packet data, validation logs, merge preflight, blockers, and disabled action affordances; shell commands and guarded backend routes remain the operational path for mutating queue decisions.
-- There is no authentication layer. Treat LAN binds as trusted-network-only until authentication exists.
+- There is no implemented authentication layer yet. Treat LAN binds as trusted-network-only until [AUTHENTICATION_PLAN.md](AUTHENTICATION_PLAN.md) is implemented.
 
 ## Web Server Flags
 
@@ -149,6 +149,8 @@ python -m agent_runner.web `
 
 Mutating actions require confirmation phrases. Use localhost first before enabling controls on a LAN bind.
 The guarded config save endpoint uses the same opt-in, rejects unsafe or redacted placeholder writes, and writes a timestamped backup before replacing the config atomically.
+
+Authentication is planned separately in [AUTHENTICATION_PLAN.md](AUTHENTICATION_PLAN.md). Confirmation phrases and `--trusted-network` are not authentication.
 
 ## Validation
 
