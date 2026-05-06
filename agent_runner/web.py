@@ -195,6 +195,7 @@ from .web_report_export import (
     build_web_report_export_payload,
     write_web_report_export_artifacts,
 )
+from .backends.claude_extensions import build_claude_advanced_diagnostics
 
 try:  # Optional dependency: the app must still import when FastAPI is absent.
     from fastapi import Body, FastAPI, HTTPException, Request
@@ -366,6 +367,7 @@ def fallbackSectionMessage(kind: str) -> str:
         "history": "Run history is empty.",
         "experience": EXPERIENCE_UNAVAILABLE_MESSAGE,
         "todo": "No active TODO file is selected.",
+        "claude": "Claude backend diagnostics are unavailable.",
         "worktree": "No pending worktree merge is available.",
         "prQueue": "No PR queue packets are available.",
         "runnerControl": "Runner controls are unavailable in fallback mode.",

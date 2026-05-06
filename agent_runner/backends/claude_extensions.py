@@ -11,6 +11,7 @@ Usage inside claudecode.py:
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import re
 from dataclasses import dataclass, field
@@ -354,7 +355,23 @@ def build_can_use_tool(ctx: ClaudeExtensionContext, cfg: Any) -> Any:
         return None
 
     strict_isolation = getattr(cfg, "can_use_tool_strict_isolation", False)
-    repo_str = str(ctx.repo).replace("\\", "/").rstrip("/")
+    try:
+        repo_str = str(ctx.repo.resolve()).replace("\\", "/").rstrip("/")
+    except Exception:
+        repo_str = str(ctx.repo).replace("\\", "/").rstrip("/")
+
+    def _resolve_for_repo(path_value: str) -> str:
+        try:
+            candidate = Path(path_value)
+            if not candidate.is_absolute():
+                candidate = ctx.repo / candidate
+            return str(candidate.resolve()).replace("\\", "/")
+        except (ValueError, OSError):
+            return ""
+
+    def _is_under_repo(abs_path: str) -> bool:
+        clean = abs_path.replace("\\", "/").rstrip("/")
+        return bool(clean == repo_str or clean.startswith(repo_str + "/"))
 
     async def can_use_tool(tool_name: str, input_data: dict, context: Any) -> Any:
         """SDK can_use_tool callback — returns PermissionResultAllow or PermissionResultDeny.
@@ -388,11 +405,8 @@ def build_can_use_tool(ctx: ClaudeExtensionContext, cfg: Any) -> Any:
                     )
 
                 # Block writes outside repo
-                try:
-                    abs_path = str(Path(file_path).resolve()).replace("\\", "/")
-                except (ValueError, OSError):
-                    abs_path = ""
-                if abs_path and not abs_path.startswith(repo_str):
+                abs_path = _resolve_for_repo(file_path)
+                if abs_path and not _is_under_repo(abs_path):
                     ctx.metrics.event("can_use_tool_denied", tool=tool_name, reason="outside_repo", path=file_path[:120])
                     return PermissionResultDeny(
                         message=f"Cannot modify files outside repository: {file_path}",
@@ -420,7 +434,11 @@ def build_can_use_tool(ctx: ClaudeExtensionContext, cfg: Any) -> Any:
                 # Strict task isolation (Dev only, opt-in)
                 if strict_isolation and stage_low == "dev" and ctx.current_task_files and abs_path:
                     try:
-                        task_paths = {str(Path(f).resolve()).replace("\\", "/").lower() for f in ctx.current_task_files}
+                        task_paths = set()
+                        for f in ctx.current_task_files:
+                            task_abs = _resolve_for_repo(f)
+                            if task_abs:
+                                task_paths.add(task_abs.lower())
                     except (ValueError, OSError):
                         task_paths = set()
                     if task_paths and abs_path.lower() not in task_paths:
@@ -547,6 +565,356 @@ _MCP_TOOLS_DESCRIPTION = (
     "- query_events: Query recent pipeline events from metrics\n"
     "Use these tools to understand pipeline state and verify your work.\n"
 )
+
+
+CLAUDE_PERMISSION_MODE_CHOICES = ("default", "acceptEdits", "bypassPermissions", "plan")
+CLAUDE_SETTING_SOURCE_CHOICES = ("user", "project", "local")
+CLAUDE_ADVANCED_FEATURE_ORDER = (
+    "mcp_tools",
+    "hooks",
+    "can_use_tool",
+    "strict_isolation",
+    "subagents",
+)
+CLAUDE_ADVANCED_FEATURE_META: dict[str, dict[str, Any]] = {
+    "mcp_tools": {
+        "label": "MCP tools",
+        "cfg_key": "mcp_tools_enabled",
+        "option": "mcp_servers",
+        "stages": ["dev", "qa", "buildfix"],
+    },
+    "hooks": {
+        "label": "Hooks",
+        "cfg_key": "hooks_enabled",
+        "option": "hooks",
+        "stages": ["pm", "dev", "qa", "buildfix", "reporter"],
+    },
+    "can_use_tool": {
+        "label": "Dynamic permission",
+        "cfg_key": "can_use_tool_enabled",
+        "option": "can_use_tool",
+        "stages": ["pm", "dev", "qa", "buildfix", "reporter"],
+    },
+    "strict_isolation": {
+        "label": "Strict task isolation",
+        "cfg_key": "can_use_tool_strict_isolation",
+        "option": "can_use_tool",
+        "stages": ["dev"],
+    },
+    "subagents": {
+        "label": "Subagents",
+        "cfg_key": "subagents_enabled",
+        "option": "agents",
+        "stages": ["dev"],
+    },
+}
+
+
+def _cfg_value(source: Any, key: str, default: Any = None) -> Any:
+    prefixed = f"claudecode_{key}"
+    if isinstance(source, dict):
+        if key in source:
+            return source.get(key)
+        return source.get(prefixed, default)
+    if hasattr(source, key):
+        return getattr(source, key)
+    if hasattr(source, prefixed):
+        return getattr(source, prefixed)
+    return default
+
+
+def _cfg_bool(source: Any, key: str, default: bool = False) -> bool:
+    value = _cfg_value(source, key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if text in {"0", "false", "no", "off", "disabled", ""}:
+            return False
+    return bool(value)
+
+
+def _cfg_int(source: Any, key: str, default: int) -> int:
+    value = _cfg_value(source, key, default)
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _cfg_list(source: Any, key: str, default: Any = None) -> list[str]:
+    value = _cfg_value(source, key, default if default is not None else [])
+    if isinstance(value, (list, tuple)):
+        raw = list(value)
+    elif isinstance(value, str):
+        raw = [part.strip() for part in re.split(r"[,\s]+", value) if part.strip()]
+    elif value in (None, ""):
+        raw = []
+    else:
+        raw = [value]
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def _claude_advanced_normalized_config(source: Any) -> dict[str, Any]:
+    return {
+        "permission_mode": str(_cfg_value(source, "permission_mode", "acceptEdits") or "acceptEdits"),
+        "max_turns": _cfg_int(source, "max_turns", 32),
+        "setting_sources": _cfg_list(source, "setting_sources", ["project"]),
+        "pm_allowed_tools": _cfg_list(source, "pm_allowed_tools", ["Read", "Grep", "Glob", "Write", "Edit"]),
+        "dev_allowed_tools": _cfg_list(source, "dev_allowed_tools", ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]),
+        "qa_allowed_tools": _cfg_list(source, "qa_allowed_tools", ["Read", "Grep", "Glob", "Bash"]),
+        "pm_disallowed_tools": _cfg_list(source, "pm_disallowed_tools"),
+        "dev_disallowed_tools": _cfg_list(source, "dev_disallowed_tools"),
+        "qa_disallowed_tools": _cfg_list(source, "qa_disallowed_tools"),
+        "mcp_tools_enabled": _cfg_bool(source, "mcp_tools_enabled"),
+        "hooks_enabled": _cfg_bool(source, "hooks_enabled"),
+        "can_use_tool_enabled": _cfg_bool(source, "can_use_tool_enabled"),
+        "can_use_tool_strict_isolation": _cfg_bool(source, "can_use_tool_strict_isolation"),
+        "subagents_enabled": _cfg_bool(source, "subagents_enabled"),
+        "subagent_reviewer_enabled": _cfg_bool(source, "subagent_reviewer_enabled", True),
+        "subagent_runner_enabled": _cfg_bool(source, "subagent_runner_enabled", True),
+        "subagent_auditor_enabled": _cfg_bool(source, "subagent_auditor_enabled", True),
+        "subagent_reviewer_model": str(_cfg_value(source, "subagent_reviewer_model", "") or ""),
+        "subagent_runner_model": str(_cfg_value(source, "subagent_runner_model", "") or ""),
+        "subagent_auditor_model": str(_cfg_value(source, "subagent_auditor_model", "") or ""),
+    }
+
+
+def _issue(severity: str, code: str, message: str, field: str = "") -> dict[str, str]:
+    payload = {"severity": severity, "code": code, "message": message}
+    if field:
+        payload["field"] = field
+    return payload
+
+
+def validate_claude_advanced_config(source: Any) -> dict[str, Any]:
+    """Validate Claude Code advanced controls without importing the SDK."""
+    cfg = _claude_advanced_normalized_config(source)
+    issues: list[dict[str, str]] = []
+
+    if cfg["permission_mode"] not in CLAUDE_PERMISSION_MODE_CHOICES:
+        issues.append(
+            _issue(
+                "error",
+                "claude_invalid_permission_mode",
+                "Claude permission mode must be one of the supported SDK modes.",
+                "claudecode_permission_mode",
+            )
+        )
+    if int(cfg["max_turns"]) < 1:
+        issues.append(
+            _issue(
+                "error",
+                "claude_invalid_max_turns",
+                "Claude max turns must be at least 1.",
+                "claudecode_max_turns",
+            )
+        )
+
+    invalid_sources = [item for item in cfg["setting_sources"] if item not in CLAUDE_SETTING_SOURCE_CHOICES]
+    if invalid_sources:
+        issues.append(
+            _issue(
+                "error",
+                "claude_invalid_setting_sources",
+                "Claude setting sources must use user, project, or local.",
+                "claudecode_setting_sources",
+            )
+        )
+
+    for stage in ("pm", "dev", "qa"):
+        if not cfg[f"{stage}_allowed_tools"]:
+            issues.append(
+                _issue(
+                    "warning",
+                    f"claude_{stage}_allowed_tools_empty",
+                    f"Claude {stage.upper()} allowed tool list is empty.",
+                    f"claudecode_{stage}_allowed_tools",
+                )
+            )
+
+    if cfg["can_use_tool_strict_isolation"] and not cfg["can_use_tool_enabled"]:
+        issues.append(
+            _issue(
+                "warning",
+                "claude_strict_isolation_not_enforced",
+                "Strict isolation requires dynamic permission control to be enabled.",
+                "claudecode_can_use_tool_enabled",
+            )
+        )
+
+    if cfg["subagents_enabled"] and not (
+        cfg["subagent_reviewer_enabled"]
+        or cfg["subagent_runner_enabled"]
+        or cfg["subagent_auditor_enabled"]
+    ):
+        issues.append(
+            _issue(
+                "warning",
+                "claude_subagents_all_disabled",
+                "Subagents are enabled, but every built-in subagent is disabled.",
+                "claudecode_subagents_enabled",
+            )
+        )
+
+    enabled_count = sum(1 for feature in CLAUDE_ADVANCED_FEATURE_ORDER if bool(cfg[CLAUDE_ADVANCED_FEATURE_META[feature]["cfg_key"]]))
+    status = "error" if any(item["severity"] == "error" for item in issues) else "warning" if issues else "ok"
+    return {
+        "status": status,
+        "valid": status != "error",
+        "config": cfg,
+        "enabled_count": enabled_count,
+        "enabledCount": enabled_count,
+        "issues": issues,
+        "warnings": [item for item in issues if item["severity"] == "warning"],
+        "errors": [item for item in issues if item["severity"] == "error"],
+    }
+
+
+def _sdk_option_support(options_cls: Any, option_name: str) -> bool | None:
+    if options_cls is None:
+        return None
+    try:
+        signature = inspect.signature(options_cls)
+        params = signature.parameters
+        if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()):
+            return True
+        return option_name in params
+    except Exception:
+        return None
+
+
+def build_claude_advanced_diagnostics(source: Any, *, options_cls: Any = None) -> dict[str, Any]:
+    validation = validate_claude_advanced_config(source)
+    cfg = dict(validation["config"])
+    sdk_available = True
+    sdk_version = ""
+    sdk_error = ""
+    if options_cls is None:
+        try:
+            import claude_agent_sdk  # type: ignore
+            options_cls = getattr(claude_agent_sdk, "ClaudeAgentOptions", None)
+            sdk_version = str(getattr(claude_agent_sdk, "__version__", "") or "")
+        except Exception as ex:
+            options_cls = None
+            sdk_available = False
+            sdk_error = str(ex).strip() or ex.__class__.__name__
+
+    option_support: dict[str, bool | None] = {}
+    for meta in CLAUDE_ADVANCED_FEATURE_META.values():
+        option_name = str(meta.get("option") or "")
+        if option_name and option_name not in option_support:
+            option_support[option_name] = _sdk_option_support(options_cls, option_name)
+
+    issues = [dict(item) for item in validation["issues"]]
+    features: dict[str, dict[str, Any]] = {}
+    for feature_id in CLAUDE_ADVANCED_FEATURE_ORDER:
+        meta = CLAUDE_ADVANCED_FEATURE_META[feature_id]
+        cfg_key = str(meta["cfg_key"])
+        option_name = str(meta["option"])
+        enabled = bool(cfg.get(cfg_key))
+        sdk_supported = option_support.get(option_name)
+        feature_status = "disabled"
+        if enabled:
+            feature_status = "ok"
+            if sdk_supported is False:
+                feature_status = "warning"
+                issues.append(
+                    _issue(
+                        "warning",
+                        f"claude_{feature_id}_sdk_unsupported",
+                        f"Installed Claude SDK does not expose the {option_name} option.",
+                        f"claudecode_{cfg_key}",
+                    )
+                )
+            elif sdk_supported is None and not sdk_available:
+                feature_status = "warning"
+                issues.append(
+                    _issue(
+                        "warning",
+                        f"claude_{feature_id}_sdk_unavailable",
+                        "Claude SDK is not installed, so this advanced feature cannot be verified.",
+                        f"claudecode_{cfg_key}",
+                    )
+                )
+        if feature_id == "strict_isolation" and enabled and not cfg["can_use_tool_enabled"]:
+            feature_status = "warning"
+        features[feature_id] = {
+            "id": feature_id,
+            "label": meta["label"],
+            "enabled": enabled,
+            "option": option_name,
+            "sdk_supported": sdk_supported,
+            "sdkSupported": sdk_supported,
+            "stages": list(meta["stages"]),
+            "status": feature_status,
+            "enforced": bool(enabled and (feature_id != "strict_isolation" or cfg["can_use_tool_enabled"])),
+        }
+
+    status = "error" if any(item["severity"] == "error" for item in issues) else "warning" if issues else "ok"
+    return {
+        "status": status,
+        "valid": not any(item["severity"] == "error" for item in issues),
+        "sdk": {
+            "available": bool(sdk_available),
+            "version": sdk_version,
+            "error": sdk_error,
+            "option_support": option_support,
+            "optionSupport": option_support,
+        },
+        "config": cfg,
+        "features": features,
+        "issues": issues,
+        "warnings": [item for item in issues if item["severity"] == "warning"],
+        "errors": [item for item in issues if item["severity"] == "error"],
+        "mcp_tools": list(_MCP_TOOL_NAMES),
+        "mcpTools": list(_MCP_TOOL_NAMES),
+        "summary": {
+            "enabled_count": sum(1 for item in features.values() if item["enabled"]),
+            "enabledCount": sum(1 for item in features.values() if item["enabled"]),
+            "issue_count": len(issues),
+            "issueCount": len(issues),
+            "warning_count": sum(1 for item in issues if item["severity"] == "warning"),
+            "warningCount": sum(1 for item in issues if item["severity"] == "warning"),
+            "error_count": sum(1 for item in issues if item["severity"] == "error"),
+            "errorCount": sum(1 for item in issues if item["severity"] == "error"),
+        },
+    }
+
+
+def format_claude_advanced_diagnostics_lines(diagnostics: dict[str, Any], *, indent: str = "") -> list[str]:
+    diag = diagnostics if isinstance(diagnostics, dict) else {}
+    sdk = diag.get("sdk") if isinstance(diag.get("sdk"), dict) else {}
+    summary = diag.get("summary") if isinstance(diag.get("summary"), dict) else {}
+    features = diag.get("features") if isinstance(diag.get("features"), dict) else {}
+    lines = [
+        (
+            f"{indent}- status={diag.get('status') or 'unknown'} "
+            f"valid={bool(diag.get('valid', False))} "
+            f"enabled={int(summary.get('enabled_count') or 0)}/{len(CLAUDE_ADVANCED_FEATURE_ORDER)} "
+            f"sdk_available={bool(sdk.get('available', False))}"
+        )
+    ]
+    for feature_id in CLAUDE_ADVANCED_FEATURE_ORDER:
+        item = features.get(feature_id) if isinstance(features.get(feature_id), dict) else {}
+        lines.append(
+            f"{indent}  - {feature_id}: "
+            f"enabled={bool(item.get('enabled', False))} "
+            f"status={item.get('status') or 'unknown'} "
+            f"sdk_supported={item.get('sdk_supported')}"
+        )
+    for issue in list(diag.get("issues") or [])[:8]:
+        if not isinstance(issue, dict):
+            continue
+        lines.append(
+            f"{indent}  - {issue.get('severity') or 'issue'} "
+            f"{issue.get('code') or 'unknown'}: {issue.get('message') or ''}"
+        )
+    return lines
 
 
 def apply_extensions(

@@ -28,6 +28,7 @@ from .run_dir import find_latest_run_dir
 from .logger import close_all_loggers, register_structured_logger_cleanup
 from .todo import build_todo_status, ensure_todo_file, read_current_todo, set_current_todo, open_path
 from .skills.status import build_skills_status, format_skills_status_lines
+from .backends.claude_extensions import build_claude_advanced_diagnostics, format_claude_advanced_diagnostics_lines
 from .preflight import check_runner_start_readiness, format_runner_start_readiness, run_preflight
 from .process_guard import init_process_guard, terminate_all_children
 from .stop_progress import (
@@ -344,6 +345,17 @@ class RunnerShell:
             print(f"claudecode_pm_allowed_tools: {eff.get('claudecode_pm_allowed_tools')}")
             print(f"claudecode_dev_allowed_tools: {eff.get('claudecode_dev_allowed_tools')}")
             print(f"claudecode_qa_allowed_tools: {eff.get('claudecode_qa_allowed_tools')}")
+            claude_diag = build_claude_advanced_diagnostics(eff)
+            features = claude_diag.get("features") if isinstance(claude_diag.get("features"), dict) else {}
+            print(
+                "claudecode_advanced: "
+                f"status={claude_diag.get('status')} "
+                f"mcp={bool((features.get('mcp_tools') or {}).get('enabled'))} "
+                f"hooks={bool((features.get('hooks') or {}).get('enabled'))} "
+                f"can_use_tool={bool((features.get('can_use_tool') or {}).get('enabled'))} "
+                f"strict_isolation={bool((features.get('strict_isolation') or {}).get('enabled'))} "
+                f"subagents={bool((features.get('subagents') or {}).get('enabled'))}"
+            )
         print(f"roles:      {eff.get('roles')}")
         print(f"plugins_enabled: {bool(eff.get('plugins_enabled'))} (allowlist={eff.get('plugins_allowlist')}, strict={bool(eff.get('plugins_strict'))})")
         tg = eff.get("telegram") if isinstance(eff.get("telegram"), dict) else {}
@@ -2035,6 +2047,12 @@ class RunnerShell:
                 report_lines.append(f"- claude_agent_sdk: OK (v{ver})")
             except ImportError:
                 report_lines.append(f"- claude_agent_sdk: NOT INSTALLED")
+            try:
+                claude_diag = build_claude_advanced_diagnostics(eff)
+                report_lines.append("- claude advanced:")
+                report_lines.extend(format_claude_advanced_diagnostics_lines(claude_diag, indent="  "))
+            except Exception as ex:
+                report_lines.append(f"- claude advanced: ERROR ({ex})")
 
         report = "\n".join(report_lines) + "\n"
         (run_dir / "DOCTOR.md").write_text(report, encoding="utf-8", errors="replace")

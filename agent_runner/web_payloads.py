@@ -1545,6 +1545,7 @@ def build_snapshot(
     _web_instance_payload = web._web_instance_payload
     now_iso = web.now_iso
     _build_config_contract = web._build_config_contract
+    _build_claude_advanced_diagnostics = web.build_claude_advanced_diagnostics
     _prompt_profile = web._prompt_profile
     resolve_goals_completion_level = web.resolve_goals_completion_level
     _build_goals_payload = web._build_goals_payload
@@ -1657,6 +1658,7 @@ def build_snapshot(
         restore_endpoint="/api/config/restore",
         restore_requires_opt_in=True,
     )
+    claude_advanced = _build_claude_advanced_diagnostics(cfg)
     profile = _prompt_profile(cfg)
     goals_completion_level = resolve_goals_completion_level(cfg.get("goals_completion_level"))
     goals = _build_goals_payload(repo_root, completion_level=goals_completion_level)
@@ -2024,6 +2026,12 @@ def build_snapshot(
     )
     goals_section_state = buildSectionState("goals", "ready" if goals_total else "empty", "" if goals_total else fallbackSectionMessage("goals"))
     config_section_state = buildSectionState("config", "ready" if config_contract.get("schema") else "empty", "")
+    claude_status = str(claude_advanced.get("status") or "unknown").strip().lower()
+    claude_section_state = buildSectionState(
+        "claude",
+        "ready" if claude_status == "ok" else "partial" if claude_status == "warning" else "error",
+        "" if claude_status == "ok" else fallbackSectionMessage("claude"),
+    )
     prompts_section_state = buildSectionState(
         "prompts",
         "ready" if prompt_items else "empty",
@@ -2199,6 +2207,8 @@ def build_snapshot(
         },
         "config": config_payload,
         "config_contract": config_contract,
+        "claude_advanced": claude_advanced,
+        "claudeAdvanced": claude_advanced,
         "prompts": {
             "dir": prompt_payload.get("dir", prompts_dir.as_posix()) if isinstance(prompt_payload, dict) else prompts_dir.as_posix(),
             "exists": prompts_dir.exists(),
@@ -2274,6 +2284,7 @@ def build_snapshot(
             "backlog": backlog_section_state,
             "goals": goals_section_state,
             "config": config_section_state,
+            "claude": claude_section_state,
             "prompts": prompts_section_state,
             "logs": logs_section_state,
             "notifications": notifications_section_state,
