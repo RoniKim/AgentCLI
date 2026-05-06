@@ -178,6 +178,12 @@ from .web_logs import (
     _resolve_log_tail_source_record,
 )
 from .web_action_audit import WEB_ACTION_AUDIT_FILE, record_web_action_audit
+from .web_report_export import (
+    WEB_REPORT_EXPORT_JSON,
+    WEB_REPORT_EXPORT_MD,
+    build_web_report_export_payload,
+    write_web_report_export_artifacts,
+)
 
 try:  # Optional dependency: the app must still import when FastAPI is absent.
     from fastapi import Body, FastAPI, HTTPException, Request
@@ -219,6 +225,8 @@ RUN_DIR_ARTIFACT_NAMES = {
     "OPERATIONS_SUMMARY.md",
     "WORK_SUMMARY.md",
     WEB_ACTION_AUDIT_FILE,
+    WEB_REPORT_EXPORT_JSON,
+    WEB_REPORT_EXPORT_MD,
     "QA_VALIDATION_REPORT.json",
     "QA_VALIDATION_REPORT.md",
     "failed_tasks.json",
@@ -686,6 +694,69 @@ def _web_artifact_open_error(error: dict[str, Any]) -> JSONResponse:
     if details:
         payload["error"]["details"] = details
     return JSONResponse(status_code=status_code, content=payload)
+
+
+def _web_report_export_error(error: dict[str, Any]) -> JSONResponse:
+    status_code = int(error.get("status_code") or 500)
+    code = str(error.get("code") or "report_export_failed")
+    message = str(error.get("message") or "Report export failed.")
+    details = {key: value for key, value in error.items() if key not in {"status_code", "code", "message"}}
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    }
+    if details:
+        payload["error"]["details"] = details
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+def _resolve_web_report_export_run_dir(
+    repo_root: Path,
+    run_id: Any,
+    run_dirs: list[Path],
+) -> tuple[Path | None, dict[str, Any] | None]:
+    raw = str(run_id or "").strip()
+    if not raw:
+        return None, {
+            "status_code": 400,
+            "code": "report_export_run_required",
+            "message": "A selected run_id is required.",
+        }
+    normalized = raw.replace("\\", "/")
+    if "/" in normalized or ".." in Path(normalized).parts:
+        return None, {
+            "status_code": 400,
+            "code": "report_export_run_invalid",
+            "message": "Report export run_id must be a single run directory name.",
+            "run_id": raw,
+        }
+    for run_dir in run_dirs:
+        if run_dir.name == raw:
+            return run_dir, None
+    return None, {
+        "status_code": 404,
+        "code": "report_export_run_not_found",
+        "message": "Selected run was not found in observable run history.",
+        "run_id": raw,
+        "agent_runs_root": (repo_root / ".AgentCLI" / "agent_runs").as_posix(),
+    }
+
+
+def _normalize_web_report_export_format(format_value: Any) -> tuple[str | None, dict[str, Any] | None]:
+    raw = str(format_value or "json").strip().lower()
+    if raw in {"json", "application/json"}:
+        return "json", None
+    if raw in {"markdown", "md", "text/markdown"}:
+        return "markdown", None
+    return None, {
+        "status_code": 400,
+        "code": "report_export_format_unsupported",
+        "message": "Report export format must be json or markdown.",
+        "format": raw,
+    }
 
 
 def _worktree_status_artifacts(repo_root: Path, run_dir: Path | None) -> list[tuple[str, Path]]:
@@ -8529,6 +8600,43 @@ def create_app(
     @app.get("/api/history")
     def api_history() -> dict[str, Any]:
         return _section("history")
+
+    @app.get("/api/reports/export")
+    def api_reports_export(run_id: str = "", format: str = "json", download: bool = False) -> Any:
+        if web_redaction_active:
+            return _web_report_export_error(
+                {
+                    "status_code": 403,
+                    "code": "report_export_redaction_blocked",
+                    "message": "Run report export is only available on loopback web binds.",
+                    **_lan_safety_error_details("report-export", reason="Report export is blocked on non-loopback binds."),
+                }
+            )
+        export_format, format_error = _normalize_web_report_export_format(format)
+        if format_error is not None or export_format is None:
+            return _web_report_export_error(format_error or {})
+
+        run_dirs = _run_dirs(repo_root)
+        run_dir, run_error = _resolve_web_report_export_run_dir(repo_root, run_id, run_dirs)
+        if run_error is not None or run_dir is None:
+            return _web_report_export_error(run_error or {})
+
+        completion_level = resolve_goals_completion_level(cfg.get("goals_completion_level"))
+        branch = _branch_name(repo_root) or "HEAD"
+        history_item = _history_item(repo_root, run_dir, branch=branch, completion_level=completion_level)
+        export_payload = build_web_report_export_payload(repo_root, run_dir, history_item)
+        artifacts = write_web_report_export_artifacts(run_dir, export_payload)
+        target = Path(artifacts["json" if export_format == "json" else "markdown"])
+        media_type = "application/json" if export_format == "json" else "text/markdown; charset=utf-8"
+        filename = f"agentcli-{run_dir.name}-report.{'json' if export_format == 'json' else 'md'}"
+        if bool(download):
+            response = FileResponse(target, media_type=media_type, filename=filename)
+        else:
+            response = FileResponse(target, media_type=media_type)
+            response.headers["Content-Disposition"] = f'inline; filename="{filename}"'
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/experience")
     def api_experience() -> dict[str, Any]:

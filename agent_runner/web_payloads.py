@@ -872,6 +872,8 @@ def build_history_item(
             "operationsSummaryJson": (run_dir / "OPERATIONS_SUMMARY.json").as_posix(),
             "operationsSummaryMarkdown": (run_dir / "OPERATIONS_SUMMARY.md").as_posix(),
             "workSummaryMarkdown": (run_dir / "WORK_SUMMARY.md").as_posix(),
+            "webReportExportJson": (run_dir / "WEB_REPORT_EXPORT.json").as_posix(),
+            "webReportExportMarkdown": (run_dir / "WEB_REPORT_EXPORT.md").as_posix(),
             "failedTasksJson": (run_dir / "failed_tasks.json").as_posix(),
             "failedTasksMarkdown": (run_dir / "failed_tasks.md").as_posix(),
             "shutdownReport": (run_dir / "SHUTDOWN_REPORT.md").as_posix(),

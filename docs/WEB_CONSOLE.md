@@ -182,3 +182,14 @@ GET /api/artifacts/open?path=<absolute-or-repo-relative-artifact-path>
 ```
 
 The helper only serves files under the active repo's `.AgentCLI` artifact root, rejects directories, oversized files, unsupported extensions, and non-loopback web binds, and uses inline text/JSON/Markdown responses by default. Add `download=true` when an explicit browser download is desired.
+
+## Report Export
+
+The Run History selected-run panel can generate browser-ready summary artifacts for a completed run:
+
+```text
+GET /api/reports/export?run_id=<run-id>&format=json
+GET /api/reports/export?run_id=<run-id>&format=markdown
+```
+
+Each request writes both `WEB_REPORT_EXPORT.json` and `WEB_REPORT_EXPORT.md` into the selected run directory, then returns the requested format. The export is loopback-only because it contains local artifact paths; non-loopback binds receive a redaction-boundary error instead of raw report content.

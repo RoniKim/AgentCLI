@@ -4323,6 +4323,12 @@ select.field-control,
   gap: 8px;
 }
 
+.history-details__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .config-role-control {
   display: grid;
   gap: 8px;

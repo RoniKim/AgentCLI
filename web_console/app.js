@@ -678,6 +678,8 @@
         cycleChangeSummary: 'Cycle change summary',
         reportSummary: 'Report summary',
         reportStatus: 'Report status',
+        exportMarkdown: 'Export Markdown',
+        exportJson: 'Export JSON',
         reportMissing: 'No report artifact is available yet.',
         reportUnavailable: 'Report unavailable',
         reportPassed: 'Passed',
@@ -1458,6 +1460,8 @@
         cycleChangeSummary: '사이클 변경 요약',
         reportSummary: '보고서 요약',
         reportStatus: '보고서 상태',
+        exportMarkdown: 'Markdown 내보내기',
+        exportJson: 'JSON 내보내기',
         reportMissing: '아직 보고서 아티팩트가 없습니다.',
         reportUnavailable: '보고서 없음',
         reportPassed: '성공',
@@ -2981,11 +2985,11 @@
     return Promise.resolve();
   }
 
-  function downloadTextFile(filename, text) {
+  function downloadTextFile(filename, text, type = 'text/plain;charset=utf-8') {
     if (typeof Blob === 'undefined' || typeof URL === 'undefined' || !URL.createObjectURL) {
       return;
     }
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const blob = new Blob([text], { type });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
@@ -9488,6 +9492,9 @@
     promptSaveInFlight,
     promptRestoreInFlight,
     promptMutationInFlight,
+    historyReportExportRequestPath,
+    historyReportExportFilename,
+    exportHistoryReport,
     normalizeGoalSaveRisk,
     normalizeGoalSaveResponse,
     goalSaveEnabled,
@@ -13151,6 +13158,46 @@
       return null;
     }
     return state.runs.find((run) => run.id === state.historySelection) || state.runs[0];
+  }
+
+  function historyReportExportRequestPath(runId, format = 'json') {
+    const exportFormat = toText(format, 'json').toLowerCase() === 'markdown' ? 'markdown' : 'json';
+    return `/api/reports/export?run_id=${encodeURIComponent(toText(runId, ''))}&format=${encodeURIComponent(exportFormat)}`;
+  }
+
+  function historyReportExportFilename(runId, format = 'json') {
+    const exportFormat = toText(format, 'json').toLowerCase() === 'markdown' ? 'markdown' : 'json';
+    const suffix = exportFormat === 'json' ? 'json' : 'md';
+    return `agentcli-${toText(runId, 'run')}-report.${suffix}`;
+  }
+
+  async function exportHistoryReport(format = 'json') {
+    const selected = currentRun();
+    const runId = toText(selected?.id, '');
+    if (!runId || typeof fetch !== 'function') {
+      return;
+    }
+    const exportFormat = toText(format, 'json').toLowerCase() === 'markdown' ? 'markdown' : 'json';
+    const response = await fetch(historyReportExportRequestPath(runId, exportFormat), {
+      method: 'GET',
+      headers: {
+        Accept: exportFormat === 'json' ? 'application/json' : 'text/markdown',
+      },
+    });
+    const body = await response.text();
+    if (!response.ok) {
+      return;
+    }
+    let text = body;
+    const contentType = exportFormat === 'json' ? 'application/json;charset=utf-8' : 'text/markdown;charset=utf-8';
+    if (exportFormat === 'json') {
+      try {
+        text = `${JSON.stringify(JSON.parse(body), null, 2)}\n`;
+      } catch {
+        text = body;
+      }
+    }
+    downloadTextFile(historyReportExportFilename(runId, exportFormat), text, contentType);
   }
 
   function currentLiveRun() {
@@ -17843,6 +17890,10 @@
                           ${chip(historyReportStatusLabel(selectedFinalReportStatus || 'missing'), historyReportStatusClass(selectedFinalReportStatus || 'missing'))}
                           ${chip(historyReportStatusLabel(selectedQaReportStatus || 'missing'), historyReportStatusClass(selectedQaReportStatus || 'missing'))}
                         </div>
+                        <div class="history-details__actions">
+                          ${button(t('history.exportMarkdown'), 'export-report-markdown', 'button--quiet')}
+                          ${button(t('history.exportJson'), 'export-report-json', 'button--quiet')}
+                        </div>
                         <div class="kpi-grid kpi-grid--four">
                           ${kpiCard(t('history.currentState'), runStatusLabel(selected.status, selected.finalReason), t('history.currentState'), ['success', 'completed'].includes(toText(selected.status, '')))}
                           ${kpiCard(t('history.tasks'), `${selectedCounts.done}/${selectedCounts.total}`, `${t('common.failed')} ${selectedCounts.failed} | ${t('common.skipped')} ${selectedCounts.skipped}`)}
@@ -19594,6 +19645,12 @@
           });
           downloadTextFile(artifact.filename, artifact.text);
         }
+        return;
+      case 'export-report-json':
+        void exportHistoryReport('json');
+        return;
+      case 'export-report-markdown':
+        void exportHistoryReport('markdown');
         return;
       case 'clear-log-tail-selection':
         if (state.sourceMode === 'api') {

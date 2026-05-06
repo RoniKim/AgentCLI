@@ -313,6 +313,8 @@ run_dir/
   ├─ QA_VALIDATION_REPORT.md   # QA validation report (Markdown)
   ├─ FINAL_RUN_REPORT.json     # final run report (browser-ready JSON)
   ├─ FINAL_RUN_REPORT.md       # final run report (Markdown)
+  ├─ WEB_REPORT_EXPORT.json    # selected-run web export summary (JSON)
+  ├─ WEB_REPORT_EXPORT.md      # selected-run web export summary (Markdown)
   ├─ WORK_SUMMARY.md           # concise daily-work-log summary
   ├─ WEB_ACTION_AUDIT.jsonl    # guarded web mutation audit records
   ├─ SHUTDOWN_REPORT.md        # 종료 요약 보고서 (local fallback first)
@@ -337,6 +339,7 @@ run_dir/
 - If the PM-authored shutdown report repeats the same half twice, the duplicate content is trimmed before the final write.
 - `write_emergency_shutdown_report()` is idempotent: it skips when `SHUTDOWN_REPORT.md` already exists and also skips when `EMERGENCY_SHUTDOWN.md` already exists.
 - `FINAL_RUN_REPORT.*` is the browser-facing final summary; `SHUTDOWN_REPORT.md` is the shutdown summary that can be overwritten by the PM-authored report.
+- `GET /api/reports/export?run_id=<run-id>&format=json|markdown` writes `WEB_REPORT_EXPORT.json` and `WEB_REPORT_EXPORT.md` for the selected Run History entry and returns the requested format on loopback web binds only.
 - Web artifact links use `GET /api/artifacts/open?path=<artifact>` and are read-only. The helper is loopback-only and serves allowed text-like files inside the active repo `.AgentCLI` artifact root.
 - Web authentication is not implemented yet; `docs/AUTHENTICATION_PLAN.md` defines the LAN/raw-read/mutation gates that must exist before non-loopback write access is supported.
 

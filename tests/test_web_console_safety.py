@@ -1701,6 +1701,115 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("artifact-open", payload["error"]["details"]["blocked_action"])
         self.assertNotIn("secret-token", json.dumps(payload, ensure_ascii=False))
 
+    def test_report_export_creates_json_and_markdown_for_selected_run(self) -> None:
+        secret = "SECRET-RAW-LOG-SHOULD-STAY-OUT"
+        _write(self.run_dir / "logs" / "run.log", f"{secret}\n")
+        _write(
+            self.run_dir / "FINAL_RUN_REPORT.json",
+            json.dumps(
+                {
+                    "status": "success",
+                    "summary": "Selected run completed.",
+                    "validation": {
+                        "status": "success",
+                        "commands_total": 2,
+                        "commands_passed": 2,
+                        "commands_failed": 0,
+                        "commands_skipped": 0,
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        _write(
+            self.run_dir / "QA_VALIDATION_REPORT.json",
+            json.dumps(
+                {
+                    "status": "passed",
+                    "summary_text": "Focused validation passed.",
+                    "summary": {
+                        "commands_total": 3,
+                        "commands_passed": 2,
+                        "commands_failed": 0,
+                        "commands_skipped": 1,
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=self.config_path)
+
+        json_response = client.get("/api/reports/export", params={"run_id": self.run_dir.name, "format": "json"})
+        self.assertEqual(200, json_response.status_code)
+        self.assertEqual("nosniff", json_response.headers.get("x-content-type-options"))
+        self.assertEqual("no-store", json_response.headers.get("cache-control"))
+        export_payload = json.loads(json_response.text)
+        self.assertEqual(1, export_payload["schema_version"])
+        self.assertEqual(self.run_dir.name, export_payload["run"]["id"])
+        self.assertEqual("Selected run completed.", export_payload["reports"]["final_run"]["summary"])
+        self.assertEqual("Focused validation passed.", export_payload["reports"]["qa_validation"]["summary"])
+        self.assertEqual(1, export_payload["task_counts"]["done"])
+        self.assertEqual(1, export_payload["task_counts"]["total"])
+        self.assertIn("WEB_REPORT_EXPORT.json", export_payload["artifacts"]["webReportExportJson"])
+        self.assertIn("WEB_REPORT_EXPORT.md", export_payload["artifacts"]["webReportExportMarkdown"])
+
+        json_artifact = self.run_dir / "WEB_REPORT_EXPORT.json"
+        markdown_artifact = self.run_dir / "WEB_REPORT_EXPORT.md"
+        self.assertTrue(json_artifact.exists())
+        self.assertTrue(markdown_artifact.exists())
+        self.assertNotIn(secret, json_artifact.read_text(encoding="utf-8"))
+        self.assertNotIn(secret, markdown_artifact.read_text(encoding="utf-8"))
+
+        markdown_response = client.get(
+            "/api/reports/export",
+            params={"run_id": self.run_dir.name, "format": "markdown", "download": "true"},
+        )
+        self.assertEqual(200, markdown_response.status_code)
+        self.assertIn("attachment", markdown_response.headers.get("content-disposition", ""))
+        self.assertIn("# AgentCLI Web Report Export", markdown_response.text)
+        self.assertIn("Selected run completed.", markdown_response.text)
+        self.assertIn("Focused validation passed.", markdown_response.text)
+
+    def test_report_export_rejects_invalid_run_or_format(self) -> None:
+        client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=self.config_path)
+
+        missing_response = client.get("/api/reports/export", params={"format": "json"})
+        self.assertEqual(400, missing_response.status_code)
+        self.assertEqual("report_export_run_required", missing_response.json()["error"]["code"])
+
+        traversal_response = client.get("/api/reports/export", params={"run_id": "../20260426-120000", "format": "json"})
+        self.assertEqual(400, traversal_response.status_code)
+        self.assertEqual("report_export_run_invalid", traversal_response.json()["error"]["code"])
+
+        unknown_response = client.get("/api/reports/export", params={"run_id": "20990101-000000", "format": "json"})
+        self.assertEqual(404, unknown_response.status_code)
+        self.assertEqual("report_export_run_not_found", unknown_response.json()["error"]["code"])
+
+        format_response = client.get("/api/reports/export", params={"run_id": self.run_dir.name, "format": "xml"})
+        self.assertEqual(400, format_response.status_code)
+        self.assertEqual("report_export_format_unsupported", format_response.json()["error"]["code"])
+
+    def test_report_export_is_blocked_on_lan_binds(self) -> None:
+        _write(self.run_dir / "FINAL_RUN_REPORT.json", json.dumps({"summary": "SECRET-LAN-REPORT"}, ensure_ascii=False))
+        client, _ = _create_client(
+            self.repo,
+            enable_runner_controls=False,
+            config_path=self.config_path,
+            host="0.0.0.0",
+            trusted_network=True,
+        )
+
+        response = client.get("/api/reports/export", params={"run_id": self.run_dir.name, "format": "markdown"})
+        self.assertEqual(403, response.status_code)
+        payload = response.json()
+        self.assertEqual("report_export_redaction_blocked", payload["error"]["code"])
+        self.assertEqual("report-export", payload["error"]["details"]["blocked_action"])
+        self.assertNotIn("SECRET-LAN-REPORT", json.dumps(payload, ensure_ascii=False))
+
     def test_lan_mutating_actions_are_rejected_even_with_opt_in_and_trusted_network(self) -> None:
         controller = FakeRunnerController(repo=self.repo, base_args=_runner_base_args(self.config_path))
         client, app = _create_client(
