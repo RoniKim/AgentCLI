@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from importlib import metadata as importlib_metadata
 import ipaddress
 from contextlib import asynccontextmanager
@@ -4062,7 +4063,31 @@ def _load_backlog_payload(
 def _cycle_events(run_dir: Path | None) -> list[dict[str, Any]]:
     if run_dir is None:
         return []
-    return _safe_jsonl(run_dir / "metrics.jsonl", max_items=500)
+    path = run_dir / "metrics.jsonl"
+    if not path.exists() or not path.is_file():
+        return []
+    rows: deque[dict[str, Any]] = deque(maxlen=500)
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                payload = dict(payload)
+                payload.setdefault("line_number", line_number)
+                payload.setdefault("lineNumber", line_number)
+                payload.setdefault("log_source", "metrics_jsonl")
+                payload.setdefault("logSource", "metrics_jsonl")
+                rows.append(payload)
+    except Exception:
+        return []
+    return list(rows)
 
 
 def _event_stage(event: dict[str, Any]) -> str:
@@ -4103,6 +4128,110 @@ def _event_message(event: dict[str, Any]) -> str:
     if event_type:
         return event_type
     return ""
+
+
+def _notification_severity(kind: str) -> str:
+    normalized = str(kind or "").strip().lower()
+    if normalized in {"error", "task_failed"}:
+        return "error"
+    if normalized in {"quota", "run_stop", "stalled"}:
+        return "warning"
+    return "info"
+
+
+def _notification_log_line(event: dict[str, Any] | None = None) -> int | None:
+    source = event if isinstance(event, dict) else {}
+    return _coerce_optional_int(
+        _pick_value(
+            source.get("line_number"),
+            source.get("lineNumber"),
+            source.get("cursor"),
+            source.get("seq"),
+        )
+    )
+
+
+def _notification_links(
+    *,
+    run_id: str,
+    task_id: str = "",
+    log_line: int | None = None,
+    log_source: str = "",
+    search: str = "",
+) -> list[dict[str, Any]]:
+    links: list[dict[str, Any]] = []
+    if run_id:
+        links.append({"kind": "run", "target": run_id, "label": "Run", "run": run_id})
+    if task_id:
+        links.append({"kind": "task", "target": task_id, "label": "Task", "taskId": task_id, "task_id": task_id})
+    log_link: dict[str, Any] = {
+        "kind": "logs",
+        "target": str(log_line or ""),
+        "label": "Logs",
+        "source": log_source,
+        "line": log_line,
+        "lineNumber": log_line,
+        "line_number": log_line,
+        "taskId": task_id,
+        "task_id": task_id,
+        "search": search[:180],
+    }
+    links.append(log_link)
+    return links
+
+
+def _notification_id(item: dict[str, Any]) -> str:
+    payload = {
+        "kind": str(item.get("kind") or ""),
+        "run": str(item.get("run") or ""),
+        "t": item.get("t") or 0,
+        "task_id": str(item.get("task_id") or item.get("taskId") or ""),
+        "log_source": str(item.get("log_source") or item.get("logSource") or ""),
+        "log_line": item.get("log_line") or item.get("logLine") or item.get("line_number") or item.get("lineNumber") or "",
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return f"ntf-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _notification_item(
+    *,
+    t: Any,
+    kind: str,
+    text: str,
+    run_id: str,
+    task_id: str = "",
+    task_title: str = "",
+    event: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    log_line = _notification_log_line(event)
+    event_data = event if isinstance(event, dict) else {}
+    log_source = _pick_text(event_data.get("log_source"), event_data.get("logSource"), "metrics_jsonl" if log_line else "")
+    item = {
+        "t": int(t or 0),
+        "kind": kind,
+        "severity": _notification_severity(kind),
+        "text": text,
+        "run": run_id,
+        "task_id": task_id,
+        "taskId": task_id,
+        "task_title": task_title,
+        "taskTitle": task_title,
+        "log_source": log_source,
+        "logSource": log_source,
+        "log_line": log_line,
+        "logLine": log_line,
+        "line_number": log_line,
+        "lineNumber": log_line,
+    }
+    item["links"] = _notification_links(
+        run_id=run_id,
+        task_id=task_id,
+        log_line=log_line,
+        log_source=log_source,
+        search=text,
+    )
+    item["id"] = _notification_id(item)
+    return item
 
 
 def _normalize_stage_name(value: Any) -> str:
@@ -4973,12 +5102,12 @@ def _build_notifications(
 
     if started_at_ms:
         notifications.append(
-            {
-                "t": started_at_ms,
-                "kind": "run_start",
-                "text": f"Run started | {branch or run_id}",
-                "run": run_id,
-            }
+            _notification_item(
+                t=started_at_ms,
+                kind="run_start",
+                text=f"Run started | {branch or run_id}",
+                run_id=run_id,
+            )
         )
 
     done_ids = [str(item) for item in (state.get("done") or []) if str(item).strip()]
@@ -4986,12 +5115,14 @@ def _build_notifications(
         item = backlog_by_id.get(task_id)
         title = item["title"] if item else task_id
         notifications.append(
-            {
-                "t": started_at_ms or _epoch_ms(datetime.now(timezone.utc).timestamp()),
-                "kind": "task_done",
-                "text": f"{task_id} | {title}",
-                "run": run_id,
-            }
+            _notification_item(
+                t=started_at_ms or _epoch_ms(datetime.now(timezone.utc).timestamp()),
+                kind="task_done",
+                text=f"{task_id} | {title}",
+                run_id=run_id,
+                task_id=task_id,
+                task_title=title,
+            )
         )
 
     failed_list = state.get("failed") if isinstance(state.get("failed"), list) else []
@@ -5004,12 +5135,14 @@ def _build_notifications(
         item = backlog_by_id.get(task_id)
         title = item["title"] if item else task_id
         notifications.append(
-            {
-                "t": started_at_ms or _epoch_ms(datetime.now(timezone.utc).timestamp()),
-                "kind": "task_failed",
-                "text": f"{task_id} | {title}",
-                "run": run_id,
-            }
+            _notification_item(
+                t=started_at_ms or _epoch_ms(datetime.now(timezone.utc).timestamp()),
+                kind="task_failed",
+                text=f"{task_id} | {title}",
+                run_id=run_id,
+                task_id=task_id,
+                task_title=title,
+            )
         )
 
     for event in events:
@@ -5037,13 +5170,20 @@ def _build_notifications(
             kind = "run_stop"
 
         if kind:
+            task_title = ""
+            if task_id:
+                item = backlog_by_id.get(task_id)
+                task_title = str(item.get("title") or "") if isinstance(item, dict) else ""
             notifications.append(
-                {
-                    "t": ts or started_at_ms,
-                    "kind": kind,
-                    "text": text or event_type,
-                    "run": run_id,
-                }
+                _notification_item(
+                    t=ts or started_at_ms,
+                    kind=kind,
+                    text=text or event_type,
+                    run_id=run_id,
+                    task_id=task_id,
+                    task_title=task_title,
+                    event=event,
+                )
             )
 
     if final_reason:
@@ -5052,12 +5192,12 @@ def _build_notifications(
         if final_kind == "task_done" and final_reason == "project_complete":
             final_text = "Project complete"
         notifications.append(
-            {
-                "t": _epoch_ms(datetime.now(timezone.utc).timestamp()),
-                "kind": final_kind,
-                "text": final_text,
-                "run": run_id,
-            }
+            _notification_item(
+                t=_epoch_ms(datetime.now(timezone.utc).timestamp()),
+                kind=final_kind,
+                text=final_text,
+                run_id=run_id,
+            )
         )
 
     notifications = [item for item in notifications if item.get("kind")]

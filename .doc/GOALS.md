@@ -336,7 +336,7 @@
 ## P1 (Should-Have)
 
 - [x] Run History supports comparing two runs side-by-side with commits, task outcomes, token/quota usage, validation results, and worktree outcomes.
-- [ ] Notifications support read/unread state, filtering, severity grouping, and links back to the relevant run/task/log lines.
+- [x] Notifications support read/unread state, filtering, severity grouping, and links back to the relevant run/task/log lines.
 - [x] Web report export can create Markdown and JSON summaries for a selected run.
 - [x] The browser can open local artifact paths through a documented safe helper instead of exposing raw filesystem mutation.
 - [x] The CLI can optionally launch or serve the web console from a documented command.

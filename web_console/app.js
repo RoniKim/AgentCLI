@@ -10,6 +10,7 @@
     config: 'agentcli.console.config.v1',
     worktree: 'agentcli.console.worktree.v1',
     locale: 'agentcli.console.locale.v1',
+    notificationsRead: 'agentcli.console.notifications.read.v1',
   };
   const GOALS_SAVE_CONFIRMATION_KEY = 'goals.confirmationPhraseExact';
   const RUNNER_CONTROL_CONFIRMATION_KEYS = {
@@ -1738,6 +1739,23 @@
     lifecycle: '수명주기',
     taskDone: '작업 완료',
     errors: '오류',
+    filterReadAll: '읽음 전체',
+    filterUnread: '읽지 않음',
+    filterRead: '읽음',
+    filterSeverityAll: '심각도 전체',
+    severityInfo: '정보',
+    severityWarning: '주의',
+    severityError: '오류',
+    unread: '읽지 않음',
+    read: '읽음',
+    markRead: '읽음 표시',
+    markUnread: '읽지 않음 표시',
+    markAllRead: '모두 읽음',
+    severityGroups: '심각도 그룹',
+    relatedLinks: '관련 링크',
+    openRun: '실행 열기',
+    openTask: '작업 열기',
+    openLogs: '로그 열기',
   });
   Object.assign(LOCALE_TEXT.ko.worktree, {
     readOnly: '읽기 전용',
@@ -1958,6 +1976,23 @@
   Object.assign(LOCALE_TEXT.en.notifications, {
     localStopConfirmed: 'Local stop confirmed. UI switched to stopped state.',
     observedKindsNote: 'Kinds derived from actual notification rows',
+    filterReadAll: 'READ ALL',
+    filterUnread: 'UNREAD',
+    filterRead: 'READ',
+    filterSeverityAll: 'SEVERITY ALL',
+    severityInfo: 'INFO',
+    severityWarning: 'WARNING',
+    severityError: 'ERROR',
+    unread: 'unread',
+    read: 'read',
+    markRead: 'Mark read',
+    markUnread: 'Mark unread',
+    markAllRead: 'Mark all read',
+    severityGroups: 'Severity groups',
+    relatedLinks: 'Related links',
+    openRun: 'Open run',
+    openTask: 'Open task',
+    openLogs: 'Open logs',
   });
 
   Object.assign(LOCALE_TEXT.en, {
@@ -5513,14 +5548,220 @@
     };
   }
 
+  function stableHash(value) {
+    const text = String(value == null ? '' : value);
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  function normalizeNotificationSeverity(value, kind = '') {
+    const severity = toText(value, '').trim().toLowerCase();
+    if (['error', 'err', 'failed', 'failure', 'critical', 'high'].includes(severity)) {
+      return 'error';
+    }
+    if (['warning', 'warn', 'quota', 'stalled', 'medium'].includes(severity)) {
+      return 'warning';
+    }
+    if (['info', 'success', 'ok', 'done', 'low'].includes(severity)) {
+      return 'info';
+    }
+    const normalizedKind = toText(kind, '').trim().toLowerCase();
+    if (normalizedKind === 'error' || normalizedKind === 'task_failed') {
+      return 'error';
+    }
+    if (normalizedKind === 'quota' || normalizedKind === 'stalled' || normalizedKind === 'run_stop') {
+      return 'warning';
+    }
+    return 'info';
+  }
+
+  function notificationSeverityLabel(severity) {
+    const normalized = normalizeNotificationSeverity(severity);
+    if (normalized === 'error') return t('notifications.severityError');
+    if (normalized === 'warning') return t('notifications.severityWarning');
+    return t('notifications.severityInfo');
+  }
+
+  function notificationSeverityChipClass(severity) {
+    const normalized = normalizeNotificationSeverity(severity);
+    if (normalized === 'error') return 'chip--err';
+    if (normalized === 'warning') return 'chip--warn';
+    return 'chip--info';
+  }
+
+  function normalizeNotificationLink(link) {
+    const raw = toObject(link);
+    const kind = toText(raw.kind || raw.type || raw.view, '').trim().toLowerCase();
+    const normalizedKind = kind === 'log' ? 'logs' : kind;
+    if (!['run', 'task', 'logs'].includes(normalizedKind)) {
+      return null;
+    }
+    const lineNumber = toMaybeNumber(raw.lineNumber ?? raw.line_number ?? raw.line ?? raw.cursor);
+    const taskId = toText(raw.taskId || raw.task_id || raw.task || raw.targetTask, '');
+    return {
+      kind: normalizedKind,
+      target: toText(raw.target || raw.id || raw.run || raw.taskId || raw.task_id || '', ''),
+      label: toText(raw.label || raw.title, ''),
+      run: toText(raw.run || raw.runId || raw.run_id || '', ''),
+      taskId,
+      task_id: taskId,
+      source: toText(raw.source || raw.sourceId || raw.source_id || '', ''),
+      lineNumber,
+      line_number: lineNumber,
+      cursor: lineNumber,
+      search: toText(raw.search || raw.query || raw.text, ''),
+    };
+  }
+
+  function notificationDefaultLinks(item) {
+    const links = [];
+    if (item.run) {
+      links.push({ kind: 'run', target: item.run, run: item.run, label: t('notifications.openRun') });
+    }
+    if (item.taskId) {
+      links.push({ kind: 'task', target: item.taskId, taskId: item.taskId, label: t('notifications.openTask') });
+    }
+    links.push({
+      kind: 'logs',
+      target: item.logLine == null ? '' : String(item.logLine),
+      label: t('notifications.openLogs'),
+      source: item.logSource,
+      lineNumber: item.logLine,
+      taskId: item.taskId,
+      search: item.text,
+    });
+    return links;
+  }
+
+  function notificationStableId(raw, normalized = {}) {
+    const source = toObject(raw);
+    const existing = toText(source.id || source.notificationId || source.notification_id || normalized.id, '');
+    if (existing) {
+      return existing;
+    }
+    const base = [
+      normalized.run || source.run || source.run_id || '',
+      normalized.kind || source.kind || source.type || '',
+      normalized.t || source.t || source.ts || source.timestamp || source.time || '',
+      normalized.taskId || source.taskId || source.task_id || '',
+      normalized.logSource || source.logSource || source.log_source || '',
+      normalized.logLine ?? source.logLine ?? source.log_line ?? source.lineNumber ?? source.line_number ?? source.cursor ?? '',
+      source.text || source.message || '',
+    ].join('|');
+    return `ntf-${stableHash(base)}`;
+  }
+
   function normalizeNotification(entry) {
     const raw = toObject(entry);
-    return {
+    const kind = toText(raw.kind || raw.type, 'info');
+    const taskId = toText(raw.taskId || raw.task_id || raw.task, '');
+    const logLine = toMaybeNumber(raw.logLine ?? raw.log_line ?? raw.lineNumber ?? raw.line_number ?? raw.cursor);
+    const normalized = {
       t: toNumber(raw.t || raw.ts || 0, 0),
-      kind: toText(raw.kind || raw.type, 'info'),
+      kind,
+      severity: normalizeNotificationSeverity(raw.severity || raw.level, kind),
       text: toText(raw.text || raw.message, ''),
       run: toText(raw.run || raw.run_id || '', ''),
+      taskId,
+      task_id: taskId,
+      taskTitle: toText(raw.taskTitle || raw.task_title || raw.title, ''),
+      task_title: toText(raw.taskTitle || raw.task_title || raw.title, ''),
+      logSource: toText(raw.logSource || raw.log_source || raw.source, ''),
+      log_source: toText(raw.logSource || raw.log_source || raw.source, ''),
+      logLine,
+      log_line: logLine,
+      lineNumber: logLine,
+      line_number: logLine,
     };
+    normalized.id = notificationStableId(raw, normalized);
+    const explicitLinks = toArray(raw.links)
+      .map(normalizeNotificationLink)
+      .filter(Boolean);
+    const defaultLinks = notificationDefaultLinks(normalized);
+    const seen = new Set();
+    normalized.links = explicitLinks.concat(defaultLinks).filter((link) => {
+      const key = `${link.kind}|${link.target}|${link.taskId}|${link.source}|${link.lineNumber}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+    return normalized;
+  }
+
+  function normalizeNotificationReadState(value) {
+    const raw = toObject(value);
+    const out = {};
+    Object.keys(raw).forEach((key) => {
+      const id = toText(key, '');
+      if (id && raw[key]) {
+        out[id] = true;
+      }
+    });
+    return out;
+  }
+
+  function notificationReadKey(item) {
+    return toText(toObject(item).id || notificationStableId(item), '');
+  }
+
+  function notificationIsRead(item) {
+    const key = notificationReadKey(item);
+    return Boolean(key && state.notificationRead && state.notificationRead[key]);
+  }
+
+  function pruneNotificationReadState(items = []) {
+    const visibleIds = new Set(toArray(items).map(notificationReadKey).filter(Boolean));
+    const previous = normalizeNotificationReadState(state.notificationRead);
+    const next = {};
+    Object.keys(previous).forEach((id) => {
+      if (visibleIds.has(id)) {
+        next[id] = true;
+      }
+    });
+    state.notificationRead = next;
+    writeJSON(STORAGE.notificationsRead, next);
+  }
+
+  function setNotificationReadState(id, read, options = {}) {
+    const key = toText(id, '');
+    if (!key) {
+      return;
+    }
+    state.notificationRead = normalizeNotificationReadState(state.notificationRead);
+    if (read) {
+      state.notificationRead[key] = true;
+    } else {
+      delete state.notificationRead[key];
+    }
+    writeJSON(STORAGE.notificationsRead, state.notificationRead);
+    if (options.render !== false) {
+      renderShell({ preserveScroll: true });
+    }
+  }
+
+  function setNotificationsReadState(ids, read, options = {}) {
+    state.notificationRead = normalizeNotificationReadState(state.notificationRead);
+    toArray(ids).forEach((id) => {
+      const key = toText(id, '');
+      if (!key) {
+        return;
+      }
+      if (read) {
+        state.notificationRead[key] = true;
+      } else {
+        delete state.notificationRead[key];
+      }
+    });
+    writeJSON(STORAGE.notificationsRead, state.notificationRead);
+    if (options.render !== false) {
+      renderShell({ preserveScroll: true });
+    }
   }
 
   function normalizeBacklogItem(task) {
@@ -9374,6 +9615,11 @@
     adaptPrompts,
     adaptLogs,
     adaptNotifications,
+    normalizeNotification,
+    normalizeNotificationSeverity,
+    normalizeNotificationLink,
+    notificationStableId,
+    normalizeNotificationReadState,
     adaptMetrics,
     adaptHistory,
     adaptExperience,
@@ -9547,6 +9793,9 @@
     historyRunValidationSummary,
     historyRunTokenQuotaSummary,
     renderHistoryComparePanel,
+    setNotificationReadFilter,
+    setNotificationSeverityFilter,
+    openNotificationLink,
     normalizeGoalSaveRisk,
     normalizeGoalSaveResponse,
     goalSaveEnabled,
@@ -9670,6 +9919,7 @@
     state.experience = toObject(next.experience);
     state.metrics = normalizeMetrics(next.metrics);
     state.notifications = toArray(next.notifications).slice(-MAX_LOG_ROWS);
+    pruneNotificationReadState(state.notifications);
     state.progress = toObject(next.progress);
     state.sectionState = toObject(next.sectionState);
     const previousRefresh = ensureSnapshotRefreshState();
@@ -11583,11 +11833,51 @@
     `;
   }
 
+  function notificationLinkLabel(link) {
+    const normalized = normalizeNotificationLink(link);
+    if (!normalized) {
+      return '';
+    }
+    if (normalized.label && !['Run', 'Task', 'Logs'].includes(normalized.label)) {
+      return normalized.label;
+    }
+    if (normalized.kind === 'run') return t('notifications.openRun');
+    if (normalized.kind === 'task') return t('notifications.openTask');
+    return t('notifications.openLogs');
+  }
+
+  function renderNotificationLinks(item) {
+    const links = toArray(item.links).map(normalizeNotificationLink).filter(Boolean);
+    if (!links.length) {
+      return '';
+    }
+    return `
+      <div class="notification-feed__links" aria-label="${escapeHTML(t('notifications.relatedLinks'))}">
+        ${links.map((link) => `
+          <button
+            type="button"
+            class="button button--tiny button--quiet notification-feed__link"
+            data-notification-link="${escapeHTML(link.kind)}"
+            data-notification-id="${escapeHTML(item.id)}"
+            data-notification-target="${escapeHTML(link.target)}"
+            data-notification-run="${escapeHTML(link.run || item.run)}"
+            data-notification-task="${escapeHTML(link.taskId || item.taskId)}"
+            data-notification-source="${escapeHTML(link.source || item.logSource)}"
+            data-notification-line="${escapeHTML(link.lineNumber == null ? '' : String(link.lineNumber))}"
+            data-notification-search="${escapeHTML(link.search || item.text)}"
+          >${escapeHTML(notificationLinkLabel(link))}</button>
+        `).join('')}
+      </div>
+    `;
+  }
+
   function renderNotificationItem(item) {
     const color = kindColor(item.kind);
     const kindText = notificationKindLabel(item.kind);
+    const read = Boolean(item.read);
+    const severity = normalizeNotificationSeverity(item.severity, item.kind);
     return `
-      <div class="notification-feed__item">
+      <div class="notification-feed__item notification-feed__item--${read ? 'read' : 'unread'} notification-feed__item--severity-${escapeHTML(severity)}" data-notification-id="${escapeHTML(item.id)}">
         <div class="notification-feed__kind">
           <span class="dot" style="color:${color}; background:${color}"></span>
           ${escapeHTML(kindText)}
@@ -11596,8 +11886,39 @@
           <div class="notification-feed__timestamp">${escapeHTML(fmtClock(item.t))}</div>
           <div class="notification-feed__relative">${escapeHTML(fmtRelative(item.t))}</div>
         </div>
-        <div class="notification-feed__msg">${escapeHTML(redactionAwareText(item.text, t('notifications.noRecorded')))}</div>
-        <div class="notification-feed__run">${escapeHTML(item.run)}</div>
+        <div class="notification-feed__details">
+          <div class="notification-feed__msg">${escapeHTML(redactionAwareText(item.text, t('notifications.noRecorded')))}</div>
+          <div class="notification-feed__meta">
+            ${chip(notificationSeverityLabel(severity), notificationSeverityChipClass(severity))}
+            ${chip(read ? t('notifications.read') : t('notifications.unread'), read ? 'chip--info' : 'chip--accent')}
+            ${item.taskId ? chip(item.taskId, 'chip--info') : ''}
+          </div>
+          ${renderNotificationLinks(item)}
+        </div>
+        <div class="notification-feed__actions">
+          <div class="notification-feed__run">${escapeHTML(item.run || t('common.unavailable'))}</div>
+          <button
+            type="button"
+            class="button button--tiny button--quiet notification-feed__read-toggle"
+            data-notification-read-toggle="${escapeHTML(item.id)}"
+            aria-pressed="${read ? 'true' : 'false'}"
+          >${escapeHTML(read ? t('notifications.markUnread') : t('notifications.markRead'))}</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderNotificationSeverityGroup(severity, items) {
+    if (!items.length) {
+      return '';
+    }
+    return `
+      <div class="notification-feed__group notification-feed__group--${escapeHTML(severity)}">
+        <div class="notification-feed__group-head">
+          <span>${escapeHTML(notificationSeverityLabel(severity))}</span>
+          <span>${escapeHTML(String(items.length))}</span>
+        </div>
+        ${items.map((item) => renderNotificationItem(item)).join('')}
       </div>
     `;
   }
@@ -18142,8 +18463,16 @@
     const liveRun = currentLiveRun();
     const liveNotifications = currentLiveRunNotifications(liveRun);
     const liveControl = currentLiveRunRunnerControl(liveRun);
-    const notificationItems = toArray(liveNotifications.items || state.notifications);
+    const notificationItems = toArray(liveNotifications.items || state.notifications).map((item) => {
+      const normalized = normalizeNotification(item);
+      return {
+        ...normalized,
+        read: notificationIsRead(normalized),
+      };
+    });
     const filters = ['all', 'run_start', 'run_stop', 'task_done', 'task_failed', 'quota', 'error', 'stalled'];
+    const readFilters = ['all', 'unread', 'read'];
+    const severityFilters = ['all', 'error', 'warning', 'info'];
     const filterLabels = {
       all: t('notifications.filterAll'),
       run_start: t('notifications.filterRunStart'),
@@ -18154,15 +18483,48 @@
       error: t('notifications.filterError'),
       stalled: t('notifications.filterStalled'),
     };
-    const filtered = notificationItems.filter((item) => state.notificationFilter === 'all' || item.kind === state.notificationFilter);
+    const readFilterLabels = {
+      all: t('notifications.filterReadAll'),
+      unread: t('notifications.filterUnread'),
+      read: t('notifications.filterRead'),
+    };
+    const severityFilterLabels = {
+      all: t('notifications.filterSeverityAll'),
+      error: t('notifications.severityError'),
+      warning: t('notifications.severityWarning'),
+      info: t('notifications.severityInfo'),
+    };
+    const filtered = notificationItems.filter((item) => {
+      const kindMatch = state.notificationFilter === 'all' || item.kind === state.notificationFilter;
+      const readMatch = state.notificationReadFilter === 'all' || (state.notificationReadFilter === 'read' ? item.read : !item.read);
+      const severity = normalizeNotificationSeverity(item.severity, item.kind);
+      const severityMatch = state.notificationSeverityFilter === 'all' || severity === state.notificationSeverityFilter;
+      return kindMatch && readMatch && severityMatch;
+    });
 
     const kindCounts = notificationItems.reduce((acc, item) => {
       acc[item.kind] = (acc[item.kind] || 0) + 1;
       return acc;
     }, {});
+    const readCounts = notificationItems.reduce((acc, item) => {
+      acc[item.read ? 'read' : 'unread'] = (acc[item.read ? 'read' : 'unread'] || 0) + 1;
+      return acc;
+    }, { read: 0, unread: 0 });
+    const severityCounts = notificationItems.reduce((acc, item) => {
+      const severity = normalizeNotificationSeverity(item.severity, item.kind);
+      acc[severity] = (acc[severity] || 0) + 1;
+      return acc;
+    }, { error: 0, warning: 0, info: 0 });
 
     const latestNotification = filtered[0] || notificationItems[0] || null;
     const observedKinds = Object.keys(kindCounts).sort();
+    const severityOrder = state.notificationSeverityFilter === 'all' ? ['error', 'warning', 'info'] : [state.notificationSeverityFilter];
+    const groupedNotifications = severityOrder
+      .map((severity) => ({
+        severity,
+        items: filtered.filter((item) => normalizeNotificationSeverity(item.severity, item.kind) === severity),
+      }))
+      .filter((group) => group.items.length);
     const configuredEvents = fmtList(state.config?.telegram?.notify_events || []);
     const stalledSeconds = toNumber(state.config?.telegram?.stalled_seconds || 0, 0);
     const controlPlaneStatus = liveControl.controllerAvailable
@@ -18210,11 +18572,26 @@
             `${escapeHTML(filtered.length)} ${escapeHTML(t('notifications.visibleItems'))} | ${escapeHTML(notificationItems.length)} ${escapeHTML(t('notifications.totalItems'))}`,
             `
               ${sectionNotice('notifications')}
-              <div class="logs-toolbar">
-                <div class="filters">
+              <div class="notification-toolbar">
+                <div class="filters notification-filter-row">
                   ${filters
                     .map((filter) => `
                       <button type="button" class="filter-chip ${state.notificationFilter === filter ? 'filter-chip--active' : ''}" data-notification-filter="${escapeHTML(filter)}">${escapeHTML(filterLabels[filter] || filter.toUpperCase())}</button>
+                    `)
+                    .join('')}
+                </div>
+                <div class="filters notification-filter-row">
+                  ${readFilters
+                    .map((filter) => `
+                      <button type="button" class="filter-chip ${state.notificationReadFilter === filter ? 'filter-chip--active' : ''}" data-notification-read-filter="${escapeHTML(filter)}">${escapeHTML(readFilterLabels[filter])}</button>
+                    `)
+                    .join('')}
+                  <button type="button" class="button button--tiny button--quiet" data-notification-bulk-read="all" ${readCounts.unread ? '' : 'disabled'}>${escapeHTML(t('notifications.markAllRead'))}</button>
+                </div>
+                <div class="filters notification-filter-row">
+                  ${severityFilters
+                    .map((filter) => `
+                      <button type="button" class="filter-chip ${state.notificationSeverityFilter === filter ? 'filter-chip--active' : ''}" data-notification-severity-filter="${escapeHTML(filter)}">${escapeHTML(severityFilterLabels[filter])}</button>
                     `)
                     .join('')}
                 </div>
@@ -18224,7 +18601,7 @@
           <div class="notification-feed">
             ${
               filtered.length
-                ? filtered.map((item) => renderNotificationItem(item)).join('')
+                ? groupedNotifications.map((group) => renderNotificationSeverityGroup(group.severity, group.items)).join('')
                 : `
                   <div class="notification-feed__empty ${state.sectionState.notifications?.status === 'error' ? 'notification-feed__empty--error' : ''}">
                     <span class="dot" style="color:${state.sectionState.notifications?.status === 'error' ? 'var(--err)' : 'var(--warn)'}; background:currentColor;"></span>
@@ -18245,6 +18622,7 @@
             `
               <div class="compact-list">
                 ${compactFactItem(t('notifications.observedKinds'), observedKinds.length ? observedKinds.map((kind) => notificationKindLabel(kind)).join(', ') : t('common.none'), t('notifications.observedKindsNote'))}
+                ${compactFactItem(t('notifications.severityGroups'), ['error', 'warning', 'info'].map((severity) => `${notificationSeverityLabel(severity)} ${severityCounts[severity] || 0}`).join(' | '), t('notifications.eventsReadFrom'))}
                 ${compactFactItem(t('notifications.newestEvent'), latestNotification ? `${notificationKindLabel(latestNotification.kind)} | ${fmtDateTime(latestNotification.t)}` : t('common.none'), latestNotificationText)}
                 ${compactFactItem(t('notifications.controlPlaneLastEvent'), controlPlaneEventLabel, controlPlaneSnapshot)}
               </div>
@@ -18259,7 +18637,7 @@
                 ${kpiCard(t('notifications.lifecycle'), String((kindCounts.run_start || 0) + (kindCounts.run_stop || 0)), t('notifications.runStartAndStop'))}
                 ${kpiCard(t('notifications.taskDone'), String(kindCounts.task_done || 0), t('notifications.successEvents'), true)}
                 ${kpiCard(t('common.quota'), String(kindCounts.quota || 0), t('notifications.budgetNotices'))}
-                ${kpiCard(t('notifications.errors'), String((kindCounts.error || 0) + (kindCounts.task_failed || 0) + (kindCounts.stalled || 0)), t('notifications.actionNeeded'))}
+                ${kpiCard(t('notifications.errors'), String((kindCounts.error || 0) + (kindCounts.task_failed || 0) + (kindCounts.stalled || 0)), `${t('notifications.actionNeeded')} | ${readCounts.unread} ${t('notifications.unread')}`)}
               </div>
             `
           )}
@@ -19937,6 +20315,95 @@
     renderShell({ preserveScroll: true });
   }
 
+  function setNotificationReadFilter(filter) {
+    const next = ['all', 'unread', 'read'].includes(filter) ? filter : 'all';
+    state.notificationReadFilter = next;
+    renderShell({ preserveScroll: true });
+  }
+
+  function setNotificationSeverityFilter(filter) {
+    const next = ['all', 'error', 'warning', 'info'].includes(filter) ? filter : 'all';
+    state.notificationSeverityFilter = next;
+    renderShell({ preserveScroll: true });
+  }
+
+  function currentNotificationItems() {
+    const liveRun = currentLiveRun();
+    const liveNotifications = currentLiveRunNotifications(liveRun);
+    return toArray(liveNotifications.items || state.notifications).map(normalizeNotification);
+  }
+
+  function findNotificationById(id) {
+    const key = toText(id, '');
+    if (!key) {
+      return null;
+    }
+    return currentNotificationItems().find((item) => item.id === key) || null;
+  }
+
+  function markAllNotificationsRead() {
+    const ids = currentNotificationItems().map((item) => item.id).filter(Boolean);
+    setNotificationsReadState(ids, true);
+  }
+
+  function openNotificationLink(link, item = null) {
+    const normalized = normalizeNotificationLink(link);
+    if (!normalized) {
+      return;
+    }
+    const sourceItem = item ? normalizeNotification(item) : null;
+    if (sourceItem?.id) {
+      setNotificationReadState(sourceItem.id, true, { render: false });
+    }
+    if (normalized.kind === 'run') {
+      const target = normalized.target || normalized.run || sourceItem?.run || '';
+      if (target && state.runs.some((run) => run.id === target)) {
+        state.historySelection = target;
+        if (state.historyCompareSelection === target || !state.runs.some((run) => run.id === state.historyCompareSelection)) {
+          state.historyCompareSelection = historyCompareFallbackRunId(target);
+        }
+      }
+      setView('history');
+      return;
+    }
+    if (normalized.kind === 'task') {
+      const target = normalized.target || normalized.taskId || sourceItem?.taskId || '';
+      if (target) {
+        state.backlogSelection = target;
+      }
+      setView('backlog');
+      return;
+    }
+    if (normalized.kind === 'logs') {
+      const tail = ensureLogTailState();
+      const taskId = normalized.taskId || sourceItem?.taskId || '';
+      const search = normalized.search || sourceItem?.text || '';
+      const lineNumber = toMaybeNumber(normalized.lineNumber ?? sourceItem?.logLine);
+      const sourceId = normalized.source || sourceItem?.logSource || '';
+      const sourceAvailable = Boolean(sourceId && normalizeLogTailSources(tail.sources).some((source) => source.id === sourceId));
+      tail.filters = normalizeLogTailFilters({
+        ...tail.filters,
+        taskId,
+        search: compactText(search, 96),
+      });
+      resetServerLogTailState();
+      if (sourceAvailable) {
+        const selection = resolveLogTailSourceSelection({
+          ...tail,
+          sourceId,
+        });
+        if (selection.sourceId) {
+          tail.sourceId = selection.sourceId;
+          applyLogTailSourceSelection(tail, selection);
+        }
+      }
+      if (lineNumber != null && (!sourceId || sourceAvailable)) {
+        tail.selected = [lineNumber];
+      }
+      setView('logs');
+    }
+  }
+
   function setHistorySelection(id) {
     state.historySelection = id;
     if (state.historyCompareSelection === id || !state.runs.some((run) => run.id === state.historyCompareSelection)) {
@@ -20242,6 +20709,9 @@
     logsPaused: true,
     logFilter: 'all',
     notificationFilter: 'all',
+    notificationReadFilter: 'all',
+    notificationSeverityFilter: 'all',
+    notificationRead: normalizeNotificationReadState(readJSON(STORAGE.notificationsRead, {})),
     configSelection: 'repo',
     backlogSelection: defaults.backlogSelectedId,
     historySelection: defaults.history[0]?.id || '',
@@ -21893,9 +22363,54 @@
       return;
     }
 
+    const notifReadToggle = event.target.closest('[data-notification-read-toggle]');
+    if (notifReadToggle) {
+      const id = notifReadToggle.dataset.notificationReadToggle;
+      const item = findNotificationById(id);
+      setNotificationReadState(id, !(item ? notificationIsRead(item) : Boolean(state.notificationRead?.[id])));
+      return;
+    }
+
+    const notifLink = event.target.closest('[data-notification-link]');
+    if (notifLink) {
+      const id = notifLink.dataset.notificationId;
+      const item = findNotificationById(id);
+      openNotificationLink(
+        {
+          kind: notifLink.dataset.notificationLink,
+          target: notifLink.dataset.notificationTarget,
+          run: notifLink.dataset.notificationRun,
+          taskId: notifLink.dataset.notificationTask,
+          source: notifLink.dataset.notificationSource,
+          lineNumber: notifLink.dataset.notificationLine,
+          search: notifLink.dataset.notificationSearch,
+        },
+        item
+      );
+      return;
+    }
+
+    const notifBulkRead = event.target.closest('[data-notification-bulk-read]');
+    if (notifBulkRead) {
+      markAllNotificationsRead();
+      return;
+    }
+
     const notifFilter = event.target.closest('[data-notification-filter]');
     if (notifFilter) {
       setNotificationFilter(notifFilter.dataset.notificationFilter);
+      return;
+    }
+
+    const notifReadFilter = event.target.closest('[data-notification-read-filter]');
+    if (notifReadFilter) {
+      setNotificationReadFilter(notifReadFilter.dataset.notificationReadFilter);
+      return;
+    }
+
+    const notifSeverityFilter = event.target.closest('[data-notification-severity-filter]');
+    if (notifSeverityFilter) {
+      setNotificationSeverityFilter(notifSeverityFilter.dataset.notificationSeverityFilter);
       return;
     }
 

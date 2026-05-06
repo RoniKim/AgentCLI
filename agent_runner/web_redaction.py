@@ -315,10 +315,21 @@ def _redact_web_prompts_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _redact_web_notification_item(item: dict[str, Any]) -> dict[str, Any]:
     redacted = deepcopy(item)
-    for key in ("text", "message", "detail"):
+    for key in ("text", "message", "detail", "task_title", "taskTitle"):
         if redacted.get(key) not in (None, "", False):
             redacted[key] = REDACTED_VALUE
-    redacted["redaction"] = _web_redaction_meta("text", "message", "detail")
+    links = redacted.get("links")
+    if isinstance(links, list):
+        redacted["links"] = [
+            {
+                **link,
+                "search": REDACTED_VALUE,
+            }
+            if isinstance(link, dict) and link.get("search") not in (None, "", False)
+            else link
+            for link in links
+        ]
+    redacted["redaction"] = _web_redaction_meta("text", "message", "detail", "task_title", "taskTitle", "links.search")
     return redacted
 
 

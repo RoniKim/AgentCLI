@@ -8630,6 +8630,34 @@ Another unsupported line.
         notification_kinds = {item["kind"] for item in populated["notifications"]}
         self.assertIn("run_start", notification_kinds)
         self.assertIn("task_done", notification_kinds)
+        task_done_notification = next(item for item in populated["notifications"] if item["kind"] == "task_done")
+        self.assertIn("id", task_done_notification)
+        self.assertEqual("info", task_done_notification["severity"])
+        self.assertGreaterEqual(len(task_done_notification["links"]), 2)
+        self.assertIn("run", {link["kind"] for link in task_done_notification["links"]})
+        self.assertIn("logs", {link["kind"] for link in task_done_notification["links"]})
+        normalized_task_notification = _run_adapter_harness(
+            [
+                {
+                    "kind": "call",
+                    "name": "normalizeNotification",
+                    "args": [
+                        {
+                            "t": 1714132920000,
+                            "kind": "task_failed",
+                            "text": "T-020 | failed build",
+                            "run": "run_20260426_120000",
+                            "task_id": "T-020",
+                            "line_number": 8,
+                        }
+                    ],
+                }
+            ]
+        )[0]
+        self.assertEqual("error", normalized_task_notification["severity"])
+        self.assertEqual("T-020", normalized_task_notification["taskId"])
+        self.assertIn("task", {link["kind"] for link in normalized_task_notification["links"]})
+        self.assertIn("logs", {link["kind"] for link in normalized_task_notification["links"]})
 
         self.assertEqual([], empty["history"])
         self.assertEqual(0, empty["historySummary"]["runs"])
