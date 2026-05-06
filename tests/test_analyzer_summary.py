@@ -122,7 +122,7 @@ class AnalyzerSummaryTests(unittest.TestCase):
     def _write_summary(self) -> dict[str, object]:
         with (
             patch("agent_runner.utils.run_cmd", side_effect=AssertionError("run_cmd should not be used")),
-            patch("agent_runner.utils._CodexAppServerClient._rpc", side_effect=AssertionError("backend RPC should not be used")),
+            patch("agent_runner.backends.codex_quota._CodexAppServerClient._rpc", side_effect=AssertionError("backend RPC should not be used")),
         ):
             summary = write_analyzer_summary_artifacts(self.run_dir)
         on_disk = json.loads((self.run_dir / "ANALYZER_SUMMARY.json").read_text(encoding="utf-8"))

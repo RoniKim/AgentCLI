@@ -19,6 +19,7 @@ from typing import Any, Optional, Tuple
 import inspect
 
 from .base import BackendAdapter, BackendQuotaStatus
+from .claude_quota import check_quota_utilization, seconds_until_reset
 from ..process_guard import register_pid, unregister_pid_if_exited
 from ..analysis_cache import merge_dev_hints_to_global_changelog
 from ..docs import resolve_docs_dir, generate_docs_digest
@@ -159,7 +160,7 @@ from ..failure_policy import (
     should_preserve_for_review,
 )
 from ..task_failures import record_task_failure_result, record_task_failure_state
-from ..progress import print_cycle_report, TokenTracker, extract_claude_tokens
+from ..progress import print_cycle_report, TokenTracker
 from ..utils import (
     force_utf8_stdio,
     eprint,
@@ -172,8 +173,6 @@ from ..utils import (
     detect_stop_reason,
     write_heartbeat,
     loop_cycle_indices,
-    check_quota_utilization,
-    seconds_until_reset,
     severity_at_or_above,
     budget_exceeded,
     is_unsafe_path,
@@ -251,6 +250,27 @@ def _patch_prompt_for_claude(prompt: str) -> str:
     )
 
     return prompt
+
+
+def extract_claude_tokens(structured: Any) -> tuple[int, int]:
+    """Extract token usage from Claude SDK structured responses when available."""
+
+    try:
+        if structured is None:
+            return 0, 0
+        if isinstance(structured, dict):
+            usage = structured.get("usage") or {}
+            inp = int(usage.get("input_tokens", 0) or 0)
+            out = int(usage.get("output_tokens", 0) or 0)
+            return inp, out
+        usage = getattr(structured, "usage", None)
+        if usage:
+            inp = int(getattr(usage, "input_tokens", 0) or 0)
+            out = int(getattr(usage, "output_tokens", 0) or 0)
+            return inp, out
+        return 0, 0
+    except Exception:
+        return 0, 0
 
 
 def _build_claude_failure_outcome(

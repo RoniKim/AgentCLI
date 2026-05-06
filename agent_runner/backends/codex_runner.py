@@ -6,8 +6,9 @@ from collections.abc import Callable
 from typing import Any
 
 from .base import AbstractAgentRunner, BackendAdapter, BackendQuotaStatus
+from .codex_quota import check_codex_quota_utilization
 from ..codex_exec import CodexExecResult, _parse_events, codex_exec
-from ..utils import check_codex_quota_utilization, has_quota_text
+from ..utils import has_quota_text
 
 
 class CodexBackendAdapter(BackendAdapter):

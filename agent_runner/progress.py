@@ -9,9 +9,6 @@ from __future__ import annotations
 
 from typing import Any, List, Optional
 
-from .utils import eprint
-
-
 # ---------------------------------------------------------------------------
 # Duration / token formatting helpers
 # ---------------------------------------------------------------------------
@@ -91,59 +88,6 @@ class TokenTracker:
         if not parts:
             return ""
         return f"Tokens: {' + '.join(parts)} = {_fmt_tokens(self.grand_total())}"
-
-
-# ---------------------------------------------------------------------------
-# Token extraction helpers (SDK-specific, never-raise)
-# ---------------------------------------------------------------------------
-
-def extract_codex_tokens(result: Any) -> tuple[int, int]:
-    """Extract (input_tokens, output_tokens) from Codex RunResult.
-
-    Tries multiple attribute patterns for forward compatibility.
-    Returns (0, 0) if usage info is unavailable.
-    """
-    try:
-        inp, out = 0, 0
-        # Pattern 1: RunResult.raw_responses[].usage
-        for resp in getattr(result, "raw_responses", []) or []:
-            usage = getattr(resp, "usage", None)
-            if usage:
-                inp += int(getattr(usage, "input_tokens", 0) or 0)
-                out += int(getattr(usage, "output_tokens", 0) or 0)
-        # Pattern 2: aggregated usage on result object
-        if inp == 0 and out == 0:
-            usage = getattr(result, "usage", None)
-            if usage:
-                inp = int(getattr(usage, "input_tokens", 0) or 0)
-                out = int(getattr(usage, "output_tokens", 0) or 0)
-        return inp, out
-    except Exception:
-        return 0, 0
-
-
-def extract_claude_tokens(structured: Any) -> tuple[int, int]:
-    """Extract (input_tokens, output_tokens) from Claude SDK structured response.
-
-    The Claude Agent SDK subprocess protocol may not expose token usage yet.
-    Returns (0, 0) if unavailable.
-    """
-    try:
-        if structured is None:
-            return 0, 0
-        if isinstance(structured, dict):
-            usage = structured.get("usage") or {}
-            inp = int(usage.get("input_tokens", 0) or 0)
-            out = int(usage.get("output_tokens", 0) or 0)
-            return inp, out
-        usage = getattr(structured, "usage", None)
-        if usage:
-            inp = int(getattr(usage, "input_tokens", 0) or 0)
-            out = int(getattr(usage, "output_tokens", 0) or 0)
-            return inp, out
-        return 0, 0
-    except Exception:
-        return 0, 0
 
 
 # ---------------------------------------------------------------------------
