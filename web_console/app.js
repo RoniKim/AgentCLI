@@ -36,6 +36,7 @@
     'backlog',
     'pr-queue',
     'runbook',
+    'operations',
     'goals',
     'config',
     'prompts',
@@ -92,6 +93,7 @@
         backlog: 'Backlog',
         prQueue: 'PR Queue',
         runbook: 'Runbook',
+        operations: 'Operations',
         goals: 'Goals',
         config: 'Config',
         prompts: 'Prompts',
@@ -533,6 +535,47 @@
         mergeBlocked: 'merge preflight blocked',
         packetPath: 'Packet path',
         artifactMissing: 'artifact missing',
+      },
+      operations: {
+        title: 'Operations',
+        subtitle: 'TODO, Skills, Claude, MCP, plugin, and enterprise profile diagnostics',
+        todoPanel: 'TODO management',
+        skillsPanel: 'Skills doctor',
+        claudePanel: 'Claude advanced',
+        mcpPanel: 'MCP diagnostics',
+        pluginPanel: 'Plugin stages',
+        enterprisePanel: 'Enterprise profile',
+        activePath: 'Active path',
+        freshness: 'Freshness',
+        pmInjection: 'PM injection',
+        goalsFirst: 'GOALS-first',
+        preview: 'Safe preview',
+        editEndpoint: 'Edit endpoint',
+        roots: 'Roots',
+        discovered: 'Discovered',
+        selected: 'Selected',
+        missing: 'Missing',
+        suggestions: 'Suggestions',
+        warnings: 'Warnings',
+        enabledFeatures: 'Enabled features',
+        sdk: 'SDK',
+        issues: 'Issues',
+        selectedMode: 'Selected mode',
+        effectiveMode: 'Effective mode',
+        timeout: 'Timeout',
+        unavailableTools: 'Unavailable tools',
+        safeFallback: 'Safe fallback',
+        allowlist: 'Allowlist',
+        strictMode: 'Strict mode',
+        diagnostics: 'Diagnostics',
+        effectiveProfile: 'Effective profile',
+        budgetFloors: 'Budget floors',
+        policySecurity: 'Policy/security',
+        noPreview: 'No preview was included in the current status snapshot.',
+        noSuggestions: 'No fuzzy suggestions.',
+        noWarnings: 'No warnings.',
+        openConfig: 'Open Config',
+        refreshPreview: 'Refresh TODO preview',
       },
       goals: {
         title: 'Goals',
@@ -1055,6 +1098,7 @@
         backlog: '백로그',
         prQueue: 'PR 큐',
         runbook: '런북',
+        operations: '운영',
         goals: '목표',
         config: '설정',
         prompts: '프롬프트',
@@ -1406,6 +1450,47 @@
         mergeBlocked: '병합 사전 점검 차단됨',
         packetPath: '패킷 경로',
         artifactMissing: '산출물 없음',
+      },
+      operations: {
+        title: '운영',
+        subtitle: 'TODO, Skills, Claude, MCP, 플러그인, 엔터프라이즈 프로필 진단',
+        todoPanel: 'TODO 관리',
+        skillsPanel: 'Skills 진단',
+        claudePanel: 'Claude 고급',
+        mcpPanel: 'MCP 진단',
+        pluginPanel: '플러그인 스테이지',
+        enterprisePanel: '엔터프라이즈 프로필',
+        activePath: '활성 경로',
+        freshness: '신선도',
+        pmInjection: 'PM 주입',
+        goalsFirst: 'GOALS 우선',
+        preview: '안전 미리보기',
+        editEndpoint: '편집 엔드포인트',
+        roots: '루트',
+        discovered: '발견됨',
+        selected: '선택됨',
+        missing: '누락',
+        suggestions: '제안',
+        warnings: '경고',
+        enabledFeatures: '활성 기능',
+        sdk: 'SDK',
+        issues: '이슈',
+        selectedMode: '선택 모드',
+        effectiveMode: '적용 모드',
+        timeout: '타임아웃',
+        unavailableTools: '사용 불가 도구',
+        safeFallback: '안전 폴백',
+        allowlist: '허용 목록',
+        strictMode: 'Strict 모드',
+        diagnostics: '진단',
+        effectiveProfile: '적용 프로필',
+        budgetFloors: '예산 하한',
+        policySecurity: '정책/보안',
+        noPreview: '현재 상태 스냅샷에는 미리보기가 포함되지 않았습니다.',
+        noSuggestions: '퍼지 제안이 없습니다.',
+        noWarnings: '경고가 없습니다.',
+        openConfig: '설정 열기',
+        refreshPreview: 'TODO 미리보기 새로고침',
       },
       goals: {
         title: '목표',
@@ -2670,6 +2755,7 @@
       backlog: 'nav.backlog',
       'pr-queue': 'nav.prQueue',
       runbook: 'nav.runbook',
+      operations: 'nav.operations',
       goals: 'nav.goals',
       config: 'nav.config',
       prompts: 'nav.prompts',
@@ -2710,6 +2796,7 @@
     backlog: 'g b',
     'pr-queue': 'g q',
     runbook: 'g u',
+    operations: 'g o',
     goals: 'g g',
     config: 'g c',
     prompts: 'g t',
@@ -3384,6 +3471,7 @@
     backlog: ['backlog'],
     'pr-queue': ['prQueue'],
     runbook: ['activeRun', 'runnerControl', 'worktree'],
+    operations: ['todo', 'skills', 'claude', 'mcp', 'plugins', 'enterprise'],
     goals: ['goals'],
     config: ['config', 'runnerControl'],
     prompts: ['prompts'],
@@ -3391,7 +3479,7 @@
     notifications: ['notifications'],
     worktree: ['worktree'],
     'instance-health': ['instanceHealth'],
-    mobile: ['activeRun', 'stages', 'logs', 'backlog', 'prQueue', 'goals', 'config', 'prompts', 'notifications', 'worktree', 'instanceHealth', 'runnerControl'],
+    mobile: ['activeRun', 'stages', 'logs', 'backlog', 'prQueue', 'todo', 'skills', 'claude', 'mcp', 'goals', 'config', 'prompts', 'notifications', 'worktree', 'instanceHealth', 'runnerControl'],
     landing: ['activeRun'],
   };
 
@@ -5620,6 +5708,12 @@
       metrics: t('common.noDataAvailableYet'),
       history: t('history.emptyState'),
       experience: t('experience.unavailable'),
+      todo: t('operations.todoPanel'),
+      skills: t('operations.skillsPanel'),
+      claude: t('operations.claudePanel'),
+      mcp: t('operations.mcpPanel'),
+      plugins: t('operations.pluginPanel'),
+      enterprise: t('operations.enterprisePanel'),
       worktree: t('worktree.noPendingMerge'),
       prQueue: t('prQueue.noPackets'),
       runnerControl: t('runner.controlsDisabled'),
@@ -7143,6 +7237,145 @@
     };
   }
 
+  function normalizeTodoStatus(raw) {
+    const data = toObject(raw);
+    const preview = toObject(data.preview);
+    const controls = toObject(data.controls);
+    const edit = toObject(controls.edit);
+    const pmInjection = toObject(data.pmInjection || data.pm_injection);
+    return {
+      ok: Boolean(data.ok ?? data.state !== 'error'),
+      available: Boolean(data.available ?? data.exists),
+      state: toText(data.state, 'missing'),
+      message: toText(data.message, ''),
+      activePath: toText(data.activePath || data.active_path, ''),
+      activeRelativePath: toText(data.activeRelativePath || data.active_relative_path, ''),
+      freshness: toText(data.freshness, 'missing'),
+      updatedAt: toText(data.updatedAt || data.updated_at || data.mtime, ''),
+      ageSeconds: toMaybeNumber(data.ageSeconds ?? data.age_seconds),
+      lineCount: toNumber(data.lineCount ?? data.line_count, 0),
+      bytes: toNumber(data.bytes, 0),
+      preview: {
+        included: Boolean(preview.included),
+        text: toText(preview.text, ''),
+        lines: toArray(preview.lines).map((line) => toText(line, '')).filter(Boolean),
+        truncated: Boolean(preview.truncated),
+      },
+      pmInjection: {
+        enabled: Boolean(pmInjection.enabled),
+        state: toText(pmInjection.state, 'missing'),
+        priorityPolicy: toText(pmInjection.priorityPolicy || pmInjection.priority_policy, ''),
+        doesNotOverrideGoals: Boolean(pmInjection.doesNotOverrideGoals ?? pmInjection.does_not_override_goals),
+        injectedLines: toNumber(pmInjection.injectedLines ?? pmInjection.injected_lines, 0),
+        summary: toText(pmInjection.summary, ''),
+      },
+      controls: {
+        edit: {
+          enabled: Boolean(edit.enabled),
+          endpoint: toText(edit.endpoint, '/api/todo/save'),
+          method: toText(edit.method, 'POST'),
+          requiresOptIn: Boolean(edit.requiresOptIn ?? edit.requires_opt_in),
+        },
+      },
+    };
+  }
+
+  function normalizeSkillsStatus(raw) {
+    const data = toObject(raw);
+    return {
+      enabled: Boolean(data.enabled),
+      roots: toArray(data.roots).map((root) => toObject(root)),
+      rootCount: toNumber(data.rootCount ?? data.root_count, 0),
+      existingRootCount: toNumber(data.existingRootCount ?? data.existing_root_count, 0),
+      discoveredCount: toNumber(data.discoveredCount ?? data.discovered_count, 0),
+      skillIds: toArray(data.skillIds || data.skill_ids).map((item) => toText(item, '')).filter(Boolean),
+      selectedSkillIds: toArray(data.selectedSkillIds || data.selected_skill_ids).map((item) => toText(item, '')).filter(Boolean),
+      missingSkillIds: toArray(data.missingSkillIds || data.missing_skill_ids).map((item) => toText(item, '')).filter(Boolean),
+      suggestions: toArray(data.suggestions).map((item) => toObject(item)),
+      warnings: toArray(data.warnings).map((item) => toText(item, '')).filter(Boolean),
+      inlineMode: toText(data.inlineMode || data.inline_mode, ''),
+      skillMatchAutofix: Boolean(data.skillMatchAutofix ?? data.skill_match_autofix),
+      skillMatchAutofixThreshold: toNumber(data.skillMatchAutofixThreshold ?? data.skill_match_autofix_threshold, 0),
+    };
+  }
+
+  function normalizeClaudeAdvanced(raw) {
+    const data = toObject(raw);
+    const summary = toObject(data.summary);
+    const sdk = toObject(data.sdk);
+    return {
+      status: toText(data.status, 'unknown'),
+      valid: Boolean(data.valid),
+      sdk: {
+        available: Boolean(sdk.available),
+        version: toText(sdk.version, ''),
+        error: toText(sdk.error, ''),
+      },
+      features: Object.values(toObject(data.features)).map((item) => toObject(item)),
+      issues: toArray(data.issues).map((item) => toObject(item)),
+      warnings: toArray(data.warnings).map((item) => toObject(item)),
+      errors: toArray(data.errors).map((item) => toObject(item)),
+      mcpTools: toArray(data.mcpTools || data.mcp_tools).map((item) => toText(item, '')).filter(Boolean),
+      summary: {
+        enabledCount: toNumber(summary.enabledCount ?? summary.enabled_count, 0),
+        issueCount: toNumber(summary.issueCount ?? summary.issue_count, 0),
+        warningCount: toNumber(summary.warningCount ?? summary.warning_count, 0),
+        errorCount: toNumber(summary.errorCount ?? summary.error_count, 0),
+      },
+    };
+  }
+
+  function normalizeMcpDiagnostics(raw) {
+    const data = toObject(raw);
+    const fallback = toObject(data.safeFallback || data.safe_fallback);
+    return {
+      status: toText(data.status, 'unknown'),
+      valid: Boolean(data.valid),
+      selectedMode: toText(data.selectedMode || data.selected_mode, ''),
+      effectiveMode: toText(data.effectiveMode || data.effective_mode || data.mode, ''),
+      timeoutSeconds: toNumber(data.timeoutSeconds ?? data.timeout_seconds, 0),
+      codexPackage: toText(data.codexPackage || data.codex_package, ''),
+      requiredTools: toArray(data.requiredTools || data.required_tools).map((item) => toText(item, '')).filter(Boolean),
+      unavailableTools: toArray(data.unavailableTools || data.unavailable_tools).map((item) => toText(item, '')).filter(Boolean),
+      toolDetails: toArray(data.toolDetails || data.tool_details).map((item) => toObject(item)),
+      warnings: toArray(data.warnings).map((item) => toObject(item)),
+      safeFallback: {
+        active: Boolean(fallback.active),
+        blocking: Boolean(fallback.blocking),
+        reason: toText(fallback.reason, ''),
+        message: toText(fallback.message, ''),
+        nonMcpRunsBlocked: Boolean(fallback.nonMcpRunsBlocked ?? fallback.non_mcp_runs_blocked),
+      },
+    };
+  }
+
+  function normalizePluginStatus(raw) {
+    const data = toObject(raw);
+    const diagnostics = toObject(data.diagnostics);
+    return {
+      enabled: Boolean(data.enabled),
+      strict: Boolean(data.strict),
+      allowlist: toArray(data.allowlist).map((item) => toText(item, '')).filter(Boolean),
+      status: toText(data.status || diagnostics.status, data.enabled ? 'unknown' : 'disabled'),
+      diagnostics,
+      diagnosticsPath: toText(data.diagnosticsPath || data.diagnostics_path, ''),
+      items: toArray(diagnostics.items).map((item) => toObject(item)),
+      counts: toObject(diagnostics.counts),
+      error: toText(diagnostics.error, ''),
+    };
+  }
+
+  function normalizeEnterpriseProfile(raw, configContract = {}) {
+    const data = toObject(raw);
+    const contract = toObject(configContract);
+    const effective = toObject(data.profileEffective || data.effective || contract.profileEffective || contract.profile_effective);
+    return {
+      profile: toText(data.profile || effective.profile, 'personal'),
+      effective,
+      profileEffective: effective,
+    };
+  }
+
   function worktreeDiagnosticsCategoryLabel(category) {
     const map = {
       active: 'worktree.filterActive',
@@ -7567,6 +7800,8 @@
         tokens: normalizeListValues(redactionSource.tokens || fallback.redaction?.tokens || []),
       },
       restart_required_paths: restartRequiredPaths,
+      profile_effective: toObject(raw.profile_effective || raw.profileEffective || fallback.profile_effective || fallback.profileEffective),
+      profileEffective: toObject(raw.profileEffective || raw.profile_effective || fallback.profileEffective || fallback.profile_effective),
       backups,
       meta: {
         ...fallbackMeta,
@@ -7878,6 +8113,8 @@
         tokens: toArray(context.redaction?.tokens || raw.redaction?.tokens),
       },
       restart_required_paths: toArray(context.restart_required_paths || raw.restart_required_paths || raw.restartRequiredPaths),
+      profile_effective: toObject(raw.profile_effective || raw.profileEffective || context.profile_effective || context.profileEffective),
+      profileEffective: toObject(raw.profileEffective || raw.profile_effective || context.profileEffective || context.profile_effective),
     };
     return buildConfigContract(raw, fallback);
   }
@@ -8526,6 +8763,12 @@
     const rawSectionState = toObject(raw.sectionState || raw.section_state);
     const hasInstanceHealthPayload = Object.prototype.hasOwnProperty.call(raw, 'instance_health') || Object.prototype.hasOwnProperty.call(raw, 'instanceHealth');
     const instanceHealth = normalizeInstanceHealth(hasInstanceHealthPayload ? (raw.instance_health || raw.instanceHealth || {}) : {});
+    const todo = normalizeTodoStatus(raw.todo || {});
+    const skillsStatus = normalizeSkillsStatus(raw.skills_status || raw.skillsStatus || {});
+    const claudeAdvanced = normalizeClaudeAdvanced(raw.claude_advanced || raw.claudeAdvanced || {});
+    const mcpDiagnostics = normalizeMcpDiagnostics(raw.mcp_diagnostics || raw.mcpDiagnostics || {});
+    const pluginStatus = normalizePluginStatus(raw.plugin_status || raw.pluginStatus || {});
+    const enterpriseProfile = normalizeEnterpriseProfile(raw.enterprise_profile || raw.enterpriseProfile || {}, configContract);
     const incomingInstanceHealthSection = sectionStateFromPayload(rawSectionState, 'instanceHealth');
     const liveRunSource = {
       ...toObject(raw.liveRun || raw.live_run || {}),
@@ -8619,6 +8862,12 @@
       worktreeDiagnostics,
       instanceHealth,
       instanceHealthPresent: hasInstanceHealthPayload,
+      todo,
+      skillsStatus,
+      claudeAdvanced,
+      mcpDiagnostics,
+      pluginStatus,
+      enterpriseProfile,
       runnerControl,
       webInstance,
       liveRun,
@@ -8644,6 +8893,12 @@
         experience: experience.state,
         prQueue: prQueue.stateInfo,
         worktree: worktree.state,
+        todo: sectionStateFromPayload(rawSectionState, 'todo') || buildSectionState('todo', todo.state === 'ready' ? 'ready' : todo.state === 'missing' ? 'empty' : todo.state === 'error' ? 'error' : 'partial', todo.message || fallbackSectionMessage('todo')),
+        skills: sectionStateFromPayload(rawSectionState, 'skills') || buildSectionState('skills', skillsStatus.enabled ? (skillsStatus.warnings.length || skillsStatus.missingSkillIds.length ? 'partial' : 'ready') : 'disabled', skillsStatus.enabled ? '' : fallbackSectionMessage('skills')),
+        claude: sectionStateFromPayload(rawSectionState, 'claude') || buildSectionState('claude', claudeAdvanced.status === 'ok' ? 'ready' : claudeAdvanced.status === 'warning' ? 'partial' : claudeAdvanced.status === 'error' ? 'error' : 'empty', claudeAdvanced.status === 'ok' ? '' : fallbackSectionMessage('claude')),
+        mcp: sectionStateFromPayload(rawSectionState, 'mcp') || buildSectionState('mcp', mcpDiagnostics.status === 'ok' ? 'ready' : mcpDiagnostics.status === 'warning' ? 'partial' : 'empty', mcpDiagnostics.status === 'ok' ? '' : fallbackSectionMessage('mcp')),
+        plugins: sectionStateFromPayload(rawSectionState, 'plugins') || buildSectionState('plugins', pluginStatus.enabled ? (pluginStatus.status === 'failed' ? 'error' : pluginStatus.status === 'partial' || pluginStatus.status === 'unknown' ? 'partial' : 'ready') : 'disabled', pluginStatus.enabled ? '' : fallbackSectionMessage('plugins')),
+        enterprise: sectionStateFromPayload(rawSectionState, 'enterprise') || buildSectionState('enterprise', enterpriseProfile.profile === 'enterprise' ? 'ready' : 'disabled', enterpriseProfile.profile === 'enterprise' ? '' : fallbackSectionMessage('enterprise')),
         instanceHealth: incomingInstanceHealthSection || buildSectionState(
           'instanceHealth',
           instanceHealth.status === 'error' ? 'error' : instanceHealth.status === 'warning' ? 'partial' : 'ready',
@@ -9272,6 +9527,12 @@
       worktreeDiagnostics: normalizeWorktreeDiagnostics({}),
       worktreeDiagnosticsFilter: normalizeWorktreeDiagnosticsFilter({}),
       instanceHealth: normalizeInstanceHealth({}),
+      todo: normalizeTodoStatus({}),
+      skillsStatus: normalizeSkillsStatus({}),
+      claudeAdvanced: normalizeClaudeAdvanced({}),
+      mcpDiagnostics: normalizeMcpDiagnostics({}),
+      pluginStatus: normalizePluginStatus({}),
+      enterpriseProfile: normalizeEnterpriseProfile({}, {}),
       worktreeMerge: {
         status: 'none',
         mode: 'manual',
@@ -9408,6 +9669,12 @@
         history: buildSectionState('history', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         experience: buildSectionState('experience', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         prQueue: buildSectionState('prQueue', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        todo: buildSectionState('todo', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        skills: buildSectionState('skills', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        claude: buildSectionState('claude', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        mcp: buildSectionState('mcp', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        plugins: buildSectionState('plugins', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        enterprise: buildSectionState('enterprise', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         worktree: buildSectionState('worktree', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         instanceHealth: buildSectionState('instanceHealth', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         runnerControl: buildSectionState('runnerControl', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
@@ -9812,6 +10079,12 @@
       worktreeDiagnostics: normalizeWorktreeDiagnostics({}),
       worktreeDiagnosticsFilter: normalizeWorktreeDiagnosticsFilter({}),
       instanceHealth: normalizeInstanceHealth({}),
+      todo: normalizeTodoStatus({}),
+      skillsStatus: normalizeSkillsStatus({}),
+      claudeAdvanced: normalizeClaudeAdvanced({}),
+      mcpDiagnostics: normalizeMcpDiagnostics({}),
+      pluginStatus: normalizePluginStatus({}),
+      enterpriseProfile: normalizeEnterpriseProfile({}, {}),
       worktreeAction: null,
       worktreeHistoricalOpen: false,
       history: [
@@ -9904,6 +10177,12 @@
         history: buildSectionState('history', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         experience: buildSectionState('experience', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         prQueue: buildSectionState('prQueue', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
+        todo: buildSectionState('todo', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
+        skills: buildSectionState('skills', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
+        claude: buildSectionState('claude', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
+        mcp: buildSectionState('mcp', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
+        plugins: buildSectionState('plugins', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
+        enterprise: buildSectionState('enterprise', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         worktree: buildSectionState('worktree', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         instanceHealth: buildSectionState('instanceHealth', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         runnerControl: buildSectionState('runnerControl', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
@@ -10036,6 +10315,13 @@
     renderLogTailBanner,
     renderLogTailFilters,
     normalizeWorktreeDiagnosticsFilter,
+    normalizeTodoStatus,
+    normalizeSkillsStatus,
+    normalizeClaudeAdvanced,
+    normalizeMcpDiagnostics,
+    normalizePluginStatus,
+    normalizeEnterpriseProfile,
+    renderOperations,
     worktreeActionPresentation,
     worktreeActionButtonClass,
     setWorktreeDiagnosticsFilter,
@@ -10236,6 +10522,12 @@
     if (next.instanceHealthPresent !== false) {
       state.instanceHealth = normalizeInstanceHealth(next.instanceHealth || next.instance_health || {});
     }
+    state.todo = normalizeTodoStatus(next.todo || {});
+    state.skillsStatus = normalizeSkillsStatus(next.skillsStatus || next.skills_status || {});
+    state.claudeAdvanced = normalizeClaudeAdvanced(next.claudeAdvanced || next.claude_advanced || {});
+    state.mcpDiagnostics = normalizeMcpDiagnostics(next.mcpDiagnostics || next.mcp_diagnostics || {});
+    state.pluginStatus = normalizePluginStatus(next.pluginStatus || next.plugin_status || {});
+    state.enterpriseProfile = normalizeEnterpriseProfile(next.enterpriseProfile || next.enterprise_profile || {}, state.configContract);
     state.runnerControl = normalizeRunnerControl(next.runnerControl);
     state.liveRun = toObject(next.liveRun);
     state.webInstance = normalizeWebInstance(next.webInstance);
@@ -16127,6 +16419,7 @@
           { view: 'backlog', label: viewLabel('backlog'), shortcut: VIEW_SHORTCUTS.backlog },
           { view: 'pr-queue', label: viewLabel('pr-queue'), shortcut: VIEW_SHORTCUTS['pr-queue'], badge: state.prQueue?.summary?.blocked ? '!' : '' },
           { view: 'runbook', label: viewLabel('runbook'), shortcut: VIEW_SHORTCUTS.runbook },
+          { view: 'operations', label: viewLabel('operations'), shortcut: VIEW_SHORTCUTS.operations },
           { view: 'goals', label: viewLabel('goals'), shortcut: VIEW_SHORTCUTS.goals },
           { view: 'config', label: viewLabel('config'), shortcut: VIEW_SHORTCUTS.config },
           { view: 'prompts', label: viewLabel('prompts'), shortcut: VIEW_SHORTCUTS.prompts },
@@ -19527,6 +19820,149 @@
     );
   }
 
+  function operationChipList(values, emptyText, className = 'chip--info') {
+    const items = toArray(values).map((item) => toText(item, '')).filter(Boolean);
+    if (!items.length) {
+      return `<span class="summary-note">${escapeHTML(emptyText || t('common.none'))}</span>`;
+    }
+    return items.slice(0, 8).map((item) => chip(item, className)).join('');
+  }
+
+  function operationWarningList(values, emptyText = t('operations.noWarnings')) {
+    const items = toArray(values).map((item) => {
+      const row = toObject(item);
+      return toText(row.message || row.code || item, '');
+    }).filter(Boolean);
+    if (!items.length) {
+      return `<div class="summary-note">${escapeHTML(emptyText)}</div>`;
+    }
+    return `<div class="compact-list">${items.slice(0, 6).map((item) => compactFactItem(t('operations.warnings'), item, '')).join('')}</div>`;
+  }
+
+  function renderOperations() {
+    const todo = normalizeTodoStatus(state.todo || {});
+    const skills = normalizeSkillsStatus(state.skillsStatus || {});
+    const claude = normalizeClaudeAdvanced(state.claudeAdvanced || {});
+    const mcp = normalizeMcpDiagnostics(state.mcpDiagnostics || {});
+    const plugins = normalizePluginStatus(state.pluginStatus || {});
+    const enterprise = normalizeEnterpriseProfile(state.enterpriseProfile || {}, state.configContract || {});
+    const effective = toObject(enterprise.profileEffective || enterprise.effective);
+    const budgetFloors = toObject(effective.budgetFloors || effective.budget_floors);
+    const budgetValues = toObject(effective.budgetValues || effective.budget_values);
+    const todoPreview = todo.preview.lines.length
+      ? `<pre class="runbook-command__text">${escapeHTML(todo.preview.lines.join('\n'))}</pre>`
+      : `<div class="summary-note">${escapeHTML(t('operations.noPreview'))}</div>`;
+    const skillRoots = skills.roots.length
+      ? `<div class="compact-list">${skills.roots.map((root) => compactFactItem(toText(root.status, 'unknown'), toText(root.path || root.raw, t('common.none')), '')).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('common.none'))}</div>`;
+    const skillSuggestions = skills.suggestions.length
+      ? `<div class="compact-list">${skills.suggestions.map((suggestion) => {
+          const matches = toArray(toObject(suggestion).matches).map((match) => {
+            const row = toObject(match);
+            return `${toText(row.skillId || row.skill_id, '')} ${toText(row.name, '')}`.trim();
+          }).filter(Boolean).join(', ');
+          return compactFactItem(toText(toObject(suggestion).missing, t('common.unknown')), matches || t('operations.noSuggestions'), '');
+        }).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('operations.noSuggestions'))}</div>`;
+    const claudeFeatures = claude.features.length
+      ? `<div class="compact-list">${claude.features.map((feature) => {
+          const status = toText(feature.status, 'unknown');
+          return compactFactItem(toText(feature.label || feature.id, 'feature'), status, feature.enabled ? t('common.enabled') : t('common.disabled'));
+        }).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('common.none'))}</div>`;
+    const pluginCounts = Object.entries(toObject(plugins.counts)).map(([key, value]) => `${key}: ${value}`);
+    const pluginItems = plugins.items.length
+      ? `<div class="compact-list">${plugins.items.slice(0, 6).map((item) => compactFactItem(toText(item.spec, t('common.unknown')), `${toText(item.status, '')} | ${toText(item.reason, '')}`, toText(item.action, ''))).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('common.none'))}</div>`;
+    const budgetRows = Object.keys(budgetFloors).length
+      ? `<div class="compact-list">${Object.keys(budgetFloors).map((key) => compactFactItem(key, String(budgetValues[key] ?? 0), `${t('operations.budgetFloors')} ${budgetFloors[key]}`)).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('common.none'))}</div>`;
+    const summaryCards = [
+      detailCard(t('operations.todoPanel'), todo.state, todo.state === 'ready' ? 'runner-control__value--accent' : 'runner-control__value--warn'),
+      detailCard(t('operations.skillsPanel'), `${skills.discoveredCount}/${skills.rootCount}`, skills.warnings.length || skills.missingSkillIds.length ? 'runner-control__value--warn' : 'runner-control__value--accent'),
+      detailCard(t('operations.claudePanel'), claude.status, claude.status === 'error' ? 'runner-control__value--err' : claude.status === 'warning' ? 'runner-control__value--warn' : 'runner-control__value--accent'),
+      detailCard(t('operations.mcpPanel'), mcp.status, mcp.status === 'warning' ? 'runner-control__value--warn' : 'runner-control__value--accent'),
+      detailCard(t('operations.pluginPanel'), plugins.status, plugins.status === 'failed' ? 'runner-control__value--err' : plugins.status === 'partial' || plugins.status === 'unknown' ? 'runner-control__value--warn' : 'runner-control__value--accent'),
+      detailCard(t('operations.enterprisePanel'), enterprise.profile, enterprise.profile === 'enterprise' ? 'runner-control__value--accent' : 'runner-control__value--muted'),
+    ].join('');
+    return viewShell(
+      'operations',
+      t('operations.title'),
+      t('operations.subtitle'),
+      `${button(t('topbar.refresh'), 'refresh-status', 'button--quiet')} ${button(t('operations.openConfig'), 'nav-config', 'button--quiet')}`,
+      `
+        ${sectionNotice('todo')}
+        ${sectionNotice('skills')}
+        ${sectionNotice('claude')}
+        ${sectionNotice('mcp')}
+        ${sectionNotice('plugins')}
+        ${sectionNotice('enterprise')}
+        <div class="runner-control__details">${summaryCards}</div>
+        <div class="view-grid view-grid--two">
+          ${panel(t('operations.todoPanel'), `${escapeHTML(todo.state)} | ${escapeHTML(todo.freshness)}`, `
+            <div class="compact-list">
+              ${compactFactItem(t('operations.activePath'), todo.activeRelativePath || todo.activePath || t('common.none'), todo.updatedAt ? fmtRelative(todo.updatedAt) : '')}
+              ${compactFactItem(t('operations.pmInjection'), todo.pmInjection.state, todo.pmInjection.doesNotOverrideGoals ? t('operations.goalsFirst') : '')}
+              ${compactFactItem(t('operations.editEndpoint'), todo.controls.edit.endpoint, todo.controls.edit.requiresOptIn ? t('runner.confirmationRequired') : '')}
+            </div>
+            <div class="summary-note">${escapeHTML(t('operations.preview'))}</div>
+            ${todoPreview}
+          `)}
+          ${panel(t('operations.skillsPanel'), `${escapeHTML(skills.existingRootCount)}/${escapeHTML(skills.rootCount)} ${escapeHTML(t('operations.roots'))}`, `
+            <div class="runner-control__details">
+              ${detailCard(t('operations.discovered'), String(skills.discoveredCount), 'runner-control__value--accent')}
+              ${detailCard(t('operations.selected'), String(skills.selectedSkillIds.length), skills.selectedSkillIds.length ? 'runner-control__value--accent' : 'runner-control__value--muted')}
+              ${detailCard(t('operations.missing'), String(skills.missingSkillIds.length), skills.missingSkillIds.length ? 'runner-control__value--warn' : 'runner-control__value--accent')}
+            </div>
+            ${skillRoots}
+            <div class="summary-note">${escapeHTML(t('operations.selected'))}</div>
+            ${operationChipList(skills.selectedSkillIds, t('common.none'), 'chip--info')}
+            <div class="summary-note">${escapeHTML(t('operations.suggestions'))}</div>
+            ${skillSuggestions}
+            ${operationWarningList(skills.warnings)}
+          `)}
+          ${panel(t('operations.claudePanel'), `${escapeHTML(claude.summary.enabledCount)} ${escapeHTML(t('operations.enabledFeatures'))} | ${escapeHTML(claude.summary.issueCount)} ${escapeHTML(t('operations.issues'))}`, `
+            <div class="compact-list">
+              ${compactFactItem(t('common.status'), claude.status, claude.valid ? t('common.ready') : t('operations.issues'))}
+              ${compactFactItem(t('operations.sdk'), claude.sdk.available ? t('common.available') : t('common.unavailable'), claude.sdk.version || claude.sdk.error)}
+              ${compactFactItem('MCP tools', claude.mcpTools.join(', ') || t('common.none'), '')}
+            </div>
+            ${claudeFeatures}
+            ${operationWarningList(claude.issues, t('common.none'))}
+          `)}
+          ${panel(t('operations.mcpPanel'), `${escapeHTML(mcp.selectedMode || t('common.unknown'))} -> ${escapeHTML(mcp.effectiveMode || t('common.unknown'))}`, `
+            <div class="compact-list">
+              ${compactFactItem(t('operations.selectedMode'), mcp.selectedMode || t('common.none'), '')}
+              ${compactFactItem(t('operations.effectiveMode'), mcp.effectiveMode || t('common.none'), '')}
+              ${compactFactItem(t('operations.timeout'), `${mcp.timeoutSeconds}s`, '')}
+              ${compactFactItem(t('operations.safeFallback'), mcp.safeFallback.active ? t('common.enabled') : t('common.disabled'), mcp.safeFallback.message || mcp.safeFallback.reason)}
+            </div>
+            <div class="summary-note">${escapeHTML(t('operations.unavailableTools'))}</div>
+            ${operationChipList(mcp.unavailableTools, t('common.none'), 'chip--warn')}
+            ${operationWarningList(mcp.warnings)}
+          `)}
+          ${panel(t('operations.pluginPanel'), `${escapeHTML(plugins.status)} | ${escapeHTML(t('operations.strictMode'))}: ${escapeHTML(plugins.strict ? t('common.enabled') : t('common.disabled'))}`, `
+            <div class="compact-list">
+              ${compactFactItem(t('common.status'), plugins.status, plugins.enabled ? t('common.enabled') : t('common.disabled'))}
+              ${compactFactItem(t('operations.allowlist'), plugins.allowlist.join(', ') || t('common.none'), '')}
+              ${compactFactItem(t('operations.diagnostics'), pluginCounts.join(', ') || t('common.none'), plugins.diagnosticsPath)}
+            </div>
+            ${pluginItems}
+          `)}
+          ${panel(t('operations.enterprisePanel'), `${escapeHTML(enterprise.profile)} | ${escapeHTML(t('operations.effectiveProfile'))}`, `
+            <div class="compact-list">
+              ${compactFactItem(t('common.status'), effective.enterprise ? t('common.enabled') : t('common.disabled'), '')}
+              ${compactFactItem('Security', effective.securityEnabled || effective.security_enabled ? t('common.enabled') : t('common.disabled'), effective.securityStageInserted || effective.security_stage_inserted ? 'Security stage inserted' : '')}
+              ${compactFactItem(t('operations.policySecurity'), effective.policyEnabled || effective.policy_enabled ? t('common.enabled') : t('common.disabled'), '')}
+              ${compactFactItem(t('operations.budgetFloors'), effective.budgetFloorEnforced || effective.budget_floor_enforced ? t('common.ready') : t('common.unavailable'), '')}
+            </div>
+            ${budgetRows}
+          `)}
+        </div>
+      `
+    );
+  }
+
   function renderInstanceHealth() {
     const health = normalizeInstanceHealth(state.instanceHealth || {});
     const guard = health.processGuard;
@@ -20391,6 +20827,8 @@
         return renderPrQueue();
       case 'runbook':
         return renderRunbook();
+      case 'operations':
+        return renderOperations();
       case 'goals':
         return renderGoals();
       case 'config':
@@ -20433,6 +20871,7 @@
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-worktree', title: t('palette.openWorktreeReview'), shortcut: 'worktree' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-pr-queue', title: t('palette.openPrQueue'), shortcut: 'pr queue' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-runbook', title: t('palette.openRunbook'), shortcut: 'runbook' },
+      { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-operations', title: t('operations.title'), shortcut: 'operations' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-mobile', title: t('palette.openMobilePreview'), shortcut: 'mobile' },
       { kind: 'action', kindLabel: t('palette.actionKind'), action: 'nav-landing', title: t('palette.openLandingPreview'), shortcut: 'landing' },
     ];
@@ -20996,6 +21435,7 @@
       'nav-backlog': 'backlog',
       'nav-pr-queue': 'pr-queue',
       'nav-runbook': 'runbook',
+      'nav-operations': 'operations',
       'nav-goals': 'goals',
       'nav-config': 'config',
       'nav-prompts': 'prompts',
@@ -21126,6 +21566,7 @@
       case 'nav-backlog':
       case 'nav-pr-queue':
       case 'nav-runbook':
+      case 'nav-operations':
       case 'nav-goals':
       case 'nav-config':
       case 'nav-prompts':
@@ -21581,6 +22022,12 @@
     worktreeDiagnostics: clone(defaults.worktreeDiagnostics),
     worktreeDiagnosticsFilter: clone(defaults.worktreeDiagnosticsFilter || normalizeWorktreeDiagnosticsFilter({})),
     instanceHealth: clone(defaults.instanceHealth),
+    todo: clone(defaults.todo),
+    skillsStatus: clone(defaults.skillsStatus),
+    claudeAdvanced: clone(defaults.claudeAdvanced),
+    mcpDiagnostics: clone(defaults.mcpDiagnostics),
+    pluginStatus: clone(defaults.pluginStatus),
+    enterpriseProfile: clone(defaults.enterpriseProfile),
     worktreeAction: defaults.worktreeAction,
     runnerControl: clone(defaults.runnerControl),
     progress: clone(defaults.progress),
@@ -21758,6 +22205,7 @@
     const actionCommands = [
       { ...readOnlyOperator, action: 'refresh-status', title: t('palette.refreshStatus'), shortcut: 'refresh' },
       { ...readOnlyOperator, action: 'nav-runbook', title: t('palette.openRunbook'), shortcut: 'runbook' },
+      { ...readOnlyOperator, action: 'nav-operations', title: t('operations.title'), shortcut: 'operations' },
       { ...readOnlyOperator, action: 'nav-pr-queue', title: t('palette.openPrQueue'), shortcut: 'pr queue' },
       { ...readOnlyOperator, action: 'nav-worktree', title: t('palette.openDiagnostics'), shortcut: 'diagnostics' },
       { ...readOnlyOperator, action: 'nav-instance-health', title: t('instanceHealth.title'), shortcut: 'instance health' },
@@ -22908,6 +23356,8 @@
         return renderPrQueue();
       case 'runbook':
         return renderRunbook();
+      case 'operations':
+        return renderOperations();
       case 'goals':
         return renderGoals();
       case 'config':
@@ -23770,6 +24220,7 @@
         r: 'history',
         n: 'notifications',
         u: 'runbook',
+        o: 'operations',
         w: 'worktree',
         i: 'instance-health',
         h: 'landing',

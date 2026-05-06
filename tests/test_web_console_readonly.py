@@ -4366,6 +4366,95 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIn("Keep this inside unmet GOALS", preview_payload["preview"]["text"])
         self.assertEqual("/api/todo/save", preview_payload["controls"]["edit"]["endpoint"])
 
+    def test_status_and_operations_view_surface_operator_diagnostics(self) -> None:
+        skills_root = self.repo / "Skills"
+        _write(
+            skills_root / "observability" / "SKILL.md",
+            "---\nname: observability\ndescription: Watch runtime signals.\n---\n# Observability\n",
+        )
+        todo_path = self.repo / ".AgentCLI" / "todo" / "Today_ops.md"
+        _write(todo_path, "# TODO\n\n## Priorities\n- [ ] Keep current GOALS work visible\n")
+        _write(self.repo / ".AgentCLI" / "todo" / "LAST_TODO.txt", ".AgentCLI/todo/Today_ops.md\n")
+        _write(
+            self.run_dir / "PLUGIN_LOAD_DIAGNOSTICS.json",
+            json.dumps(
+                {
+                    "status": "partial",
+                    "strict": False,
+                    "counts": {"blocked": 1},
+                    "items": [
+                        {
+                            "spec": "plugin.alpha:Stage",
+                            "status": "blocked",
+                            "reason": "not_allowlisted",
+                            "action": "skipped",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        _write_config(
+            self.config_path,
+            self.repo,
+            profile="enterprise",
+            roles=["PM", "Security", "Dev", "QA"],
+            security={"enabled": True},
+            policy={"enabled": True},
+            skills={
+                "enabled": True,
+                "roots": [skills_root.as_posix()],
+                "inline_mode": "both",
+                "skill_match_autofix": True,
+                "skill_match_autofix_threshold": 0.8,
+            },
+            claudecode_mcp_tools_enabled=True,
+            claudecode_hooks_enabled=True,
+            claudecode_dynamic_permission_enabled=True,
+            claudecode_strict_isolation=True,
+            claudecode_subagents_enabled=True,
+            mcp_mode="npx",
+            mcp_timeout_seconds=15,
+            plugins_enabled=True,
+            plugins_allowlist=["plugin.beta"],
+            plugins_strict=False,
+        )
+
+        payload = self.client.get("/api/status").json()
+
+        self.assertEqual("ready", payload["todo"]["state"])
+        self.assertEqual("goals_first", payload["todo"]["pmInjection"]["priorityPolicy"])
+        self.assertEqual(1, payload["skillsStatus"]["discoveredCount"])
+        self.assertIn("observability", payload["skillsStatus"]["selectedSkillIds"])
+        self.assertEqual("partial", payload["pluginStatus"]["status"])
+        self.assertTrue(payload["enterpriseProfile"]["profileEffective"]["budgetFloorEnforced"])
+        self.assertIn("claudeAdvanced", payload)
+        self.assertIn("mcpDiagnostics", payload)
+        self.assertIn("skills", payload["sectionState"])
+        self.assertIn("plugins", payload["sectionState"])
+
+        normalized = _run_adapter_harness([{"kind": "call", "name": "normalizeSnapshot", "args": [payload]}])[0]
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+                {"kind": "call", "name": "setView", "args": ["operations"]},
+                {"kind": "call", "name": "renderShell", "args": [{"force": True, "preserveScroll": True}]},
+            ]
+        )
+
+        self.assertEqual("operations", shell["roots"]["view"])
+        main_html = shell["roots"]["main"]
+        self.assertIn("TODO management", main_html)
+        self.assertIn("Skills doctor", main_html)
+        self.assertIn("Claude advanced", main_html)
+        self.assertIn("MCP diagnostics", main_html)
+        self.assertIn("Plugin stages", main_html)
+        self.assertIn("Enterprise profile", main_html)
+        self.assertIn("Keep current GOALS work visible", main_html)
+        self.assertIn("observability", main_html)
+
     def test_api_history_and_history_view_show_missing_report_state(self) -> None:
         missing_run_dir = self._make_live_run_dir("20260426-130500")
         _write_run_bundle(

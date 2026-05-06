@@ -153,6 +153,24 @@ class DocsValidationTests(unittest.TestCase):
             troubleshooting_errors,
         )
 
+    def test_goal_completion_docs_reject_p0_only_project_complete_claims(self) -> None:
+        advanced_text = (ROOT / "docs" / "ADVANCED_FEATURES.md").read_text(encoding="utf-8")
+        stale_advanced = advanced_text.replace(
+            "- **P0 (Must-Have)**: 필수 범위. `goals_completion_level=\"p0\"`일 때만 P0 전부 체크가 완성 조건입니다.",
+            "- **P0 (Must-Have)**: 전부 체크 완료 = 프로젝트 완성",
+        )
+        advanced_errors = validate_advanced_features_doc(stale_advanced)
+
+        troubleshooting_text = (ROOT / "docs" / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+        stale_troubleshooting = troubleshooting_text.replace(
+            "설정된 `goals_completion_level` 범위의 GOALS.md 체크박스 모두 완료",
+            "GOALS.md P0(+P1) 모두 완료",
+        )
+        troubleshooting_errors = validate_troubleshooting_doc(stale_troubleshooting)
+
+        self.assertTrue(any("goals_completion_level" in error for error in advanced_errors), advanced_errors)
+        self.assertTrue(any("goals_completion_level" in error for error in troubleshooting_errors), troubleshooting_errors)
+
     def test_web_console_doc_rejects_stale_server_flag(self) -> None:
         text = (ROOT / "docs" / "WEB_CONSOLE.md").read_text(encoding="utf-8")
         stale = text.replace(
@@ -207,7 +225,7 @@ class DocsValidationTests(unittest.TestCase):
         route_inventory = collect_fastapi_route_inventory(ROOT)
         stale_routes = text.replace("`/api/reports/export`, ", "", 1)
         stale_scope = text.replace(
-            "TODO, Skills, Claude, and MCP diagnostics can still be promoted from status/config visibility into richer first-class operator panels.",
+            "Future polish can split the Operations route into deeper drill-down panels, but the current first-class route surfaces the checked TODO, Skills, Claude, MCP, plugin, and enterprise diagnostics.",
             "Report export and TODO, Skills, Claude, and MCP diagnostics remain tracked.",
             1,
         )

@@ -7,6 +7,28 @@ from typing import Any
 from .runtime_contract import PIPELINE_STAGE_ORDER
 
 
+def _web_payload_bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
+def _web_payload_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
 def build_live_state_payload(
     web: Any,
     controller_status: dict[str, Any] | None,
@@ -1576,6 +1598,8 @@ def build_snapshot(
     _build_pr_queue_payload = web._build_pr_queue_payload
     _build_experience_payload = web._build_experience_payload
     build_todo_status = web.build_todo_status
+    build_skills_status = web.build_skills_status
+    selected_skill_ids_from_tasks = web.selected_skill_ids_from_tasks
     scan_worktree_diagnostics = web.scan_worktree_diagnostics
     _stage_output_stall_threshold_seconds = web._stage_output_stall_threshold_seconds
     _tail_text = web._tail_text
@@ -1671,7 +1695,7 @@ def build_snapshot(
     goals_completion_level = resolve_goals_completion_level(cfg.get("goals_completion_level"))
     goals = _build_goals_payload(repo_root, completion_level=goals_completion_level)
     prompt_items = _load_prompt_items(repo_root, prompts_dir, profile=profile)
-    todo = build_todo_status(repo_root, include_preview=False)
+    todo = build_todo_status(repo_root, include_preview=True)
     branch = _branch_name(repo_root)
     controller = runner_controller
     if controller is None and runner_controller_auto_build:
@@ -1690,6 +1714,25 @@ def build_snapshot(
     )
     state = progress["state"] if isinstance(progress.get("state"), dict) else {"done": [], "failed": [], "warnings": []}
     backlog = progress["backlog"] if isinstance(progress.get("backlog"), dict) else {"items": [], "counts": {}, "selected_id": ""}
+    selected_skill_ids = selected_skill_ids_from_tasks(backlog.get("items", []))
+    skills_status = build_skills_status(repo_root, cfg.get("skills") or {}, run_dir=latest_run_dir, selected_skill_ids=selected_skill_ids)
+    plugin_diagnostics = _safe_json(latest_run_dir / "PLUGIN_LOAD_DIAGNOSTICS.json", {}) if latest_run_dir else {}
+    plugin_status_value = str(plugin_diagnostics.get("status") or "").strip().lower() if isinstance(plugin_diagnostics, dict) else ""
+    plugin_status = {
+        "enabled": _web_payload_bool(cfg.get("plugins_enabled"), default=False),
+        "strict": _web_payload_bool(cfg.get("plugins_strict"), default=True),
+        "allowlist": _web_payload_list(cfg.get("plugins_allowlist")),
+        "diagnostics": plugin_diagnostics if isinstance(plugin_diagnostics, dict) else {},
+        "status": plugin_status_value or ("disabled" if not _web_payload_bool(cfg.get("plugins_enabled"), default=False) else "unknown"),
+        "diagnosticsPath": (latest_run_dir / "PLUGIN_LOAD_DIAGNOSTICS.json").as_posix() if latest_run_dir and (latest_run_dir / "PLUGIN_LOAD_DIAGNOSTICS.json").exists() else "",
+        "diagnostics_path": (latest_run_dir / "PLUGIN_LOAD_DIAGNOSTICS.json").as_posix() if latest_run_dir and (latest_run_dir / "PLUGIN_LOAD_DIAGNOSTICS.json").exists() else "",
+    }
+    profile_effective = config_contract.get("profileEffective", config_contract.get("profile_effective", {}))
+    enterprise_profile = {
+        "profile": str(cfg.get("profile") or "personal"),
+        "effective": profile_effective if isinstance(profile_effective, dict) else {},
+        "profileEffective": profile_effective if isinstance(profile_effective, dict) else {},
+    }
     run_summary = _safe_json(latest_run_dir / "run_summary.json", {}) if latest_run_dir else {}
     last_run_summary = _safe_json(latest_run_dir / "last_run_summary.json", {}) if latest_run_dir else {}
     log_entries = _load_log_entries(latest_run_dir)
@@ -2064,6 +2107,24 @@ def build_snapshot(
         "ready" if todo_state == "ready" else "partial" if todo_state in {"empty", "stale"} else "empty" if todo_state == "missing" else "error",
         str(todo.get("message") or fallbackSectionMessage("todo")) if isinstance(todo, dict) else fallbackSectionMessage("todo"),
     )
+    skills_enabled = bool(skills_status.get("enabled")) if isinstance(skills_status, dict) else False
+    skills_warnings = skills_status.get("warnings") if isinstance(skills_status, dict) and isinstance(skills_status.get("warnings"), list) else []
+    skills_missing = skills_status.get("missing_skill_ids") if isinstance(skills_status, dict) and isinstance(skills_status.get("missing_skill_ids"), list) else []
+    skills_section_state = buildSectionState(
+        "skills",
+        "partial" if skills_enabled and (skills_warnings or skills_missing) else "ready" if skills_enabled else "disabled",
+        "; ".join(str(item) for item in (skills_warnings or skills_missing)[:3]) if skills_enabled and (skills_warnings or skills_missing) else ("" if skills_enabled else "Skills are disabled in config."),
+    )
+    plugins_section_state = buildSectionState(
+        "plugins",
+        "error" if plugin_status["status"] == "failed" else "partial" if plugin_status["status"] in {"partial", "unknown"} else "ready" if plugin_status["enabled"] else "disabled",
+        "" if plugin_status["status"] == "ok" else (str(plugin_diagnostics.get("error") or "") if isinstance(plugin_diagnostics, dict) and plugin_diagnostics.get("error") else fallbackSectionMessage("plugins")),
+    )
+    enterprise_section_state = buildSectionState(
+        "enterprise",
+        "ready" if str(enterprise_profile.get("profile") or "").strip().lower() == "enterprise" else "disabled",
+        "" if str(enterprise_profile.get("profile") or "").strip().lower() == "enterprise" else "Enterprise profile is not active.",
+    )
     logs_section_state = buildSectionState(
         "logs",
         "ready" if log_entries else "empty",
@@ -2248,6 +2309,12 @@ def build_snapshot(
         "metrics": metrics,
         "notifications": notifications,
         "todo": todo,
+        "skills_status": skills_status,
+        "skillsStatus": skills_status,
+        "plugin_status": plugin_status,
+        "pluginStatus": plugin_status,
+        "enterprise_profile": enterprise_profile,
+        "enterpriseProfile": enterprise_profile,
         "experience": experience,
         "pr_queue": pr_queue,
         "prQueue": pr_queue,
@@ -2321,6 +2388,9 @@ def build_snapshot(
             "logs": logs_section_state,
             "notifications": notifications_section_state,
             "todo": todo_section_state,
+            "skills": skills_section_state,
+            "plugins": plugins_section_state,
+            "enterprise": enterprise_section_state,
             "metrics": metrics_section_state,
             "history": history_section_state,
             "experience": experience_section_state,
@@ -2508,8 +2578,17 @@ def status_snapshot_for_scope(snapshot: dict[str, Any], *, scope: str = "full") 
         "logs": _dashboard_logs_payload(snapshot.get("logs")),
         "config": _dashboard_config_payload(snapshot.get("config"), snapshot.get("config_contract")),
         "config_contract": _dashboard_config_contract_payload(snapshot.get("config_contract")),
+        "claude_advanced": snapshot.get("claude_advanced", {}),
+        "claudeAdvanced": snapshot.get("claudeAdvanced", snapshot.get("claude_advanced", {})),
         "mcp_diagnostics": snapshot.get("mcp_diagnostics", {}),
         "mcpDiagnostics": snapshot.get("mcpDiagnostics", snapshot.get("mcp_diagnostics", {})),
+        "todo": snapshot.get("todo", {}),
+        "skills_status": snapshot.get("skills_status", {}),
+        "skillsStatus": snapshot.get("skillsStatus", snapshot.get("skills_status", {})),
+        "plugin_status": snapshot.get("plugin_status", {}),
+        "pluginStatus": snapshot.get("pluginStatus", snapshot.get("plugin_status", {})),
+        "enterprise_profile": snapshot.get("enterprise_profile", {}),
+        "enterpriseProfile": snapshot.get("enterpriseProfile", snapshot.get("enterprise_profile", {})),
         "prompts": _dashboard_prompts_payload(snapshot.get("prompts")),
         "history": _dashboard_history_payload(snapshot.get("history")),
         "metrics": snapshot.get("metrics", {}),

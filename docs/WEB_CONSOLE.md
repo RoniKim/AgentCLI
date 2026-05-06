@@ -1,6 +1,6 @@
 # AgentCLI Web Console
 
-> Last verified: 2026-05-06 (against live FastAPI route inventory and GOALS verification).
+> Last verified: 2026-05-07 (against live FastAPI route inventory and GOALS verification).
 
 AgentCLI has a FastAPI web console for browser-based local-operator monitoring and guarded repo operations. It is repo-owned code in `web_console/` served by `agent_runner.web`; the exported design files under `docs/Design/project/` are reference input only.
 
@@ -33,12 +33,13 @@ Verified on 2026-05-06 with local API, unit, and checked-in browser smoke covera
 - Additional read-only contracts now cover Goals metadata and backend log tailing.
 - LAN or external binds now redact logs, log file metadata, GOALS raw text, backlog/task excerpts, config snapshots, prompt previews/content, and serialized runner arguments before the browser sees them, while the browser renders hidden/unavailable copy for those fields.
 - The explicit prompt-read path stays available for the editor flow after a user selects a prompt; the inventory view remains redacted and the raw-content path is only used by that explicit editor request.
-- The UI has first-pass routes for Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, and Worktree Review.
+- The UI has first-pass routes for Dashboard, Pipeline, Logs, Backlog, PR Queue, Runbook, Operations, Goals, Config, Prompts, Run History, Notifications, Worktree Review, Instance Health, and the mobile workflow.
 - The shell now exposes `/worktree` for the same diagnostics summary.
 - PR Queue browser controls can validate, approve merge, discard, and request rebase for queued packets through guarded backend routes. Merge approval requires a validated packet plus exact `MERGE PR <packet_id>`; discard and rebase require exact `DISCARD PR <packet_id>` / `REBASE PR <packet_id>` confirmation phrases; every browser PR Queue decision uses shared packet helper gates plus the web opt-in, LAN, and confirmation gates.
 - Local retention dry-runs report stale `agent_runs`, `PM_CACHE`, logs, diagnostics, and backups from configurable settings without deleting files; active runs, pending worktree review markers, cleanup-failed artifacts, and queued PR packet evidence are preserved in the report.
+- The Operations route renders TODO active path/freshness/PM injection/safe preview/edit endpoint, Skills roots/discovered/selected/missing/suggestions, Claude advanced diagnostics, MCP mode fallback, plugin stage diagnostics, and enterprise profile budget/security policy status.
 - TODO status is exposed in shell and web status with active path, freshness, and PM injection policy; `/api/todo` provides an explicit bounded preview, while guarded `/api/todo/save` writes only repo-local `.AgentCLI/todo` files and keeps TODO advisory under GOALS-first PM gating.
-- Checked-in Playwright smoke coverage now exercises Dashboard, Pipeline, Logs, Backlog, Goals, Config, Prompts, Run History, Notifications, Worktree Review, EN/KO Dashboard and Config locale switching, and a mobile-width viewport.
+- Checked-in Playwright smoke coverage now exercises Dashboard, Pipeline, Logs, Backlog, PR Queue, Runbook, Operations, Goals, Config, Prompts, Run History, Notifications, Worktree Review, Instance Health, EN/KO route rendering, browser console/page error checks, and a mobile-width viewport.
 - Runner controls are disabled by default and require explicit opt-in.
 - Config saves now reuse that opt-in and create a timestamped backup before atomic disk writes.
 - Config rendering now tolerates `roles` as strings or arrays and uses the runtime role hint: Built-in order: PM, PL, Security, Dev, QA. Plugin specs like pkg.mod:Class are preserved.
@@ -47,7 +48,7 @@ Verified on 2026-05-06 with local API, unit, and checked-in browser smoke covera
 
 Known remaining scope:
 
-- TODO, Skills, Claude, and MCP diagnostics can still be promoted from status/config visibility into richer first-class operator panels.
+- Future polish can split the Operations route into deeper drill-down panels, but the current first-class route surfaces the checked TODO, Skills, Claude, MCP, plugin, and enterprise diagnostics.
 - There is no implemented authentication layer yet. Treat LAN binds as trusted-network-only until [AUTHENTICATION_PLAN.md](AUTHENTICATION_PLAN.md) is implemented.
 
 ## Web Server Flags
@@ -124,7 +125,7 @@ Run the checked-in Playwright smoke against fixture data:
 python .\tests\web_console_playwright_smoke.py
 ```
 
-If Playwright or the browser runtime is unavailable, the smoke skips cleanly and prints the optional setup command instead of installing packages.
+If Playwright or the browser runtime is unavailable, the local smoke skips cleanly and prints the optional setup command instead of installing packages. A release gate must run with Playwright and Chromium installed; skipped smoke output is not browser-render proof.
 
 ## Optional Playwright Setup
 
@@ -164,7 +165,7 @@ python -B -m unittest discover -s tests -p "test_worktree*.py"
 python -B .\tests\web_console_playwright_smoke.py
 ```
 
-The web smoke path covers the primary views, Dashboard and Config locale switching, prompt read loading, worktree review, and the mobile-width layout. Install Playwright locally before using the browser smoke command as a release gate.
+The web smoke path covers the primary views, Dashboard and Config locale switching, prompt read loading, worktree review, browser console/page errors, and the mobile-width layout. Install Playwright locally before using the browser smoke command as a release gate.
 
 ## Worktree Diagnostics
 

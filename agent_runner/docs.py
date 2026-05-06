@@ -1076,6 +1076,20 @@ def validate_advanced_features_doc(text: str) -> list[str]:
             )
         )
 
+    stale_completion_claims = [
+        "P0 (Must-Have)**: 전부 체크 완료 = 프로젝트 완성",
+        "P1 (Should-Have)**: 있으면 좋지만 완성 판단에 영향 없음",
+        "P0 전부 [x] + 실패 미재시도 0개",
+    ]
+    for claim in stale_completion_claims:
+        if claim in text:
+            errors.append(f"{doc_label}: stale project completion claim must use goals_completion_level: {claim}")
+    completion_section = _section_text(text, "## 완성 판단 (`project_complete`)")
+    if completion_section is not None:
+        lowered = completion_section.lower()
+        if "goals_completion_level" not in lowered or '"all"' not in lowered:
+            errors.append(f"{doc_label}: project_complete section must document goals_completion_level and the all default")
+
     return errors
 
 
@@ -1100,6 +1114,14 @@ def validate_troubleshooting_doc(text: str) -> list[str]:
                 require_recovery_guidance=True,
             )
         )
+
+    stop_reason_section = _section_text(text, "## 종료 사유 (Stop Reason) 우선순위")
+    if stop_reason_section is not None:
+        if "GOALS.md P0(+P1) 모두 완료" in stop_reason_section or "P0(+P1)" in stop_reason_section:
+            errors.append(f"{doc_label}: project_complete stop reason must refer to goals_completion_level, not P0(+P1)")
+        project_complete_lines = [line for line in stop_reason_section.splitlines() if "`project_complete`" in line]
+        if project_complete_lines and not any("goals_completion_level" in line for line in project_complete_lines):
+            errors.append(f"{doc_label}: project_complete stop reason must mention goals_completion_level")
 
     return errors
 

@@ -88,6 +88,7 @@ from .remote.controller import (
 from .runtime_contract import CODEX_MODEL_FIELD_SPECS, PIPELINE_ROLE_FIELD_SPEC, PIPELINE_STAGE_ORDER, ROLE_SPEC_CANONICALS
 from .stop_progress import normalize_stop_progress_payload, summarize_stop_progress_liveness
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, load_state, parse_backlog_md
+from .skills.status import build_skills_status, selected_skill_ids_from_tasks
 from .task_history import query_history
 from .todo import build_todo_status, save_current_todo_text
 from .failure_policy import (
@@ -369,8 +370,11 @@ def fallbackSectionMessage(kind: str) -> str:
         "history": "Run history is empty.",
         "experience": EXPERIENCE_UNAVAILABLE_MESSAGE,
         "todo": "No active TODO file is selected.",
+        "skills": "Skills doctor/status is unavailable.",
         "claude": "Claude backend diagnostics are unavailable.",
         "mcp": "MCP diagnostics are unavailable.",
+        "plugins": "Plugin stage diagnostics are unavailable.",
+        "enterprise": "Enterprise profile details are unavailable.",
         "worktree": "No pending worktree merge is available.",
         "prQueue": "No PR queue packets are available.",
         "runnerControl": "Runner controls are unavailable in fallback mode.",

@@ -425,7 +425,7 @@ claude auth login
 | 1 | `quota_exhausted` | API 할당량 소진 (failover 트리거) |
 | 2 | `quota_utilization` | OAuth 사용량 임계치 초과 (선제적 wait/stop) |
 | 3 | `stop_file` | STOP 파일 감지 (graceful stop) |
-| 4 | `project_complete` | GOALS.md P0(+P1) 모두 완료 |
+| 4 | `project_complete` | 설정된 `goals_completion_level` 범위의 GOALS.md 체크박스 모두 완료 |
 | 5 | `all_tasks_done` | 백로그 태스크 전부 done |
 | 6 | `all_tasks_attempted` | 모든 태스크 시도 완료 (실패 포함) |
 | 7 | `prepared_only` | continuous 미설정 — 백로그만 준비하고 종료 |

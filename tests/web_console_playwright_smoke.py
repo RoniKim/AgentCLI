@@ -44,6 +44,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
         "backlog",
         "pr-queue",
         "runbook",
+        "operations",
         "goals",
         "config",
         "prompts",
@@ -415,10 +416,30 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             locale="en-US",
         )
         page = context.new_page()
+        self._install_browser_error_tracker(page)
         if before_goto is not None:
             before_goto(context, page)
         page.goto(self.server_url, wait_until="domcontentloaded")
+        self._assert_no_browser_errors(page)
         return page
+
+    def _install_browser_error_tracker(self, page) -> None:
+        errors: list[str] = []
+
+        def on_console(message) -> None:
+            if message.type == "error":
+                errors.append(f"console.error: {message.text}")
+
+        def on_page_error(error) -> None:
+            errors.append(f"pageerror: {error}")
+
+        setattr(page, "_agentcli_browser_errors", errors)
+        page.on("console", on_console)
+        page.on("pageerror", on_page_error)
+
+    def _assert_no_browser_errors(self, page) -> None:
+        errors = list(getattr(page, "_agentcli_browser_errors", []))
+        self.assertEqual([], errors, "Browser emitted console/page errors:\n" + "\n".join(errors))
 
     def _close_playwright(self, manager) -> None:
         try:
@@ -431,6 +452,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
         page.locator(f'#sidebar [data-action="{action}"], #sidebar [data-nav="{view}"]').first.click()
         self.expect(page.locator("#main")).to_have_attribute("data-view", view)
         self.expect(page.locator("#main")).to_contain_text(re.compile(re.escape(marker), re.IGNORECASE))
+        self._assert_no_browser_errors(page)
 
     def _assert_desktop_route_layout(self, page, route: str) -> None:
         metrics = page.evaluate(
@@ -640,6 +662,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
         path = screenshot_dir / name
         page.screenshot(path=path.as_posix(), full_page=True)
         self.assertTrue(path.exists() and path.stat().st_size > 0, f"Screenshot was not written: {path}")
+        self._assert_no_browser_errors(page)
         return path
 
     def _stop_overlay_focus_state(self, page) -> dict[str, str]:
@@ -857,6 +880,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self._open_view(page, "nav-pr-queue", "pr-queue", "PR Queue")
             self.expect(page.locator("#main")).to_contain_text("QA smoke note")
             self.expect(page.locator("#main").get_by_role("button", name="Validate")).to_be_disabled()
+            self._open_view(page, "nav-operations", "operations", "TODO management")
             self._open_view(page, "nav-goals", "goals", "GOALS.md snapshot")
 
             self._open_view(page, "nav-config", "config", "Field details")
@@ -985,7 +1009,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(mobile_root.locator("[data-mobile-editor-panel]")).to_be_visible()
             self.expect(mobile_root.locator("[data-mobile-confirmation-panel]")).to_be_visible()
             self.expect(mobile_root.locator("[data-mobile-notification-panel]")).to_be_visible()
-            self.assertEqual(13, mobile_root.locator("[data-mobile-route-grid] [data-nav]").count())
+            self.assertEqual(14, mobile_root.locator("[data-mobile-route-grid] [data-nav]").count())
             self._capture_screenshot(page, "mobile-workflow-en.png")
 
             mobile_root.locator('[data-mobile-route-grid] [data-nav="logs"]').click()
@@ -1032,7 +1056,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             )
             self.assertTrue(route_heights)
             self.assertGreaterEqual(min(route_heights), 58)
-            self.assertEqual(13, len(layout["routeButtons"]))
+            self.assertEqual(14, len(layout["routeButtons"]))
 
             def assert_stack(name: str, rects: list[dict[str, object]]) -> None:
                 ordered = sorted(rects, key=lambda rect: (float(rect["top"]), float(rect["left"])))

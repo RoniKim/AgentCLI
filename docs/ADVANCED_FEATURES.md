@@ -168,8 +168,8 @@ REPO/.doc/GOALS.md
 ```
 
 **핵심 규칙:**
-- **P0 (Must-Have)**: 전부 체크 완료 = 프로젝트 완성
-- **P1 (Should-Have)**: 있으면 좋지만 완성 판단에 영향 없음
+- **P0 (Must-Have)**: 필수 범위. `goals_completion_level="p0"`일 때만 P0 전부 체크가 완성 조건입니다.
+- **P1 (Should-Have)**: 권장 범위. 현재 기본값인 `goals_completion_level="all"`에서는 P1도 완성 조건에 포함됩니다.
 - `## Completion Criteria`: 사용자 정의 추가 조건 (참고용)
 
 ## 동작 흐름
@@ -185,7 +185,7 @@ REPO/.doc/GOALS.md
     2. Dev가 태스크 실행
     3. 태스크 완료 시 → GOALS.md 체크박스 자동 [x] 업데이트
     4. Completion Evaluator:
-       - P0 전부 [x] + 실패 미재시도 0개 → project_complete 신호 → 자동 종료
+       - 설정된 `goals_completion_level` 범위 전부 [x] + 실패 미재시도 0개 → project_complete 신호 → 자동 종료
        - 아직 미완료 → 다음 Cycle 계속
 ```
 
