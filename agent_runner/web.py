@@ -239,6 +239,31 @@ RUNNER_CONTROL_TRUTHY = {"1", "true", "yes", "on", "enabled"}
 RUNNER_CONTROL_FALSY = {"0", "false", "no", "off", "disabled"}
 SENSITIVE_CONFIG_TOKENS = _web_config.SENSITIVE_CONFIG_TOKENS
 REDACTED_VALUE = _web_config.REDACTED_VALUE
+WEB_ARTIFACT_OPEN_ALLOWED_EXTENSIONS = {
+    ".csv",
+    ".diff",
+    ".json",
+    ".jsonl",
+    ".log",
+    ".md",
+    ".patch",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
+WEB_ARTIFACT_OPEN_MAX_BYTES = 25 * 1024 * 1024
+WEB_ARTIFACT_OPEN_MEDIA_TYPES = {
+    ".csv": "text/csv; charset=utf-8",
+    ".diff": "text/plain; charset=utf-8",
+    ".json": "application/json",
+    ".jsonl": "application/x-ndjson",
+    ".log": "text/plain; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
+    ".patch": "text/plain; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+    ".yaml": "text/yaml; charset=utf-8",
+    ".yml": "text/yaml; charset=utf-8",
+}
 LAN_SAFETY_MUTATION_DISABLED_MESSAGE = (
     "LAN safety blocks mutating web actions until authentication or a stronger trusted-operator gate is implemented."
 )
@@ -568,6 +593,99 @@ def _path_is_within(path: Path, parent: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+def _resolve_web_artifact_open_path(repo_root: Path, path_text: Any) -> tuple[Path | None, dict[str, Any] | None]:
+    raw = str(path_text or "").strip()
+    if not raw:
+        return None, {
+            "status_code": 400,
+            "code": "artifact_path_required",
+            "message": "An artifact path is required.",
+        }
+    raw_parts = Path(raw.replace("\\", "/")).parts
+    if ".." in raw_parts:
+        return None, {
+            "status_code": 400,
+            "code": "artifact_path_traversal",
+            "message": "Artifact path must not contain parent-directory traversal.",
+            "path": raw,
+        }
+    try:
+        requested = Path(raw).expanduser()
+        candidate = requested.resolve() if requested.is_absolute() else (repo_root / requested).resolve()
+    except Exception:
+        return None, {
+            "status_code": 400,
+            "code": "artifact_path_invalid",
+            "message": "Artifact path could not be resolved.",
+            "path": raw,
+        }
+
+    artifact_root = (repo_root / ".AgentCLI").resolve()
+    if not _path_is_within(candidate, artifact_root):
+        return None, {
+            "status_code": 403,
+            "code": "artifact_path_outside_agentcli_root",
+            "message": "Artifact path must stay within the active repo .AgentCLI artifact root.",
+            "path": candidate.as_posix(),
+            "artifact_root": artifact_root.as_posix(),
+        }
+    if not candidate.exists():
+        return None, {
+            "status_code": 404,
+            "code": "artifact_not_found",
+            "message": "Artifact file was not found.",
+            "path": candidate.as_posix(),
+        }
+    if not candidate.is_file():
+        return None, {
+            "status_code": 400,
+            "code": "artifact_not_file",
+            "message": "Artifact path must reference a file.",
+            "path": candidate.as_posix(),
+        }
+    suffix = candidate.suffix.lower()
+    if suffix not in WEB_ARTIFACT_OPEN_ALLOWED_EXTENSIONS:
+        return None, {
+            "status_code": 415,
+            "code": "artifact_type_unsupported",
+            "message": "Artifact file type is not supported by the browser open helper.",
+            "path": candidate.as_posix(),
+            "extension": suffix,
+            "allowed_extensions": sorted(WEB_ARTIFACT_OPEN_ALLOWED_EXTENSIONS),
+        }
+    try:
+        size = candidate.stat().st_size
+    except Exception:
+        size = 0
+    if size > WEB_ARTIFACT_OPEN_MAX_BYTES:
+        return None, {
+            "status_code": 413,
+            "code": "artifact_too_large",
+            "message": "Artifact is too large for the browser open helper.",
+            "path": candidate.as_posix(),
+            "bytes": size,
+            "max_bytes": WEB_ARTIFACT_OPEN_MAX_BYTES,
+        }
+    return candidate, None
+
+
+def _web_artifact_open_error(error: dict[str, Any]) -> JSONResponse:
+    status_code = int(error.get("status_code") or 500)
+    code = str(error.get("code") or "artifact_open_failed")
+    message = str(error.get("message") or "Artifact could not be opened.")
+    details = {key: value for key, value in error.items() if key not in {"status_code", "code", "message"}}
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    }
+    if details:
+        payload["error"]["details"] = details
+    return JSONResponse(status_code=status_code, content=payload)
 
 
 def _worktree_status_artifacts(repo_root: Path, run_dir: Path | None) -> list[tuple[str, Path]]:
@@ -8432,6 +8550,30 @@ def create_app(
     @app.get("/api/worktree")
     def api_worktree() -> dict[str, Any]:
         return _section("worktree")
+
+    @app.get("/api/artifacts/open")
+    def api_artifacts_open(path: str = "", download: bool = False) -> Any:
+        if web_redaction_active:
+            return _web_artifact_open_error(
+                {
+                    "status_code": 403,
+                    "code": "artifact_open_redaction_blocked",
+                    "message": "Raw artifact opening is only available on loopback web binds.",
+                    **_lan_safety_error_details("artifact-open", reason="Raw artifact opening is blocked on non-loopback binds."),
+                }
+            )
+        target, error = _resolve_web_artifact_open_path(repo_root, path)
+        if error is not None or target is None:
+            return _web_artifact_open_error(error or {})
+        media_type = WEB_ARTIFACT_OPEN_MEDIA_TYPES.get(target.suffix.lower(), "text/plain; charset=utf-8")
+        if bool(download):
+            response = FileResponse(target, media_type=media_type, filename=target.name)
+        else:
+            response = FileResponse(target, media_type=media_type)
+            response.headers["Content-Disposition"] = f'inline; filename="{target.name}"'
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/worktree/diagnostics")
     def api_worktree_diagnostics(request: Request) -> dict[str, Any]:

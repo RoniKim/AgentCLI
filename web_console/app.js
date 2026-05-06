@@ -10754,14 +10754,52 @@
     `;
   }
 
+  function isLocalArtifactPath(value) {
+    const text = toText(value, '').trim();
+    if (!text || text.length > 1000 || /[\n\r|,]/.test(text)) {
+      return false;
+    }
+    const normalized = text.replace(/\\/g, '/');
+    if (!normalized.includes('/.AgentCLI/') && !normalized.startsWith('.AgentCLI/')) {
+      return false;
+    }
+    return /\.(csv|diff|json|jsonl|log|md|patch|txt|ya?ml)$/i.test(normalized);
+  }
+
+  function localArtifactOpenURL(value) {
+    return `/api/artifacts/open?path=${encodeURIComponent(toText(value, '').trim())}`;
+  }
+
+  function artifactPathLinksHTML(value) {
+    const text = toText(value, '');
+    const parts = normalizeListValues(text);
+    if (parts.length > 1 && parts.every(isLocalArtifactPath)) {
+      return parts
+        .map((part) => artifactPathLinksHTML(part))
+        .join('<span class="artifact-open-separator">, </span>');
+    }
+    if (isLocalArtifactPath(text)) {
+      return `<a class="artifact-open-link" href="${escapeHTML(localArtifactOpenURL(text))}" target="_blank" rel="noopener noreferrer">${escapeHTML(text)}</a>`;
+    }
+    return escapeHTML(text);
+  }
+
+  function compactFactBodyHTML(value) {
+    return artifactPathLinksHTML(value);
+  }
+
+  function compactFactMetaHTML(value) {
+    return artifactPathLinksHTML(value);
+  }
+
   function compactFactItem(label, value, meta = '') {
     return `
       <div class="compact-list__item">
         <span class="compact-list__bullet"></span>
         <div>
-          <div class="compact-list__body">${escapeHTML(value)}</div>
+          <div class="compact-list__body">${compactFactBodyHTML(value)}</div>
           <div class="compact-list__meta">${escapeHTML(label)}</div>
-          ${meta ? `<div class="compact-list__meta">${escapeHTML(meta)}</div>` : ''}
+          ${meta ? `<div class="compact-list__meta">${compactFactMetaHTML(meta)}</div>` : ''}
         </div>
       </div>
     `;

@@ -337,6 +337,7 @@ run_dir/
 - If the PM-authored shutdown report repeats the same half twice, the duplicate content is trimmed before the final write.
 - `write_emergency_shutdown_report()` is idempotent: it skips when `SHUTDOWN_REPORT.md` already exists and also skips when `EMERGENCY_SHUTDOWN.md` already exists.
 - `FINAL_RUN_REPORT.*` is the browser-facing final summary; `SHUTDOWN_REPORT.md` is the shutdown summary that can be overwritten by the PM-authored report.
+- Web artifact links use `GET /api/artifacts/open?path=<artifact>` and are read-only. The helper is loopback-only and serves allowed text-like files inside the active repo `.AgentCLI` artifact root.
 
 ## STATE.json 구조
 

@@ -32,6 +32,16 @@ class WebConsoleStaticTests(unittest.TestCase):
         self.assertNotIn("docs/design/project", lowered)
         self.assertNotIn("text/babel", lowered)
 
+    def test_artifact_paths_render_through_safe_open_helper(self) -> None:
+        self.assertIn("/api/artifacts/open?path=", self.app_js)
+        self.assertIn("function isLocalArtifactPath", self.app_js)
+        self.assertIn("artifact-open-link", self.app_js)
+        self.assertIn("normalized.startsWith('.AgentCLI/')", self.app_js)
+        self.assertIn("function artifactPathLinksHTML", self.app_js)
+        self.assertIn("function compactFactMetaHTML", self.app_js)
+        self.assertIn("artifact-open-separator", self.app_js)
+        self.assertIn(".artifact-open-link", self.styles_css)
+
     def test_role_metadata_and_pipeline_contract_cover_pl_and_plugin_specs(self) -> None:
         expected_tokens = [
             "const BUILTIN_ROLE_OPTIONS = ['PM', 'PL', 'Security', 'Dev', 'QA'];",

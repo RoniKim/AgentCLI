@@ -1637,6 +1637,70 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("lan_safety_blocked", trusted_body["status"])
         self.assertEqual(0, trusted_app.state.runner_controller.start_calls)
 
+    def test_artifact_open_helper_serves_only_safe_agentcli_artifacts(self) -> None:
+        client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=self.config_path)
+        report = self.run_dir / "FINAL_RUN_REPORT.md"
+        _write(report, "# Final report\n\nSafe artifact body.\n")
+
+        relative_response = client.get("/api/artifacts/open", params={"path": report.relative_to(self.repo).as_posix()})
+        self.assertEqual(200, relative_response.status_code)
+        self.assertIn("Safe artifact body.", relative_response.text)
+        self.assertEqual("nosniff", relative_response.headers.get("x-content-type-options"))
+        self.assertEqual("no-store", relative_response.headers.get("cache-control"))
+        self.assertIn("inline", relative_response.headers.get("content-disposition", ""))
+
+        absolute_response = client.get("/api/artifacts/open", params={"path": report.as_posix(), "download": "true"})
+        self.assertEqual(200, absolute_response.status_code)
+        self.assertIn("attachment", absolute_response.headers.get("content-disposition", ""))
+
+        outside = self.repo / "README.md"
+        _write(outside, "outside\n")
+        outside_response = client.get("/api/artifacts/open", params={"path": outside.as_posix()})
+        self.assertEqual(403, outside_response.status_code)
+        self.assertEqual("artifact_path_outside_agentcli_root", outside_response.json()["error"]["code"])
+
+        unsupported = self.run_dir / "experience.db"
+        _write(unsupported, "sqlite-ish\n")
+        unsupported_response = client.get("/api/artifacts/open", params={"path": unsupported.as_posix()})
+        self.assertEqual(415, unsupported_response.status_code)
+        self.assertEqual("artifact_type_unsupported", unsupported_response.json()["error"]["code"])
+
+        missing_response = client.get("/api/artifacts/open", params={"path": (self.run_dir / "missing.md").as_posix()})
+        self.assertEqual(404, missing_response.status_code)
+        self.assertEqual("artifact_not_found", missing_response.json()["error"]["code"])
+
+        traversal_response = client.get("/api/artifacts/open", params={"path": ".AgentCLI/agent_runs/../web_console.lock.json"})
+        self.assertEqual(400, traversal_response.status_code)
+        self.assertEqual("artifact_path_traversal", traversal_response.json()["error"]["code"])
+
+        directory_response = client.get("/api/artifacts/open", params={"path": self.run_dir.as_posix()})
+        self.assertEqual(400, directory_response.status_code)
+        self.assertEqual("artifact_not_file", directory_response.json()["error"]["code"])
+
+        large_artifact = self.run_dir / "too-large.log"
+        large_artifact.write_text("x" * (25 * 1024 * 1024 + 1), encoding="utf-8")
+        large_response = client.get("/api/artifacts/open", params={"path": large_artifact.as_posix()})
+        self.assertEqual(413, large_response.status_code)
+        self.assertEqual("artifact_too_large", large_response.json()["error"]["code"])
+
+    def test_artifact_open_helper_is_blocked_on_lan_binds(self) -> None:
+        report = self.run_dir / "FINAL_RUN_REPORT.md"
+        _write(report, "# Final report\n\nsecret-token should not stream on LAN.\n")
+        client, _ = _create_client(
+            self.repo,
+            enable_runner_controls=False,
+            config_path=self.config_path,
+            host="0.0.0.0",
+            trusted_network=True,
+        )
+
+        response = client.get("/api/artifacts/open", params={"path": report.as_posix()})
+        self.assertEqual(403, response.status_code)
+        payload = response.json()
+        self.assertEqual("artifact_open_redaction_blocked", payload["error"]["code"])
+        self.assertEqual("artifact-open", payload["error"]["details"]["blocked_action"])
+        self.assertNotIn("secret-token", json.dumps(payload, ensure_ascii=False))
+
     def test_lan_mutating_actions_are_rejected_even_with_opt_in_and_trusted_network(self) -> None:
         controller = FakeRunnerController(repo=self.repo, base_args=_runner_base_args(self.config_path))
         client, app = _create_client(

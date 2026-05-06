@@ -4980,6 +4980,20 @@ select.field-control,
   color: var(--text);
 }
 
+.artifact-open-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.artifact-open-link:hover {
+  color: var(--accent-2);
+}
+
+.artifact-open-separator {
+  color: var(--text-sub);
+}
+
 .compact-list__item > :not(.compact-list__bullet) {
   min-width: 0;
   max-width: 100%;
