@@ -4366,6 +4366,12 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIn("Keep this inside unmet GOALS", preview_payload["preview"]["text"])
         self.assertEqual("/api/todo/save", preview_payload["controls"]["edit"]["endpoint"])
 
+        edit_payload = self.client.get("/api/todo?preview=true&preview_lines=10000&preview_max_chars=12000").json()
+        self.assertEqual(10000, edit_payload["preview"]["maxLines"])
+        self.assertEqual(12000, edit_payload["preview"]["maxChars"])
+        self.assertFalse(edit_payload["preview"]["truncated"])
+        self.assertIn("Keep this inside unmet GOALS", edit_payload["preview"]["text"])
+
     def test_status_and_operations_view_surface_operator_diagnostics(self) -> None:
         skills_root = self.repo / "Skills"
         _write(
@@ -4412,8 +4418,8 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             },
             claudecode_mcp_tools_enabled=True,
             claudecode_hooks_enabled=True,
-            claudecode_dynamic_permission_enabled=True,
-            claudecode_strict_isolation=True,
+            claudecode_can_use_tool_enabled=True,
+            claudecode_can_use_tool_strict_isolation=True,
             claudecode_subagents_enabled=True,
             mcp_mode="npx",
             mcp_timeout_seconds=15,
@@ -4453,7 +4459,14 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertIn("Plugin stages", main_html)
         self.assertIn("Enterprise profile", main_html)
         self.assertIn("Keep current GOALS work visible", main_html)
+        self.assertIn("TODO editor", main_html)
+        self.assertIn("Load full TODO", main_html)
+        self.assertIn("Save TODO", main_html)
+        self.assertIn("TODO saves require runner controls", main_html)
         self.assertIn("observability", main_html)
+        self.assertIn("Dynamic permission", main_html)
+        self.assertIn("Strict task isolation", main_html)
+        self.assertIn("Subagents", main_html)
 
     def test_api_history_and_history_view_show_missing_report_state(self) -> None:
         missing_run_dir = self._make_live_run_dir("20260426-130500")

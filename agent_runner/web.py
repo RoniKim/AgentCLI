@@ -90,7 +90,7 @@ from .stop_progress import normalize_stop_progress_payload, summarize_stop_progr
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, load_state, parse_backlog_md
 from .skills.status import build_skills_status, selected_skill_ids_from_tasks
 from .task_history import query_history
-from .todo import build_todo_status, save_current_todo_text
+from .todo import TODO_CONTENT_MAX_CHARS, build_todo_status, save_current_todo_text
 from .failure_policy import (
     STATUS_GROUP_BLOCKED_ENV,
     STATUS_GROUP_REGRESSION,
@@ -8699,8 +8699,19 @@ def create_app(
         return _section("prompts")
 
     @app.get("/api/todo")
-    def api_todo(preview: bool = True) -> dict[str, Any]:
-        payload = build_todo_status(repo_root, include_preview=bool(preview))
+    def api_todo(
+        preview: bool = True,
+        preview_lines: int = 24,
+        preview_max_chars: int = 4000,
+    ) -> dict[str, Any]:
+        lines_limit = max(1, min(int(preview_lines), 10000))
+        char_limit = max(1, min(int(preview_max_chars), TODO_CONTENT_MAX_CHARS))
+        payload = build_todo_status(
+            repo_root,
+            include_preview=bool(preview),
+            preview_lines=lines_limit,
+            preview_max_chars=char_limit,
+        )
         return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_todo_payload)
 
     def _todo_save_error(status_code: int, code: str, message: str, **details: Any) -> JSONResponse:

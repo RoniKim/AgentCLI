@@ -576,6 +576,22 @@
         noWarnings: 'No warnings.',
         openConfig: 'Open Config',
         refreshPreview: 'Refresh TODO preview',
+        loadTodo: 'Load full TODO',
+        saveTodo: 'Save TODO',
+        resetTodo: 'Reset TODO draft',
+        todoEditor: 'TODO editor',
+        todoEditorLocked: 'TODO saves require runner controls and local trusted access.',
+        todoLoadFailed: 'TODO load failed',
+        todoSaveFailed: 'TODO save failed',
+        todoSaved: 'TODO saved',
+        todoLoading: 'Loading TODO content',
+        todoSaving: 'Saving TODO',
+        todoPreviewOnly: 'Preview only. Load full TODO before saving.',
+        todoRedacted: 'TODO content is redacted in the current web mode.',
+        todoNoContent: 'No TODO content is loaded.',
+        todoNoChanges: 'No TODO changes to save.',
+        todoTooLarge: 'TODO exceeds the maximum editable size.',
+        todoBackupPath: 'Backup path',
       },
       goals: {
         title: 'Goals',
@@ -1491,6 +1507,22 @@
         noWarnings: '경고가 없습니다.',
         openConfig: '설정 열기',
         refreshPreview: 'TODO 미리보기 새로고침',
+        loadTodo: 'TODO 전체 불러오기',
+        saveTodo: 'TODO 저장',
+        resetTodo: 'TODO 초안 초기화',
+        todoEditor: 'TODO 편집기',
+        todoEditorLocked: 'TODO 저장은 러너 컨트롤과 로컬 신뢰 접근이 필요합니다.',
+        todoLoadFailed: 'TODO 불러오기 실패',
+        todoSaveFailed: 'TODO 저장 실패',
+        todoSaved: 'TODO가 저장되었습니다',
+        todoLoading: 'TODO 내용을 불러오는 중',
+        todoSaving: 'TODO 저장 중',
+        todoPreviewOnly: '미리보기 전용입니다. 저장 전에 TODO 전체를 불러오세요.',
+        todoRedacted: '현재 웹 모드에서는 TODO 내용이 레닥션됩니다.',
+        todoNoContent: '불러온 TODO 내용이 없습니다.',
+        todoNoChanges: '저장할 TODO 변경이 없습니다.',
+        todoTooLarge: 'TODO가 편집 가능한 최대 크기를 초과했습니다.',
+        todoBackupPath: '백업 경로',
       },
       goals: {
         title: '목표',
@@ -7260,6 +7292,8 @@
         text: toText(preview.text, ''),
         lines: toArray(preview.lines).map((line) => toText(line, '')).filter(Boolean),
         truncated: Boolean(preview.truncated),
+        maxLines: toNumber(preview.maxLines ?? preview.max_lines, 0),
+        maxChars: toNumber(preview.maxChars ?? preview.max_chars, 0),
       },
       pmInjection: {
         enabled: Boolean(pmInjection.enabled),
@@ -7275,6 +7309,7 @@
           endpoint: toText(edit.endpoint, '/api/todo/save'),
           method: toText(edit.method, 'POST'),
           requiresOptIn: Boolean(edit.requiresOptIn ?? edit.requires_opt_in),
+          maxChars: toNumber(edit.maxChars ?? edit.max_chars, 12000),
         },
       },
     };
@@ -7303,6 +7338,7 @@
     const data = toObject(raw);
     const summary = toObject(data.summary);
     const sdk = toObject(data.sdk);
+    const featureValues = Array.isArray(data.features) ? data.features : Object.values(toObject(data.features));
     return {
       status: toText(data.status, 'unknown'),
       valid: Boolean(data.valid),
@@ -7311,7 +7347,7 @@
         version: toText(sdk.version, ''),
         error: toText(sdk.error, ''),
       },
-      features: Object.values(toObject(data.features)).map((item) => toObject(item)),
+      features: featureValues.map((item) => toObject(item)),
       issues: toArray(data.issues).map((item) => toObject(item)),
       warnings: toArray(data.warnings).map((item) => toObject(item)),
       errors: toArray(data.errors).map((item) => toObject(item)),
@@ -9528,6 +9564,7 @@
       worktreeDiagnosticsFilter: normalizeWorktreeDiagnosticsFilter({}),
       instanceHealth: normalizeInstanceHealth({}),
       todo: normalizeTodoStatus({}),
+      todoEditor: createBlankTodoEditor(),
       skillsStatus: normalizeSkillsStatus({}),
       claudeAdvanced: normalizeClaudeAdvanced({}),
       mcpDiagnostics: normalizeMcpDiagnostics({}),
@@ -10316,6 +10353,11 @@
     renderLogTailFilters,
     normalizeWorktreeDiagnosticsFilter,
     normalizeTodoStatus,
+    normalizeTodoMutationResponse,
+    todoSaveDisabledReason,
+    loadTodoEditor,
+    saveTodoDraft,
+    resetTodoEditor,
     normalizeSkillsStatus,
     normalizeClaudeAdvanced,
     normalizeMcpDiagnostics,
@@ -10523,6 +10565,15 @@
       state.instanceHealth = normalizeInstanceHealth(next.instanceHealth || next.instance_health || {});
     }
     state.todo = normalizeTodoStatus(next.todo || {});
+    if (
+      state.todoEditor &&
+      state.todoEditor.loaded &&
+      state.todoEditor.activePath &&
+      state.todo.activePath &&
+      state.todoEditor.activePath !== state.todo.activePath
+    ) {
+      state.todoEditor = createBlankTodoEditor();
+    }
     state.skillsStatus = normalizeSkillsStatus(next.skillsStatus || next.skills_status || {});
     state.claudeAdvanced = normalizeClaudeAdvanced(next.claudeAdvanced || next.claude_advanced || {});
     state.mcpDiagnostics = normalizeMcpDiagnostics(next.mcpDiagnostics || next.mcp_diagnostics || {});
@@ -19839,6 +19890,212 @@
     return `<div class="compact-list">${items.slice(0, 6).map((item) => compactFactItem(t('operations.warnings'), item, '')).join('')}</div>`;
   }
 
+  function todoEditorData() {
+    if (!state.todoEditor || typeof state.todoEditor !== 'object') {
+      state.todoEditor = createBlankTodoEditor();
+    }
+    return state.todoEditor;
+  }
+
+  function todoEditorDirty(editor = todoEditorData()) {
+    return toText(editor.draftContent, '') !== toText(editor.baseContent, '');
+  }
+
+  function todoLoadRequestPath(todo = normalizeTodoStatus(state.todo || {})) {
+    const maxChars = Math.max(1, toNumber(todo.controls?.edit?.maxChars, 12000));
+    return `/api/todo?preview=true&preview_lines=10000&preview_max_chars=${encodeURIComponent(String(maxChars))}`;
+  }
+
+  function normalizeTodoMutationResponse(payload) {
+    const raw = toObject(payload);
+    const error = toObject(raw.error);
+    const details = toObject(error.details);
+    return {
+      ok: Boolean(raw.ok !== false),
+      action: toText(raw.action, ''),
+      status: toText(raw.status, ''),
+      message: toText(raw.message, ''),
+      activePath: toText(raw.activePath || raw.active_path || details.activePath || details.active_path, ''),
+      backupPath: toText(raw.backupPath || raw.backup_path || details.backupPath || details.backup_path, ''),
+      todo: normalizeTodoStatus(raw.todo || {}),
+      snapshot: toObject(raw.snapshot),
+      error,
+    };
+  }
+
+  function todoSaveDisabledReason(todo = normalizeTodoStatus(state.todo || {}), editor = todoEditorData()) {
+    if (editor.loading) return t('operations.todoLoading');
+    if (editor.saving) return t('operations.todoSaving');
+    if (state.sourceMode !== 'api') return t('snapshot.backendUnavailable');
+    if (state.redaction?.active) return t('operations.todoRedacted');
+    if (todo.controls.edit.requiresOptIn && !state.runnerControl?.enabled) return t('operations.todoEditorLocked');
+    if (!todo.controls.edit.enabled) return t('operations.todoEditorLocked');
+    if (!editor.loaded) return t('operations.todoPreviewOnly');
+    if (!todoEditorDirty(editor)) return t('operations.todoNoChanges');
+    if (toText(editor.draftContent, '').length > Math.max(1, toNumber(todo.controls.edit.maxChars, 12000))) {
+      return t('operations.todoTooLarge');
+    }
+    return '';
+  }
+
+  async function loadTodoEditor() {
+    const todo = normalizeTodoStatus(state.todo || {});
+    const editor = todoEditorData();
+    if (editor.loading || editor.saving) return;
+    const requestPath = todoLoadRequestPath(todo);
+    state.todoEditor = {
+      ...editor,
+      status: 'loading',
+      message: t('operations.todoLoading'),
+      errorCode: '',
+      loading: true,
+      requestPath,
+      saveEndpoint: todo.controls.edit.endpoint || '/api/todo/save',
+    };
+    renderShell({ preserveScroll: true });
+
+    try {
+      if (state.sourceMode !== 'api') throw new Error(t('snapshot.backendUnavailable'));
+      if (state.redaction?.active) throw new Error(t('operations.todoRedacted'));
+      const response = await fetch(requestPath, {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const loadError = new Error(toText(payload?.message || payload?.error?.message || t('operations.todoLoadFailed'), t('operations.todoLoadFailed')));
+        loadError.code = toText(payload?.error?.code || 'todo_load_failed', 'todo_load_failed');
+        throw loadError;
+      }
+      const loadedTodo = normalizeTodoStatus(payload);
+      if (loadedTodo.preview.truncated) {
+        const truncatedError = new Error(t('operations.todoPreviewOnly'));
+        truncatedError.code = 'todo_preview_truncated';
+        throw truncatedError;
+      }
+      const content = loadedTodo.preview.text;
+      state.todo = loadedTodo;
+      state.todoEditor = {
+        ...createBlankTodoEditor(),
+        status: 'loaded',
+        message: loadedTodo.message || t('common.ready'),
+        activePath: loadedTodo.activePath,
+        baseContent: content,
+        draftContent: content,
+        loaded: true,
+        loading: false,
+        saving: false,
+        requestPath,
+        saveEndpoint: loadedTodo.controls.edit.endpoint || todo.controls.edit.endpoint || '/api/todo/save',
+      };
+      renderShell({ preserveScroll: true });
+    } catch (error) {
+      state.todoEditor = {
+        ...todoEditorData(),
+        status: 'error',
+        message: error instanceof Error ? error.message : t('operations.todoLoadFailed'),
+        errorCode: error instanceof Error && error.code ? error.code : 'todo_load_failed',
+        loading: false,
+        saving: false,
+        requestPath,
+      };
+      renderShell({ preserveScroll: true });
+    }
+  }
+
+  async function saveTodoDraft() {
+    const todo = normalizeTodoStatus(state.todo || {});
+    const editor = todoEditorData();
+    if (editor.loading || editor.saving) return;
+    const disabledReason = todoSaveDisabledReason(todo, editor);
+    const requestPath = todo.controls.edit.endpoint || editor.saveEndpoint || '/api/todo/save';
+    if (disabledReason) {
+      state.todoEditor = {
+        ...editor,
+        status: 'error',
+        message: disabledReason,
+        errorCode: 'todo_save_disabled',
+        saveEndpoint: requestPath,
+      };
+      renderShell({ preserveScroll: true });
+      return;
+    }
+
+    state.todoEditor = {
+      ...editor,
+      status: 'saving',
+      message: t('operations.todoSaving'),
+      errorCode: '',
+      saving: true,
+      saveEndpoint: requestPath,
+    };
+    renderShell({ preserveScroll: true });
+
+    try {
+      const response = await fetch(requestPath, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ content: editor.draftContent }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      const normalized = normalizeTodoMutationResponse(payload);
+      if (!response.ok || normalized.ok === false) {
+        const saveError = new Error(toText(normalized.message || t('operations.todoSaveFailed'), t('operations.todoSaveFailed')));
+        saveError.code = toText(normalized.error.code || 'todo_save_failed', 'todo_save_failed');
+        saveError.backupPath = normalized.backupPath;
+        throw saveError;
+      }
+      if (normalized.snapshot && Object.keys(normalized.snapshot).length) {
+        applyServerSnapshot(normalized.snapshot);
+      } else if (normalized.todo) {
+        state.todo = normalized.todo;
+      }
+      state.todoEditor = {
+        ...createBlankTodoEditor(),
+        status: 'success',
+        message: normalized.message || t('operations.todoSaved'),
+        activePath: normalized.activePath || state.todo.activePath || editor.activePath,
+        baseContent: editor.draftContent,
+        draftContent: editor.draftContent,
+        loaded: true,
+        backupPath: normalized.backupPath,
+        savedAt: nowMs(),
+        saveEndpoint: requestPath,
+      };
+      renderShell({ preserveScroll: true });
+    } catch (error) {
+      state.todoEditor = {
+        ...todoEditorData(),
+        status: 'error',
+        message: error instanceof Error ? error.message : t('operations.todoSaveFailed'),
+        errorCode: error instanceof Error && error.code ? error.code : 'todo_save_failed',
+        backupPath: error instanceof Error ? toText(error.backupPath || '', '') : '',
+        saving: false,
+      };
+      renderShell({ preserveScroll: true });
+    }
+  }
+
+  function resetTodoEditor() {
+    const editor = todoEditorData();
+    if (editor.loading || editor.saving) return;
+    if (!editor.loaded) {
+      state.todoEditor = createBlankTodoEditor();
+    } else {
+      state.todoEditor = {
+        ...editor,
+        status: 'loaded',
+        message: t('common.ready'),
+        errorCode: '',
+        draftContent: editor.baseContent,
+      };
+    }
+    renderShell({ preserveScroll: true });
+  }
+
   function renderOperations() {
     const todo = normalizeTodoStatus(state.todo || {});
     const skills = normalizeSkillsStatus(state.skillsStatus || {});
@@ -19877,6 +20134,24 @@
     const budgetRows = Object.keys(budgetFloors).length
       ? `<div class="compact-list">${Object.keys(budgetFloors).map((key) => compactFactItem(key, String(budgetValues[key] ?? 0), `${t('operations.budgetFloors')} ${budgetFloors[key]}`)).join('')}</div>`
       : `<div class="summary-note">${escapeHTML(t('common.none'))}</div>`;
+    const todoEditor = todoEditorData();
+    const todoSaveReason = todoSaveDisabledReason(todo, todoEditor);
+    const todoLoadDisabled = todoEditor.loading || todoEditor.saving || state.sourceMode !== 'api' || Boolean(state.redaction?.active);
+    const todoLoadPresentation = actionPresentation('todo-load', todoEditor.loading ? 'busy' : todoLoadDisabled ? 'disabled' : 'ready', todoLoadDisabled && !todoEditor.loading ? (state.redaction?.active ? t('operations.todoRedacted') : t('snapshot.backendUnavailable')) : '');
+    const todoSavePresentation = actionPresentation('todo-save', todoEditor.saving ? 'busy' : todoSaveReason ? 'disabled' : 'ready', todoSaveReason);
+    const todoEditorStatus = todoEditor.status === 'error'
+      ? 'failure'
+      : todoEditor.status === 'success'
+        ? 'success'
+        : todoEditor.loading || todoEditor.saving
+          ? 'busy'
+          : 'ready';
+    const todoEditorBanner = todoEditor.message
+      ? renderActionStateBanner(actionPresentation('todo-editor', todoEditorStatus, todoEditor.message), t('operations.todoEditor'), todoEditor.message)
+      : '';
+    const todoEditorDisabled = !todoEditor.loaded || todoEditor.loading || todoEditor.saving || Boolean(state.redaction?.active);
+    const todoDraftChars = toText(todoEditor.draftContent, '').length;
+    const todoMaxChars = Math.max(1, toNumber(todo.controls.edit.maxChars, 12000));
     const summaryCards = [
       detailCard(t('operations.todoPanel'), todo.state, todo.state === 'ready' ? 'runner-control__value--accent' : 'runner-control__value--warn'),
       detailCard(t('operations.skillsPanel'), `${skills.discoveredCount}/${skills.rootCount}`, skills.warnings.length || skills.missingSkillIds.length ? 'runner-control__value--warn' : 'runner-control__value--accent'),
@@ -19907,6 +20182,32 @@
             </div>
             <div class="summary-note">${escapeHTML(t('operations.preview'))}</div>
             ${todoPreview}
+            <div class="prompt-editor" data-todo-editor-root data-todo-loaded="${todoEditor.loaded ? 'true' : 'false'}" data-todo-dirty="${todoEditorDirty(todoEditor) ? 'true' : 'false'}" data-action-state="${escapeHTML(todoEditorStatus)}">
+              <div class="prompt-editor__head">
+                <div class="prompt-editor__title-block">
+                  <div class="panel__title">${escapeHTML(t('operations.todoEditor'))}</div>
+                  <div class="panel__meta">${escapeHTML(todoEditor.activePath || todo.activeRelativePath || todo.activePath || t('common.none'))} | ${escapeHTML(String(todoDraftChars))}/${escapeHTML(String(todoMaxChars))}</div>
+                </div>
+              </div>
+              ${todoEditorBanner}
+              <div class="prompt-editor__field">
+                <label class="prompt-editor__label" for="todo-editor-content">${escapeHTML(t('operations.todoEditor'))}</label>
+                <textarea
+                  id="todo-editor-content"
+                  class="field-control field-control--textarea prompt-editor__textarea"
+                  rows="8"
+                  data-todo-editor-field="content"
+                  ${todoEditorDisabled ? 'disabled' : ''}
+                >${escapeHTML(todoEditor.loaded ? todoEditor.draftContent : '')}</textarea>
+              </div>
+              <div class="modal-actions" style="margin-top:12px;">
+                ${button(t('operations.loadTodo'), 'todo-load', actionButtonClass(todoLoadPresentation, 'button--quiet'), actionButtonAttrs(todoLoadPresentation))}
+                ${button(t('operations.resetTodo'), 'todo-reset', 'button--quiet', `${todoEditor.loading || todoEditor.saving || !todoEditor.loaded ? 'disabled aria-disabled="true"' : ''}`)}
+                ${button(t('operations.saveTodo'), 'todo-save', actionButtonClass(todoSavePresentation, 'button--primary'), actionButtonAttrs(todoSavePresentation))}
+              </div>
+              ${todoSaveReason ? `<div class="summary-note" data-todo-save-disabled-reason>${escapeHTML(todoSaveReason)}</div>` : ''}
+              ${todoEditor.backupPath ? `<div class="summary-note">${escapeHTML(t('operations.todoBackupPath'))}: ${escapeHTML(todoEditor.backupPath)}</div>` : ''}
+            </div>
           `)}
           ${panel(t('operations.skillsPanel'), `${escapeHTML(skills.existingRootCount)}/${escapeHTML(skills.rootCount)} ${escapeHTML(t('operations.roots'))}`, `
             <div class="runner-control__details">
@@ -21524,6 +21825,15 @@
       case 'prompt-restore':
         void restorePromptDraft();
         return;
+      case 'todo-load':
+        void loadTodoEditor();
+        return;
+      case 'todo-save':
+        void saveTodoDraft();
+        return;
+      case 'todo-reset':
+        resetTodoEditor();
+        return;
       case 'toggle-logs':
         setLiveTailPaused(!isLiveTailPaused());
         renderShell({ preserveScroll: true });
@@ -21901,6 +22211,24 @@
     };
   }
 
+  function createBlankTodoEditor() {
+    return {
+      status: 'idle',
+      message: '',
+      errorCode: '',
+      activePath: '',
+      baseContent: '',
+      draftContent: '',
+      loaded: false,
+      loading: false,
+      saving: false,
+      backupPath: '',
+      savedAt: 0,
+      requestPath: '/api/todo',
+      saveEndpoint: '/api/todo/save',
+    };
+  }
+
   function createBlankConfigRestoreState() {
     return {
       status: 'idle',
@@ -22023,6 +22351,7 @@
     worktreeDiagnosticsFilter: clone(defaults.worktreeDiagnosticsFilter || normalizeWorktreeDiagnosticsFilter({})),
     instanceHealth: clone(defaults.instanceHealth),
     todo: clone(defaults.todo),
+    todoEditor: clone(defaults.todoEditor || createBlankTodoEditor()),
     skillsStatus: clone(defaults.skillsStatus),
     claudeAdvanced: clone(defaults.claudeAdvanced),
     mcpDiagnostics: clone(defaults.mcpDiagnostics),
@@ -24031,6 +24360,23 @@
         updatePromptEditorDraft('draftFile', event.target.value);
       } else if (field === 'content') {
         updatePromptEditorDraft('draftContent', event.target.value);
+      }
+      return;
+    }
+
+    if (event.target.matches('[data-todo-editor-field]')) {
+      const editor = todoEditorData();
+      if (editor.loading || editor.saving) return;
+      state.todoEditor = {
+        ...editor,
+        status: editor.status === 'success' ? 'loaded' : editor.status,
+        message: '',
+        errorCode: '',
+        draftContent: event.target.value,
+      };
+      const root = event.target.closest('[data-todo-editor-root]');
+      if (root) {
+        root.setAttribute('data-todo-dirty', todoEditorDirty(state.todoEditor) ? 'true' : 'false');
       }
       return;
     }
