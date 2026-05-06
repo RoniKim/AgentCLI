@@ -2784,6 +2784,66 @@ select.field-control,
   gap: 12px;
 }
 
+.history-compare {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  background: var(--surface-2);
+}
+
+.history-compare__select {
+  display: grid;
+  gap: 6px;
+  min-width: min(240px, 100%);
+  color: var(--text-sub);
+  font-size: 12px;
+}
+
+.history-compare__grid {
+  display: grid;
+  grid-template-columns: minmax(112px, 0.8fr) repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-1);
+  overflow: hidden;
+}
+
+.history-compare__row {
+  display: contents;
+}
+
+.history-compare__head,
+.history-compare__metric,
+.history-compare__value {
+  min-width: 0;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.history-compare__head {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.history-compare__metric {
+  color: var(--text-sub);
+  font-weight: 700;
+}
+
+.history-compare__value {
+  color: var(--text);
+}
+
+.history-compare__grid > :nth-last-child(-n + 3) {
+  border-bottom: 0;
+}
+
 .experience-panel {
   margin-top: 2px;
 }

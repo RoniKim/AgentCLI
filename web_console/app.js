@@ -680,6 +680,13 @@
         reportStatus: 'Report status',
         exportMarkdown: 'Export Markdown',
         exportJson: 'Export JSON',
+        runComparison: 'Run comparison',
+        compareAgainst: 'Compare against',
+        selectedRunLabel: 'Selected run',
+        comparedRunLabel: 'Compared run',
+        compareMetric: 'Metric',
+        tokenQuota: 'Token / quota',
+        compareUnavailable: 'Select another run to compare.',
         reportMissing: 'No report artifact is available yet.',
         reportUnavailable: 'Report unavailable',
         reportPassed: 'Passed',
@@ -1462,6 +1469,13 @@
         reportStatus: '보고서 상태',
         exportMarkdown: 'Markdown 내보내기',
         exportJson: 'JSON 내보내기',
+        runComparison: '실행 비교',
+        compareAgainst: '비교 대상',
+        selectedRunLabel: '선택 실행',
+        comparedRunLabel: '비교 실행',
+        compareMetric: '지표',
+        tokenQuota: '토큰 / 할당량',
+        compareUnavailable: '비교할 다른 실행을 선택하세요.',
         reportMissing: '아직 보고서 아티팩트가 없습니다.',
         reportUnavailable: '보고서 없음',
         reportPassed: '성공',
@@ -5937,6 +5951,21 @@
     const stateCounts = toObject(raw.stateCounts || raw.state_counts);
     const runSummary = toObject(raw.runSummary || raw.run_summary);
     const lastRunSummary = toObject(raw.lastRunSummary || raw.last_run_summary);
+    const metrics = normalizeMetrics(raw.metrics || {});
+    const quota = normalizeQuotaData(raw, metrics);
+    const rawTokens = toObject(raw.tokens);
+    const tokensAvailable = Boolean(
+      raw.tokensAvailable ||
+        raw.tokens_available ||
+        metrics.tokensAvailable ||
+        metrics.tokens_available ||
+        rawTokens.in != null ||
+        rawTokens.out != null ||
+        metrics.tokens.in != null ||
+        metrics.tokens.out != null
+    );
+    const tokenIn = tokensAvailable ? toMaybeNumber(rawTokens.in ?? rawTokens.input ?? metrics.tokens.in) : null;
+    const tokenOut = tokensAvailable ? toMaybeNumber(rawTokens.out ?? rawTokens.output ?? metrics.tokens.out) : null;
     const runCycles = toArray(runSummary.cycles);
     const doneCount = toNumber(stateCounts.done ?? raw.tasksDone ?? taskCounts.done ?? lastRunSummary.done ?? 0, 0);
     const failedCount = toNumber(stateCounts.failed ?? raw.tasksFailed ?? taskCounts.failed ?? lastRunSummary.failed_count ?? 0, 0);
@@ -5986,6 +6015,22 @@
       lastCycle: toText(raw.lastCycle, ''),
       runSummary,
       lastRunSummary,
+      metrics,
+      tokens24h: toArray(raw.tokens24h || raw.tokens_24h || metrics.tokens24h),
+      tokensAvailable,
+      tokens_available: tokensAvailable,
+      tokens: {
+        in: tokenIn,
+        out: tokenOut,
+        available: tokensAvailable,
+      },
+      quotaAvailable: quota.available,
+      quota_available: quota.available,
+      quotaWindow: quota.window,
+      quota_window: quota.window,
+      quotaUsed: quota.used,
+      quota_used: quota.used,
+      quota: clone(quota),
       worktreeOutcome: toText(raw.worktreeOutcome || raw.worktree_outcome, 'none'),
       qaValidationReport: toObject(raw.qaValidationReport || raw.qa_validation_report),
       qa_validation_report: toObject(raw.qa_validation_report || raw.qaValidationReport),
@@ -9495,6 +9540,13 @@
     historyReportExportRequestPath,
     historyReportExportFilename,
     exportHistoryReport,
+    currentCompareRun,
+    historyCompareFallbackRunId,
+    setHistoryCompareSelection,
+    historyRunCommitSummary,
+    historyRunValidationSummary,
+    historyRunTokenQuotaSummary,
+    renderHistoryComparePanel,
     normalizeGoalSaveRisk,
     normalizeGoalSaveResponse,
     goalSaveEnabled,
@@ -9661,6 +9713,16 @@
     }
     if (!state.historySelection && state.history.length) {
       state.historySelection = state.history[0].id;
+    } else if (state.historySelection && !state.history.some((run) => run.id === state.historySelection)) {
+      state.historySelection = state.history[0]?.id || '';
+    }
+    if (
+      state.history.length < 2 ||
+      !state.historyCompareSelection ||
+      state.historyCompareSelection === state.historySelection ||
+      !state.history.some((run) => run.id === state.historyCompareSelection)
+    ) {
+      state.historyCompareSelection = historyCompareFallbackRunId(state.historySelection);
     }
     if (!nextPrompts.length) {
       state.promptSelection = '';
@@ -11540,6 +11602,117 @@
     `;
   }
 
+  function historyRunCommitSummary(run) {
+    const cycle = historyCycleChangeSummary(run);
+    const commits = toArray(cycle.commits);
+    return {
+      count: commits.length,
+      text: commits.length ? compactText(commits.map(historyCycleChangeCommitText).filter(Boolean).join(' | '), 180) : t('common.none'),
+    };
+  }
+
+  function historyRunValidationSummary(run) {
+    const raw = toObject(run);
+    const finalReport = toObject(raw.finalRunReport || raw.final_run_report);
+    const qaReport = toObject(raw.qaValidationReport || raw.qa_validation_report);
+    const finalCounts = historyReportCounts(finalReport);
+    const qaCounts = historyReportCounts(qaReport);
+    const cycle = historyCycleChangeSummary(raw);
+    const validationResults = toArray(cycle.validationResults || cycle.validation_results);
+    const failedCommands = finalCounts.commandsFailed + qaCounts.commandsFailed;
+    const passedCommands = finalCounts.commandsPassed + qaCounts.commandsPassed;
+    const skippedCommands = finalCounts.commandsSkipped + qaCounts.commandsSkipped;
+    const statusText = [
+      `${t('history.finalRunReport')}: ${historyReportStatusLabel(toText(finalReport.status || raw.reportStatus, 'missing'))}`,
+      `${t('history.qaValidationReport')}: ${historyReportStatusLabel(toText(qaReport.status || raw.qaValidationReportStatus, 'missing'))}`,
+    ].join(' | ');
+    return {
+      count: validationResults.length || (passedCommands + failedCommands + skippedCommands),
+      text: `${statusText} | passed ${passedCommands} | failed ${failedCommands} | skipped ${skippedCommands}`,
+    };
+  }
+
+  function historyRunTokenQuotaSummary(run) {
+    const raw = toObject(run);
+    const tokens = toObject(raw.tokens);
+    const hasTokens = Boolean(raw.tokensAvailable || raw.tokens_available || tokens.available || tokens.in != null || tokens.out != null);
+    const tokenIn = hasTokens ? toMaybeNumber(tokens.in ?? tokens.input) : null;
+    const tokenOut = hasTokens ? toMaybeNumber(tokens.out ?? tokens.output) : null;
+    const tokenTotal = tokenIn != null && tokenOut != null ? tokenIn + tokenOut : null;
+    const tokenText = hasTokens
+      ? `${tokenTotal != null ? fmtNumberShort(tokenTotal) : t('common.available')} (${t('pipeline.input')} ${metricText(true, tokenIn, fmtNumberShort)} | ${t('pipeline.output')} ${metricText(true, tokenOut, fmtNumberShort)})`
+      : t('pipeline.tokenTelemetryUnavailable');
+    const quotaText = formatQuotaUsage(raw.quota);
+    return `${tokenText} | ${quotaText}`;
+  }
+
+  function historyRunTaskOutcomeSummary(run) {
+    const counts = historyTaskCounts(run);
+    return `${counts.done}/${counts.total} | ${t('common.failed')} ${counts.failed} | ${t('common.skipped')} ${counts.skipped} | ${t('history.cycles', { count: counts.cycles })}`;
+  }
+
+  function historyCompareRow(label, selectedValue, comparedValue) {
+    return `
+      <div class="history-compare__row">
+        <div class="history-compare__metric">${escapeHTML(label)}</div>
+        <div class="history-compare__value">${artifactPathLinksHTML(selectedValue)}</div>
+        <div class="history-compare__value">${artifactPathLinksHTML(comparedValue)}</div>
+      </div>
+    `;
+  }
+
+  function renderHistoryComparePanel(selected, compared) {
+    if (!selected) {
+      return '';
+    }
+    const options = state.runs
+      .filter((run) => run.id !== selected.id)
+      .map((run) => `<option value="${escapeHTML(run.id)}" ${compared && compared.id === run.id ? 'selected' : ''}>${escapeHTML(`${run.branch || 'HEAD'} | ${run.id}`)}</option>`)
+      .join('');
+    if (!compared || !options) {
+      return `
+        <div class="history-compare">
+          <div class="history-report__head">
+            <div>
+              <div class="history-report__title">${escapeHTML(t('history.runComparison'))}</div>
+              <div class="history-report__copy">${escapeHTML(t('history.compareUnavailable'))}</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    const selectedCommit = historyRunCommitSummary(selected);
+    const comparedCommit = historyRunCommitSummary(compared);
+    const selectedValidation = historyRunValidationSummary(selected);
+    const comparedValidation = historyRunValidationSummary(compared);
+    return `
+      <div class="history-compare">
+        <div class="history-report__head">
+          <div>
+            <div class="history-report__title">${escapeHTML(t('history.runComparison'))}</div>
+            <div class="history-report__copy">${escapeHTML(`${selected.id} <-> ${compared.id}`)}</div>
+          </div>
+          <label class="history-compare__select">
+            <span>${escapeHTML(t('history.compareAgainst'))}</span>
+            <select class="field-control" data-history-compare-select aria-label="${escapeHTML(t('history.compareAgainst'))}">
+              ${options}
+            </select>
+          </label>
+        </div>
+        <div class="history-compare__grid">
+          <div class="history-compare__head">${escapeHTML(t('history.compareMetric'))}</div>
+          <div class="history-compare__head">${escapeHTML(t('history.selectedRunLabel'))}</div>
+          <div class="history-compare__head">${escapeHTML(t('history.comparedRunLabel'))}</div>
+          ${historyCompareRow(t('history.commits'), `${selectedCommit.count} | ${selectedCommit.text}`, `${comparedCommit.count} | ${comparedCommit.text}`)}
+          ${historyCompareRow(t('history.tasks'), historyRunTaskOutcomeSummary(selected), historyRunTaskOutcomeSummary(compared))}
+          ${historyCompareRow(t('history.tokenQuota'), historyRunTokenQuotaSummary(selected), historyRunTokenQuotaSummary(compared))}
+          ${historyCompareRow(t('history.validationResults'), `${selectedValidation.count} | ${selectedValidation.text}`, `${comparedValidation.count} | ${comparedValidation.text}`)}
+          ${historyCompareRow(t('history.worktreeOutcome'), historyWorktreeOutcomeLabel(selected.worktreeOutcome), historyWorktreeOutcomeLabel(compared.worktreeOutcome))}
+        </div>
+      </div>
+    `;
+  }
+
   function renderHistoryRow(run) {
     const selected = state.historySelection === run.id;
     const executionStatus = toText(run.executionStatus || run.status, run.status);
@@ -13158,6 +13331,27 @@
       return null;
     }
     return state.runs.find((run) => run.id === state.historySelection) || state.runs[0];
+  }
+
+  function historyCompareFallbackRunId(selectedId = '') {
+    const selected = toText(selectedId, '');
+    const candidate = state.runs.find((run) => run.id !== selected);
+    return candidate ? candidate.id : '';
+  }
+
+  function currentCompareRun(selected = currentRun()) {
+    if (!selected || state.runs.length < 2) {
+      return null;
+    }
+    const selectedId = toText(selected.id, '');
+    return state.runs.find((run) => run.id === state.historyCompareSelection && run.id !== selectedId)
+      || state.runs.find((run) => run.id !== selectedId)
+      || null;
+  }
+
+  function setHistoryCompareSelection(id) {
+    state.historyCompareSelection = toText(id, '');
+    renderShell({ preserveScroll: true });
   }
 
   function historyReportExportRequestPath(runId, format = 'json') {
@@ -17826,6 +18020,7 @@
 
   function renderHistory() {
     const selected = currentRun();
+    const compared = currentCompareRun(selected);
     const totalTasks = state.runs.reduce((sum, run) => sum + run.tasksTotal, 0);
     const doneTasks = state.runs.reduce((sum, run) => sum + run.tasksDone, 0);
     const successes = state.runs.filter((run) => normalizeProjectStatus(run.projectStatus || run.projectComplete) === 'complete').length;
@@ -17912,6 +18107,7 @@
                           ${renderHistoryReportPanel(t('history.finalRunReport'), selectedFinalRunReport, 'final')}
                           ${renderHistoryReportPanel(t('history.qaValidationReport'), selectedQaValidationReport, 'qa')}
                         </div>
+                        ${renderHistoryComparePanel(selected, compared)}
                         ${renderHistoryExperiencePanel(state.experience)}
                         ${renderHistoryCycleChangePanel(selectedCycleChangeSummary)}
                         <div class="summary-note">${escapeHTML(t('history.persistedSummariesDriveThisView'))}</div>
@@ -19743,6 +19939,9 @@
 
   function setHistorySelection(id) {
     state.historySelection = id;
+    if (state.historyCompareSelection === id || !state.runs.some((run) => run.id === state.historyCompareSelection)) {
+      state.historyCompareSelection = historyCompareFallbackRunId(id);
+    }
     renderShell({ preserveScroll: true });
   }
 
@@ -20046,6 +20245,7 @@
     configSelection: 'repo',
     backlogSelection: defaults.backlogSelectedId,
     historySelection: defaults.history[0]?.id || '',
+    historyCompareSelection: defaults.history.find((run) => run.id !== defaults.history[0]?.id)?.id || '',
     promptSelection: defaults.prompts[0]?.id || '',
     reviewedWorktree: Boolean(readJSON(STORAGE.worktree, null)?.reviewed),
     serverMode: false,
@@ -21859,6 +22059,11 @@
 
     if (event.target.matches('[data-config-backup-select]')) {
       updateConfigRestoreMutationField('backupSelection', event.target.value);
+      return;
+    }
+
+    if (event.target.matches('[data-history-compare-select]')) {
+      setHistoryCompareSelection(event.target.value);
       return;
     }
 

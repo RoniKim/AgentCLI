@@ -707,6 +707,7 @@ def build_history_item(
     _epoch_ms = web._epoch_ms
     _latest_path_mtime_ms = web._latest_path_mtime_ms
     _history_worktree_outcome = web._history_worktree_outcome
+    _build_metrics_payload = web._build_metrics_payload
     _tail_text = web._tail_text
 
     state = load_state(run_dir / "STATE.json")
@@ -789,6 +790,11 @@ def build_history_item(
 
     branch_value = _pick_text(run_summary.get("branch"), last_summary.get("branch"), branch, "HEAD")
     worktree_outcome = _history_worktree_outcome(run_dir)
+    metrics = _build_metrics_payload(run_dir, {}, controller_status=None)
+    tokens = metrics.get("tokens") if isinstance(metrics.get("tokens"), dict) else {}
+    quota = metrics.get("quota") if isinstance(metrics.get("quota"), dict) else {}
+    tokens_available = bool(metrics.get("tokens_available") or metrics.get("tokensAvailable"))
+    quota_available = bool(metrics.get("quota_available") or metrics.get("quotaAvailable"))
     qa_validation_report = _safe_json(run_dir / "QA_VALIDATION_REPORT.json", {})
     final_run_report = _safe_json(run_dir / "FINAL_RUN_REPORT.json", {})
     cycle_change_summary = _safe_json(run_dir / "cycle_change_summary.json", {})
@@ -847,6 +853,22 @@ def build_history_item(
         "lastCycle": last_cycle,
         "runSummary": run_summary,
         "lastRunSummary": last_summary,
+        "metrics": metrics,
+        "tokens24h": list(metrics.get("tokens24h") or []),
+        "tokensAvailable": tokens_available,
+        "tokens_available": tokens_available,
+        "tokens": {
+            "in": tokens.get("in"),
+            "out": tokens.get("out"),
+            "available": tokens_available,
+        },
+        "quotaAvailable": quota_available,
+        "quota_available": quota_available,
+        "quotaWindow": metrics.get("quotaWindow") or metrics.get("quota_window") or quota.get("window"),
+        "quota_window": metrics.get("quota_window") or metrics.get("quotaWindow") or quota.get("window"),
+        "quotaUsed": metrics.get("quotaUsed") if metrics.get("quotaUsed") is not None else metrics.get("quota_used"),
+        "quota_used": metrics.get("quota_used") if metrics.get("quota_used") is not None else metrics.get("quotaUsed"),
+        "quota": quota,
         "worktreeOutcome": worktree_outcome,
         "qaValidationReport": qa_validation_report,
         "qa_validation_report": qa_validation_report,

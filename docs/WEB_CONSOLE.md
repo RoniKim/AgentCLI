@@ -26,6 +26,7 @@ Verified on 2026-05-06 with local API, unit, and checked-in browser smoke covera
 - Completed run report generation also writes `WORK_SUMMARY.md`, a short daily-work-log Markdown artifact without raw logs, prompts, transcripts, or diffs.
 - Mutating web actions append redacted `WEB_ACTION_AUDIT.jsonl` records with timestamps and result summaries: run/worktree-bound actions write under the active `run_dir`, while config, prompt, and goals edits write to `.AgentCLI/WEB_ACTION_AUDIT.jsonl`.
 - Browser-rendered `.AgentCLI` artifact paths use the loopback-only read-only `/api/artifacts/open` helper for allowed text-like artifacts instead of invoking raw local filesystem operations.
+- Run History can compare the selected run against another run side-by-side, including commits, task outcomes, token/quota telemetry, validation status/results, and worktree outcomes.
 - Backup creation happens inside save/restore flows; there is no standalone `/api/*/backup` route family.
 - Read-only worktree diagnostics now scan `.AgentCLI/agent_runs`, the central pending marker, patch paths, cleanup-failed artifacts, and generated worktree directories without deleting anything by default.
 - Additional read-only contracts now cover Goals metadata and backend log tailing.
@@ -43,7 +44,7 @@ Verified on 2026-05-06 with local API, unit, and checked-in browser smoke covera
 
 Known remaining scope:
 
-- Run History comparison, Notifications read/unread workflow, and Instance Health remain tracked in `.doc/GOALS.md` P1.
+- Notifications read/unread workflow and Instance Health remain tracked in `.doc/GOALS.md` P1.
 - Browser PR Queue detail is currently read-oriented: it shows packet data, validation logs, merge preflight, blockers, and disabled action affordances; shell commands and guarded backend routes remain the operational path for mutating queue decisions.
 - There is no implemented authentication layer yet. Treat LAN binds as trusted-network-only until [AUTHENTICATION_PLAN.md](AUTHENTICATION_PLAN.md) is implemented.
 
