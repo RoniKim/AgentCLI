@@ -1552,6 +1552,7 @@ def build_snapshot(
     _build_config_contract = web._build_config_contract
     _build_claude_advanced_diagnostics = web.build_claude_advanced_diagnostics
     _build_mcp_diagnostics = web.build_mcp_diagnostics
+    _build_instance_health = web.build_instance_health
     _prompt_profile = web._prompt_profile
     resolve_goals_completion_level = web.resolve_goals_completion_level
     _build_goals_payload = web._build_goals_payload
@@ -1846,6 +1847,13 @@ def build_snapshot(
         active=redaction_active,
         redactor=lambda value: _redact_web_runner_control(value, redact_start_options=True),
     )
+    instance_health = _build_instance_health(
+        repo_root,
+        run_dir=latest_run_dir,
+        web_instance=web_instance,
+        live_state=live_state,
+        runner_control=runner_control,
+    )
     log_summary_payload: dict[str, Any] = {
         "source": {
             "id": "",
@@ -2114,6 +2122,12 @@ def build_snapshot(
         runner_control_state,
         runner_control.get("message") or fallbackSectionMessage("runnerControl"),
     )
+    instance_health_status = str(instance_health.get("status") or "ok").strip().lower()
+    instance_health_section_state = buildSectionState(
+        "instanceHealth",
+        "error" if instance_health_status == "error" else "partial" if instance_health_status == "warning" else "ready",
+        "" if instance_health_status == "ok" else "Instance health diagnostics need operator review.",
+    )
     live_run = _live_run_payload(
         repo=repo_root,
         branch=branch,
@@ -2239,6 +2253,8 @@ def build_snapshot(
         "prQueue": pr_queue,
         "worktree": worktree,
         "worktree_diagnostics": worktree_diagnostics,
+        "instance_health": instance_health,
+        "instanceHealth": instance_health,
         "runner_control": runner_control,
         "web_instance": web_instance,
         "webInstance": web_instance,
@@ -2311,6 +2327,7 @@ def build_snapshot(
             "prQueue": pr_queue_section_state,
             "worktree": worktree_section_state,
             "runnerControl": runner_control_section_state,
+            "instanceHealth": instance_health_section_state,
         },
         "run_summary": run_summary,
         "last_run_summary": last_run_summary,

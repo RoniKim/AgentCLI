@@ -45,6 +45,12 @@ class WebConsoleStaticTests(unittest.TestCase):
     def test_command_palette_operator_actions_have_stateful_rows(self) -> None:
         app_tokens = [
             "function inspectCommandPaletteCommands",
+            "normalizeInstanceHealth",
+            "renderInstanceHealth",
+            "'instance-health'",
+            "nav-instance-health",
+            "instanceHealth: 'Instance Health'",
+            "g i",
             "paletteRunnerCommand('start'",
             "paletteRunnerCommand('stop'",
             "paletteRunnerCommand('reload'",

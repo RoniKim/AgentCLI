@@ -72,6 +72,7 @@ from .prompts import (
 )
 from .pr_queue import load_branch_index, pr_packet_path, pr_queue_root
 from .local_retention import build_local_retention_dry_run
+from .instance_health import build_instance_health
 from .process_guard import _pid_alive, _pid_create_time_ticks, _pid_executable_path, init_process_guard, terminate_all_children
 from .run_dir import find_latest_run_dir
 from .shared import coerce_roles_arg
@@ -5959,6 +5960,7 @@ def build_health(repo: Path | str | None = None) -> dict[str, Any]:
     progress = snapshot.get("progress", {}) if isinstance(snapshot.get("progress"), dict) else {}
     runner_control = snapshot.get("runner_control", {}) if isinstance(snapshot.get("runner_control"), dict) else {}
     web_instance = snapshot.get("web_instance", {}) if isinstance(snapshot.get("web_instance"), dict) else {}
+    instance_health = snapshot.get("instance_health", {}) if isinstance(snapshot.get("instance_health"), dict) else {}
     diagnostics = build_web_diagnostics(repo)
     return {
         "ok": bool(snapshot.get("ok", False)),
@@ -5968,6 +5970,8 @@ def build_health(repo: Path | str | None = None) -> dict[str, Any]:
         "runner_control": runner_control,
         "web_instance": web_instance,
         "webInstance": web_instance,
+        "instance_health": instance_health,
+        "instanceHealth": instance_health,
         "diagnostics": diagnostics,
         "web_diagnostics": diagnostics,
         "timestamp": now_iso(),
@@ -8245,6 +8249,10 @@ def create_app(
             "latest_run_dir": snap.get("latest_run_dir"),
             "status": progress.get("run_status", "idle"),
             "runner_control": snap.get("runner_control", {}),
+            "web_instance": snap.get("web_instance", {}),
+            "webInstance": snap.get("webInstance", snap.get("web_instance", {})),
+            "instance_health": snap.get("instance_health", {}),
+            "instanceHealth": snap.get("instanceHealth", snap.get("instance_health", {})),
             "diagnostics": diagnostics,
             "web_diagnostics": diagnostics,
             "timestamp": now_iso(),

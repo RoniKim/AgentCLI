@@ -440,6 +440,32 @@ def tracked_pid_details(*, alive_only: bool = True) -> list[dict[str, Any]]:
     return records
 
 
+def process_guard_state() -> dict[str, Any]:
+    """Return a read-only summary of the active process guard layers."""
+    with _lock:
+        session_dir = _session_dir
+        stop_path_configured = _stop_path_func is not None
+        initialized = bool(_initialized)
+        job_object_active = bool(_job_handle)
+        tracked_count = len(_tracked_pids)
+    session_dir_text = session_dir.as_posix() if isinstance(session_dir, Path) else ""
+    current_pid = os.getpid()
+    return {
+        "initialized": initialized,
+        "session_dir": session_dir_text,
+        "sessionDir": session_dir_text,
+        "job_object_active": job_object_active,
+        "jobObjectActive": job_object_active,
+        "stop_path_configured": stop_path_configured,
+        "stopPathConfigured": stop_path_configured,
+        "tracked_pid_count": tracked_count,
+        "trackedPidCount": tracked_count,
+        "current_pid": current_pid,
+        "currentPid": current_pid,
+        "platform": sys.platform,
+    }
+
+
 def _kill_pid(pid: int) -> bool:
     """Kill a single process by PID. On Windows always uses TerminateProcess."""
     if pid <= 0 or pid == os.getpid():

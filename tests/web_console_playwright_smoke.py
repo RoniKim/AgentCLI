@@ -50,6 +50,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
         "history",
         "notifications",
         "worktree",
+        "instance-health",
         "landing",
         "mobile",
     )
@@ -984,7 +985,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.expect(mobile_root.locator("[data-mobile-editor-panel]")).to_be_visible()
             self.expect(mobile_root.locator("[data-mobile-confirmation-panel]")).to_be_visible()
             self.expect(mobile_root.locator("[data-mobile-notification-panel]")).to_be_visible()
-            self.assertEqual(12, mobile_root.locator("[data-mobile-route-grid] [data-nav]").count())
+            self.assertEqual(13, mobile_root.locator("[data-mobile-route-grid] [data-nav]").count())
             self._capture_screenshot(page, "mobile-workflow-en.png")
 
             mobile_root.locator('[data-mobile-route-grid] [data-nav="logs"]').click()
@@ -1031,7 +1032,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             )
             self.assertTrue(route_heights)
             self.assertGreaterEqual(min(route_heights), 58)
-            self.assertEqual(12, len(layout["routeButtons"]))
+            self.assertEqual(13, len(layout["routeButtons"]))
 
             def assert_stack(name: str, rects: list[dict[str, object]]) -> None:
                 ordered = sorted(rects, key=lambda rect: (float(rect["top"]), float(rect["left"])))

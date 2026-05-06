@@ -42,6 +42,7 @@
     'history',
     'notifications',
     'worktree',
+    'instance-health',
     'landing',
     'mobile',
   ];
@@ -95,6 +96,7 @@
         config: 'Config',
         prompts: 'Prompts',
         worktreeReview: 'Worktree Review',
+        instanceHealth: 'Instance Health',
         runHistory: 'Run History',
         notifications: 'Notifications',
         landingPreview: 'Landing preview',
@@ -1057,6 +1059,7 @@
         config: '설정',
         prompts: '프롬프트',
         worktreeReview: '워크트리 검토',
+        instanceHealth: '인스턴스 상태',
         runHistory: '실행 기록',
         notifications: '알림',
         landingPreview: '랜딩 미리보기',
@@ -2205,6 +2208,36 @@
       actionNeeded: 'action needed',
       eventsReadFrom: 'Events are read from lifecycle records and control-plane snapshots. No placeholder feed is used.',
     },
+    instanceHealth: {
+      title: 'Instance Health',
+      subtitle: 'Process guard, tracked children, lock ownership, and stale artifact diagnostics.',
+      processGuard: 'Process guard',
+      trackedChildren: 'Tracked child PIDs',
+      handleDiagnostics: 'Handle/process diagnostics',
+      webInstanceLock: 'Web instance lock',
+      staleArtifacts: 'Stale artifact risks',
+      initialized: 'Initialized',
+      jobObject: 'Job object',
+      stopPath: 'Stop path hook',
+      currentPid: 'Current PID',
+      sessionDir: 'Session dir',
+      pid: 'PID',
+      alive: 'alive',
+      exited: 'exited',
+      sessionFile: 'session file',
+      noTrackedChildren: 'No tracked child PIDs.',
+      warningKinds: 'Warning kinds',
+      latestProcessCount: 'Latest process count',
+      latestHandleCount: 'Latest handle count',
+      sourcePath: 'Source path',
+      noWarnings: 'No handle/process warnings.',
+      lockState: 'Lock state',
+      lockOwner: 'Lock owner',
+      staleLocks: 'stale locks',
+      unknownLocks: 'unknown locks',
+      staleArtifactBlockers: 'artifact blockers',
+      staleArtifactWarnings: 'artifact warnings',
+    },
     runner: {
       ...LOCALE_TEXT.en.runner,
       loadingStatus: 'Loading runner control status...',
@@ -2366,6 +2399,36 @@
       eventsReadFrom: '이벤트는 수명주기 기록과 제어 평면 스냅샷에서 읽어옵니다. 플레이스홀더 피드는 사용하지 않습니다.',
       localStopConfirmed: '로컬 중지가 확인되었고 UI가 중지 상태로 전환되었습니다.',
       observedKindsNote: '실제 알림 행에서 파생된 종류입니다.',
+    },
+    instanceHealth: {
+      title: '인스턴스 상태',
+      subtitle: '프로세스 가드, 추적 자식 PID, 락 소유권, 오래된 산출물 진단입니다.',
+      processGuard: '프로세스 가드',
+      trackedChildren: '추적 자식 PID',
+      handleDiagnostics: '핸들/프로세스 진단',
+      webInstanceLock: '웹 인스턴스 락',
+      staleArtifacts: '오래된 산출물 위험',
+      initialized: '초기화됨',
+      jobObject: '작업 객체',
+      stopPath: '중지 경로 훅',
+      currentPid: '현재 PID',
+      sessionDir: '세션 디렉터리',
+      pid: 'PID',
+      alive: '실행 중',
+      exited: '종료됨',
+      sessionFile: '세션 파일',
+      noTrackedChildren: '추적 중인 자식 PID가 없습니다.',
+      warningKinds: '경고 종류',
+      latestProcessCount: '최근 프로세스 수',
+      latestHandleCount: '최근 핸들 수',
+      sourcePath: '원본 경로',
+      noWarnings: '핸들/프로세스 경고가 없습니다.',
+      lockState: '락 상태',
+      lockOwner: '락 소유자',
+      staleLocks: '오래된 락',
+      unknownLocks: '확인 불가 락',
+      staleArtifactBlockers: '산출물 차단',
+      staleArtifactWarnings: '산출물 경고',
     },
     runner: {
       ...LOCALE_TEXT.ko.runner,
@@ -2613,6 +2676,7 @@
       history: 'nav.runHistory',
       notifications: 'nav.notifications',
       worktree: 'nav.worktreeReview',
+      'instance-health': 'nav.instanceHealth',
       landing: 'nav.landingPreview',
       mobile: 'nav.mobilePreview',
     };
@@ -2652,6 +2716,7 @@
     history: 'g r',
     notifications: 'g n',
     worktree: 'g w',
+    'instance-health': 'g i',
     landing: 'g h',
     mobile: 'g m',
   };
@@ -3325,7 +3390,8 @@
     history: ['history', 'experience'],
     notifications: ['notifications'],
     worktree: ['worktree'],
-    mobile: ['activeRun', 'stages', 'logs', 'backlog', 'prQueue', 'goals', 'config', 'prompts', 'notifications', 'worktree', 'runnerControl'],
+    'instance-health': ['instanceHealth'],
+    mobile: ['activeRun', 'stages', 'logs', 'backlog', 'prQueue', 'goals', 'config', 'prompts', 'notifications', 'worktree', 'instanceHealth', 'runnerControl'],
     landing: ['activeRun'],
   };
 
@@ -6969,6 +7035,103 @@
     };
   }
 
+  function normalizeInstanceHealth(raw) {
+    const data = toObject(raw);
+    const status = toText(data.status, 'ok');
+    const processGuard = toObject(data.process_guard || data.processGuard);
+    const trackedChildren = toObject(data.tracked_children || data.trackedChildren);
+    const trackedSummary = toObject(trackedChildren.summary);
+    const handleDiagnostics = toObject(data.handle_diagnostics || data.handleDiagnostics);
+    const handleSummary = toObject(handleDiagnostics.summary);
+    const lockDiagnostics = toObject(data.lock_diagnostics || data.lockDiagnostics);
+    const lockSummary = toObject(lockDiagnostics.summary);
+    const staleArtifacts = toObject(data.stale_artifacts || data.staleArtifacts);
+    const staleSummary = toObject(staleArtifacts.summary);
+    const summary = toObject(data.summary);
+    return {
+      schema: toText(data.schema, ''),
+      status,
+      ok: Boolean(data.ok ?? status !== 'error'),
+      generatedAt: toText(data.generatedAt || data.generated_at, ''),
+      repo: toText(data.repo, ''),
+      runDir: toText(data.runDir || data.run_dir, ''),
+      processGuard: {
+        initialized: Boolean(processGuard.initialized),
+        jobObjectActive: Boolean(processGuard.jobObjectActive ?? processGuard.job_object_active),
+        stopPathConfigured: Boolean(processGuard.stopPathConfigured ?? processGuard.stop_path_configured),
+        trackedPidCount: toNumber(processGuard.trackedPidCount ?? processGuard.tracked_pid_count, 0),
+        currentPid: toNumber(processGuard.currentPid ?? processGuard.current_pid, 0),
+        sessionDir: toText(processGuard.sessionDir || processGuard.session_dir, ''),
+        platform: toText(processGuard.platform, ''),
+      },
+      trackedChildren: {
+        items: toArray(trackedChildren.items).map((item) => ({
+          pid: toNumber(toObject(item).pid, 0),
+          alive: Boolean(toObject(item).alive),
+          sessionFile: toText(toObject(item).sessionFile || toObject(item).session_file, ''),
+          sessionExists: Boolean(toObject(item).sessionExists ?? toObject(item).session_exists),
+        })),
+        pids: toArray(trackedChildren.pids).map((pid) => toNumber(pid, 0)).filter((pid) => pid > 0),
+        summary: {
+          total: toNumber(trackedSummary.total, 0),
+          alive: toNumber(trackedSummary.alive, 0),
+          exited: toNumber(trackedSummary.exited, 0),
+          missingSessionFiles: toNumber(trackedSummary.missingSessionFiles ?? trackedSummary.missing_session_files, 0),
+        },
+      },
+      handleDiagnostics: {
+        status: toText(handleDiagnostics.status, 'missing'),
+        sourcePath: toText(handleDiagnostics.sourcePath || handleDiagnostics.source_path, ''),
+        sourceExists: Boolean(handleDiagnostics.sourceExists ?? handleDiagnostics.source_exists),
+        warnings: toArray(handleDiagnostics.warnings).map((item) => toObject(item)),
+        summary: {
+          healthy: Boolean(handleSummary.healthy ?? true),
+          warningCount: toNumber(handleSummary.warningCount ?? handleSummary.warning_count, toArray(handleDiagnostics.warnings).length),
+          latestProcessCount: toNumber(handleSummary.latestProcessCount ?? handleSummary.latest_process_count, 0),
+          latestHandleCount: toNumber(handleSummary.latestHandleCount ?? handleSummary.latest_handle_count, 0),
+          warningKinds: toArray(handleSummary.warningKinds || handleSummary.warning_kinds).map((item) => toText(item, '')).filter(Boolean),
+        },
+      },
+      lockDiagnostics: {
+        status: toText(lockDiagnostics.status, 'ok'),
+        items: toArray(lockDiagnostics.items).map((item) => toObject(item)),
+        summary: {
+          total: toNumber(lockSummary.total, 0),
+          active: toNumber(lockSummary.active, 0),
+          stale: toNumber(lockSummary.stale, 0),
+          unknown: toNumber(lockSummary.unknown, 0),
+        },
+      },
+      webInstance: normalizeWebInstance(data.webInstance || data.web_instance),
+      staleArtifacts: {
+        status: toText(staleArtifacts.status, 'ok'),
+        stopArtifacts: toObject(staleArtifacts.stopArtifacts || staleArtifacts.stop_artifacts),
+        worktreeDiagnostics: toObject(staleArtifacts.worktreeDiagnostics || staleArtifacts.worktree_diagnostics),
+        summary: {
+          stopFile: toNumber(staleSummary.stopFile ?? staleSummary.stop_file, 0),
+          runnerWait: toNumber(staleSummary.runnerWait ?? staleSummary.runner_wait, 0),
+          cleanupFailed: toNumber(staleSummary.cleanupFailed ?? staleSummary.cleanup_failed, 0),
+          stalePendingMarkers: toNumber(staleSummary.stalePendingMarkers ?? staleSummary.stale_pending_markers, 0),
+          orphanedWorktrees: toNumber(staleSummary.orphanedWorktrees ?? staleSummary.orphaned_worktrees, 0),
+          staleTaskBranches: toNumber(staleSummary.staleTaskBranches ?? staleSummary.stale_task_branches, 0),
+          interruptedAttempts: toNumber(staleSummary.interruptedAttempts ?? staleSummary.interrupted_attempts, 0),
+          blockers: toNumber(staleSummary.blockers, 0),
+          warnings: toNumber(staleSummary.warnings, 0),
+        },
+      },
+      liveState: normalizeLiveState(data.liveState || data.live_state),
+      summary: {
+        trackedPids: toNumber(summary.trackedPids ?? summary.tracked_pids, 0),
+        aliveTrackedPids: toNumber(summary.aliveTrackedPids ?? summary.alive_tracked_pids, 0),
+        handleWarnings: toNumber(summary.handleWarnings ?? summary.handle_warnings, 0),
+        staleLocks: toNumber(summary.staleLocks ?? summary.stale_locks, 0),
+        unknownLocks: toNumber(summary.unknownLocks ?? summary.unknown_locks, 0),
+        staleArtifactBlockers: toNumber(summary.staleArtifactBlockers ?? summary.stale_artifact_blockers, 0),
+        staleArtifactWarnings: toNumber(summary.staleArtifactWarnings ?? summary.stale_artifact_warnings, 0),
+      },
+    };
+  }
+
   function worktreeDiagnosticsCategoryLabel(category) {
     const map = {
       active: 'worktree.filterActive',
@@ -8349,6 +8512,7 @@
     const prQueue = adaptPrQueue(raw.pr_queue || raw.prQueue);
     const worktree = adaptWorktree(raw.worktree);
     const worktreeDiagnostics = normalizeWorktreeDiagnostics(raw.worktree_diagnostics || raw.worktreeDiagnostics || {});
+    const instanceHealth = normalizeInstanceHealth(raw.instance_health || raw.instanceHealth || {});
     const liveRunSource = {
       ...toObject(raw.liveRun || raw.live_run || {}),
       webInstance,
@@ -8439,6 +8603,7 @@
       prQueue,
       worktreeMerge: worktree,
       worktreeDiagnostics,
+      instanceHealth,
       runnerControl,
       webInstance,
       liveRun,
@@ -8464,6 +8629,11 @@
         experience: experience.state,
         prQueue: prQueue.stateInfo,
         worktree: worktree.state,
+        instanceHealth: buildSectionState(
+          'instanceHealth',
+          instanceHealth.status === 'error' ? 'error' : instanceHealth.status === 'warning' ? 'partial' : 'ready',
+          instanceHealth.status === 'ok' ? '' : 'Instance health diagnostics need operator review.'
+        ),
         runnerControl: buildSectionState(
           'runnerControl',
           toText(runnerControl.instanceState || webInstance.state, '').toLowerCase() === 'duplicate'
@@ -9086,6 +9256,7 @@
       prQueueAction: null,
       worktreeDiagnostics: normalizeWorktreeDiagnostics({}),
       worktreeDiagnosticsFilter: normalizeWorktreeDiagnosticsFilter({}),
+      instanceHealth: normalizeInstanceHealth({}),
       worktreeMerge: {
         status: 'none',
         mode: 'manual',
@@ -9223,6 +9394,7 @@
         experience: buildSectionState('experience', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         prQueue: buildSectionState('prQueue', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         worktree: buildSectionState('worktree', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
+        instanceHealth: buildSectionState('instanceHealth', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
         runnerControl: buildSectionState('runnerControl', 'loading', t('snapshot.loadingReadOnly'), 'loading'),
       },
     };
@@ -9624,6 +9796,7 @@
       },
       worktreeDiagnostics: normalizeWorktreeDiagnostics({}),
       worktreeDiagnosticsFilter: normalizeWorktreeDiagnosticsFilter({}),
+      instanceHealth: normalizeInstanceHealth({}),
       worktreeAction: null,
       worktreeHistoricalOpen: false,
       history: [
@@ -9717,6 +9890,7 @@
         experience: buildSectionState('experience', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         prQueue: buildSectionState('prQueue', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         worktree: buildSectionState('worktree', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
+        instanceHealth: buildSectionState('instanceHealth', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
         runnerControl: buildSectionState('runnerControl', 'fallback', 'Using fallback data because the API is unavailable.', 'fallback'),
       },
     };
@@ -9761,6 +9935,8 @@
     prQueueActionPresentation,
     openPrQueueActionModal,
     applyPrQueueAction,
+    normalizeInstanceHealth,
+    renderInstanceHealth,
     setLocale,
     currentTopbarIdentity,
     identityRunnerModeLabel,
@@ -10042,6 +10218,7 @@
     state.prQueue.selectedId = state.prQueueSelectedId;
     state.worktreeMerge = toObject(next.worktreeMerge);
     state.worktreeDiagnostics = normalizeWorktreeDiagnostics(next.worktreeDiagnostics || next.worktree_diagnostics || {});
+    state.instanceHealth = normalizeInstanceHealth(next.instanceHealth || next.instance_health || {});
     state.runnerControl = normalizeRunnerControl(next.runnerControl);
     state.liveRun = toObject(next.liveRun);
     state.webInstance = normalizeWebInstance(next.webInstance);
@@ -15944,6 +16121,7 @@
         items: [
           { view: 'history', label: viewLabel('history'), shortcut: VIEW_SHORTCUTS.history },
           { view: 'notifications', label: viewLabel('notifications'), shortcut: VIEW_SHORTCUTS.notifications, badge: String(state.notifications.length) },
+          { view: 'instance-health', label: viewLabel('instance-health'), shortcut: VIEW_SHORTCUTS['instance-health'], badge: state.instanceHealth?.status === 'ok' ? '' : '!' },
         ],
       },
       {
@@ -19289,6 +19467,110 @@
     }
   }
 
+  function instanceHealthStatusChip(status) {
+    const normalized = toText(status, 'ok').toLowerCase();
+    if (normalized === 'error') return chip(normalized, 'chip--err');
+    if (normalized === 'warning') return chip(normalized, 'chip--warn');
+    if (normalized === 'missing') return chip(normalized, 'chip--info');
+    return chip(normalized || 'ok', 'chip--accent');
+  }
+
+  function renderInstanceHealthChildPid(item) {
+    const row = toObject(item);
+    const stateLabel = row.alive ? t('instanceHealth.alive') : t('instanceHealth.exited');
+    const stateClass = row.alive ? 'chip--accent' : 'chip--warn';
+    return `
+      <div class="compact-list__item instance-health__pid">
+        <span class="compact-list__bullet"></span>
+        <div>
+          <div class="compact-list__body">${chip(`${t('instanceHealth.pid')} ${row.pid || 0}`, stateClass)} ${chip(stateLabel, stateClass)}</div>
+          <div class="compact-list__meta">${escapeHTML(row.sessionFile || t('common.none'))}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderInstanceHealthLock(item) {
+    const row = toObject(item);
+    const owner = toObject(row.owner);
+    const liveness = toObject(row.liveness);
+    const code = toText(row.code, '');
+    const kind = toText(row.kind, 'lock');
+    const lockState = toText(row.state, 'unknown');
+    const ownerText = [
+      owner.hostname,
+      owner.pid ? `${t('instanceHealth.pid')} ${owner.pid}` : '',
+      owner.host && owner.port ? `${owner.host}:${owner.port}` : '',
+      liveness.reason,
+    ].filter(Boolean).join(' | ');
+    return compactFactItem(
+      [code, kind, lockState].filter(Boolean).join(' | '),
+      toText(row.path, t('common.none')),
+      ownerText || toText(row.message, '')
+    );
+  }
+
+  function renderInstanceHealth() {
+    const health = normalizeInstanceHealth(state.instanceHealth || {});
+    const guard = health.processGuard;
+    const tracked = health.trackedChildren;
+    const handle = health.handleDiagnostics;
+    const locks = health.lockDiagnostics;
+    const stale = health.staleArtifacts;
+    const staleSummary = stale.summary;
+    const summaryCards = [
+      detailCard(t('common.status'), health.status || 'ok', health.status === 'error' ? 'runner-control__value--err' : health.status === 'warning' ? 'runner-control__value--warn' : 'runner-control__value--accent'),
+      detailCard(t('instanceHealth.trackedChildren'), `${tracked.summary.alive}/${tracked.summary.total}`, tracked.summary.alive ? 'runner-control__value--accent' : 'runner-control__value--muted'),
+      detailCard(t('instanceHealth.handleDiagnostics'), `${health.summary.handleWarnings} warnings`, health.summary.handleWarnings ? 'runner-control__value--warn' : 'runner-control__value--accent'),
+      detailCard(t('instanceHealth.staleArtifacts'), `${health.summary.staleArtifactBlockers}/${health.summary.staleArtifactWarnings}`, health.summary.staleArtifactBlockers ? 'runner-control__value--err' : health.summary.staleArtifactWarnings ? 'runner-control__value--warn' : 'runner-control__value--accent'),
+    ].join('');
+    const guardFacts = [
+      compactFactItem(t('instanceHealth.initialized'), guard.initialized ? t('common.yes') : t('common.no'), t('instanceHealth.processGuard')),
+      compactFactItem(t('instanceHealth.jobObject'), guard.jobObjectActive ? t('common.yes') : t('common.no'), guard.platform),
+      compactFactItem(t('instanceHealth.stopPath'), guard.stopPathConfigured ? t('common.yes') : t('common.no'), `${t('instanceHealth.currentPid')} ${guard.currentPid || 0}`),
+      compactFactItem(t('instanceHealth.sessionDir'), guard.sessionDir || t('common.none'), ''),
+    ].join('');
+    const pidHTML = tracked.items.length
+      ? `<div class="compact-list">${tracked.items.map(renderInstanceHealthChildPid).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('instanceHealth.noTrackedChildren'))}</div>`;
+    const handleWarningKinds = handle.summary.warningKinds.join(', ');
+    const handleFacts = [
+      compactFactItem(t('common.status'), handle.status, t('instanceHealth.handleDiagnostics')),
+      compactFactItem(t('instanceHealth.warningKinds'), handleWarningKinds || t('instanceHealth.noWarnings'), `${handle.summary.warningCount} ${t('common.total')}`),
+      compactFactItem(t('instanceHealth.latestProcessCount'), String(handle.summary.latestProcessCount || 0), t('instanceHealth.handleDiagnostics')),
+      compactFactItem(t('instanceHealth.latestHandleCount'), String(handle.summary.latestHandleCount || 0), handle.sourcePath || t('instanceHealth.sourcePath')),
+    ].join('');
+    const lockItems = locks.items.length
+      ? `<div class="compact-list">${locks.items.map(renderInstanceHealthLock).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('common.noDataAvailableYet'))}</div>`;
+    const staleFacts = [
+      compactFactItem('STOP', String(staleSummary.stopFile), t('instanceHealth.staleArtifacts')),
+      compactFactItem('runner wait', String(staleSummary.runnerWait), t('instanceHealth.staleArtifacts')),
+      compactFactItem('cleanup failed', String(staleSummary.cleanupFailed), t('instanceHealth.staleArtifacts')),
+      compactFactItem('stale markers', String(staleSummary.stalePendingMarkers), t('instanceHealth.staleArtifacts')),
+      compactFactItem('orphaned worktrees', String(staleSummary.orphanedWorktrees), t('instanceHealth.staleArtifacts')),
+      compactFactItem('interrupted attempts', String(staleSummary.interruptedAttempts), t('instanceHealth.staleArtifacts')),
+    ].join('');
+    return viewShell(
+      'instance-health',
+      t('instanceHealth.title'),
+      t('instanceHealth.subtitle'),
+      `${button(t('topbar.refresh'), 'refresh-status', 'button--quiet')} ${button(t('common.openWorktree'), 'nav-worktree', 'button--quiet')} ${button(t('common.openRunbook'), 'nav-runbook', 'button--quiet')}`,
+      `
+        ${sectionNotice('instanceHealth')}
+        <div class="runner-control__details instance-health__summary">${summaryCards}</div>
+        <div class="view-grid view-grid--two instance-health__grid">
+          ${panel(t('instanceHealth.processGuard'), `${escapeHTML(guard.platform || t('common.unknown'))}`, `<div class="compact-list">${guardFacts}</div>`, 'instance-health-panel')}
+          ${panel(t('instanceHealth.trackedChildren'), `${escapeHTML(tracked.summary.total)} ${escapeHTML(t('common.total'))}`, pidHTML, 'instance-health-panel')}
+          ${panel(t('instanceHealth.handleDiagnostics'), `${escapeHTML(handle.summary.warningCount)} warnings`, `<div class="compact-list">${handleFacts}</div>`, 'instance-health-panel')}
+          ${panel(t('instanceHealth.webInstanceLock'), `${escapeHTML(locks.summary.stale)} ${escapeHTML(t('instanceHealth.staleLocks'))} | ${escapeHTML(locks.summary.unknown)} ${escapeHTML(t('instanceHealth.unknownLocks'))}`, lockItems, 'instance-health-panel')}
+          ${panel(t('instanceHealth.staleArtifacts'), `${escapeHTML(staleSummary.blockers)} ${escapeHTML(t('instanceHealth.staleArtifactBlockers'))} | ${escapeHTML(staleSummary.warnings)} ${escapeHTML(t('instanceHealth.staleArtifactWarnings'))}`, `<div class="compact-list">${staleFacts}</div>`, 'instance-health-panel')}
+          ${panel(t('runner.liveStates'), '', `${runnerControlLiveStateChips(health.liveState)}<div class="runner-control__details">${runnerControlLiveStateRows(health.liveState).map((row) => detailCard(row.label, row.value, row.className)).join('')}</div>`, 'instance-health-panel')}
+        </div>
+      `
+    );
+  }
+
   function renderWorktreeDiagnosticsEntry(entry) {
     const categories = normalizeWorktreeDiagnosticCategories(entry.categories);
     const categoryChips = categories
@@ -20104,6 +20386,8 @@
         return renderNotifications();
       case 'worktree':
         return renderWorktree();
+      case 'instance-health':
+        return renderInstanceHealth();
       case 'landing':
         return renderLanding();
       case 'mobile':
@@ -20701,6 +20985,7 @@
       'nav-history': 'history',
       'nav-notifications': 'notifications',
       'nav-worktree': 'worktree',
+      'nav-instance-health': 'instance-health',
       'nav-landing': 'landing',
       'nav-mobile': 'mobile',
     };
@@ -20826,6 +21111,7 @@
       case 'nav-history':
       case 'nav-notifications':
       case 'nav-worktree':
+      case 'nav-instance-health':
       case 'nav-landing':
       case 'nav-mobile':
         openNavByAction(action);
@@ -21273,6 +21559,7 @@
     worktreeMerge: clone(defaults.worktreeMerge),
     worktreeDiagnostics: clone(defaults.worktreeDiagnostics),
     worktreeDiagnosticsFilter: clone(defaults.worktreeDiagnosticsFilter || normalizeWorktreeDiagnosticsFilter({})),
+    instanceHealth: clone(defaults.instanceHealth),
     worktreeAction: defaults.worktreeAction,
     runnerControl: clone(defaults.runnerControl),
     progress: clone(defaults.progress),
@@ -21452,6 +21739,7 @@
       { ...readOnlyOperator, action: 'nav-runbook', title: t('palette.openRunbook'), shortcut: 'runbook' },
       { ...readOnlyOperator, action: 'nav-pr-queue', title: t('palette.openPrQueue'), shortcut: 'pr queue' },
       { ...readOnlyOperator, action: 'nav-worktree', title: t('palette.openDiagnostics'), shortcut: 'diagnostics' },
+      { ...readOnlyOperator, action: 'nav-instance-health', title: t('instanceHealth.title'), shortcut: 'instance health' },
       { ...readOnlyOperator, action: 'nav-history', title: t('palette.openRunHistory'), shortcut: 'history' },
       { ...readOnlyOperator, action: 'nav-config', title: t('palette.openConfigChanges'), shortcut: 'config changes', meta: t('palette.configChangeSurface') },
       {
@@ -22611,6 +22899,8 @@
         return renderNotifications();
       case 'worktree':
         return renderWorktree();
+      case 'instance-health':
+        return renderInstanceHealth();
       case 'landing':
         return renderLanding();
       case 'mobile':
@@ -22675,6 +22965,9 @@
     }
     if (normalizedView === 'history') {
       return !toArray(state.history).length;
+    }
+    if (normalizedView === 'instance-health') {
+      return !toText(state.instanceHealth?.schema, '').trim();
     }
     return false;
   }
@@ -23457,6 +23750,7 @@
         n: 'notifications',
         u: 'runbook',
         w: 'worktree',
+        i: 'instance-health',
         h: 'landing',
         m: 'mobile',
       };

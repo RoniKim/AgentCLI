@@ -2833,6 +2833,15 @@ class WebConsoleStatusPollingScopeTests(unittest.TestCase):
 
         self.assertEqual(["/api/status?scope=full"], shell["fetchCalls"])
 
+    def test_switching_to_instance_health_requests_explicit_full_status_snapshot(self) -> None:
+        shell = _run_shell_harness(
+            [
+                {"kind": "call", "name": "setView", "args": ["instance-health"]},
+            ]
+        )
+
+        self.assertEqual(["/api/status?scope=full"], shell["fetchCalls"])
+
 
 class WebConsoleRedactionHelperTests(unittest.TestCase):
     def test_web_redaction_helpers_are_reexported_from_web(self) -> None:
@@ -3728,6 +3737,104 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             self.assertTrue(command["disabled"], command)
             self.assertEqual("DISABLED", command["statusLabel"])
             self.assertTrue(command["disabledReason"] or command["meta"], command)
+
+    def test_status_health_and_instance_health_view_surface_process_diagnostics(self) -> None:
+        status_payload = self.client.get("/api/status").json()
+        health_payload = self.client.get("/api/health").json()
+        self.assertIn("instanceHealth", status_payload.get("sectionState", {}))
+        for payload in (status_payload, health_payload):
+            self.assertIn("instance_health", payload)
+            self.assertIn("instanceHealth", payload)
+            instance_health = payload["instance_health"]
+            self.assertEqual("agentcli.instance_health.v1", instance_health["schema"])
+            self.assertIn("process_guard", instance_health)
+            self.assertIn("tracked_children", instance_health)
+            self.assertIn("handle_diagnostics", instance_health)
+            self.assertIn("lock_diagnostics", instance_health)
+            self.assertIn("stale_artifacts", instance_health)
+
+        injected = dict(status_payload)
+        injected_health = {
+            "schema": "agentcli.instance_health.v1",
+            "status": "warning",
+            "ok": True,
+            "generated_at": "2026-04-26T12:05:00Z",
+            "repo": self.repo.as_posix(),
+            "run_dir": self.run_dir.as_posix(),
+            "process_guard": {
+                "initialized": True,
+                "job_object_active": False,
+                "stop_path_configured": True,
+                "tracked_pid_count": 1,
+                "current_pid": 123,
+                "session_dir": "C:/agentcli/sessions",
+                "platform": "win32",
+            },
+            "tracked_children": {
+                "pids": [321],
+                "items": [{"pid": 321, "alive": True, "session_file": "C:/agentcli/sessions/321.json", "session_exists": True}],
+                "summary": {"total": 1, "alive": 1, "exited": 0, "missing_session_files": 0},
+            },
+            "handle_diagnostics": {
+                "status": "ok",
+                "source_path": (self.run_dir / "diagnostics" / "windows-handle-diagnostics.jsonl").as_posix(),
+                "source_exists": True,
+                "warnings": [{"kind": "process_count", "message": "process count high"}],
+                "summary": {"warning_count": 1, "latest_process_count": 99, "latest_handle_count": 12345, "warning_kinds": ["process_count"]},
+            },
+            "lock_diagnostics": {
+                "status": "warning",
+                "summary": {"total": 1, "active": 0, "stale": 1, "unknown": 0},
+                "items": [
+                    {
+                        "code": "stale_web_instance_lock",
+                        "kind": "web_instance_lock",
+                        "state": "stale",
+                        "path": (self.repo / ".AgentCLI" / "web_console.lock.json").as_posix(),
+                        "owner": {"pid": 777, "hostname": "test-host"},
+                        "liveness": {"reason": "pid_not_alive"},
+                    }
+                ],
+            },
+            "web_instance": {"state": "duplicate", "mode": "read_only", "reason": "duplicate web console"},
+            "stale_artifacts": {
+                "status": "warning",
+                "summary": {
+                    "stop_file": 1,
+                    "runner_wait": 1,
+                    "cleanup_failed": 1,
+                    "stale_pending_markers": 2,
+                    "orphaned_worktrees": 1,
+                    "stale_task_branches": 1,
+                    "interrupted_attempts": 1,
+                    "blockers": 3,
+                    "warnings": 5,
+                },
+                "stop_artifacts": {"stop_file_exists": True, "stop_progress_phase": "runner_wait"},
+                "worktree_diagnostics": {"status": "warning", "summary": {"cleanup_failed": 1}},
+            },
+            "summary": {"tracked_pids": 1, "alive_tracked_pids": 1, "handle_warnings": 1, "stale_locks": 1, "unknown_locks": 0, "stale_artifact_blockers": 3, "stale_artifact_warnings": 5},
+        }
+        injected["instance_health"] = injected_health
+        injected["instanceHealth"] = injected_health
+        normalized = _run_adapter_harness([
+            {"kind": "call", "name": "normalizeSnapshot", "args": [injected]},
+        ])[0]
+        rendered = _run_shell_harness([
+            {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+            {"kind": "call", "name": "setView", "args": ["instance-health"]},
+            {"kind": "call", "name": "renderShell", "args": [{"force": True, "preserveScroll": True}]},
+        ])
+        html = rendered["roots"]["main"]
+        self.assertEqual("instance-health", rendered["roots"]["view"])
+        self.assertIn("Instance Health", html)
+        self.assertIn("Process guard", html)
+        self.assertIn("Tracked child PIDs", html)
+        self.assertIn("PID 321", html)
+        self.assertIn("process_count", html)
+        self.assertIn("stale_web_instance_lock", html)
+        self.assertIn("cleanup failed", html)
+        self.assertIn("runner wait", html)
 
     def _api_log_tail(self, **params: object) -> dict[str, object]:
         response = self.client.get("/api/logs/tail", params=params)
