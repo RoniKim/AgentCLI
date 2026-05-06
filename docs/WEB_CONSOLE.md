@@ -47,7 +47,7 @@ Verified on 2026-05-06 with local API, unit, and checked-in browser smoke covera
 
 Known remaining scope:
 
-- Instance Health remains tracked in `.doc/GOALS.md` P1.
+- TODO, Skills, Claude, and MCP diagnostics can still be promoted from status/config visibility into richer first-class operator panels.
 - There is no implemented authentication layer yet. Treat LAN binds as trusted-network-only until [AUTHENTICATION_PLAN.md](AUTHENTICATION_PLAN.md) is implemented.
 
 ## Web Server Flags

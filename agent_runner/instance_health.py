@@ -34,6 +34,21 @@ def _status_from_counts(*, blockers: int = 0, warnings: int = 0) -> str:
     return "ok"
 
 
+def _handle_diagnostic_warning_count(payload: dict[str, Any]) -> int:
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    errors = payload.get("errors") if isinstance(payload.get("errors"), list) else []
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    status = str(payload.get("status") or "").strip().lower()
+    warning_count = len(warnings)
+    if errors:
+        warning_count += 1
+    if status in {"malformed", "partial", "error"}:
+        warning_count += 1
+    if summary.get("healthy") is False:
+        warning_count += 1
+    return warning_count
+
+
 def _tracked_children_payload() -> dict[str, Any]:
     records = tracked_pid_details(alive_only=False)
     alive_count = len([item for item in records if bool(item.get("alive"))])
@@ -183,7 +198,7 @@ def build_instance_health(
         }
     stale_risks = _stale_artifact_risks(repo_root, run_dir_path)
 
-    handle_warnings = len(handle_diagnostics.get("warnings") or [])
+    handle_warnings = _handle_diagnostic_warning_count(handle_diagnostics)
     lock_summary = lock_diagnostics.get("summary") if isinstance(lock_diagnostics.get("summary"), dict) else {}
     lock_stale = int(lock_summary.get("stale") or 0)
     lock_unknown = int(lock_summary.get("unknown") or 0)

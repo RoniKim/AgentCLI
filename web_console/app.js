@@ -5596,6 +5596,17 @@
     };
   }
 
+  function sectionStateFromPayload(sectionState, kind) {
+    const rawMap = toObject(sectionState);
+    const item = toObject(rawMap[kind]);
+    const rawStatus = toText(item.status || item.state, '');
+    const message = toText(item.message || item.copy || '', '');
+    if (!rawStatus && !message) {
+      return null;
+    }
+    return buildSectionState(kind, rawStatus || 'ready', message, toText(item.source, 'api'));
+  }
+
   function fallbackSectionMessage(kind) {
     const messages = {
       activeRun: t('common.noDataAvailableYet'),
@@ -8512,7 +8523,10 @@
     const prQueue = adaptPrQueue(raw.pr_queue || raw.prQueue);
     const worktree = adaptWorktree(raw.worktree);
     const worktreeDiagnostics = normalizeWorktreeDiagnostics(raw.worktree_diagnostics || raw.worktreeDiagnostics || {});
-    const instanceHealth = normalizeInstanceHealth(raw.instance_health || raw.instanceHealth || {});
+    const rawSectionState = toObject(raw.sectionState || raw.section_state);
+    const hasInstanceHealthPayload = Object.prototype.hasOwnProperty.call(raw, 'instance_health') || Object.prototype.hasOwnProperty.call(raw, 'instanceHealth');
+    const instanceHealth = normalizeInstanceHealth(hasInstanceHealthPayload ? (raw.instance_health || raw.instanceHealth || {}) : {});
+    const incomingInstanceHealthSection = sectionStateFromPayload(rawSectionState, 'instanceHealth');
     const liveRunSource = {
       ...toObject(raw.liveRun || raw.live_run || {}),
       webInstance,
@@ -8604,6 +8618,7 @@
       worktreeMerge: worktree,
       worktreeDiagnostics,
       instanceHealth,
+      instanceHealthPresent: hasInstanceHealthPayload,
       runnerControl,
       webInstance,
       liveRun,
@@ -8629,7 +8644,7 @@
         experience: experience.state,
         prQueue: prQueue.stateInfo,
         worktree: worktree.state,
-        instanceHealth: buildSectionState(
+        instanceHealth: incomingInstanceHealthSection || buildSectionState(
           'instanceHealth',
           instanceHealth.status === 'error' ? 'error' : instanceHealth.status === 'warning' ? 'partial' : 'ready',
           instanceHealth.status === 'ok' ? '' : 'Instance health diagnostics need operator review.'
@@ -10218,7 +10233,9 @@
     state.prQueue.selectedId = state.prQueueSelectedId;
     state.worktreeMerge = toObject(next.worktreeMerge);
     state.worktreeDiagnostics = normalizeWorktreeDiagnostics(next.worktreeDiagnostics || next.worktree_diagnostics || {});
-    state.instanceHealth = normalizeInstanceHealth(next.instanceHealth || next.instance_health || {});
+    if (next.instanceHealthPresent !== false) {
+      state.instanceHealth = normalizeInstanceHealth(next.instanceHealth || next.instance_health || {});
+    }
     state.runnerControl = normalizeRunnerControl(next.runnerControl);
     state.liveRun = toObject(next.liveRun);
     state.webInstance = normalizeWebInstance(next.webInstance);
@@ -21055,6 +21072,10 @@
         refreshSnapshot({ allowFallback: true });
         return;
       case 'save-config':
+        if (state.activeView !== 'config') {
+          setView('config');
+          return;
+        }
         void saveConfigDraft();
         return;
       case 'prompt-save':

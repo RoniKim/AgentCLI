@@ -207,8 +207,8 @@ class DocsValidationTests(unittest.TestCase):
         route_inventory = collect_fastapi_route_inventory(ROOT)
         stale_routes = text.replace("`/api/reports/export`, ", "", 1)
         stale_scope = text.replace(
-            "Instance Health remains tracked",
-            "Report export and Instance Health remain tracked",
+            "TODO, Skills, Claude, and MCP diagnostics can still be promoted from status/config visibility into richer first-class operator panels.",
+            "Report export and TODO, Skills, Claude, and MCP diagnostics remain tracked.",
             1,
         )
         stale_status_section = stale_routes.split("## Current Status", 1)[1].split("## Web Server Flags", 1)[0]

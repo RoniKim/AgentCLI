@@ -2843,6 +2843,64 @@ class WebConsoleStatusPollingScopeTests(unittest.TestCase):
         self.assertEqual(["/api/status?scope=full"], shell["fetchCalls"])
 
 
+class WebConsoleInstanceHealthAdapterTests(unittest.TestCase):
+    def test_dashboard_snapshot_keeps_instance_health_warning_when_body_is_omitted(self) -> None:
+        full_payload = _clone_fixture(_make_normal_snapshot())
+        health_payload = {
+            "schema": "agentcli.instance_health.v1",
+            "status": "warning",
+            "ok": True,
+            "process_guard": {"initialized": True, "platform": "win32"},
+            "tracked_children": {"items": [], "pids": [], "summary": {"total": 0, "alive": 0}},
+            "handle_diagnostics": {"status": "malformed", "warnings": [], "errors": [{"message": "invalid JSON"}], "summary": {"healthy": False, "warning_count": 0}},
+            "lock_diagnostics": {"status": "ok", "summary": {"total": 0, "active": 0, "stale": 0, "unknown": 0}, "items": []},
+            "stale_artifacts": {"status": "ok", "summary": {"blockers": 0, "warnings": 0}},
+            "summary": {"tracked_pids": 0, "alive_tracked_pids": 0, "handle_warnings": 1, "stale_locks": 0, "unknown_locks": 0, "stale_artifact_blockers": 0, "stale_artifact_warnings": 0},
+        }
+        full_payload["instance_health"] = health_payload
+        full_payload["instanceHealth"] = health_payload
+        dashboard_payload = _clone_fixture(full_payload)
+        dashboard_payload.pop("instance_health", None)
+        dashboard_payload.pop("instanceHealth", None)
+        dashboard_payload["sectionState"] = {
+            "instanceHealth": {
+                "status": "partial",
+                "message": "Instance health diagnostics need operator review.",
+                "source": "api",
+            }
+        }
+
+        normalized_full, normalized_dashboard = _run_adapter_harness([
+            {"kind": "call", "name": "normalizeSnapshot", "args": [full_payload]},
+            {"kind": "call", "name": "normalizeSnapshot", "args": [dashboard_payload]},
+        ])
+
+        self.assertTrue(normalized_full["instanceHealthPresent"])
+        self.assertFalse(normalized_dashboard["instanceHealthPresent"])
+        self.assertEqual("partial", normalized_dashboard["sectionState"]["instanceHealth"]["status"])
+        rendered = _run_shell_harness([
+            {"kind": "call", "name": "applySnapshotModel", "args": [normalized_full]},
+            {"kind": "call", "name": "applySnapshotModel", "args": [normalized_dashboard]},
+            {"kind": "call", "name": "renderInstanceHealth", "args": []},
+        ])
+        self.assertIn("warning", rendered["results"][-1])
+        self.assertIn("Handle/process diagnostics", rendered["results"][-1])
+
+    def test_palette_save_config_routes_to_config_diff_surface_before_saving(self) -> None:
+        normalized = _run_adapter_harness([
+            {"kind": "call", "name": "normalizeSnapshot", "args": [_make_normal_snapshot()]},
+        ])[0]
+
+        shell = _run_shell_harness([
+            {"kind": "call", "name": "applySnapshotModel", "args": [normalized]},
+            {"kind": "call", "name": "handleAction", "args": ["save-config"]},
+            {"kind": "call", "name": "renderShell", "args": [{"force": True, "preserveScroll": True}]},
+        ])
+
+        self.assertEqual("config", shell["roots"]["view"])
+        self.assertFalse(any("/api/config/save" in call for call in shell["fetchCalls"]))
+
+
 class WebConsoleRedactionHelperTests(unittest.TestCase):
     def test_web_redaction_helpers_are_reexported_from_web(self) -> None:
         import agent_runner.web as web_module
