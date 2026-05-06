@@ -799,10 +799,12 @@ def build_history_item(
     final_run_report = _safe_json(run_dir / "FINAL_RUN_REPORT.json", {})
     cycle_change_summary = _safe_json(run_dir / "cycle_change_summary.json", {})
     operations_summary = _safe_json(run_dir / "OPERATIONS_SUMMARY.json", {})
+    web_history_snapshot = _safe_json(run_dir / "WEB_HISTORY_SNAPSHOT.json", {})
     qa_validation_report = qa_validation_report if isinstance(qa_validation_report, dict) else {}
     final_run_report = final_run_report if isinstance(final_run_report, dict) else {}
     cycle_change_summary = cycle_change_summary if isinstance(cycle_change_summary, dict) else {}
     operations_summary = operations_summary if isinstance(operations_summary, dict) else {}
+    web_history_snapshot = web_history_snapshot if isinstance(web_history_snapshot, dict) else {}
     report_summary = _pick_text(final_run_report.get("summary"), "")
     report_status = _pick_text(final_run_report.get("status"), "")
     qa_report_status = _pick_text(qa_validation_report.get("status"), "")
@@ -878,6 +880,8 @@ def build_history_item(
         "cycle_change_summary": cycle_change_summary,
         "operationsSummary": operations_summary,
         "operations_summary": operations_summary,
+        "webHistorySnapshot": web_history_snapshot,
+        "web_history_snapshot": web_history_snapshot,
         "failedTasks": failed_tasks,
         "failed_tasks": failed_tasks,
         "reportSummary": report_summary,
@@ -893,6 +897,7 @@ def build_history_item(
             "cycleChangeSummaryMarkdown": (run_dir / "cycle_change_summary.md").as_posix(),
             "operationsSummaryJson": (run_dir / "OPERATIONS_SUMMARY.json").as_posix(),
             "operationsSummaryMarkdown": (run_dir / "OPERATIONS_SUMMARY.md").as_posix(),
+            "webHistorySnapshotJson": (run_dir / "WEB_HISTORY_SNAPSHOT.json").as_posix(),
             "workSummaryMarkdown": (run_dir / "WORK_SUMMARY.md").as_posix(),
             "webReportExportJson": (run_dir / "WEB_REPORT_EXPORT.json").as_posix(),
             "webReportExportMarkdown": (run_dir / "WEB_REPORT_EXPORT.md").as_posix(),

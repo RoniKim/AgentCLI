@@ -356,7 +356,7 @@
 - [x] MCP mode diagnostics report selected mode, timeout, unavailable tools, and safe fallback behavior without blocking non-MCP runs.
 - [x] Plugin stage loading has allowlist, strict-mode, failure diagnostics, Web config validation, and tests for allowed, blocked, missing, and load-error stages.
 - [x] Enterprise profile has tests and Web config visibility for Security stage insertion, policy/security scan enablement, and budget floor enforcement.
-- [ ] Completed runs can persist a lightweight redacted final web-history snapshot for replay without storing raw prompts, raw logs, or full GOALS text.
+- [x] Completed runs can persist a lightweight redacted final web-history snapshot for replay without storing raw prompts, raw logs, or full GOALS text.
 - [ ] Command Palette exposes operator actions for Runbook, PR Queue, diagnostics, run history, config changes, and safe runner controls with disabled/read-only states.
 - [ ] Instance Health view summarizes process guard state, tracked child PIDs, handle/process diagnostic warnings, web instance lock state, and stale artifact risks.
 - [ ] Critical path smoke tests cover backend failover, quota wait, outer-loop reason handling, interrupted attempt recovery, and PR queue reconcile.

@@ -94,6 +94,7 @@ from ..experience import (
     render_pm_experience_summary_from_run,
 )
 from ..reporting import collect_shutdown_context, build_local_shutdown_report, write_run_report_artifacts
+from ..web_history_snapshot import write_final_web_history_snapshot
 from ..pr_queue import queue_review_packet
 from ..pipeline import (
     PipelineManager,
@@ -4414,6 +4415,10 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     final_reason = cleanup_result.final_reason
         run_summary["final"] = {"rc": last_rc, "reason": final_reason or ""}
         _write_run_summary()
+        try:
+            write_final_web_history_snapshot(source_repo if worktree_dir is not None else repo, run_dir)
+        except Exception as ex:
+            eprint(f"[WARN] Failed to write final web history snapshot: {ex}")
         try:
             ctx_repo = source_repo if worktree_dir is not None else repo
             ctx = collect_shutdown_context(ctx_repo, run_dir)

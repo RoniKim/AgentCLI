@@ -91,6 +91,7 @@ from .reporting import (
     write_cycle_change_summary_artifacts,
     write_run_report_artifacts,
 )
+from .web_history_snapshot import write_final_web_history_snapshot
 from .process_guard import write_windows_handle_diagnostics_artifacts
 from .runtime_contract import (
     AttemptContext,
@@ -4494,6 +4495,10 @@ async def main_async(args: argparse.Namespace) -> int:
                     final_reason = cleanup_result.final_reason
             run_summary["final"] = {"rc": last_rc, "reason": final_reason or ""}
             _write_run_summary()
+            try:
+                write_final_web_history_snapshot(source_repo if worktree_dir is not None else repo, run_dir)
+            except Exception as ex:
+                eprint(f"[WARN] Failed to write final web history snapshot: {ex}")
             try:
                 ctx_repo = source_repo if worktree_dir is not None else repo
                 ctx = collect_shutdown_context(ctx_repo, run_dir)
