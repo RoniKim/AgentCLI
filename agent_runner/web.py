@@ -177,6 +177,7 @@ from .web_logs import (
     _resolve_log_tail_source,
     _resolve_log_tail_source_record,
 )
+from .web_action_audit import WEB_ACTION_AUDIT_FILE, record_web_action_audit
 
 try:  # Optional dependency: the app must still import when FastAPI is absent.
     from fastapi import Body, FastAPI, HTTPException, Request
@@ -217,6 +218,7 @@ RUN_DIR_ARTIFACT_NAMES = {
     "OPERATIONS_SUMMARY.json",
     "OPERATIONS_SUMMARY.md",
     "WORK_SUMMARY.md",
+    WEB_ACTION_AUDIT_FILE,
     "QA_VALIDATION_REPORT.json",
     "QA_VALIDATION_REPORT.md",
     "failed_tasks.json",
@@ -6178,6 +6180,113 @@ def create_app(
             "liveRun": snap.get("liveRun", {}),
         }
 
+    def _audit_run_dir_from_value(value: Any, *, depth: int = 0) -> Path | None:
+        if depth > 5:
+            return None
+        if isinstance(value, dict):
+            for key in ("run_dir", "runDir"):
+                raw = value.get(key)
+                if raw not in (None, "", False):
+                    try:
+                        return Path(str(raw)).expanduser().resolve()
+                    except Exception:
+                        try:
+                            return Path(str(raw)).expanduser()
+                        except Exception:
+                            return None
+            for key in ("start", "result", "stop"):
+                found = _audit_run_dir_from_value(value.get(key), depth=depth + 1)
+                if found is not None:
+                    return found
+            for item in value.values():
+                found = _audit_run_dir_from_value(item, depth=depth + 1)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for item in value:
+                found = _audit_run_dir_from_value(item, depth=depth + 1)
+                if found is not None:
+                    return found
+        return None
+
+    def _record_web_action(
+        *,
+        action: str,
+        status: str,
+        ok: bool,
+        route: str,
+        message: str = "",
+        error_code: str = "",
+        details: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+        run_dir: Path | str | None = None,
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del snapshot
+        audit_run_dir: Path | str | None = run_dir
+        if audit_run_dir in (None, "", False):
+            audit_run_dir = _audit_run_dir_from_value(result)
+        if audit_run_dir in (None, "", False):
+            audit_run_dir = _audit_run_dir_from_value(details)
+        return record_web_action_audit(
+            repo_root,
+            action=action,
+            status=status,
+            ok=ok,
+            route=route,
+            message=message,
+            error_code=error_code,
+            details=details,
+            result=result,
+            run_dir=audit_run_dir,
+        )
+
+    def _audit_error_status(status_code: int, code: str) -> str:
+        code_text = str(code or "").strip().lower()
+        if not code_text:
+            return "error"
+        if code_text == "lan_safety_mutation_blocked":
+            return "lan_safety_blocked"
+        if "disabled" in code_text:
+            return "disabled"
+        if "busy" in code_text:
+            return "busy"
+        if "confirmation" in code_text:
+            return code_text
+        if status_code == 400:
+            return "invalid_request"
+        if status_code == 403:
+            return "blocked"
+        if status_code == 404:
+            return "not_found"
+        if status_code == 409:
+            return "conflict"
+        return "error"
+
+    def _config_restore_error(status_code: int, code: str, message: str, **details: Any) -> JSONResponse:
+        payload: dict[str, Any] = {
+            "ok": False,
+            "action": "config-restore",
+            "status": "error",
+            "message": message,
+            "error": {
+                "code": code,
+                "message": message,
+            },
+        }
+        if details:
+            payload["error"]["details"] = details
+        _record_web_action(
+            action="config.restore",
+            route="/api/config/restore",
+            status=_audit_error_status(status_code, code),
+            ok=False,
+            message=message,
+            error_code=code,
+            details=details,
+        )
+        return JSONResponse(status_code=status_code, content=payload)
+
     def _runner_control_response(
         *,
         action: str,
@@ -6237,6 +6346,17 @@ def create_app(
             payload["error"]["details"] = _redact_nested(details) if redact_sensitive else details
         if result is not None:
             payload["result"] = _redact_nested(result) if redact_sensitive and not ok else (_redact_web_runner_result(result) if redact_sensitive and isinstance(result, dict) else result)
+        _record_web_action(
+            action=f"runner.{action}",
+            route=f"/api/runner/{action}",
+            status=status,
+            ok=ok,
+            message=safe_message,
+            error_code=error_code or "",
+            details=details,
+            result=result,
+            snapshot=snapshot,
+        )
         return JSONResponse(status_code=status_code, content=payload)
 
     def _runner_control_disabled(action: str) -> Any:
@@ -6833,6 +6953,17 @@ def create_app(
                 payload["error"]["details"] = details
         if result is not None:
             payload["result"] = result
+        _record_web_action(
+            action=f"worktree.{action}",
+            route=f"/api/worktree/{action}",
+            status=status,
+            ok=ok,
+            message=message,
+            error_code=error_code or "",
+            details=details,
+            result=result,
+            snapshot=snapshot,
+        )
         return JSONResponse(status_code=status_code, content=payload)
 
     def _worktree_action_disabled(action: str) -> Any:
@@ -7343,6 +7474,17 @@ def create_app(
                 payload["error"]["details"] = details
         if result is not None:
             payload["result"] = result
+        _record_web_action(
+            action=f"pr_queue.{action}",
+            route=f"/api/pr-queue/{action}",
+            status=status,
+            ok=ok,
+            message=message,
+            error_code=error_code or "",
+            details=details,
+            result=result,
+            snapshot=snapshot,
+        )
         return JSONResponse(status_code=status_code, content=payload)
 
     def _pr_queue_action_disabled(action: str) -> Any:
@@ -7772,6 +7914,18 @@ def create_app(
                 },
                 "snapshot": snapshot,
             }
+            _record_web_action(
+                action="config.restore",
+                route="/api/config/restore",
+                status="restored",
+                ok=True,
+                message=message,
+                result={
+                    "config_path": cfg_path.as_posix(),
+                    "backup_path": backup_path.as_posix(),
+                    "restored_from_path": restored_from_path,
+                },
+            )
             return JSONResponse(status_code=200, content=response_payload)
         except Exception as ex:
             details: dict[str, Any] = {"path": cfg_path.as_posix()}
@@ -7867,6 +8021,20 @@ def create_app(
                 "reload_required_paths": reload_required_paths,
                 "snapshot": snapshot,
             }
+            _record_web_action(
+                action="config.save",
+                route="/api/config/save",
+                status="saved",
+                ok=True,
+                message=message,
+                result={
+                    "config_path": cfg_path.as_posix(),
+                    "backup_path": backup_path.as_posix(),
+                    "changed_paths": changed_paths,
+                    "changed_path_count": len(changed_paths),
+                    "reload_required_paths": reload_required_paths,
+                },
+            )
             return JSONResponse(status_code=200, content=response_payload)
         except Exception as ex:
             details: dict[str, Any] = {"path": cfg_path.as_posix()}
@@ -7905,6 +8073,17 @@ def create_app(
         }
         if details:
             payload["error"]["details"] = details
+        audit_action = "prompt.restore" if action == "prompt-restore" else "prompt.save"
+        audit_route = "/api/prompts/restore" if action == "prompt-restore" else "/api/prompts/save"
+        _record_web_action(
+            action=audit_action,
+            route=audit_route,
+            status=_audit_error_status(status_code, code),
+            ok=False,
+            message=message,
+            error_code=code,
+            details=details,
+        )
         return JSONResponse(status_code=status_code, content=payload)
 
     def _prompt_action_body(request: Request) -> dict[str, Any] | None:
@@ -7932,6 +8111,15 @@ def create_app(
         }
         if details:
             payload["error"]["details"] = details
+        _record_web_action(
+            action="config.save",
+            route="/api/config/save",
+            status=_audit_error_status(status_code, code),
+            ok=False,
+            message=message,
+            error_code=code,
+            details=details,
+        )
         return JSONResponse(status_code=status_code, content=payload)
 
     async def _config_save_body(request: Request) -> dict[str, Any] | None:
@@ -8031,6 +8219,20 @@ def create_app(
             )
             if error is not None:
                 return _prompt_error_from_payload(error, action="prompt-save")
+            _record_web_action(
+                action="prompt.save",
+                route="/api/prompts/save",
+                status=str((response_payload or {}).get("status") or "saved"),
+                ok=True,
+                message=str((response_payload or {}).get("message") or "Prompt saved."),
+                result={
+                    "prompt_id": prompt_id,
+                    "prompt_file": prompt_file,
+                    "saved_path": str((response_payload or {}).get("saved_path") or ""),
+                    "backup_path": str((response_payload or {}).get("backup_path") or ""),
+                    "content_length": len(str(content)),
+                },
+            )
             return JSONResponse(status_code=200, content=response_payload)
         finally:
             control_lock.release()
@@ -8096,9 +8298,53 @@ def create_app(
             )
             if error is not None:
                 return _prompt_error_from_payload(error, action="prompt-restore")
+            _record_web_action(
+                action="prompt.restore",
+                route="/api/prompts/restore",
+                status=str((response_payload or {}).get("status") or "restored"),
+                ok=True,
+                message=str((response_payload or {}).get("message") or "Prompt restored."),
+                result={
+                    "prompt_id": prompt_id,
+                    "prompt_file": prompt_file,
+                    "saved_path": str((response_payload or {}).get("saved_path") or ""),
+                    "backup_path": str((response_payload or {}).get("backup_path") or ""),
+                    "restored_from_path": str((response_payload or {}).get("restored_from_path") or ""),
+                },
+            )
             return JSONResponse(status_code=200, content=response_payload)
         finally:
             control_lock.release()
+
+    def _goal_save_error(status_code: int, code: str, message: str, **details: Any) -> JSONResponse:
+        payload: dict[str, Any] = {
+            "ok": False,
+            "action": "goals-save",
+            "status": "error",
+            "message": message,
+            "error": {
+                "code": code,
+                "message": message,
+            },
+        }
+        if details:
+            payload["error"]["details"] = details
+            if "risk" in details:
+                payload["risk"] = details["risk"]
+            if "backup_path" in details:
+                payload["backup_path"] = details["backup_path"]
+            if "confirmation_phrase" in details:
+                payload["confirmation_phrase"] = details["confirmation_phrase"]
+        _record_web_action(
+            action="goals.save",
+            route="/api/goals/save",
+            status=_audit_error_status(status_code, code),
+            ok=False,
+            message=message,
+            error_code=code,
+            details=details,
+        )
+        return JSONResponse(status_code=status_code, content=payload)
 
     @app.get("/api/goals")
     def api_goals() -> dict[str, Any]:
@@ -8131,6 +8377,26 @@ def create_app(
 
             plan = _goal_save_validate_request(body, repo_root=repo_root, goal_path=goal_path)
             response_payload = _goal_save_commit(plan, snapshot_factory=lambda: _snapshot(busy_override=False))
+            goal_counts = {priority: len(items) for priority, items in plan.next_items.items()}
+            checked_counts = {
+                priority: sum(1 for item in items if bool(item.get("done") or item.get("checked")))
+                for priority, items in plan.next_items.items()
+            }
+            _record_web_action(
+                action="goals.save",
+                route="/api/goals/save",
+                status="saved",
+                ok=True,
+                message=str(response_payload.get("message") or "Goals saved."),
+                result={
+                    "goals_path": plan.goal_path.as_posix(),
+                    "backup_path": plan.backup_path.as_posix(),
+                    "goal_counts": goal_counts,
+                    "checked_counts": checked_counts,
+                    "risk_count": int(plan.risk_report.get("risk_count") or 0),
+                    "requires_confirmation": bool(plan.risk_report.get("requires_confirmation")),
+                },
+            )
             return JSONResponse(status_code=200, content=response_payload)
         except GoalSaveFailure as ex:
             return _goal_save_error(ex.status_code, ex.code, ex.message, **ex.details)

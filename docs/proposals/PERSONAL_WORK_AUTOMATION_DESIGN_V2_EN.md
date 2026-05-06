@@ -1,11 +1,11 @@
 # Personal Work Automation Design v2
 
-> ⚠️ **PROPOSAL — NOT YET IMPLEMENTED.** This document defines future design for AgentCLI Web.
-> The artifacts/features below (`INSTANCE_LOCK.json`, `WORK_SUMMARY.md`, `WEB_ACTION_AUDIT.jsonl`,
-> `WEB_SNAPSHOT.json`, Personal Runbook panel, Local Automation Start Presets, Long-running task health,
-> Retention policy, Config backup/restore, Command Palette, etc.) do **not** exist in the current codebase.
-> Use this only as a forward-looking design reference; do not assume any feature here is available.
-> Verified against codebase on 2026-04-28.
+> ⚠️ **PROPOSAL / GAP MAP.** This document started as a future design for AgentCLI Web.
+> Several items are now implemented (`WORK_SUMMARY.md`, `WEB_ACTION_AUDIT.jsonl`, Personal Runbook,
+> Config backup/restore, and repo-level duplicate web instance lock). Remaining proposal items such as
+> `WEB_SNAPSHOT.json`, Local Automation Start Presets, Long-running task health, Retention policy,
+> Command Palette, and web worktree cleanup remain future scope unless linked from current docs.
+> Verified against codebase on 2026-05-06.
 
 > Date: 2026-04-28  
 > Scope: AgentCLI Web as a local, single-operator cockpit for one active repository.  
@@ -143,7 +143,7 @@ Properties:
 
 - Allows runner start, stop, reload, restart.
 - Allows config save, prompt save/restore, GOALS save.
-- Allows guarded worktree merge/discard/cleanup.
+- Allows guarded worktree merge/discard. Web worktree cleanup remains future explicit-action scope.
 - Every destructive or long-running action requires explicit confirmation.
 - UI clearly shows `Local Operator`.
 - UI clearly shows the active repository path.
@@ -700,6 +700,7 @@ Artifact:
 
 ```text
 run_dir/WEB_ACTION_AUDIT.jsonl
+.AgentCLI/WEB_ACTION_AUDIT.jsonl
 ```
 
 Events:
@@ -714,7 +715,7 @@ Events:
 - `goals_save`
 - `worktree_merge`
 - `worktree_discard`
-- `worktree_cleanup`
+- `worktree_cleanup` (future explicit-action scope)
 
 Suggested event shape:
 
@@ -1326,7 +1327,7 @@ Recommended answers for now:
 | Same-remote clones | Isolate by local path for now |
 | Budget guardrails | Add wall time first; token/spend later |
 | Playwright release gate | Required after Phase 2 |
-| Web audit location | Start in run_dir; add web-level audit later if needed |
+| Web audit location | Use `run_dir/WEB_ACTION_AUDIT.jsonl` for run/worktree-bound actions and `.AgentCLI/WEB_ACTION_AUDIT.jsonl` for config/prompt/goals edits not tied to a run |
 
 ---
 

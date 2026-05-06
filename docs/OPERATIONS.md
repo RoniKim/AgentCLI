@@ -314,6 +314,7 @@ run_dir/
   ├─ FINAL_RUN_REPORT.json     # final run report (browser-ready JSON)
   ├─ FINAL_RUN_REPORT.md       # final run report (Markdown)
   ├─ WORK_SUMMARY.md           # concise daily-work-log summary
+  ├─ WEB_ACTION_AUDIT.jsonl    # guarded web mutation audit records
   ├─ SHUTDOWN_REPORT.md        # 종료 요약 보고서 (local fallback first)
   ├─ SHUTDOWN_CONTEXT.json     # 종료 시 컨텍스트
   ├─ PM_SHUTDOWN_REPORT_OUTPUT.txt # PM shutdown report raw output

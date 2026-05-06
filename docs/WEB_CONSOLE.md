@@ -24,6 +24,7 @@ Verified on 2026-05-06 with local API, unit, and checked-in browser smoke covera
 - `/api/health` exposes web diagnostics for FastAPI/uvicorn availability and repo `.venv` health, including missing executables and stale `pyvenv.cfg` base paths; startup dependency failures include the same diagnostic issue codes when the HTTP app cannot start.
 - The Runbook route renders active-repo commands for venv activation, shell/web startup, status/stop, worktree merge/discard, PR queue review, diagnostics, and long unattended runs.
 - Completed run report generation also writes `WORK_SUMMARY.md`, a short daily-work-log Markdown artifact without raw logs, prompts, transcripts, or diffs.
+- Mutating web actions append redacted `WEB_ACTION_AUDIT.jsonl` records with timestamps and result summaries: run/worktree-bound actions write under the active `run_dir`, while config, prompt, and goals edits write to `.AgentCLI/WEB_ACTION_AUDIT.jsonl`.
 - Backup creation happens inside save/restore flows; there is no standalone `/api/*/backup` route family.
 - Read-only worktree diagnostics now scan `.AgentCLI/agent_runs`, the central pending marker, patch paths, cleanup-failed artifacts, and generated worktree directories without deleting anything by default.
 - Additional read-only contracts now cover Goals metadata and backend log tailing.

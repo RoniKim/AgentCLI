@@ -334,6 +334,21 @@ class WebConsoleSafetyTests(unittest.TestCase):
     def _web_instance_lock_path(self) -> Path:
         return self.repo / ".AgentCLI" / "web_console.lock.json"
 
+    def _web_action_audit_path(self, run_dir: Path | None = None) -> Path:
+        from agent_runner.web_action_audit import web_action_audit_path
+
+        return web_action_audit_path(self.repo, run_dir)
+
+    def _read_web_action_audit(self, run_dir: Path | None = None) -> list[dict[str, object]]:
+        path = self._web_action_audit_path(run_dir)
+        if not path.exists():
+            return []
+        records: list[dict[str, object]] = []
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip():
+                records.append(json.loads(line))
+        return records
+
     def _terminate_sleep_process(self, proc: subprocess.Popen[object]) -> None:
         if proc.poll() is None:
             try:
@@ -1399,6 +1414,60 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual(self.config_path.as_posix(), stop_body["snapshot"]["runner_control"]["status"]["config_path"])
         self.assertEqual(3, len(controller.start_overrides))
 
+    def test_runner_actions_write_web_action_audit_records(self) -> None:
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        start = client.post("/api/runner/start", json={"confirmation": "START RUNNER"})
+        self.assertEqual(200, start.status_code)
+        start_run_dir = Path(start.json()["result"]["run_dir"])
+
+        reload = client.post("/api/runner/reload", json={"confirmation": "RELOAD RUNNER"})
+        self.assertEqual(200, reload.status_code)
+        reload_run_dir = Path(reload.json()["result"]["start"]["run_dir"])
+
+        restart = client.post("/api/runner/restart", json={"confirmation": "RESTART RUNNER"})
+        self.assertEqual(200, restart.status_code)
+        restart_run_dir = Path(restart.json()["result"]["start"]["run_dir"])
+
+        stop = client.post("/api/runner/stop", json={"confirmation": "STOP RUNNER"})
+        self.assertEqual(200, stop.status_code)
+
+        start_records = self._read_web_action_audit(start_run_dir)
+        self.assertEqual("runner.start", start_records[-1]["action"])
+        self.assertEqual("started", start_records[-1]["status"])
+        self.assertTrue(start_records[-1]["ok"])
+        self.assertEqual("/api/runner/start", start_records[-1]["route"])
+        self.assertIn("timestamp", start_records[-1])
+        self.assertIn("result", start_records[-1])
+
+        reload_records = self._read_web_action_audit(reload_run_dir)
+        self.assertEqual("runner.reload", reload_records[-1]["action"])
+        self.assertEqual("reloaded", reload_records[-1]["status"])
+
+        restart_records = self._read_web_action_audit(restart_run_dir)
+        restart_actions = [record["action"] for record in restart_records]
+        self.assertIn("runner.restart", restart_actions)
+        self.assertEqual("runner.stop", restart_records[-1]["action"])
+        self.assertEqual("stopped", restart_records[-1]["status"])
+        self.assertTrue(restart_records[-1]["ok"])
+
+    def test_unbound_failed_web_actions_write_repo_level_audit_not_historical_run(self) -> None:
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        bad_runner = client.post("/api/runner/start", json={"confirmation": "WRONG"})
+        self.assertEqual(400, bad_runner.status_code)
+
+        missing_worktree = client.post("/api/worktree/merge", json={"confirmation": "MERGE WORKTREE"})
+        self.assertEqual(409, missing_worktree.status_code)
+
+        repo_records = self._read_web_action_audit()
+        actions = [record["action"] for record in repo_records]
+        self.assertIn("runner.start", actions)
+        self.assertIn("worktree.merge", actions)
+        self.assertFalse(any(record["ok"] for record in repo_records))
+        self.assertEqual("", repo_records[-1]["run_dir"])
+        self.assertFalse((self.run_dir / "WEB_ACTION_AUDIT.jsonl").exists())
+
     def test_stopped_reload_restart_start_only_does_not_write_stop_artifacts(self) -> None:
         class StopArtifactController(FakeRunnerController):
             def stop(self, *, wait: bool = False) -> dict[str, object]:
@@ -2179,6 +2248,12 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertFalse(self.pending_path.exists())
         self.assertTrue((self.run_dir / "WORKTREE_MERGE_APPLIED.json").exists())
         self.assertFalse(self.worktree_dir.exists())
+        audit_records = self._read_web_action_audit(self.run_dir)
+        self.assertEqual("worktree.merge", audit_records[-1]["action"])
+        self.assertEqual("applied", audit_records[-1]["status"])
+        self.assertTrue(audit_records[-1]["ok"])
+        self.assertEqual("applied", audit_records[-1]["result"]["status"])
+        self.assertIn("timestamp", audit_records[-1])
 
         retry = client.post("/api/worktree/merge", json=body)
         self.assertEqual(409, retry.status_code)
@@ -2206,6 +2281,11 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertFalse(self.pending_path.exists())
         self.assertTrue((self.run_dir / "WORKTREE_MERGE_DISCARDED.json").exists())
         self.assertFalse(self.worktree_dir.exists())
+        audit_records = self._read_web_action_audit(self.run_dir)
+        self.assertEqual("worktree.discard", audit_records[-1]["action"])
+        self.assertEqual("discarded", audit_records[-1]["status"])
+        self.assertTrue(audit_records[-1]["ok"])
+        self.assertEqual("discarded", audit_records[-1]["result"]["status"])
 
         retry = client.post("/api/worktree/discard", json=body)
         self.assertEqual(409, retry.status_code)
@@ -2401,6 +2481,16 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("failed", payload["worktree"]["applyCheck"]["status"])
         self.assertTrue(self.pending_path.exists())
         self.assertEqual(snapshot["worktree"]["sourceRepo"], payload["worktree"]["sourceRepo"])
+        audit_records = self._read_web_action_audit(self.run_dir)
+        audit = audit_records[-1]
+        self.assertEqual("worktree.merge", audit["action"])
+        self.assertFalse(audit["ok"])
+        self.assertEqual("worktree_patch_check_failed", audit["error_code"])
+        self.assertEqual("[redacted]", audit["details"]["output"])
+        self.assertEqual("[redacted]", audit["details"]["apply_check"]["output"])
+        audit_text = self._web_action_audit_path(self.run_dir).read_text(encoding="utf-8", errors="replace")
+        self.assertNotIn("this context does not exist", audit_text)
+        self.assertNotIn("still invalid", audit_text)
 
     def test_worktree_merge_reports_patch_apply_failure_details_and_keeps_pending_state(self) -> None:
         from agent_runner.web import build_snapshot
@@ -2578,6 +2668,126 @@ class WebConsoleSafetyTests(unittest.TestCase):
         controller = app.state.runner_controller
         self.assertEqual("subprocess", controller.runner_mode)
         self.assertEqual("subprocess", controller.base_args.telegram["runner_mode"])
+
+    def test_config_prompt_and_goals_mutations_write_redacted_web_action_audit(self) -> None:
+        _write_config(self.config_path, self.repo, iterations=2, prompts_dir="prompts/agentcli")
+        prompts_dir = self.home / "prompts" / "agentcli"
+        prompt_path = prompts_dir / "pm_bootstrap_prompt.md"
+        original_prompt = (ROOT / "templates" / "agent_prompts" / "pm_bootstrap_prompt.md").read_text(encoding="utf-8")
+        prompt_secret_marker = "DO_NOT_LOG_PROMPT_SECRET_20260506"
+        goal_secret_marker = "DO_NOT_LOG_GOAL_TEXT_20260506"
+        _write(prompt_path, original_prompt)
+
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+        config_response = client.post("/api/config/save", json={"changes": [{"path": "iterations", "value": 5}]})
+        self.assertEqual(200, config_response.status_code)
+
+        prompt_response = client.post(
+            "/api/prompts/save",
+            json={
+                "id": "pm_bootstrap",
+                "file": "pm_bootstrap_prompt.md",
+                "content": original_prompt + f"\n# {prompt_secret_marker}\n",
+            },
+        )
+        self.assertEqual(200, prompt_response.status_code)
+
+        goals_response = client.post(
+            "/api/goals/save",
+            json={
+                "draft": {
+                    "p0": [
+                        self._goal_item("Expose read-only progress views", done=True),
+                        self._goal_item("Add FastAPI web console", done=False),
+                    ],
+                    "p1": [self._goal_item(goal_secret_marker, done=False)],
+                }
+            },
+        )
+        self.assertEqual(200, goals_response.status_code)
+
+        records = self._read_web_action_audit()
+        actions = [record["action"] for record in records]
+        self.assertIn("config.save", actions)
+        self.assertIn("prompt.save", actions)
+        self.assertIn("goals.save", actions)
+
+        config_record = next(record for record in records if record["action"] == "config.save")
+        self.assertEqual("saved", config_record["status"])
+        self.assertTrue(config_record["ok"])
+        self.assertEqual(["iterations"], config_record["result"]["changed_paths"])
+        self.assertIn("timestamp", config_record)
+
+        prompt_record = next(record for record in records if record["action"] == "prompt.save")
+        self.assertEqual("pm_bootstrap", prompt_record["result"]["prompt_id"])
+        self.assertEqual(len(original_prompt + f"\n# {prompt_secret_marker}\n"), prompt_record["result"]["content_length"])
+
+        goals_record = next(record for record in records if record["action"] == "goals.save")
+        self.assertEqual({"p0": 2, "p1": 1}, goals_record["result"]["goal_counts"])
+        self.assertEqual({"p0": 1, "p1": 0}, goals_record["result"]["checked_counts"])
+
+        audit_text = self._web_action_audit_path().read_text(encoding="utf-8", errors="replace")
+        self.assertNotIn("initial-bot-token", audit_text)
+        self.assertNotIn(prompt_secret_marker, audit_text)
+        self.assertNotIn(goal_secret_marker, audit_text)
+
+    def test_config_prompt_and_goals_failures_write_redacted_web_action_audit(self) -> None:
+        _write_config(self.config_path, self.repo)
+        prompts_dir = self.home / "prompts" / "agentcli"
+        prompt_path = prompts_dir / "pm_bootstrap_prompt.md"
+        original_prompt = (ROOT / "templates" / "agent_prompts" / "pm_bootstrap_prompt.md").read_text(encoding="utf-8")
+        goal_secret_marker = "DO_NOT_LOG_FAILED_GOAL_TEXT_20260506"
+        _write(prompt_path, original_prompt)
+
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+        config_response = client.post("/api/config/save", json={"changes": [{"path": "telegram.bot_token", "value": "[redacted]"}]})
+        self.assertEqual(400, config_response.status_code)
+
+        prompt_response = client.post(
+            "/api/prompts/save",
+            json={
+                "id": "pm_bootstrap",
+                "file": "pm_bootstrap_prompt.md",
+                "content": "Repo only: {repo}\n",
+            },
+        )
+        self.assertEqual(400, prompt_response.status_code)
+
+        _write(
+            self.goals_path,
+            f"""# Project Goals
+
+## P0
+- [x] Expose read-only progress views
+- [ ] {goal_secret_marker}
+
+## P1
+""",
+        )
+        goals_response = client.post(
+            "/api/goals/save",
+            json={
+                "draft": {
+                    "p0": [self._goal_item("Expose read-only progress views", done=True)],
+                    "p1": [],
+                }
+            },
+        )
+        self.assertEqual(400, goals_response.status_code)
+
+        records = self._read_web_action_audit()
+        by_action = {record["action"]: record for record in records}
+        self.assertEqual("invalid_request", by_action["config.save"]["status"])
+        self.assertEqual("invalid_request", by_action["prompt.save"]["status"])
+        self.assertEqual("goals_confirmation_required", by_action["goals.save"]["status"])
+        self.assertFalse(by_action["config.save"]["ok"])
+        self.assertFalse(by_action["prompt.save"]["ok"])
+        self.assertFalse(by_action["goals.save"]["ok"])
+
+        audit_text = self._web_action_audit_path().read_text(encoding="utf-8", errors="replace")
+        self.assertNotIn("initial-bot-token", audit_text)
+        self.assertNotIn("Repo only: {repo}", audit_text)
+        self.assertNotIn(goal_secret_marker, audit_text)
 
     def test_config_save_normalizes_string_and_array_list_payloads_consistently(self) -> None:
         def _save_and_read(changes: list[dict[str, object]]) -> dict[str, object]:
