@@ -1959,8 +1959,8 @@ class WorktreeIsolationTests(unittest.TestCase):
             result = asyncio.run(run_fast_web_worktree_regression_async(self.repo, summary_path))
 
         self.assertTrue(result["ok"])
-        self.assertEqual(6, len(result["commands"]))
-        self.assertEqual(6, len(calls))
+        self.assertEqual(7, len(result["commands"]))
+        self.assertEqual(7, len(calls))
         self.assertTrue(summary_path.exists())
 
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -1972,24 +1972,32 @@ class WorktreeIsolationTests(unittest.TestCase):
             "tests/test_worktree_isolation.py",
             "tests/test_worktree_manual_merge.py",
         ]
+        expected_commands = ["py_compile", *expected_files]
         self.assertTrue(summary["ok"])
-        self.assertEqual(expected_files, [item["test_file"] for item in summary["commands"]])
-        self.assertEqual(expected_files, [item["test_file"] for item in result["commands"]])
+        self.assertEqual(expected_commands, [item["test_file"] for item in summary["commands"]])
+        self.assertEqual(expected_commands, [item["test_file"] for item in result["commands"]])
+        self.assertEqual("compile_agentcli_python", summary["commands"][0]["name"])
+        self.assertEqual("compile", summary["commands"][0]["kind"])
+        self.assertIn("agent_runner/cycle.py", summary["commands"][0]["cmd"])
+        self.assertIn("tests/web_console_playwright_smoke.py", summary["commands"][0]["cmd"])
         self.assertEqual(summary_path.as_posix(), summary["artifact_path"])
         self.assertEqual(summary_path.as_posix(), summary["artifactPath"])
+        self.assertIn("agent_runner/web.py", summary["compile_files"])
         self.assertEqual(expected_files, summary["suite_files"])
         self.assertEqual([], summary["trigger_files"])
         self.assertEqual("", summary["failure_summary"])
 
-        for call, expected_file in zip(calls, expected_files, strict=True):
+        self.assertEqual("py_compile", calls[0]["cmd"][3])
+        self.assertIn("agent_runner/gates.py", calls[0]["cmd"])
+        for call, expected_file in zip(calls[1:], expected_files, strict=True):
             self.assertEqual(Path(expected_file).name, call["cmd"][-1])
             self.assertEqual(self.repo, call["cwd"])
             self.assertTrue(str(call["log_path"]).endswith(".txt"))
 
         log_dir = self.run_dir / "fast_web_worktree_regression"
-        self.assertTrue((log_dir / "01_test_web_console_readonly.txt").exists())
-        self.assertTrue((log_dir / "06_test_worktree_manual_merge.txt").exists())
-        self.assertEqual("01_test_web_console_readonly.txt", Path(summary["commands"][0]["artifact_path"]).name)
+        self.assertTrue((log_dir / "01_compile_agentcli_python.txt").exists())
+        self.assertTrue((log_dir / "07_test_worktree_manual_merge.txt").exists())
+        self.assertEqual("01_compile_agentcli_python.txt", Path(summary["commands"][0]["artifact_path"]).name)
         self.assertEqual("", summary["commands"][0]["failure_summary"])
 
     def test_fast_web_worktree_regression_stops_on_first_failure_and_records_summary(self) -> None:
@@ -2023,7 +2031,7 @@ class WorktreeIsolationTests(unittest.TestCase):
             result = asyncio.run(run_fast_web_worktree_regression_async(self.repo, summary_path))
 
         self.assertFalse(result["ok"])
-        self.assertEqual(2, len(calls))
+        self.assertEqual(3, len(calls))
         self.assertIsNotNone(result["failed_command"])
         self.assertEqual("test_web_console_safety", result["failed_command"]["name"])
         self.assertTrue(summary_path.exists())
@@ -2031,17 +2039,17 @@ class WorktreeIsolationTests(unittest.TestCase):
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         self.assertFalse(summary["ok"])
         self.assertEqual("test_web_console_safety", summary["failed_command"]["name"])
-        self.assertEqual(2, len(summary["commands"]))
+        self.assertEqual(3, len(summary["commands"]))
         self.assertEqual(summary_path.as_posix(), summary["artifact_path"])
         self.assertEqual(summary_path.as_posix(), summary["artifactPath"])
         self.assertIn("fast_web_worktree_regression failed:", summary["failure_summary"])
         self.assertEqual("boom", summary["failed_command"]["failure_summary"])
         self.assertEqual(
-            (self.run_dir / "fast_web_worktree_regression" / "02_test_web_console_safety.txt").as_posix(),
-            summary["commands"][1]["artifact_path"],
+            (self.run_dir / "fast_web_worktree_regression" / "03_test_web_console_safety.txt").as_posix(),
+            summary["commands"][2]["artifact_path"],
         )
-        self.assertEqual("boom", summary["commands"][1]["failure_summary"])
-        self.assertTrue((self.run_dir / "fast_web_worktree_regression" / "02_test_web_console_safety.txt").exists())
+        self.assertEqual("boom", summary["commands"][2]["failure_summary"])
+        self.assertTrue((self.run_dir / "fast_web_worktree_regression" / "03_test_web_console_safety.txt").exists())
 
     def test_gate_commands_resolve_source_repo_venv_when_running_in_worktree(self) -> None:
         from agent_runner.gates import normalize_gate_command

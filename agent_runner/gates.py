@@ -21,6 +21,17 @@ FAST_WEB_WORKTREE_REGRESSION_TEST_FILES: tuple[str, ...] = (
     "tests/test_worktree_manual_merge.py",
 )
 
+FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES: tuple[str, ...] = (
+    "agent_runner/cli.py",
+    "agent_runner/cycle.py",
+    "agent_runner/gates.py",
+    "agent_runner/web.py",
+    "agent_runner/web_payloads.py",
+    "agent_runner/backends/claudecode.py",
+    *FAST_WEB_WORKTREE_REGRESSION_TEST_FILES,
+    "tests/web_console_playwright_smoke.py",
+)
+
 FAST_WEB_WORKTREE_REGRESSION_SCOPE_FILES: tuple[str, ...] = (
     ".doc/goals.md",
 )
@@ -406,11 +417,25 @@ def should_run_fast_web_worktree_regression(
 
 def _fast_web_worktree_regression_commands() -> list[dict[str, object]]:
     python = sys.executable or "python"
-    commands: list[dict[str, object]] = []
+    commands: list[dict[str, object]] = [
+        {
+            "name": "compile_agentcli_python",
+            "kind": "compile",
+            "test_file": "py_compile",
+            "cmd": [
+                python,
+                "-B",
+                "-m",
+                "py_compile",
+                *FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES,
+            ],
+        }
+    ]
     for test_file in FAST_WEB_WORKTREE_REGRESSION_TEST_FILES:
         commands.append(
             {
                 "name": Path(test_file).stem,
+                "kind": "test",
                 "test_file": test_file,
                 "cmd": [
                     python,
@@ -464,6 +489,8 @@ async def run_fast_web_worktree_regression_async(
         "failureSummary": "",
         "trigger_files": [str(item) for item in dict.fromkeys(str(file).replace("\\", "/") for file in (trigger_files or []) if str(file).strip())],
         "triggerFiles": [str(item) for item in dict.fromkeys(str(file).replace("\\", "/") for file in (trigger_files or []) if str(file).strip())],
+        "compile_files": list(FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES),
+        "compileFiles": list(FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES),
         "suite_files": list(FAST_WEB_WORKTREE_REGRESSION_TEST_FILES),
         "suiteFiles": list(FAST_WEB_WORKTREE_REGRESSION_TEST_FILES),
     }
@@ -473,6 +500,7 @@ async def run_fast_web_worktree_regression_async(
             cmd = [str(part) for part in spec["cmd"]]  # type: ignore[index]
             test_file = str(spec["test_file"])  # type: ignore[index]
             name = str(spec["name"])  # type: ignore[index]
+            kind = str(spec.get("kind") or "test")
             cmd_log_path = log_dir / f"{index:02d}_{name}.txt"
             started_at = now_iso()
             started_monotonic = time.monotonic()
@@ -498,6 +526,8 @@ async def run_fast_web_worktree_regression_async(
             record = {
                 "index": index,
                 "name": name,
+                "kind": kind,
+                "gate": "fast_web_worktree_regression",
                 "test_file": test_file,
                 "cmd": cmd,
                 "rc": rc,

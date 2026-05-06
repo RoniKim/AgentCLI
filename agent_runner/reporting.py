@@ -8,7 +8,13 @@ from typing import Any, Optional, Sequence
 
 from .analyzer import write_analyzer_artifacts
 from .docs import read_text_robust
-from .gates import FAST_WEB_WORKTREE_REGRESSION_TEST_FILES, find_build_cmd, find_test_cmd, looks_like_no_tests_found
+from .gates import (
+    FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES,
+    FAST_WEB_WORKTREE_REGRESSION_TEST_FILES,
+    find_build_cmd,
+    find_test_cmd,
+    looks_like_no_tests_found,
+)
 from .goals import parse_goals_completion, read_goals
 from .gitops import find_pending_worktree_merge, git_head, git_porcelain, list_untracked, read_pending_worktree_merge
 from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backlog_task_ids, parse_backlog_md, load_state
@@ -1124,6 +1130,22 @@ def _build_qa_skip_reasons(
             rationale = "Fast web/worktree regression was not triggered by the task file scope."
         else:
             rationale = "Fast web/worktree regression was not reached."
+        compile_cmd = [
+            sys.executable or "python",
+            "-B",
+            "-m",
+            "py_compile",
+            *FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES,
+        ]
+        skip_records.append(
+            _skipped_command_record(
+                name="fast_web_worktree_regression_compile",
+                kind="compile",
+                gate="fast_web_worktree_regression",
+                cmd=compile_cmd,
+                rationale=rationale,
+            )
+        )
         for index, test_file in enumerate(FAST_WEB_WORKTREE_REGRESSION_TEST_FILES, start=1):
             cmd = [sys.executable or "python", "-B", "-m", "unittest", "discover", "-s", "tests", "-p", Path(test_file).name]
             skip_records.append(
