@@ -27,6 +27,7 @@ from .run_dir import make_run_dir
 from .run_dir import find_latest_run_dir
 from .logger import close_all_loggers, register_structured_logger_cleanup
 from .todo import build_todo_status, ensure_todo_file, read_current_todo, set_current_todo, open_path
+from .skills.status import build_skills_status, format_skills_status_lines
 from .preflight import check_runner_start_readiness, format_runner_start_readiness, run_preflight
 from .process_guard import init_process_guard, terminate_all_children
 from .stop_progress import (
@@ -523,6 +524,28 @@ class RunnerShell:
         if active:
             print(f"todo_path: {active}")
 
+    def _print_skills_status(self, run_dir: Path | None, *, detailed: bool = False) -> None:
+        if not self.repo:
+            return
+        eff = self.effective()
+        try:
+            status = build_skills_status(self.repo, eff.get("skills") or {}, run_dir=run_dir)
+        except Exception as ex:
+            print(f"skills: ERROR ({ex})")
+            return
+        lines = format_skills_status_lines(status)
+        if not detailed and len(lines) > 3:
+            compact = [lines[0]]
+            selected = status.get("selected_skill_ids") if isinstance(status.get("selected_skill_ids"), list) else []
+            missing = status.get("missing_skill_ids") if isinstance(status.get("missing_skill_ids"), list) else []
+            if selected:
+                compact.append(f"  - selected skill ids: {', '.join(str(item) for item in selected)}")
+            if missing:
+                compact.append(f"  - missing skill ids: {', '.join(str(item) for item in missing)}")
+            lines = compact
+        for line in lines:
+            print(line)
+
     def start(self, extra_tokens: list[str]) -> None:
         if not self._start_lock.acquire(blocking=False):
             print("[INFO] Runner start already in progress.")
@@ -990,6 +1013,7 @@ class RunnerShell:
             print(f"run_dir: {data.get('run_dir') or '(not set)'}")
             print(f"goals_completion_level: {eff.get('goals_completion_level')}")
             self._print_todo_status()
+            self._print_skills_status(self.run_dir)
             print(f"uptime:  {int(data.get('uptime_seconds') or 0)}s")
             print(f"exit:    {data.get('exit_code') if data.get('exit_code') is not None else '(running/unknown)'}")
             print(
@@ -1035,6 +1059,7 @@ class RunnerShell:
         print(f"run_dir: {_shorten(run_dir)}")
         print(f"goals_completion_level: {eff.get('goals_completion_level')}")
         self._print_todo_status()
+        self._print_skills_status(run_dir)
         print(f"uptime:  {dur}")
         print(f"exit:    {self._runner_exit_code if (not alive) else '(running)'}")
         control_event = read_runner_control_event(run_dir)
@@ -1908,22 +1933,12 @@ class RunnerShell:
             report_lines.append(f"- prompts_dir: not found ({prompts_dir})")
 
         # ── Skills system ──
-        skills_cfg = eff.get("skills") or {}
-        skills_enabled = skills_cfg.get("enabled", False)
-        report_lines.append(f"- skills.enabled: {skills_enabled}")
-        if skills_enabled:
-            try:
-                from .skills import resolve_skills_roots, build_skills_index
-                roots_raw = skills_cfg.get("roots") or []
-                roots = resolve_skills_roots(self.repo, roots_raw)
-                existing = [r for r in roots if r.exists()]
-                idx = build_skills_index(roots)
-                report_lines.append(f"  - roots configured: {len(roots)}, existing: {len(existing)}")
-                report_lines.append(f"  - skills discovered: {len(idx)}")
-                if not idx:
-                    report_lines.append("  - WARNING: enabled but no SKILL.md files found")
-            except Exception as ex:
-                report_lines.append(f"  - ERROR: {ex}")
+        try:
+            skills_status = build_skills_status(self.repo, eff.get("skills") or {}, run_dir=run_dir)
+            report_lines.append("- skills status:")
+            report_lines.extend(format_skills_status_lines(skills_status, indent="  "))
+        except Exception as ex:
+            report_lines.append(f"- skills status: ERROR ({ex})")
 
         # ── Task history ──
         task_hist_enabled = eff.get("task_history_enabled", True)
