@@ -40,7 +40,7 @@
 
 | 문서 | 크기 | 비고 |
 |------|------|------|
-| [PERSONAL_WORK_AUTOMATION_DESIGN_V2_EN.md](proposals/PERSONAL_WORK_AUTOMATION_DESIGN_V2_EN.md) | 35KB | 거의 전체가 미구현 (INSTANCE_LOCK·WORK_SUMMARY·WEB_ACTION_AUDIT·WEB_SNAPSHOT 4개 신규 artifact + Runbook + Presets + Health + Retention + 5단계 로드맵) |
+| [PERSONAL_WORK_AUTOMATION_DESIGN_V2_EN.md](proposals/PERSONAL_WORK_AUTOMATION_DESIGN_V2_EN.md) | 35KB | 일부 구현됨 (Runbook·WORK_SUMMARY 반영, INSTANCE_LOCK·WEB_ACTION_AUDIT·WEB_SNAPSHOT·Retention 등은 GOALS P1 후속) |
 
 ## 3. 아카이브 (docs/archive/, 시점 자료)
 

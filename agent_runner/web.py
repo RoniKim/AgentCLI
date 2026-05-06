@@ -216,6 +216,7 @@ RUN_DIR_ARTIFACT_NAMES = {
     "FINAL_RUN_REPORT.md",
     "OPERATIONS_SUMMARY.json",
     "OPERATIONS_SUMMARY.md",
+    "WORK_SUMMARY.md",
     "QA_VALIDATION_REPORT.json",
     "QA_VALIDATION_REPORT.md",
     "failed_tasks.json",

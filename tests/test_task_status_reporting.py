@@ -173,9 +173,10 @@ class TaskStatusReportingTests(unittest.TestCase):
     def test_write_run_report_artifacts_writes_successful_operations_summary(self) -> None:
         self._write_state({"done": ["T1", "T4"], "failed": [], "warnings": []})
 
-        self._write_reports()
+        artifacts = self._write_reports()
         summary = self._read_operations_summary()
         summary_md = (self.run_dir / "OPERATIONS_SUMMARY.md").read_text(encoding="utf-8")
+        work_summary_md = (self.run_dir / "WORK_SUMMARY.md").read_text(encoding="utf-8")
 
         self.assertEqual("queued", summary["status"])
         self.assertEqual(2, summary["counts"]["completed"])
@@ -186,6 +187,12 @@ class TaskStatusReportingTests(unittest.TestCase):
         self.assertEqual(0, summary["handle_process_warnings"]["warning_count"])
         self.assertIn("completed: 2", summary_md)
         self.assertIn("queued: 2", summary_md)
+        self.assertEqual((self.run_dir / "WORK_SUMMARY.md").as_posix(), artifacts["artifacts"]["work_summary_markdown"])
+        self.assertIn("# Work Summary", work_summary_md)
+        self.assertIn("done: 2/4", work_summary_md)
+        self.assertIn("validation:", work_summary_md)
+        self.assertNotIn("raw log", work_summary_md.lower())
+        self.assertNotIn("diff --git", work_summary_md)
 
     def test_operations_summary_counts_review_required_and_blocked_env_and_exposes_history_artifacts(self) -> None:
         state = {"done": ["T4"], "failed": [], "warnings": []}
@@ -206,6 +213,7 @@ class TaskStatusReportingTests(unittest.TestCase):
         self.assertEqual(1, history_item["operationsSummary"]["counts"]["review_required"])
         self.assertEqual((self.run_dir / "OPERATIONS_SUMMARY.json").as_posix(), history_item["reportArtifacts"]["operationsSummaryJson"])
         self.assertEqual((self.run_dir / "OPERATIONS_SUMMARY.md").as_posix(), history_item["reportArtifacts"]["operationsSummaryMarkdown"])
+        self.assertEqual((self.run_dir / "WORK_SUMMARY.md").as_posix(), history_item["reportArtifacts"]["workSummaryMarkdown"])
 
     def test_operations_summary_includes_stale_cleanup_warnings(self) -> None:
         self._write_state({"done": ["T4"], "failed": [], "warnings": []})

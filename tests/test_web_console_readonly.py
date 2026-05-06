@@ -4138,6 +4138,7 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertEqual("", history_item["qaValidationReportStatus"])
         self.assertIn("QA_VALIDATION_REPORT.json", history_item["reportArtifacts"]["qaValidationJson"])
         self.assertIn("FINAL_RUN_REPORT.json", history_item["reportArtifacts"]["finalRunJson"])
+        self.assertIn("WORK_SUMMARY.md", history_item["reportArtifacts"]["workSummaryMarkdown"])
 
         normalized, history_html, _history_title = self._render_history_view(status_payload)
         normalized_history_item = next(item for item in normalized["history"] if item["id"] == missing_run_dir.name)

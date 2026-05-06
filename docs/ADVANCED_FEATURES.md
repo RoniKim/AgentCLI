@@ -456,6 +456,7 @@ QA 후속 태스크는 다음 사이클의 PM이 백로그를 생성할 때 자�
   │
   ├─ 2) QA / FINAL run 보고서 생성 (write_run_report_artifacts)
   │    └─ QA_VALIDATION_REPORT.json / QA_VALIDATION_REPORT.md + FINAL_RUN_REPORT.json / FINAL_RUN_REPORT.md 기록
+  │    └─ OPERATIONS_SUMMARY.json / OPERATIONS_SUMMARY.md + WORK_SUMMARY.md 기록
   │
   ├─ 3) 로컬 폴백 본문 생성 (build_local_shutdown_report)
   │    └─ 호출자가 SHUTDOWN_REPORT.md에 기록

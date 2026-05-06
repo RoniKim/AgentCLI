@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -2162,6 +2163,64 @@ def _render_operations_summary_md(summary: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _work_summary_text(value: object, *, max_chars: int = 220) -> str:
+    text = _text(value, "").replace("\r", " ").replace("\n", " ").strip()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _render_work_summary_md(final_report: dict[str, Any], operations_summary: dict[str, Any]) -> str:
+    tasks = final_report.get("tasks") if isinstance(final_report.get("tasks"), dict) else {}
+    validation = final_report.get("validation") if isinstance(final_report.get("validation"), dict) else {}
+    goals = final_report.get("goals") if isinstance(final_report.get("goals"), dict) else {}
+    actions = _as_list(operations_summary.get("next_operator_actions") or operations_summary.get("nextOperatorActions") or final_report.get("next_actions") or [])
+    failures = _as_list(final_report.get("failures") or [])
+    lines: list[str] = []
+    lines.append("# Work Summary")
+    lines.append("")
+    lines.append(f"- run_id: {final_report.get('run_id')}")
+    lines.append(f"- status: {final_report.get('status')}")
+    lines.append(f"- stop_reason: {final_report.get('stop_reason')}")
+    lines.append(f"- summary: {_work_summary_text(final_report.get('summary'))}")
+    lines.append("")
+    lines.append("## Tasks")
+    lines.append("")
+    lines.append(f"- done: {tasks.get('done', 0)}/{tasks.get('total', 0)}")
+    lines.append(f"- failed: {tasks.get('failed', 0)}")
+    lines.append(f"- blocked_env: {tasks.get('blocked_env', tasks.get('tasks_blocked_env', 0))}")
+    lines.append(f"- review_needed: {tasks.get('review', tasks.get('tasks_review', 0))}")
+    lines.append(f"- regression: {tasks.get('regressed', tasks.get('tasks_regressed', 0))}")
+    lines.append(f"- pending: {tasks.get('pending', 0)}")
+    lines.append("")
+    lines.append("## Goals And Validation")
+    lines.append("")
+    lines.append(f"- goals: {goals.get('completion_status', 'unknown')}")
+    lines.append(f"- validation: {validation.get('status', 'missing')}")
+    lines.append(f"- validation_commands: {validation.get('commands_passed', 0)}/{validation.get('commands_total', 0)} passed")
+    lines.append("")
+    lines.append("## Next Actions")
+    lines.append("")
+    if actions:
+        for action in actions[:8]:
+            lines.append(f"- {_work_summary_text(action)}")
+    else:
+        lines.append("- No immediate operator action was recorded.")
+    if failures:
+        lines.append("")
+        lines.append("## Review Items")
+        lines.append("")
+        for item in failures[:8]:
+            if not isinstance(item, dict):
+                continue
+            label = _work_summary_text(item.get("task_title") or item.get("task_id") or "task")
+            reason = _work_summary_text(item.get("reason") or item.get("task_status") or "unknown", max_chars=120)
+            lines.append(f"- {label}: {reason}")
+    lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def write_run_report_artifacts(
     *,
     repo: Path,
@@ -2191,11 +2250,13 @@ def write_run_report_artifacts(
     final_md = run_dir / "FINAL_RUN_REPORT.md"
     operations_json = run_dir / "OPERATIONS_SUMMARY.json"
     operations_md = run_dir / "OPERATIONS_SUMMARY.md"
+    work_summary_md = run_dir / "WORK_SUMMARY.md"
     final_artifacts = final_report.get("artifacts") if isinstance(final_report.get("artifacts"), dict) else {}
     final_artifacts.update(
         {
             "operations_summary_json": operations_json.as_posix(),
             "operations_summary_markdown": operations_md.as_posix(),
+            "work_summary_markdown": work_summary_md.as_posix(),
         }
     )
     final_report["artifacts"] = final_artifacts
@@ -2224,6 +2285,10 @@ def write_run_report_artifacts(
     except Exception:
         pass
     try:
+        safe_write_text(work_summary_md, _render_work_summary_md(final_report, operations_summary))
+    except Exception:
+        pass
+    try:
         analyzer_result = write_analyzer_artifacts(repo, run_dir)
     except Exception:
         analyzer_result = {}
@@ -2239,6 +2304,7 @@ def write_run_report_artifacts(
             "final_run_markdown": final_md.as_posix(),
             "operations_summary_json": operations_json.as_posix(),
             "operations_summary_markdown": operations_md.as_posix(),
+            "work_summary_markdown": work_summary_md.as_posix(),
             "analyzer_summary_json": str(
                 (
                     (analyzer_result.get("artifacts") or {}).get("summary_json")

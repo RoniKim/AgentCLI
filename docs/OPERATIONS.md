@@ -313,6 +313,7 @@ run_dir/
   ├─ QA_VALIDATION_REPORT.md   # QA validation report (Markdown)
   ├─ FINAL_RUN_REPORT.json     # final run report (browser-ready JSON)
   ├─ FINAL_RUN_REPORT.md       # final run report (Markdown)
+  ├─ WORK_SUMMARY.md           # concise daily-work-log summary
   ├─ SHUTDOWN_REPORT.md        # 종료 요약 보고서 (local fallback first)
   ├─ SHUTDOWN_CONTEXT.json     # 종료 시 컨텍스트
   ├─ PM_SHUTDOWN_REPORT_OUTPUT.txt # PM shutdown report raw output
@@ -329,7 +330,7 @@ run_dir/
 
 ## Shutdown / final report writers
 
-- `write_run_report_artifacts()` writes `QA_VALIDATION_REPORT.json` / `QA_VALIDATION_REPORT.md` and `FINAL_RUN_REPORT.json` / `FINAL_RUN_REPORT.md`.
+- `write_run_report_artifacts()` writes `QA_VALIDATION_REPORT.json` / `QA_VALIDATION_REPORT.md`, `FINAL_RUN_REPORT.json` / `FINAL_RUN_REPORT.md`, `OPERATIONS_SUMMARY.*`, and `WORK_SUMMARY.md`.
 - `build_local_shutdown_report()` builds the markdown body for `SHUTDOWN_REPORT.md`; the caller writes the file.
 - The normal shutdown flow writes `SHUTDOWN_CONTEXT.json` and a local `SHUTDOWN_REPORT.md` first, then best-effort PM output may overwrite the fallback copy.
 - If the PM-authored shutdown report repeats the same half twice, the duplicate content is trimmed before the final write.

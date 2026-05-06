@@ -345,7 +345,7 @@
 - [ ] Web PR Queue browser controls can validate, merge, discard, and rebase queued packets with the same safety gates as shell commands.
 - [ ] Authentication plan exists before use outside trusted private networks.
 - [x] A personal Runbook panel renders venv activation, shell start, web serve, status, stop, merge, discard, diagnostics, and recommended long-run commands for the active repo.
-- [ ] Each run writes a concise `WORK_SUMMARY.md` suitable for daily work logs without exposing raw secrets or long transcripts.
+- [x] Each run writes a concise `WORK_SUMMARY.md` suitable for daily work logs without exposing raw secrets or long transcripts.
 - [ ] Web action audit artifacts record local start, stop, restart, config, prompt, goals, and worktree actions with timestamps and results.
 - [ ] Local retention settings and dry-run prune reports manage run directories, logs, diagnostics, and backups without deleting pending worktree review state.
 - [ ] TODO management is visible from shell/web status with active TODO path, freshness, PM injection state, and safe preview/edit controls without overriding GOALS-first PM gating.
