@@ -5,7 +5,7 @@
 > This file is the target backlog, not a status report. Current implementation notes belong in `docs/WEB_CONSOLE.md`, `docs/MASTER_INDEX.md`, or archived incident/design notes.
 > Do not downgrade, remove, or merge unmet P0 goals to make progress look complete; implement them until they are true.
 > Task sizing rule: each unchecked P0 item should be small enough for one focused AgentCLI task branch.
-> Last reviewed: 2026-05-03.
+> Last reviewed: 2026-05-06.
 
 ## P0 (Must-Have)
 
@@ -233,34 +233,34 @@
 - [x] PR queue records base/head refs, branch, commits, changed files, GOALS trace, QA notes, validation status, and merge preflight state.
 - [x] Dev-stage test skipping is recorded as `validation_pending`, `tests_skipped`, or `no_tests_found`, never as success.
 - [x] Full validation runs on demand in an isolated temporary worktree.
-- [ ] Merge requires validation result plus explicit user approval.
-- [ ] Web PR Queue shows diff, QA notes, validation logs, merge preflight, and blocking reasons.
+- [x] Merge requires validation result plus explicit user approval.
+- [x] Web PR Queue shows diff, QA notes, validation logs, merge preflight, and blocking reasons.
 - [x] Dependency-blocked tasks expose the blocking upstream task id, title, status, reason, validation summary, and next action instead of only `Depends on: ['Tn']`.
-- [ ] Shell commands support listing, validating, rebasing, merging, and discarding queued PRs.
-- [ ] Telegram can list queued PRs and report validation/merge status.
-- [ ] Stale branches, missing patch artifacts, and deleted worktrees are reconciled without corrupting the queue.
+- [x] Shell commands support listing, validating, rebasing, merging, and discarding queued PRs.
+- [x] Telegram can list queued PRs and report validation/merge status.
+- [x] Stale branches, missing patch artifacts, and deleted worktrees are reconciled without corrupting the queue.
 
 ### P0-U. Experience DB And Analyzer Stage
 
-- [ ] Experience DB schema and migration exist under `.AgentCLI/experience` with tables for runs, task experiences, validation experiences, file patterns, and lessons.
-- [ ] Completed task experience records link run id, task id, GOALS refs, changed files, branch/head refs, validation artifacts, and local PR packet ids.
-- [ ] Failed task experience records preserve task status, reason, dependency blockers, validation summary, artifact pointers, and retry/discard outcome without storing raw logs.
-- [ ] Validation experience records classify `validation_pending`, `tests_skipped`, `no_tests_found`, `validation_failed`, `blocked_env`, and `validation_passed` separately.
-- [ ] Local PR queue validate, merge, discard, and rebase decisions are recorded as experience signals tied to the PR packet and GOALS trace.
-- [ ] Deterministic Analyzer rules produce `ANALYZER_SUMMARY.json` from run artifacts without calling an LLM.
-- [ ] Analyzer lesson records include kind, normalized trigger, GOALS refs, file globs, gate, task status, evidence pointers, confidence, and last-applied metadata.
-- [ ] Analyzer output is advisory only and cannot mark GOALS complete, approve merges, mutate source code, or bypass deterministic validation gates.
-- [ ] PM receives a token-bounded experience summary block even when a custom PM prompt is configured.
-- [ ] Experience summary injection enforces max item count, max characters, no raw logs, no raw diffs, and redacted evidence pointers.
-- [ ] Experience lessons can recommend task sizing, validation selection, retry avoidance, and dependency cleanup based on recorded evidence.
-- [ ] Web Console shows recent lessons, repeated failure patterns, validation gaps, and merge blockers from read-only Experience DB data.
-- [ ] Telegram can summarize latest experience blockers and queued PR validation needs without exposing raw prompts or logs.
-- [ ] Experience retention settings prune old lessons and evidence pointers without deleting pending PR queue or active run artifacts.
-- [ ] Experience redaction settings prevent secrets, raw backend transcripts, raw prompts, and long test output from leaking into future PM prompts.
+- [x] Experience DB schema and migration exist under `.AgentCLI/experience` with tables for runs, task experiences, validation experiences, file patterns, and lessons.
+- [x] Completed task experience records link run id, task id, GOALS refs, changed files, branch/head refs, validation artifacts, and local PR packet ids.
+- [x] Failed task experience records preserve task status, reason, dependency blockers, validation summary, artifact pointers, and retry/discard outcome without storing raw logs.
+- [x] Validation experience records classify `validation_pending`, `tests_skipped`, `no_tests_found`, `validation_failed`, `blocked_env`, and `validation_passed` separately.
+- [x] Local PR queue validate, merge, discard, and rebase decisions are recorded as experience signals tied to the PR packet and GOALS trace.
+- [x] Deterministic Analyzer rules produce `ANALYZER_SUMMARY.json` from run artifacts without calling an LLM.
+- [x] Analyzer lesson records include kind, normalized trigger, GOALS refs, file globs, gate, task status, evidence pointers, confidence, and last-applied metadata.
+- [x] Analyzer output is advisory only and cannot mark GOALS complete, approve merges, mutate source code, or bypass deterministic validation gates.
+- [x] PM receives a token-bounded experience summary block even when a custom PM prompt is configured.
+- [x] Experience summary injection enforces max item count, max characters, no raw logs, no raw diffs, and redacted evidence pointers.
+- [x] Experience lessons can recommend task sizing, validation selection, retry avoidance, and dependency cleanup based on recorded evidence.
+- [x] Web Console shows recent lessons, repeated failure patterns, validation gaps, and merge blockers from read-only Experience DB data.
+- [x] Telegram can summarize latest experience blockers and queued PR validation needs without exposing raw prompts or logs.
+- [x] Experience retention settings prune old lessons and evidence pointers without deleting pending PR queue or active run artifacts.
+- [x] Experience redaction settings prevent secrets, raw backend transcripts, raw prompts, and long test output from leaking into future PM prompts.
 
 ### P0-V. Maintainability And Module Decomposition
 
-- [ ] Web import compatibility tests protect `agent_runner.web` public and test-used private helper names before any helper extraction.
+- [x] Web import compatibility tests protect `agent_runner.web` public and test-used private helper names before any helper extraction.
 - [x] Web endpoint golden tests protect `/api/status`, `/api/progress`, `/api/worktree`, and `/api/runner/status` payload contracts.
 - [x] Web endpoint golden tests protect `/api/config`, `/api/goals`, `/api/prompts`, and `/api/logs` payload contracts.
 - [x] Web redaction helpers are extracted into a focused module while `agent_runner.web` re-exports the old helper names.
@@ -276,9 +276,9 @@
 - [x] Stop progress recording is shared by shell, Codex backend, Claude backend, and web runner controls.
 - [x] Task branch preserve, abandon, rollback, and cleanup dispatch are shared by Codex and Claude backends.
 - [x] Codex and Claude PM output postprocessing use the same GOALS gating, task splitting, and `goal_trace` preservation logic.
-- [ ] Backend adapter interfaces isolate model invocation, message streaming, model option construction, and quota probing from orchestration code.
-- [ ] Codex backend-specific code is limited to Codex CLI execution, Codex app-server integration, Codex quota probing, and Codex model options.
-- [ ] Claude backend-specific code is limited to Claude SDK/CLI execution, Claude streaming collection, Claude quota probing, and Claude model options.
+- [x] Backend adapter interfaces isolate model invocation, message streaming, model option construction, and quota probing from orchestration code.
+- [x] Codex backend-specific code is limited to Codex CLI execution, Codex app-server integration, Codex quota probing, and Codex model options.
+- [x] Claude backend-specific code is limited to Claude SDK/CLI execution, Claude streaming collection, Claude quota probing, and Claude model options.
 - [x] Every decomposition PR is extraction-only with no product behavior changes, no endpoint contract changes, and no run artifact filename changes.
 
 ### P0-W. Web Operational UX Follow-Up
@@ -290,15 +290,15 @@
 - [x] Log tail state leaves `loading` at EOF and shows last log line plus no-output warning when no new `run.log` lines arrive.
 - [x] Worktree Review defaults to the active run's current pending/no-pending state and does not surface old applied/discarded artifacts unless the user opens historical context.
 - [x] Mobile navigation confines overflow to an intentional visible horizontal scroll container or wraps route groups without hidden off-screen controls at 390px width.
-- [ ] Web snapshot polling uses route-appropriate payloads so Dashboard refresh does not require multi-megabyte `/api/status` responses containing full GOALS raw text/history data.
-- [ ] Web PR Queue route lists queued local PR packets with task id, GOALS refs, branch, changed files, validation status, QA notes, and merge preflight status.
-- [ ] Web PR Queue detail view shows per-file diff, validation logs, blockers, dependency detail, and explicit read-only vs mutating validate/merge/discard affordances.
+- [x] Web snapshot polling uses route-appropriate payloads so Dashboard refresh does not require multi-megabyte `/api/status` responses containing full GOALS raw text/history data.
+- [x] Web PR Queue route lists queued local PR packets with task id, GOALS refs, branch, changed files, validation status, QA notes, and merge preflight status.
+- [x] Web PR Queue detail view shows per-file diff, validation logs, blockers, dependency detail, and explicit read-only vs mutating validate/merge/discard affordances.
 
 ### P0-X. Unattended Operations Follow-Up
 
-- [ ] Direct runner and resume entrypoints reconcile stale STOP files using heartbeat age and an audit event without deleting fresh operator STOP requests.
-- [ ] Long sleeps, quota waits, and loop idle waits refresh `HEARTBEAT` at bounded intervals while remaining STOP-aware.
-- [ ] Claude backend quota and wait paths use the shared STOP-aware sleep helper instead of raw long `asyncio.sleep` calls.
+- [x] Direct runner and resume entrypoints reconcile stale STOP files using heartbeat age and an audit event without deleting fresh operator STOP requests.
+- [x] Long sleeps, quota waits, and loop idle waits refresh `HEARTBEAT` at bounded intervals while remaining STOP-aware.
+- [x] Claude backend quota and wait paths use the shared STOP-aware sleep helper instead of raw long `asyncio.sleep` calls.
 - [x] Startup readiness can auto-reconcile stale `WORKTREE_MERGE_PENDING.json` markers when the patch/worktree is missing or source `HEAD` already reflects the pending head, while preserving valid pending merges.
 - [x] Stale task branches and attempt directories are listed by doctor/readiness with age, status, reason, and owning run before any cleanup is offered.
 - [x] Stale branch, stale attempt, and old run cleanup require explicit operator approval and write dry-run plus applied cleanup artifacts.
@@ -314,11 +314,11 @@
 - [x] `_isolate_or_stop` consumes a typed `FailureOutcome` so `blocked_env` and `test_contract_changed` tasks are preserved for human review instead of abandoned.
 - [x] `backends/claudecode.py` records failures with the same task-status enriched schema as `cycle.py` so failover cannot produce mixed `STATE.json` schemas.
 - [x] `task_status.py` classifier covers Java, Go, Rust, C/C++, Kotlin, Swift, Maven, Gradle, NuGet, Cargo, regression, and dependency-resolution patterns with multi-language tests.
-- [ ] `task_history` SQLite stores `task_status` so PM failed-task context and consecutive-failure handling distinguish environment-blocked tasks from code regressions.
-- [ ] `needs_dependency` and `blocked_dependency` reasons are first-class `BLOCKED_ENV` mappings in `classify_task_failure` without relying on text-pattern inference.
-- [ ] Shutdown reports and Web Console task counters split regression, review-needed, and blocked-env groups so environment failures do not look like code regressions.
+- [x] `task_history` SQLite stores `task_status` so PM failed-task context and consecutive-failure handling distinguish environment-blocked tasks from code regressions.
+- [x] `needs_dependency` and `blocked_dependency` reasons are first-class `BLOCKED_ENV` mappings in `classify_task_failure` without relying on text-pattern inference.
+- [x] Shutdown reports and Web Console task counters split regression, review-needed, and blocked-env groups so environment failures do not look like code regressions.
 - [x] Codex and Claude backends use the same failure disposition, validation artifact, local PR queue, and run report helpers so failover cannot produce mixed schemas.
-- [ ] PR queue packet and index writes are lock-protected and recoverable after interrupted packet or index updates.
+- [x] PR queue packet and index writes are lock-protected and recoverable after interrupted packet or index updates.
 - [x] `STATE.json` mutation helpers preserve concurrent done, failed, and warning updates across runner, controller, and future Web mutation paths.
 - [x] GOALS auto-check writes atomically and detects operator edit conflicts instead of overwriting Web edits.
 - [x] Attempt directories record `STARTED` and `FINISHED` markers, and preflight reports interrupted attempts before a new unattended run starts.
@@ -327,9 +327,9 @@
 
 ### P0-Z. Stage Effects And Backlog Refiner Runtime
 
-- [ ] `StageOutcome` supports declared effects such as `backlog_written` and `tasks_reload_required` so `PipelineManager` can safely apply stage side effects.
+- [x] `StageOutcome` supports declared effects such as `backlog_written` and `tasks_reload_required` so `PipelineManager` can safely apply stage side effects.
 - [x] `PipelineSession` exposes safe artifact and backlog write APIs for state-mutating stages.
-- [ ] `PipelineManager` reloads task state after any stage declares backlog mutation.
+- [x] `PipelineManager` reloads task state after any stage declares backlog mutation.
 - [x] A built-in PL/Backlog Refiner can run between PM and Dev and split oversized tasks while preserving GOALS trace and dependencies.
 - [x] Web Config and Pipeline views support PL and plugin stages without dropping unknown role specs.
 
@@ -339,7 +339,7 @@
 - [ ] Notifications support read/unread state, filtering, severity grouping, and links back to the relevant run/task/log lines.
 - [ ] Web report export can create Markdown and JSON summaries for a selected run.
 - [ ] The browser can open local artifact paths through a documented safe helper instead of exposing raw filesystem mutation.
-- [ ] The CLI can optionally launch or serve the web console from a documented command.
+- [x] The CLI can optionally launch or serve the web console from a documented command.
 - [ ] Web console exposes diagnostics for missing FastAPI/uvicorn dependencies and broken virtual environments.
 - [x] UI state clearly distinguishes fallback/demo data from real API data.
 - [ ] Authentication plan exists before use outside trusted private networks.
