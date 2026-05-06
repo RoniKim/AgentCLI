@@ -6,8 +6,7 @@ import unittest
 import uuid
 from pathlib import Path
 
-from agent_runner.config import default_database_path
-from agent_runner.experience import query_task_experiences, record_task_experience
+from agent_runner.experience import experience_db_path, query_task_experiences, record_task_experience
 from agent_runner.pipeline.shared_runtime import select_next_task_with_dependency_checks
 from agent_runner.state import TaskItem
 
@@ -41,10 +40,10 @@ class ExperienceFailedTests(unittest.TestCase):
         shutil.rmtree(self.root, ignore_errors=True)
 
     def _raw_payload_text(self, *, task_id: str) -> str:
-        conn = sqlite3.connect(str(default_database_path(self.repo)))
+        conn = sqlite3.connect(str(experience_db_path(self.repo)))
         try:
             row = conn.execute(
-                "SELECT experience_payload FROM task_experiences WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                "SELECT experience_payload FROM task_experiences WHERE task_id = ? ORDER BY rowid DESC LIMIT 1",
                 (task_id,),
             ).fetchone()
             return str(row[0]) if row else ""

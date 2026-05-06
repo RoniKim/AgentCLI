@@ -4,8 +4,8 @@ import unittest
 import uuid
 from pathlib import Path
 
-from agent_runner.config import default_database_path
 from agent_runner.experience import (
+    experience_db_path,
     query_completed_task_experiences,
     record_completed_task_experience,
 )
@@ -166,7 +166,8 @@ class CompletedTaskExperienceTests(unittest.TestCase):
         self.assertNotIn(raw_diff, serialized)
         self.assertNotIn(raw_goal_text, serialized)
 
-        db_path = default_database_path(self.repo)
+        db_path = experience_db_path(self.repo)
+        self.assertTrue(db_path.exists())
         db_blobs = [db_path.read_bytes()]
         wal_path = Path(str(db_path) + "-wal")
         if wal_path.exists():

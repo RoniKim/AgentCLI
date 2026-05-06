@@ -361,8 +361,8 @@ def record_completed_task_experience(
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
             }
             existing = conn.execute(
-                "SELECT id FROM task_experiences WHERE run_id = ? AND task_id = ? AND status = ? "
-                "AND (backend = '' OR backend IS NULL) ORDER BY id DESC LIMIT 1",
+                "SELECT rowid FROM task_experiences WHERE run_id = ? AND task_id = ? AND status = ? "
+                "AND (backend = '' OR backend IS NULL) ORDER BY rowid DESC LIMIT 1",
                 (payload["run_id"], payload["task_id"], payload["status"]),
             ).fetchone()
             values = (
@@ -387,7 +387,7 @@ def record_completed_task_experience(
                     "run_id = ?, task_id = ?, title = ?, status = ?, task_status = ?, validation_status = ?, "
                     "goal_refs = ?, changed_files = ?, branch_ref = ?, head_ref = ?, base_ref = ?, "
                     "validation_artifacts = ?, pr_packet_ids = ?, recorded_at = ? "
-                    "WHERE id = ?",
+                    "WHERE rowid = ?",
                     (*values, existing[0]),
                 )
             else:
@@ -434,7 +434,7 @@ def query_completed_task_experiences(
                 params.append(_text(task_id))
             if clauses:
                 sql += " WHERE " + " AND ".join(clauses)
-            sql += " ORDER BY id DESC LIMIT ?"
+            sql += " ORDER BY rowid DESC LIMIT ?"
             params.append(int(max_items))
             rows = conn.execute(sql, tuple(params)).fetchall()
             result: list[dict[str, Any]] = []
@@ -481,7 +481,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import default_database_path
 from .utils import eprint
 
 _SCHEMA_SQL = """\
@@ -590,21 +589,68 @@ _TASK_HISTORY_EXPERIENCE_COLUMNS: dict[str, str] = {
 
 
 def _ensure_task_history_experience_columns(conn: sqlite3.Connection) -> None:
-    existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(task_experiences)").fetchall()}
+    table_info = conn.execute("PRAGMA table_info(task_experiences)").fetchall()
+    existing = {str(row[1]) for row in table_info}
+    id_column = next((row for row in table_info if str(row[1]) == "id"), None)
+    if table_info and not (id_column and int(id_column[5] or 0) == 1):
+        _migrate_task_experiences_to_history_schema(conn)
+        table_info = conn.execute("PRAGMA table_info(task_experiences)").fetchall()
+        existing = {str(row[1]) for row in table_info}
     for column, ddl in _TASK_HISTORY_EXPERIENCE_COLUMNS.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE task_experiences ADD COLUMN {column} {ddl}")
 
 
+def _migrate_task_experiences_to_history_schema(conn: sqlite3.Connection) -> None:
+    """Rebuild legacy repo-local task_experiences tables with the unified schema."""
+
+    legacy_table = "task_experiences_legacy_migration"
+    conn.execute(f"DROP TABLE IF EXISTS {legacy_table}")
+    conn.execute(f"ALTER TABLE task_experiences RENAME TO {legacy_table}")
+    conn.executescript(_TASK_HISTORY_EXPERIENCE_SCHEMA_SQL)
+
+    legacy_columns = {
+        str(row[1])
+        for row in conn.execute(f"PRAGMA table_info({legacy_table})").fetchall()
+    }
+    target_columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(task_experiences)").fetchall()
+    }
+    copy_columns = [
+        column
+        for column in _TASK_HISTORY_EXPERIENCE_COLUMNS
+        if column in legacy_columns and column in target_columns
+    ]
+    if copy_columns:
+        columns_sql = ", ".join(copy_columns)
+        conn.execute(
+            f"INSERT INTO task_experiences ({columns_sql}) "
+            f"SELECT {columns_sql} FROM {legacy_table}"
+        )
+    conn.execute(f"DROP TABLE IF EXISTS {legacy_table}")
+
+
 def _connect_task_history_experience_db(repo: Path) -> sqlite3.Connection:
-    db = default_database_path(repo)
+    db = experience_db_paths(repo).db_path
     db.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        (db.parent / SCHEMA_VERSION_FILENAME).write_text(f"{EXPERIENCE_SCHEMA_VERSION}\n", encoding="utf-8")
+    except Exception:
+        pass
     conn = sqlite3.connect(str(db), timeout=10)
     try:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA busy_timeout=5000;")
-        conn.executescript(_TASK_HISTORY_EXPERIENCE_SCHEMA_SQL)
-        _ensure_task_history_experience_columns(conn)
+        has_task_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_experiences'"
+        ).fetchone()
+        if has_task_table:
+            _ensure_task_history_experience_columns(conn)
+            conn.executescript(_TASK_HISTORY_EXPERIENCE_SCHEMA_SQL)
+        else:
+            conn.executescript(_TASK_HISTORY_EXPERIENCE_SCHEMA_SQL)
+            _ensure_task_history_experience_columns(conn)
         conn.commit()
     except Exception:
         conn.close()
@@ -613,7 +659,7 @@ def _connect_task_history_experience_db(repo: Path) -> sqlite3.Connection:
 
 
 def _db_path(repo: Path) -> Path:
-    return default_database_path(repo)
+    return experience_db_paths(repo).db_path
 
 
 def _connect(repo: Path) -> sqlite3.Connection:
@@ -931,10 +977,10 @@ def query_task_experiences(
             params: tuple[Any, ...]
             normalized_task_id = _text(task_id)
             if normalized_task_id:
-                sql += "WHERE task_id = ? ORDER BY id DESC LIMIT ?"
+                sql += "WHERE task_id = ? ORDER BY rowid DESC LIMIT ?"
                 params = (normalized_task_id, _int(max_items, 50))
             else:
-                sql += "ORDER BY id DESC LIMIT ?"
+                sql += "ORDER BY rowid DESC LIMIT ?"
                 params = (_int(max_items, 50),)
             rows = conn.execute(sql, params).fetchall()
             columns = [

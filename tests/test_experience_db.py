@@ -13,7 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agent_runner.experience import EXPERIENCE_SCHEMA_VERSION, initialize_experience_db
+from agent_runner.experience import (
+    EXPERIENCE_SCHEMA_VERSION,
+    experience_db_path,
+    initialize_experience_db,
+    query_completed_task_experiences,
+    record_completed_task_experience,
+)
 
 
 @pytest.fixture
@@ -111,3 +117,38 @@ def test_initialize_experience_db_schema_excludes_raw_prompt_log_and_diff_fields
         assert "raw_diff" not in columns
         assert "prompt" not in columns
         assert "diff" not in columns
+
+
+def test_task_experience_records_use_repo_local_experience_db_after_schema_init(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    paths = initialize_experience_db(repo)
+    record_completed_task_experience(
+        repo,
+        run_id="run-1",
+        task_id="T1",
+        title="Persist repo-local task experience",
+        status="done",
+        task_status="completed",
+        validation_status="validation_passed",
+        goal_trace=[{"goal_ref": "P0-U"}],
+        changed_files=["agent_runner/experience.py"],
+        branch_ref="task/T1",
+        head_ref="abc123",
+        base_ref="main",
+        validation_artifacts=[],
+        pr_packet_ids=["pr-run-1-t1"],
+    )
+
+    assert experience_db_path(repo) == paths.db_path
+    assert query_completed_task_experiences(repo, run_id="run-1", task_id="T1")[0]["pr_packet_ids"] == [
+        "pr-run-1-t1"
+    ]
+    with sqlite3.connect(str(paths.db_path)) as conn:
+        columns = _table_columns(paths.db_path, "task_experiences")
+        row_count = conn.execute("SELECT COUNT(*) FROM task_experiences").fetchone()[0]
+
+    assert "id" in columns
+    assert "branch_ref" in columns
+    assert row_count == 1
