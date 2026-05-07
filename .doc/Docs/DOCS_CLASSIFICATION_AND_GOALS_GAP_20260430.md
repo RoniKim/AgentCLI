@@ -43,7 +43,7 @@
 | `docs/TELEGRAM.md` | Telegram guide | hybrid mode, commands, push notification | P0-T/U에 queued PR/experience notification 일부 반영 |
 | `docs/TROUBLESHOOTING.md` | troubleshooting | quota, no_diff, failover, plugin, worktree, preflight | 운영 docs로 유지. 특정 기능 목표보다는 support surface |
 | `docs/MASTER_INDEX.md` | doc inventory | 문서 상태와 우선순위 인덱스 | P0-S docs validation과 직접 연결 |
-| `docs/WORKTREE_MERGE_FAILURE_20260428.md` | incident record | 이미 반영된 worktree merge incident 기록 | 새 GOALS 후보 아님 |
+| `docs/archive/WORKTREE_MERGE_FAILURE_20260428.md` | incident record | 이미 반영된 worktree merge incident 기록 | 새 GOALS 후보 아님 |
 
 Action:
 

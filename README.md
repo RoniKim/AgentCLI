@@ -221,6 +221,7 @@ Claude Code CLI가 프로젝트 루트에서 실행되면 `.claude/commands/` �
 
 | 문서 | 내용 |
 |------|------|
+| [문서 허브](docs/README.md) | 현재 문서 읽는 순서, 구현 완료 문서와 proposal/archive 구분 |
 | [설치 가이드](docs/INSTALLATION.md) | 요구사항, Step-by-Step 세팅, 환경 검증 |
 | [설정 관리](docs/CONFIGURATION.md) | Config 관리, 백엔드 선택, 모델 설정, Claude 고급 |
 | [파이프라인](docs/PIPELINE.md) | PM→Dev→QA 로직, 커스터마이징, Enterprise |
@@ -230,6 +231,8 @@ Claude Code CLI가 프로젝트 루트에서 실행되면 `.claude/commands/` �
 | [고급 기능](docs/ADVANCED_FEATURES.md) | TODO, GOALS, 태스크 히스토리, QA 후속, Shutdown |
 | [개발자 가이드](docs/DEVELOPER_GUIDE.md) | Stage/Backend 확장, 메트릭스, 프로세스 안전 |
 | [설정 레퍼런스](docs/CONFIG_REFERENCE_KO.md) | 전체 설정 변수 상세 (23개 섹션) |
+| [Web Console](docs/WEB_CONSOLE.md) | 현재 Web Console 구현, 안전 게이트, 검증 명령 |
+| [문서 인덱스](docs/MASTER_INDEX.md) | 전체 문서 inventory와 정합성 상태 |
 
 ---
 
