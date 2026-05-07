@@ -48,6 +48,7 @@ def write_task_validation_artifacts(
     goal_ref: str = "",
     goal_text: str = "",
     goal_trace: Sequence[object] | None = None,
+    active_goal_context: dict[str, Any] | None = None,
 ) -> Path:
     """Persist per-attempt validation artifacts shared across execution backends."""
 
@@ -78,6 +79,7 @@ def write_task_validation_artifacts(
     test_validation = next((record for record in records if str(record.get("kind") or "") == "test"), {})
     normalized_goal_trace = _object_list(goal_trace)
     normalized_task_files = _string_list(task_files)
+    active_goal_payload = dict(active_goal_context or {})
 
     payload = {
         "schema_version": 1,
@@ -88,6 +90,8 @@ def write_task_validation_artifacts(
         "goal_ref": str(goal_ref or ""),
         "goal_text": str(goal_text or ""),
         "goal_trace": normalized_goal_trace,
+        "active_goal_context": active_goal_payload,
+        "activeGoalContext": active_goal_payload,
         "cycle": int(cycle),
         "step": int(step),
         "attempt": int(attempt),

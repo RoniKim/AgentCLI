@@ -18,6 +18,15 @@ from typing import Any
 from ..cli import DEFAULTS, parse_args
 from ..config import AGENT_WORK_DIR
 from ..config import load_config, save_config
+from ..active_goal import (
+    ActiveGoalError,
+    build_active_goal_status,
+    cancel_active_goal,
+    clear_active_goal,
+    complete_active_goal,
+    create_active_goal,
+    update_active_goal,
+)
 from ..pr_queue import build_telegram_pr_queue_detail, build_telegram_pr_queue_summary
 from ..shell import _parse_kv_tokens
 from .controller import RunnerController
@@ -667,6 +676,21 @@ class TelegramControlService:
 
         self.allowed_chat_ids.add(chat_id)
 
+    def _active_goal_summary_line(self) -> str:
+        try:
+            status = build_active_goal_status(self.repo)
+        except Exception as ex:
+            return f"active goal: ERROR ({ex})"
+        goal = status.get("goal") if isinstance(status.get("goal"), dict) else {}
+        progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
+        if not goal:
+            return f"active goal: {status.get('state') or 'missing'}"
+        objective = _sanitize_summary_text(goal.get("objective"), limit=80)
+        return (
+            f"active goal: {progress.get('summary') or status.get('state') or 'missing'}"
+            + (f" | {objective}" if objective else "")
+        )
+
     def _format_status(self, data: dict[str, Any]) -> str:
         running = bool(data.get("running"))
         done = int(data.get("done") or 0)
@@ -683,12 +707,74 @@ class TelegramControlService:
             f"\uacbd\ub85c: {data.get('repo') or self.repo} | "
             f"\uac00\ub3d9 \uc2dc\uac04: {_fmt_uptime(uptime)}",     # 모드/경로/가동 시간
             f"  \uc9c4\ud589: {_fmt_progress(done, failed, warnings)}",  # 진행: ✅ 완료 ...
+            f"  {self._active_goal_summary_line()}",
             f"  \uc911\uc9c0 \uc0ac\uc720: {_fmt_reason_kr(reason)} | "
             f"STOP \ud30c\uc77c: {'\uc788\uc74c' if stop_file_exists else '\uc5c6\uc74c'}",  # 중지 사유/STOP 파일
         ]
         last_event = str(data.get("last_event") or "").strip()
         if last_event:
             lines.append(f"  \ub9c8\uc9c0\ub9c9 \uc774\ubca4\ud2b8: {last_event}")  # 마지막 이벤트
+        return "\n".join(lines)
+
+    def _parse_goal_options(self, raw_args: list[str]) -> tuple[dict[str, Any], list[str]]:
+        opts: dict[str, Any] = {}
+        positional: list[str] = []
+        idx = 0
+        while idx < len(raw_args):
+            item = str(raw_args[idx] or "").strip()
+            if not item:
+                idx += 1
+                continue
+            if item in {"--replace", "-r"}:
+                opts["replace"] = True
+                idx += 1
+                continue
+            if item in {"--mode", "--etag", "--token-budget", "--time-budget", "--cycle-budget"}:
+                if idx + 1 < len(raw_args):
+                    opts[item.lstrip("-").replace("-", "_")] = raw_args[idx + 1]
+                    idx += 2
+                    continue
+                idx += 1
+                continue
+            positional.append(item)
+            idx += 1
+        return opts, positional
+
+    def _format_active_goal_status(self) -> str:
+        status = build_active_goal_status(self.repo)
+        goal = status.get("goal") if isinstance(status.get("goal"), dict) else {}
+        namespaced = status.get("active_goal_status") if isinstance(status.get("active_goal_status"), dict) else {}
+        lines = [
+            "Active goal",
+            f"state: {status.get('state') or 'missing'}",
+            f"terminal: {namespaced.get('terminalReason') or namespaced.get('terminal_reason') or '-'}",
+        ]
+        if not goal:
+            return "\n".join(lines)
+        budgets = goal.get("budgets") if isinstance(goal.get("budgets"), dict) else {}
+        usage = goal.get("usage") if isinstance(goal.get("usage"), dict) else {}
+        progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
+        lines.extend(
+            [
+                f"id: {goal.get('id') or ''}",
+                f"mode: {goal.get('mode') or 'adaptive'}",
+                f"revision: {goal.get('revision') or 0}",
+                f"objective: {goal.get('objective') or ''}",
+                f"progress: {progress.get('summary') or ''}",
+                (
+                    "budget: "
+                    f"tokens={budgets.get('token_budget') or 0} "
+                    f"time={budgets.get('time_budget_seconds') or 0}s "
+                    f"cycles={budgets.get('cycle_budget') or 0}"
+                ),
+                (
+                    "usage: "
+                    f"tokens={usage.get('tokens_used') or 0} "
+                    f"time={usage.get('time_used_seconds') or 0}s "
+                    f"cycles={usage.get('cycles_used') or 0}"
+                ),
+            ]
+        )
         return "\n".join(lines)
 
     def _build_detail_text(self, *, lines: int = 80) -> str:
@@ -707,6 +793,7 @@ class TelegramControlService:
             f"  \ubaa8\ub4dc: {status.get('runner_mode') or 'thread'} | "
             f"\uacbd\ub85c: {status.get('repo') or self.repo}",
             f"  \uc9c4\ud589: {_fmt_progress(done, failed, warnings)}",
+            f"  {self._active_goal_summary_line()}",
             f"  \uc911\uc9c0 \uc0ac\uc720: {_fmt_reason_kr(reason)}",
             "",
         ]
@@ -1174,7 +1261,8 @@ class TelegramControlService:
                 messages.append(
                     f"{_EMOJI['run_start']} \ub7ec\ub108 \uc2dc\uc791\ub428\n"   # 🟢 러너 시작됨
                     f"  \uc2e4\ud589 ID: {self._short_run_id(run_dir)} | "        # 실행 ID
-                    f"\ubaa8\ub4dc: {runner_mode}"                                 # 모드
+                    f"\ubaa8\ub4dc: {runner_mode}\n"                                # 모드
+                    f"  {self._active_goal_summary_line()}"
                 )
 
             if self._notify_enabled("run_stop") and (not running) and prev_running:
@@ -1184,7 +1272,8 @@ class TelegramControlService:
                     f"{_EMOJI['run_stop']} \ub7ec\ub108 \uc911\uc9c0\ub428\n"          # 🔴 러너 중지됨
                     f"  \uc2e4\ud589 ID: {stop_run_id}\n"                                # 실행 ID
                     f"  \uc774\uc720: {_fmt_reason_kr(final_reason)} | "                  # 이유
-                    f"{_fmt_progress(done, failed, warnings)}"                             # ✅ 완료 ...
+                    f"{_fmt_progress(done, failed, warnings)}\n"                           # ✅ 완료 ...
+                    f"  {self._active_goal_summary_line()}"
                 )
 
             if self._notify_enabled("task_done") and done > prev_done:
@@ -1298,7 +1387,7 @@ class TelegramControlService:
             f"  \uc800\uc7a5\uc18c: {self.repo}",                      # 저장소
             f"  \uc778\uc99d: {'\uc644\ub8cc' if authorized else '\ubbf8\uc778\uc99d'}",  # 인증: 완료/미인증
             f"  \uc5f0\uacb0\ub41c \ucc44\ud305: {len(self.allowed_chat_ids)}\uac1c",    # 연결된 채팅: N개
-            "\uba85\ub839\uc5b4: /whoami /pair /status /detail /experience /errors /events /grep /run_start /run_stop /runs /tail /notify",  # 명령어
+            "\uba85\ub839\uc5b4: /whoami /pair /status /goal /detail /experience /errors /events /grep /run_start /run_stop /runs /tail /notify",  # 명령어
         ]
         lines.append("PR queue: /prs /pr <id>")
         if not authorized:
@@ -1580,6 +1669,76 @@ class TelegramControlService:
         status = self.controller.status()
         await self._reply(update, self._format_status(status))
 
+    async def cmd_goal(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._require_auth(update):
+            return
+        raw_args = [str(item or "") for item in (context.args or [])]
+        action = (raw_args[0].strip().lower() if raw_args else "status") or "status"
+        rest = raw_args[1:] if raw_args else []
+        try:
+            if action in {"status", "show"}:
+                await self._reply(update, self._format_active_goal_status())
+                return
+            opts, positional = self._parse_goal_options(rest)
+            if action == "create":
+                objective = " ".join(positional).strip()
+                if not objective:
+                    await self._reply(update, "Usage: /goal create <objective> [--mode strict|adaptive|exploratory]")
+                    return
+                status = create_active_goal(
+                    self.repo,
+                    objective,
+                    mode=str(opts.get("mode") or "adaptive"),
+                    token_budget=int(opts.get("token_budget") or 0),
+                    time_budget_seconds=int(opts.get("time_budget") or 0),
+                    cycle_budget=int(opts.get("cycle_budget") or 0),
+                    source={"kind": "operator", "surface": "telegram"},
+                    replace=bool(opts.get("replace")),
+                    expected_etag=str(opts.get("etag") or ""),
+                )
+                await self._reply(update, f"Active goal created: {status['goal'].get('id')}\n{self._format_active_goal_status()}")
+                return
+            if action == "update":
+                update_kwargs: dict[str, Any] = {"expected_etag": str(opts.get("etag") or "")}
+                objective = " ".join(positional).strip()
+                if objective:
+                    update_kwargs["objective"] = objective
+                if opts.get("mode"):
+                    update_kwargs["mode"] = str(opts.get("mode") or "")
+                if opts.get("token_budget") is not None:
+                    update_kwargs["token_budget"] = int(opts.get("token_budget") or 0)
+                if opts.get("time_budget") is not None:
+                    update_kwargs["time_budget_seconds"] = int(opts.get("time_budget") or 0)
+                if opts.get("cycle_budget") is not None:
+                    update_kwargs["cycle_budget"] = int(opts.get("cycle_budget") or 0)
+                if len(update_kwargs) <= 1:
+                    await self._reply(update, "Usage: /goal update [objective] [--mode ...] [--token-budget N] [--time-budget N] [--cycle-budget N]")
+                    return
+                status = update_active_goal(self.repo, **update_kwargs)
+                await self._reply(update, f"Active goal updated: revision={status.get('revision')}\n{self._format_active_goal_status()}")
+                return
+            if action == "complete":
+                evidence = " ".join(positional).strip()
+                if not evidence:
+                    await self._reply(update, "Usage: /goal complete <evidence>")
+                    return
+                status = complete_active_goal(self.repo, evidence=evidence, expected_etag=str(opts.get("etag") or ""))
+                await self._reply(update, f"Active goal completed: {status['goal'].get('id')}")
+                return
+            if action == "cancel":
+                reason = " ".join(positional).strip()
+                status = cancel_active_goal(self.repo, reason=reason, expected_etag=str(opts.get("etag") or ""))
+                await self._reply(update, f"Active goal canceled: {status['goal'].get('id')}")
+                return
+            if action == "clear":
+                clear_active_goal(self.repo, expected_etag=str(opts.get("etag") or ""))
+                await self._reply(update, "Active goal cleared.")
+                return
+        except (ActiveGoalError, ValueError) as ex:
+            await self._reply(update, f"Active goal command failed: {ex}")
+            return
+        await self._reply(update, "Usage: /goal [status] | create | update | complete | cancel | clear")
+
     async def cmd_run_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._require_auth(update):
             return
@@ -1708,6 +1867,7 @@ class TelegramControlService:
             app.add_handler(CommandHandler("whoami", self.cmd_whoami))
             app.add_handler(CommandHandler("pair", self.cmd_pair))
             app.add_handler(CommandHandler("status", self.cmd_status))
+            app.add_handler(CommandHandler("goal", self.cmd_goal))
             app.add_handler(CommandHandler("detail", self.cmd_detail))
             app.add_handler(CommandHandler("experience", self.cmd_experience))
             app.add_handler(CommandHandler("prs", self.cmd_prs))

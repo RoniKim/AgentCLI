@@ -25,7 +25,18 @@ from __future__ import annotations
 import sys
 
 
-_ONE_SHOT_FLAGS = {"--wizard", "--init-prompts", "--preflight", "-h", "--help"}
+_ONE_SHOT_FLAGS = {
+    "--wizard",
+    "--init-prompts",
+    "--preflight",
+    "--active-goal-status",
+    "--active-goal-objective",
+    "--active-goal-complete",
+    "--active-goal-cancel",
+    "--active-goal-clear",
+    "-h",
+    "--help",
+}
 _WEB_FLAGS = {"--web", "--serve-web"}
 
 

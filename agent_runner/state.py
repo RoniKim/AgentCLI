@@ -284,6 +284,9 @@ class TaskItem:
     priority: str = "P1"
     touched_file_globs: list[str] = field(default_factory=list)
     goal_trace: list[dict[str, Any]] | None = None
+    active_goal_id: str = ""
+    active_goal: dict[str, Any] | None = None
+    active_goal_admission: dict[str, Any] | None = None
 
 
 def task_scheduling_snapshot(task: Any) -> dict[str, Any]:
@@ -436,6 +439,14 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
                 if isinstance(trace, dict):
                     goal_trace.append(dict(trace))
 
+        active_goal_id = str(x.get("active_goal_id") or x.get("activeGoalId") or "").strip()
+        active_goal_val = x.get("active_goal") if isinstance(x.get("active_goal"), dict) else x.get("activeGoal")
+        active_goal = dict(active_goal_val) if isinstance(active_goal_val, dict) else None
+        active_goal_admission_val = (
+            x.get("active_goal_admission") if isinstance(x.get("active_goal_admission"), dict) else x.get("activeGoalAdmission")
+        )
+        active_goal_admission = dict(active_goal_admission_val) if isinstance(active_goal_admission_val, dict) else None
+
         # drop empty id/title/prompt
         if tid and title and prompt:
             items.append(
@@ -452,6 +463,9 @@ def load_backlog_json(path: Path) -> list[TaskItem]:
                     priority=scheduling["priority"],
                     touched_file_globs=scheduling["touched_file_globs"],
                     goal_trace=goal_trace,
+                    active_goal_id=active_goal_id,
+                    active_goal=active_goal,
+                    active_goal_admission=active_goal_admission,
                 )
             )
 

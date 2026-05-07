@@ -11,6 +11,7 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .active_goal import active_goal_role_context, build_active_goal_status
 from .experience import (
     record_pr_queue_signal,
     record_validation_experiences,
@@ -192,6 +193,26 @@ def _packet_index_sync_extra(packet: Mapping[str, Any]) -> dict[str, object]:
     )
     if isinstance(reconciliation, dict) and reconciliation:
         extra["queue_reconciliation"] = dict(reconciliation)
+    active_goal_context = (
+        packet.get("active_goal_context")
+        if isinstance(packet.get("active_goal_context"), dict)
+        else packet.get("activeGoalContext")
+        if isinstance(packet.get("activeGoalContext"), dict)
+        else None
+    )
+    if isinstance(active_goal_context, dict) and active_goal_context:
+        extra["active_goal_context"] = dict(active_goal_context)
+        extra["activeGoalContext"] = dict(active_goal_context)
+        active_goal_id = str(
+            active_goal_context.get("active_goal_id")
+            or active_goal_context.get("activeGoalId")
+            or packet.get("active_goal_id")
+            or packet.get("activeGoalId")
+            or ""
+        ).strip()
+        if active_goal_id:
+            extra["active_goal_id"] = active_goal_id
+            extra["activeGoalId"] = active_goal_id
     return extra
 
 
@@ -538,6 +559,7 @@ def queue_review_packet(
     commits: Sequence[object] | object | None = None,
     status: str = "pr_queued",
     recoverable_reason: str = "",
+    active_goal_context: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     source_repo_path = Path(source_repo).expanduser().resolve()
     queue_root = pr_queue_root(source_repo_path)
@@ -659,6 +681,11 @@ def queue_review_packet(
                     goal_trace_value.append(item)
 
     validation_status_text = _choose_packet_validation_status(validation_status, derived_validation_statuses)
+    active_goal_payload = (
+        dict(active_goal_context)
+        if isinstance(active_goal_context, Mapping)
+        else active_goal_role_context(build_active_goal_status(source_repo_path), role="PR")
+    )
 
     missing = [
         name
@@ -730,6 +757,8 @@ def queue_review_packet(
         "validation_artifacts": validation_artifacts_value,
         "qa_notes": qa_notes_value,
         "goal_trace": goal_trace_value,
+        "active_goal_context": active_goal_payload,
+        "activeGoalContext": active_goal_payload,
         "merge_preflight": merge_preflight_value,
         "changed_files": changed_files_value,
         "commits": commits_value,
@@ -748,6 +777,10 @@ def queue_review_packet(
         "created_at": created_at_text,
         "updated_at": now,
         "packet_path": packet_path.as_posix(),
+        "active_goal_id": str(active_goal_payload.get("active_goal_id") or ""),
+        "activeGoalId": str(active_goal_payload.get("activeGoalId") or active_goal_payload.get("active_goal_id") or ""),
+        "active_goal_context": active_goal_payload,
+        "activeGoalContext": active_goal_payload,
     }
 
     if recoverable:

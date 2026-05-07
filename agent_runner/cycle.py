@@ -62,6 +62,7 @@ from .gitops import (
 )
 from .inventory import build_repo_inventory, write_repo_inventory_files
 from .todo import read_current_todo, format_todo_block
+from .active_goal import active_goal_role_context, build_active_goal_status, format_active_goal_block, increment_active_goal_usage
 from .metrics import MetricsLogger
 from .logger import create_logger
 from .policy import load_policy_rules, policy_scan_files
@@ -70,6 +71,7 @@ from .scan import DEFAULT_SCAN_IGNORE_GLOBS
 from .prompts import (
     PromptStore,
     ensure_pm_instructions_have_output_schema,
+    append_active_goal_context,
     append_pm_output_contract,
     append_pm_essential_context,
     codex_call_hint,
@@ -702,6 +704,12 @@ async def main_async(args: argparse.Namespace) -> int:
                         "context_json": json.dumps(ctx_obj, ensure_ascii=False, indent=2),
                     },
                 )
+                active_goal_status = build_active_goal_status(source_repo if worktree_dir is not None else repo)
+                prompt = append_active_goal_context(
+                    prompt,
+                    active_goal_block=format_active_goal_block(active_goal_status),
+                    role="Reporter",
+                )
                 res = await codex_backend.invoke_model(
                     prompt,
                     instructions=reporter_instructions,
@@ -1102,6 +1110,8 @@ async def main_async(args: argparse.Namespace) -> int:
             # Optional TODO context (user-authored; drives backlog priority)
             todo_path, todo_text = read_current_todo(repo)
             todo_block = format_todo_block(todo_path, todo_text)
+            active_goal_status = build_active_goal_status(source_repo if worktree_dir is not None else repo)
+            active_goal_block = format_active_goal_block(active_goal_status)
 
             # Goals context
             goals_block, goals_instruction = build_goals_prompt_context(
@@ -1136,6 +1146,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "repo": str(repo),
                         "run_dir": str(run_dir),
                         "todo_block": todo_block,
+                        "active_goal_block": active_goal_block,
                         "docs_dir": str(docs_dir) if docs_dir else "(none)",
                         "docs_read_mode": str(args.docs_read_mode),
                         "digest_rel": str(digest_rel),
@@ -1151,6 +1162,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         failed_tasks_block=_failed_blk,
                         goals_block=goals_block,
                         goals_instruction=goals_instruction,
+                        active_goal_block=active_goal_block,
                         experience_summary_block=experience_summary_block,
                     )
                     pm_out = await _run_pm_structured(
@@ -1185,6 +1197,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         done_ids=done_ids,
                         failed_ids=failed_ids,
                         completion_level=goals_completion_level,
+                        active_goal_status=active_goal_status,
                     )
                     gate = pm_postprocess["pm_gate"]
                     _pm_dump = pm_postprocess["pm_output_model_dump"]
@@ -1306,6 +1319,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         "repo": str(repo),
                         "run_dir": str(run_dir),
                         "todo_block": todo_block,
+                        "active_goal_block": active_goal_block,
                         "docs_dir": str(docs_dir) if docs_dir else "(none)",
                         "docs_read_mode": str(args.docs_read_mode),
                         "digest_rel": str(digest_rel),
@@ -1327,6 +1341,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         failed_tasks_block=_failed_blk_i,
                         goals_block=goals_block,
                         goals_instruction=goals_instruction,
+                        active_goal_block=active_goal_block,
                         build_warnings_block=build_warnings_block,
                         experience_summary_block=experience_summary_block,
                     )
@@ -1374,6 +1389,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         done_ids=done_ids,
                         failed_ids=failed_ids,
                         completion_level=goals_completion_level,
+                        active_goal_status=active_goal_status,
                     )
                     gate = pm_postprocess["pm_gate"]
                     _pm_dump = pm_postprocess["pm_output_model_dump"]
@@ -1515,8 +1531,14 @@ async def main_async(args: argparse.Namespace) -> int:
                     build_skills_context_fn=build_skills_context,
                 )
 
+                active_goal_status = build_active_goal_status(source_repo if worktree_dir is not None else repo)
                 ctx = {"repo": str(repo), "run_dir": str(run_dir), "skills_context": skills_context}
                 qa_prompt = store.render("qa_prompt", QA_TEMPLATE_DEFAULT, ctx)
+                qa_prompt = append_active_goal_context(
+                    qa_prompt,
+                    active_goal_block=format_active_goal_block(active_goal_status),
+                    role="QA",
+                )
                 if bool(getattr(args, "qa_to_backlog", False)):
                     qa_prompt = qa_prompt.rstrip() + "\n\n" + QA_FOLLOWUPS_OUTPUT_CONTRACT + "\n"
                 qa_result = await codex_backend.invoke_model(
@@ -1655,6 +1677,8 @@ async def main_async(args: argparse.Namespace) -> int:
                 task_status: str = "",
             ) -> Path:
                 records = [record for record in validations if isinstance(record, dict)]
+                active_goal_status = build_active_goal_status(source_repo if worktree_dir is not None else repo)
+                active_goal_context = active_goal_role_context(active_goal_status, role="Validation")
                 artifact_path = write_task_validation_artifacts(
                     attempt_dir=attempt_context.attempt_dir,
                     task_id=task.id,
@@ -1671,6 +1695,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     goal_ref=task_goal_ref,
                     goal_text=task_goal_text,
                     goal_trace=task_goal_trace,
+                    active_goal_context=active_goal_context,
                 )
                 validation_artifacts: list[str] = [artifact_path.as_posix()]
                 for record in records:
@@ -2338,6 +2363,12 @@ async def main_async(args: argparse.Namespace) -> int:
                         "codex_call_hint": codex_call_hint(autopilot),
                     }
                     dev_prompt = store.render("dev_task_prompt", DEV_TASK_TEMPLATE_DEFAULT, ctx)
+                    active_goal_status = build_active_goal_status(source_repo if worktree_dir is not None else repo)
+                    dev_prompt = append_active_goal_context(
+                        dev_prompt,
+                        active_goal_block=format_active_goal_block(active_goal_status),
+                        role="Dev",
+                    )
 
                     # Inject gate failure context from a previous failed attempt.
                     gate_error_for_prompt = _prev_gate_error
@@ -2392,6 +2423,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         dev_final = (dev_result.final_output or "")
                         _inp, _out = dev_result.input_tokens, dev_result.output_tokens
                         token_tracker.add("Dev", _inp, _out)
+                        increment_active_goal_usage(source_repo if worktree_dir is not None else repo, tokens_used=_inp + _out)
                         task_duration = time.time() - task_start_time
                         logger.timing("dev_task_execution", task_duration, task_id=next_task.id, attempt=attempt)
                         # Check result-based error signals (codex exec returns errors in result, not exceptions)
@@ -3736,6 +3768,11 @@ async def main_async(args: argparse.Namespace) -> int:
                 duration_seconds=cycle_dt,
                 tokens=token_tracker.summary(),
             )
+            increment_active_goal_usage(
+                source_repo if worktree_dir is not None else repo,
+                time_used_seconds=int(cycle_dt),
+                cycles_used=1,
+            )
             print_cycle_report(cycle_idx, cycle_dt, task_results, done_count, total_count, failed_count, skipped_count, token_tracker=token_tracker)
 
             done_delta = done_count - before_done
@@ -3869,6 +3906,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 SharedCycleDeps(
                     args=args,
                     repo=repo,
+                    active_goal_repo=source_repo if worktree_dir is not None else repo,
                     run_dir=run_dir,
                     stop_path=stop_path,
                     metrics=metrics,

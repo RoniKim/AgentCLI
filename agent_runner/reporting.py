@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from .active_goal import active_goal_role_context, build_active_goal_status
 from .analyzer import write_analyzer_artifacts
 from .docs import read_text_robust
 from .gates import (
@@ -80,6 +81,12 @@ def collect_shutdown_context(repo: Path, run_dir: Path) -> dict[str, Any]:
         "repo": str(repo),
         "run_dir": str(run_dir),
     }
+    try:
+        active_goal_context = active_goal_role_context(build_active_goal_status(repo), role="Shutdown")
+    except Exception:
+        active_goal_context = {}
+    ctx["active_goal_context"] = active_goal_context
+    ctx["activeGoalContext"] = active_goal_context
 
     # Git
     try:
@@ -1287,6 +1294,7 @@ def _build_qa_attempt_report(repo: Path, attempt_path: Path, attempt_raw: dict[s
 
 def build_qa_validation_report(repo: Path, run_dir: Path) -> dict[str, Any]:
     config = _load_run_command_config(run_dir)
+    active_goal_context = active_goal_role_context(build_active_goal_status(repo), role="QAReport")
     attempts_raw = _load_validation_attempts(run_dir)
     attempts = [_build_qa_attempt_report(repo, item["path"], item["raw"], config) for item in attempts_raw]
     passed = len([item for item in attempts if item["status"] == "passed"])
@@ -1347,6 +1355,8 @@ def build_qa_validation_report(repo: Path, run_dir: Path) -> dict[str, Any]:
         "status": report_status,
         "summary": summary,
         "summary_text": summary_text,
+        "active_goal_context": active_goal_context,
+        "activeGoalContext": active_goal_context,
         "artifacts": artifacts,
         "attempts": attempts,
     }
@@ -1896,6 +1906,10 @@ def build_operations_summary(
 
 
 def _build_final_run_report(repo: Path, run_dir: Path, *, stop_reason: str, qa_report: dict[str, Any]) -> dict[str, Any]:
+    active_goal_context = active_goal_role_context(build_active_goal_status(repo), role="FinalReport")
+    active_goal_progress = (
+        active_goal_context.get("progress") if isinstance(active_goal_context.get("progress"), dict) else {}
+    )
     state = {}
     try:
         state = load_state(run_dir / "STATE.json")
@@ -1972,6 +1986,8 @@ def _build_final_run_report(repo: Path, run_dir: Path, *, stop_reason: str, qa_r
         summary_bits.append(f"{failure_group_counts.get(STATUS_GROUP_REGRESSION, 0)} regression task(s)")
     if tasks_skipped:
         summary_bits.append(f"{tasks_skipped} skipped task(s)")
+    if active_goal_context.get("active"):
+        summary_bits.append(f"active goal {active_goal_progress.get('summary') or active_goal_context.get('state')}")
     if next_actions:
         summary_bits.append(f"next: {next_actions[0]}")
 
@@ -2004,6 +2020,10 @@ def _build_final_run_report(repo: Path, run_dir: Path, *, stop_reason: str, qa_r
             "failureGroupCounts": failure_group_counts,
         },
         "goals": completion,
+        "active_goal_context": active_goal_context,
+        "activeGoalContext": active_goal_context,
+        "active_goal_progress": active_goal_progress,
+        "activeGoalProgress": active_goal_progress,
         "validation": validation_summary,
         "failures": failures,
         "next_actions": next_actions,
@@ -2078,6 +2098,15 @@ def _render_final_run_report_md(report: dict[str, Any]) -> str:
     tasks = report.get("tasks") if isinstance(report.get("tasks"), dict) else {}
     validation = report.get("validation") if isinstance(report.get("validation"), dict) else {}
     goals = report.get("goals") if isinstance(report.get("goals"), dict) else {}
+    active_goal_context = report.get("active_goal_context") if isinstance(report.get("active_goal_context"), dict) else {}
+    active_goal = active_goal_context.get("active_goal") if isinstance(active_goal_context.get("active_goal"), dict) else {}
+    active_goal_progress = (
+        report.get("active_goal_progress")
+        if isinstance(report.get("active_goal_progress"), dict)
+        else active_goal_context.get("progress")
+        if isinstance(active_goal_context.get("progress"), dict)
+        else {}
+    )
     lines: list[str] = []
     lines.append("# Final Run Report")
     lines.append("")
@@ -2103,6 +2132,15 @@ def _render_final_run_report_md(report: dict[str, Any]) -> str:
     lines.append(f"- project_complete: {goals.get('project_complete', False)}")
     lines.append(f"- completion_status: {goals.get('completion_status', 'unknown')}")
     lines.append(f"- completion_reason: {goals.get('completion_reason', '')}")
+    lines.append("")
+    lines.append("## Active Goal")
+    lines.append("")
+    lines.append(f"- active: {bool(active_goal_context.get('active'))}")
+    lines.append(f"- id: {active_goal_context.get('active_goal_id') or ''}")
+    lines.append(f"- state: {active_goal.get('status') or active_goal_context.get('state') or 'missing'}")
+    lines.append(f"- mode: {active_goal.get('mode') or active_goal_context.get('mode') or ''}")
+    lines.append(f"- progress: {active_goal_progress.get('summary') or 'missing'}")
+    lines.append(f"- subordinate_to_goals_md: {bool(active_goal_context.get('subordinate_to_goals_md', True))}")
     lines.append("")
     lines.append("## Validation")
     lines.append("")
@@ -2413,6 +2451,12 @@ def build_local_shutdown_report(
     lines.append("## Progress")
     lines.append("")
     lines.append(f"- done: {tasks_done}/{tasks_total}")
+    active_goal_context = ctx.get("active_goal_context") if isinstance(ctx.get("active_goal_context"), dict) else {}
+    if active_goal_context and active_goal_context.get("active"):
+        active_goal = active_goal_context.get("active_goal") if isinstance(active_goal_context.get("active_goal"), dict) else {}
+        lines.append(f"- active_goal_id: {active_goal_context.get('active_goal_id') or ''}")
+        lines.append(f"- active_goal_status: {active_goal.get('status') or active_goal_context.get('state') or ''}")
+        lines.append(f"- active_goal_mode: {active_goal.get('mode') or active_goal_context.get('mode') or ''}")
     lines.append("")
 
     lines.append("## Backlog snapshot")

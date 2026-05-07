@@ -11,6 +11,26 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .cli import DEFAULTS
+from .active_goal import (
+    ActiveGoalConflict,
+    ActiveGoalError,
+    build_active_goal_analytics,
+    build_active_goal_status,
+    build_active_goal_timeline,
+    cancel_active_goal,
+    clear_active_goal,
+    complete_active_goal,
+    complete_active_goal_checkpoint,
+    create_active_goal,
+    import_active_goal_state,
+    list_active_goal_autonomy_presets,
+    list_active_goal_templates,
+    propose_goals_from_active_goal,
+    recommend_next_active_goals,
+    set_active_goal_checkpoints,
+    update_active_goal,
+    write_active_goal_export,
+)
 from .config import (
     app_home,
     load_config,
@@ -31,7 +51,12 @@ from .skills.status import build_skills_status, format_skills_status_lines
 from .backends.claude_extensions import build_claude_advanced_diagnostics, format_claude_advanced_diagnostics_lines
 from .mcp_diagnostics import build_mcp_diagnostics, format_mcp_diagnostics_lines
 from .pipeline import coerce_plugin_bool, normalize_plugin_allowlist
-from .preflight import check_runner_start_readiness, format_runner_start_readiness, run_preflight
+from .preflight import (
+    check_active_goal_autonomy_readiness,
+    check_runner_start_readiness,
+    format_runner_start_readiness,
+    run_preflight,
+)
 from .process_guard import init_process_guard, terminate_all_children
 from .stop_progress import (
     build_stop_file_paths,
@@ -549,6 +574,278 @@ class RunnerShell:
         if active:
             print(f"todo_path: {active}")
 
+    def _print_active_goal_status(self, *, detailed: bool = False) -> None:
+        if not self.repo:
+            return
+        try:
+            status = build_active_goal_status(self.repo)
+        except Exception as ex:
+            print(f"active_goal: ERROR ({ex})")
+            return
+        goal = status.get("goal") if isinstance(status.get("goal"), dict) else {}
+        progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
+        print(
+            "active_goal: "
+            f"state={status.get('state') or 'missing'} "
+            f"mode={goal.get('mode') or '-'} "
+            f"revision={status.get('revision') or 0} "
+            f"injection={status.get('pmInjection', {}).get('state') if isinstance(status.get('pmInjection'), dict) else 'missing'} "
+            f"progress={progress.get('summary') or 'missing'}"
+        )
+        if not goal:
+            return
+        objective = str(goal.get("objective") or "").strip()
+        if objective:
+            if not detailed and len(objective) > 120:
+                objective = objective[:117].rstrip() + "..."
+            print(f"active_goal_objective: {objective}")
+        if detailed:
+            budgets = goal.get("budgets") if isinstance(goal.get("budgets"), dict) else {}
+            usage = goal.get("usage") if isinstance(goal.get("usage"), dict) else {}
+            template = goal.get("template") if isinstance(goal.get("template"), dict) else {}
+            preset = goal.get("autonomy_preset") if isinstance(goal.get("autonomy_preset"), dict) else {}
+            checkpoint_progress = progress.get("checkpoint_progress") if isinstance(progress.get("checkpoint_progress"), dict) else progress.get("checkpointProgress")
+            checkpoint_progress = checkpoint_progress if isinstance(checkpoint_progress, dict) else {}
+            print(f"active_goal_id: {goal.get('id') or ''}")
+            print(f"active_goal_etag: {status.get('etag') or ''}")
+            if template.get("key") or preset.get("key"):
+                print(f"active_goal_template: {template.get('key') or '-'}")
+                print(f"active_goal_preset: {preset.get('key') or '-'}")
+            print(
+                "active_goal_budget: "
+                f"tokens={budgets.get('token_budget') or 0} "
+                f"time_seconds={budgets.get('time_budget_seconds') or 0} "
+                f"cycles={budgets.get('cycle_budget') or 0}"
+            )
+            print(
+                "active_goal_usage: "
+                f"tokens={usage.get('tokens_used') or 0} "
+                f"time_seconds={usage.get('time_used_seconds') or 0} "
+                f"cycles={usage.get('cycles_used') or 0}"
+            )
+            print(f"active_goal_progress: {progress.get('summary') or ''}")
+            if checkpoint_progress.get("total"):
+                print(
+                    "active_goal_checkpoints: "
+                    f"completed={checkpoint_progress.get('completed') or 0}/{checkpoint_progress.get('total') or 0} "
+                    f"active={checkpoint_progress.get('active_checkpoint_id') or '-'}"
+                )
+
+    def _parse_goal_options(self, args: list[str]) -> tuple[dict[str, Any], list[str]]:
+        opts: dict[str, Any] = {
+            "mode": None,
+            "template": None,
+            "preset": None,
+            "level": None,
+            "token_budget": None,
+            "time_budget_seconds": None,
+            "cycle_budget": None,
+            "replace": False,
+            "etag": None,
+        }
+        positional: list[str] = []
+        index = 0
+        value_options = {
+            "--mode": "mode",
+            "--template": "template",
+            "--preset": "preset",
+            "--level": "level",
+            "--token-budget": "token_budget",
+            "--time-budget-seconds": "time_budget_seconds",
+            "--cycle-budget": "cycle_budget",
+            "--etag": "etag",
+        }
+        while index < len(args):
+            token = args[index]
+            if token == "--replace":
+                opts["replace"] = True
+                index += 1
+                continue
+            target = value_options.get(token)
+            if target:
+                if index + 1 >= len(args):
+                    raise ValueError(f"{token} requires a value")
+                raw_value = args[index + 1]
+                if target in {"token_budget", "time_budget_seconds", "cycle_budget"}:
+                    opts[target] = int(raw_value)
+                else:
+                    opts[target] = raw_value
+                index += 2
+                continue
+            positional.append(token)
+            index += 1
+        return opts, positional
+
+    def goal(self, args: list[str]) -> None:
+        """/goal UX for repo-local active goal state."""
+        if not self.repo:
+            print("[ERR] repo is not set. Use /repo <path>.")
+            return
+
+        if not args or args[0] in {"status", "show"}:
+            self._print_active_goal_status(detailed=True)
+            return
+
+        cmd = args[0].strip().lower()
+        rest = args[1:]
+        try:
+            if cmd == "templates":
+                print(json.dumps(list_active_goal_templates(), ensure_ascii=False, indent=2, sort_keys=True))
+                return
+
+            if cmd in {"presets", "autonomy"}:
+                print(json.dumps(list_active_goal_autonomy_presets(), ensure_ascii=False, indent=2, sort_keys=True))
+                return
+
+            if cmd in {"recommend", "recommendations"}:
+                print(json.dumps(recommend_next_active_goals(self.repo), ensure_ascii=False, indent=2, sort_keys=True))
+                return
+
+            if cmd == "timeline":
+                print(json.dumps(build_active_goal_timeline(self.repo), ensure_ascii=False, indent=2, sort_keys=True))
+                return
+
+            if cmd == "analytics":
+                print(json.dumps(build_active_goal_analytics(self.repo), ensure_ascii=False, indent=2, sort_keys=True))
+                return
+
+            if cmd == "export":
+                payload = write_active_goal_export(self.repo)
+                print(f"[OK] Active goal export written: {payload.get('path')}")
+                print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+                return
+
+            if cmd == "import":
+                opts, positional = self._parse_goal_options(rest)
+                if not positional:
+                    print("[ERR] Usage: /goal import <ACTIVE_GOAL_EXPORT.json> [--replace] [--etag E]")
+                    return
+                import_path = Path(positional[0]).expanduser()
+                if not import_path.is_absolute():
+                    import_path = (self.repo / import_path).resolve()
+                payload = json.loads(import_path.read_text(encoding="utf-8-sig", errors="replace"))
+                status = import_active_goal_state(
+                    self.repo,
+                    payload if isinstance(payload, dict) else {},
+                    replace=bool(opts.get("replace")),
+                    expected_etag=str(opts.get("etag") or ""),
+                )
+                print(f"[OK] Active goal imported: {status['goal'].get('id')}")
+                self._print_active_goal_status(detailed=True)
+                return
+
+            if cmd == "checkpoint":
+                subcmd = rest[0].strip().lower() if rest else ""
+                subrest = rest[1:] if rest else []
+                opts, positional = self._parse_goal_options(subrest)
+                if subcmd == "set":
+                    checkpoints = [{"title": item, "status": "active" if idx == 0 else "pending"} for idx, item in enumerate(positional)]
+                    status = set_active_goal_checkpoints(self.repo, checkpoints, expected_etag=str(opts.get("etag") or ""))
+                    print(f"[OK] Active goal checkpoints set: {len(status['goal'].get('checkpoints') or [])}")
+                    self._print_active_goal_status(detailed=True)
+                    return
+                if subcmd == "complete":
+                    if len(positional) < 2:
+                        print("[ERR] Usage: /goal checkpoint complete <checkpoint-id> <evidence> [--etag E]")
+                        return
+                    checkpoint_id = positional[0]
+                    evidence = " ".join(positional[1:]).strip()
+                    status = complete_active_goal_checkpoint(
+                        self.repo,
+                        checkpoint_id,
+                        evidence=evidence,
+                        resume_point={"note": "shell checkpoint completion"},
+                        expected_etag=str(opts.get("etag") or ""),
+                    )
+                    print(f"[OK] Active goal checkpoint completed: {checkpoint_id}")
+                    self._print_active_goal_status(detailed=True)
+                    return
+                print("[ERR] Usage: /goal checkpoint set <title...> | /goal checkpoint complete <checkpoint-id> <evidence>")
+                return
+
+            if cmd == "create":
+                opts, positional = self._parse_goal_options(rest)
+                objective = " ".join(positional).strip()
+                status = create_active_goal(
+                    self.repo,
+                    objective,
+                    mode=str(opts.get("mode") or "adaptive"),
+                    token_budget=int(opts.get("token_budget") or 0),
+                    time_budget_seconds=int(opts.get("time_budget_seconds") or 0),
+                    cycle_budget=int(opts.get("cycle_budget") or 0),
+                    template_key=str(opts.get("template") or ""),
+                    autonomy_preset_key=str(opts.get("preset") or ""),
+                    replace=bool(opts.get("replace")),
+                    expected_etag=str(opts.get("etag") or ""),
+                    source={"kind": "operator", "surface": "shell"},
+                )
+                print(f"[OK] Active goal created: {status['goal'].get('id')}")
+                self._print_active_goal_status(detailed=True)
+                return
+
+            if cmd == "update":
+                opts, positional = self._parse_goal_options(rest)
+                objective = " ".join(positional).strip() or None
+                status = update_active_goal(
+                    self.repo,
+                    objective=objective,
+                    mode=opts.get("mode"),
+                    token_budget=opts.get("token_budget"),
+                    time_budget_seconds=opts.get("time_budget_seconds"),
+                    cycle_budget=opts.get("cycle_budget"),
+                    template_key=opts.get("template"),
+                    autonomy_preset_key=opts.get("preset"),
+                    expected_etag=str(opts.get("etag") or ""),
+                )
+                print(f"[OK] Active goal updated: revision={status.get('revision')}")
+                self._print_active_goal_status(detailed=True)
+                return
+
+            if cmd == "complete":
+                opts, positional = self._parse_goal_options(rest)
+                evidence = " ".join(positional).strip()
+                status = complete_active_goal(self.repo, evidence=evidence, expected_etag=str(opts.get("etag") or ""))
+                print(f"[OK] Active goal completed: {status['goal'].get('id')}")
+                self._print_active_goal_status(detailed=True)
+                return
+
+            if cmd == "cancel":
+                opts, positional = self._parse_goal_options(rest)
+                reason = " ".join(positional).strip()
+                status = cancel_active_goal(self.repo, reason=reason, expected_etag=str(opts.get("etag") or ""))
+                print(f"[OK] Active goal canceled: {status['goal'].get('id')}")
+                self._print_active_goal_status(detailed=True)
+                return
+
+            if cmd == "clear":
+                opts, _positional = self._parse_goal_options(rest)
+                clear_active_goal(self.repo, expected_etag=str(opts.get("etag") or ""))
+                print("[OK] Active goal cleared.")
+                self._print_active_goal_status(detailed=True)
+                return
+
+            if cmd == "propose":
+                opts, positional = self._parse_goal_options(rest)
+                level = str(opts.get("level") or (positional[0] if positional else "P0") or "P0")
+                payload = propose_goals_from_active_goal(self.repo, level=level)
+                print(f"[OK] Active goal GOALS proposal written: {payload.get('proposal_path')}")
+                print("policy: proposal_only_operator_confirmation_required")
+                return
+        except (ActiveGoalConflict, ActiveGoalError, ValueError) as ex:
+            print(f"[ERR] {ex}")
+            return
+        except Exception as ex:
+            print(f"[ERR] Active goal command failed: {ex}")
+            return
+
+        print(
+            "[ERR] Usage: /goal [status] | /goal create <objective> [--mode strict|adaptive|exploratory] "
+            "[--template K] [--preset K] [--token-budget N] [--time-budget-seconds N] [--cycle-budget N] [--replace] | "
+            "/goal update [objective] [--mode ...] [--etag E] | /goal complete [evidence] | "
+            "/goal cancel [reason] | /goal clear | /goal propose [P0|P1] | "
+            "/goal templates | /goal presets | /goal recommend | /goal timeline | /goal analytics | /goal export"
+        )
+
     def _print_skills_status(self, run_dir: Path | None, *, detailed: bool = False) -> None:
         if not self.repo:
             return
@@ -669,7 +966,7 @@ class RunnerShell:
         if str(stop_reconciliation.get("action_taken") or "") == "deleted_stop_files":
             audit_path = str(stop_reconciliation.get("audit_path") or "").strip()
             print(f"[STOP] Reconciled stale STOP file before runner start. audit={audit_path}".rstrip(), flush=True)
-        readiness = check_runner_start_readiness(self.repo, run_dir, stop_file=stop_file)
+        readiness = check_runner_start_readiness(self.repo, run_dir, stop_file=stop_file, config=eff)
         for line in format_runner_start_readiness(readiness):
             print(line)
         if not bool(readiness.get("ok")):
@@ -1058,6 +1355,7 @@ class RunnerShell:
             print(f"mode:    {data.get('runner_mode') or 'thread'}")
             print(f"run_dir: {data.get('run_dir') or '(not set)'}")
             print(f"goals_completion_level: {eff.get('goals_completion_level')}")
+            self._print_active_goal_status()
             self._print_todo_status()
             self._print_skills_status(self.run_dir)
             self._print_mcp_diagnostics(eff)
@@ -1105,6 +1403,7 @@ class RunnerShell:
         print(f"running: {alive}")
         print(f"run_dir: {_shorten(run_dir)}")
         print(f"goals_completion_level: {eff.get('goals_completion_level')}")
+        self._print_active_goal_status()
         self._print_todo_status()
         self._print_skills_status(run_dir)
         self._print_mcp_diagnostics(eff)
@@ -1682,6 +1981,7 @@ class RunnerShell:
             "  /start [--flags...]        Start the runner with optional overrides",
             "  /stop [--wait]             Request runner stop and optionally wait",
             "  /status                    Show runner status",
+            "  /goal [status|create|update|complete|cancel|clear|templates|presets|recommend|timeline|analytics]  Manage runtime active goal",
             "  /prs                       List queued PR packets",
             "  /pr <id>                   Show queued PR packet details",
             "  /validate-pr <id> [--full] Run isolated PR validation and persist the result",
@@ -2041,6 +2341,32 @@ class RunnerShell:
         except Exception as ex:
             report_lines.append(f"- todo: ERROR ({ex})")
 
+        # ── Active goal runtime ──
+        try:
+            active_goal_status = build_active_goal_status(self.repo)
+            active_goal = active_goal_status.get("goal") if isinstance(active_goal_status.get("goal"), dict) else {}
+            active_goal_progress = (
+                active_goal_status.get("progress") if isinstance(active_goal_status.get("progress"), dict) else {}
+            )
+            report_lines.append(
+                "- active_goal: "
+                f"state={active_goal_status.get('state') or 'missing'} "
+                f"mode={active_goal.get('mode') or '-'} "
+                f"progress={active_goal_progress.get('summary') or 'missing'} "
+                f"goals_first={bool(active_goal_progress.get('subordinate_to_goals_md', True))}"
+            )
+            active_goal_readiness = check_active_goal_autonomy_readiness(self.repo, eff)
+            report_lines.append(
+                "- active_goal_readiness: "
+                f"status={active_goal_readiness.get('status') or 'ok'} "
+                f"warnings={len(active_goal_readiness.get('warnings') or [])}"
+            )
+            for warning in active_goal_readiness.get("warnings") or []:
+                if isinstance(warning, dict):
+                    report_lines.append(f"  - {warning.get('code')}: {warning.get('message')}")
+        except Exception as ex:
+            report_lines.append(f"- active_goal: ERROR ({ex})")
+
         # ── Docs digest ──
         docs_read_mode = eff.get("docs_read_mode", "digest")
         docs_dir_raw = eff.get("docs_dir", ".doc/Docs")
@@ -2167,6 +2493,23 @@ def _build_completer() -> Any:
             "/start": start_flags,
             "/stop": WordCompleter(["--wait"], ignore_case=True),
             "/status": None,
+            "/goal": WordCompleter(
+                [
+                    "status",
+                    "create",
+                    "update",
+                    "complete",
+                    "cancel",
+                    "clear",
+                    "--mode",
+                    "strict",
+                    "adaptive",
+                    "exploratory",
+                    "--replace",
+                    "--etag",
+                ],
+                ignore_case=True,
+            ),
             "/prs": None,
             "/pr": None,
             "/validate-pr": WordCompleter(["--full"], ignore_case=True),
@@ -2330,6 +2673,9 @@ def _dispatch(sh: RunnerShell, line: str) -> bool:
         return False
     if cmd == "/status":
         sh.status()
+        return False
+    if cmd == "/goal":
+        sh.goal(args)
         return False
     if cmd == "/prs":
         if args:

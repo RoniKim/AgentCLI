@@ -142,6 +142,7 @@ def append_pm_essential_context(
     failed_tasks_block: str = "",
     goals_block: str = "",
     goals_instruction: str = "",
+    active_goal_block: str = "",
     experience_summary_block: str = "",
     build_warnings_block: str = "",
 ) -> str:
@@ -173,6 +174,15 @@ def append_pm_essential_context(
             section += f"\n{goals_instruction}\n"
         section += "</pm_goals>"
         s += section
+
+    # --- Active goal (operator intent, subordinate to GOALS.md) ---
+    if active_goal_block and active_goal_block.strip() not in {"(none)", "(disabled)"} and "<pm_active_goal>" not in s:
+        s += (
+            "\n\n<pm_active_goal>\n"
+            "## Active Goal (runtime operator intent — subordinate to GOALS.md)\n"
+            f"{active_goal_block}\n"
+            "</pm_active_goal>"
+        )
 
     # --- Experience summary (advisory only) ---
     if experience_summary_block and "<pm_experience_summary" not in s:
@@ -212,6 +222,41 @@ def append_pm_essential_context(
     if experience_summary_block and experience_summary_block.strip() not in {"(none)", "(disabled)"} and "<pm_experience_summary" not in s:
         s += "\n\n" + experience_summary_block.strip()
 
+    return s.strip() + "\n"
+
+
+def _active_goal_role_marker(role: str) -> str:
+    label = re.sub(r"[^a-z0-9]+", "_", str(role or "").strip().lower()).strip("_")
+    return f"{label or 'role'}_active_goal"
+
+
+def append_active_goal_context(
+    prompt_text: str,
+    *,
+    active_goal_block: str = "",
+    role: str,
+) -> str:
+    """Append active-goal runtime context to a non-PM role prompt.
+
+    Active goals are operator intent for the current run. They must stay below
+    GOALS.md, validation, worktree, PR, policy, and LAN safety gates.
+    """
+    s = (prompt_text or "").rstrip()
+    block = str(active_goal_block or "").strip()
+    if not block or block in {"(none)", "(disabled)"}:
+        return s.strip() + "\n"
+    marker = _active_goal_role_marker(role)
+    if f"<{marker}>" in s:
+        return s.strip() + "\n"
+    label = str(role or "Role").strip() or "Role"
+    s += (
+        f"\n\n<{marker}>\n"
+        f"## Active Goal For {label} (runtime operator intent - subordinate to GOALS.md)\n"
+        "Use this objective only to prioritize and explain work that is already allowed by GOALS.md, "
+        "the task contract, validation gates, worktree policy, PR policy, and network/LAN safety gates.\n"
+        f"{block}\n"
+        f"</{marker}>"
+    )
     return s.strip() + "\n"
 
 

@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .config import default_config_path, legacy_default_config_path, load_config
+from .active_goal import build_active_goal_status
+from .goals import resolve_goals_completion_level
 from .gitops import (
     collect_worktree_cleanup_candidates,
     reconcile_stale_pending_worktree_markers,
@@ -120,6 +122,134 @@ def _coerce_optional_float(value: object) -> float | None:
         return float(str(value).strip())
     except Exception:
         return None
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "y", "on"}
+
+
+def _coerce_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    return dict(config or {}) if isinstance(config, dict) else {}
+
+
+def _config_gitops(config: dict[str, Any]) -> dict[str, Any]:
+    gitops = config.get("gitops")
+    return dict(gitops) if isinstance(gitops, dict) else {}
+
+
+def check_active_goal_autonomy_readiness(repo: Path | str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    repo_path = Path(repo).expanduser().resolve()
+    eff = _coerce_config(config)
+    warnings: list[dict[str, Any]] = []
+    try:
+        status = build_active_goal_status(repo_path)
+    except Exception as exc:
+        return {
+            "active": False,
+            "status": "error",
+            "warnings": [
+                _readiness_issue(
+                    "active_goal_status_unreadable",
+                    f"Active goal status could not be read for autonomy readiness: {exc}",
+                    severity="warning",
+                    details={"error": str(exc)},
+                )
+            ],
+        }
+    if not bool(status.get("active")):
+        return {"active": False, "status": "ok", "warnings": []}
+
+    goal = status.get("goal") if isinstance(status.get("goal"), dict) else {}
+    progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
+    budgets = goal.get("budgets") if isinstance(goal.get("budgets"), dict) else {}
+    mode = str(goal.get("mode") or "adaptive").strip().lower() or "adaptive"
+    completion_level = resolve_goals_completion_level(eff.get("goals_completion_level"))
+    loop_enabled = _coerce_bool(eff.get("loop"))
+    unattended = _coerce_bool(eff.get("unattended"))
+    continuous = _coerce_bool(eff.get("continuous"))
+    loop_max_cycles = _coerce_optional_int(eff.get("loop_max_cycles")) or 0
+    loop_idle_exit_after = _coerce_optional_int(eff.get("loop_idle_exit_after")) or 0
+    high_autonomy = bool(unattended or loop_enabled or continuous or loop_max_cycles > 1 or loop_idle_exit_after > 0)
+    autonomy_level = "unattended" if unattended else "loop" if loop_enabled or continuous else "manual"
+    gitops = _config_gitops(eff)
+    merge_mode = str(gitops.get("worktree_merge_mode") or "manual").strip().lower() or "manual"
+    budget_total = sum(
+        int(budgets.get(key) or 0)
+        for key in ("token_budget", "time_budget_seconds", "cycle_budget")
+    )
+    details = {
+        "active_goal_id": str(goal.get("id") or ""),
+        "mode": mode,
+        "autonomy_level": autonomy_level,
+        "unattended": unattended,
+        "loop": loop_enabled,
+        "continuous": continuous,
+        "loop_max_cycles": loop_max_cycles,
+        "loop_idle_exit_after": loop_idle_exit_after,
+        "goals_completion_level": completion_level,
+        "worktree_merge_mode": merge_mode,
+        "progress": dict(progress),
+    }
+    if high_autonomy and mode == "exploratory" and budget_total <= 0:
+        warnings.append(
+            _readiness_issue(
+                "active_goal_exploratory_unbounded",
+                "Exploratory active-goal mode under loop/unattended autonomy should set a token, time, or cycle budget.",
+                severity="warning",
+                details=details,
+            )
+        )
+    if high_autonomy and completion_level != "all":
+        warnings.append(
+            _readiness_issue(
+                "active_goal_completion_level_narrows_unattended",
+                "Loop/unattended active-goal runs should normally keep goals_completion_level=all so project completion is not narrowed to P0 only.",
+                severity="warning",
+                details=details,
+            )
+        )
+    if unattended and not loop_enabled and not continuous:
+        warnings.append(
+            _readiness_issue(
+                "active_goal_unattended_without_loop",
+                "Unattended active-goal autonomy is enabled while loop/continuous execution is disabled.",
+                severity="warning",
+                details=details,
+            )
+        )
+    if high_autonomy and loop_max_cycles <= 0 and loop_idle_exit_after <= 0 and budget_total <= 0:
+        warnings.append(
+            _readiness_issue(
+                "active_goal_loop_unbounded",
+                "Loop/unattended active-goal runs should set a loop bound, idle exit, or active-goal budget.",
+                severity="warning",
+                details=details,
+            )
+        )
+    if merge_mode in {"auto", "apply", "true", "yes", "y"}:
+        warnings.append(
+            _readiness_issue(
+                "active_goal_auto_merge_conflict",
+                "Active-goal completion is not merge readiness; keep worktree_merge_mode=manual for active-goal runs.",
+                severity="warning",
+                details=details,
+            )
+        )
+    return {
+        "active": True,
+        "status": "warning" if warnings else "ok",
+        "warnings": warnings,
+        "active_goal_id": str(goal.get("id") or ""),
+        "mode": mode,
+        "autonomy_level": autonomy_level,
+        "goals_completion_level": completion_level,
+        "worktree_merge_mode": merge_mode,
+    }
 
 
 def _path_age_seconds(path: Path) -> int | None:
@@ -678,7 +808,13 @@ def _stop_artifact_details(run_dir: Path, stop_file: str) -> dict[str, Any]:
     }
 
 
-def check_runner_start_readiness(repo: Path | str, run_dir: Path | str, *, stop_file: str = "STOP") -> dict[str, Any]:
+def check_runner_start_readiness(
+    repo: Path | str,
+    run_dir: Path | str,
+    *,
+    stop_file: str = "STOP",
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     repo_path = Path(repo).expanduser().resolve()
     run_dir_path = Path(run_dir).expanduser().resolve()
     stop_file_name = str(stop_file or "STOP").strip() or "STOP"
@@ -888,6 +1024,10 @@ def check_runner_start_readiness(repo: Path | str, run_dir: Path | str, *, stop_
             )
 
     cleanup_candidates = collect_worktree_cleanup_candidates(repo_path, run_dir=run_dir_path)
+    active_goal_readiness = check_active_goal_autonomy_readiness(repo_path, config=config)
+    warnings.extend(
+        [dict(item) for item in active_goal_readiness.get("warnings", []) if isinstance(item, dict)]
+    )
 
     report = {
         "schema_version": READINESS_SCHEMA_VERSION,
@@ -911,6 +1051,8 @@ def check_runner_start_readiness(repo: Path | str, run_dir: Path | str, *, stop_
             "pending_marker_reconciliations": [dict(item) for item in pending_marker_reconciliations if isinstance(item, dict)],
             "cleanup_candidates": [dict(item) for item in cleanup_candidates if isinstance(item, dict)],
         },
+        "active_goal_readiness": active_goal_readiness,
+        "activeGoalReadiness": active_goal_readiness,
         "blockers": blockers,
         "warnings": warnings,
         "blocker_count": len(blockers),

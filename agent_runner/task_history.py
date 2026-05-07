@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS task_history (
     max_attempts INTEGER DEFAULT 1,
     run_id       TEXT DEFAULT '',
     backend      TEXT DEFAULT '',
+    active_goal_id TEXT DEFAULT '',
+    active_goal TEXT DEFAULT '{}',
     recorded_at  TEXT NOT NULL
 );
 """
@@ -54,6 +56,8 @@ _MIGRATIONS = [
     "ALTER TABLE task_history ADD COLUMN attempt INTEGER DEFAULT 0;",
     "ALTER TABLE task_history ADD COLUMN max_attempts INTEGER DEFAULT 1;",
     "ALTER TABLE task_history ADD COLUMN task_status TEXT DEFAULT '';",
+    "ALTER TABLE task_history ADD COLUMN active_goal_id TEXT DEFAULT '';",
+    "ALTER TABLE task_history ADD COLUMN active_goal TEXT DEFAULT '{}';",
 ]
 
 _MAX_DETAIL_LEN = 500
@@ -111,6 +115,8 @@ def record_task(
     max_attempts: int = 1,
     run_id: str = "",
     backend: str = "",
+    active_goal_id: str = "",
+    active_goal: dict[str, Any] | None = None,
 ) -> None:
     """Record a completed or failed task. Never raises."""
     try:
@@ -118,11 +124,17 @@ def record_task(
         try:
             truncated_detail = (detail or "")[:_MAX_DETAIL_LEN]
             files_json = json.dumps(list(files) if files else [], ensure_ascii=False)
+            active_goal_payload = dict(active_goal or {})
+            active_goal_id_text = str(
+                active_goal_id or active_goal_payload.get("id") or active_goal_payload.get("active_goal_id") or ""
+            ).strip()
+            active_goal_json = json.dumps(active_goal_payload, ensure_ascii=False, sort_keys=True)
             recorded_at = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "INSERT INTO task_history "
-                "(task_id, title, status, task_status, reason, detail, files, cycle_idx, attempt, max_attempts, run_id, backend, recorded_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(task_id, title, status, task_status, reason, detail, files, cycle_idx, attempt, max_attempts, "
+                "run_id, backend, active_goal_id, active_goal, recorded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(task_id),
                     str(title),
@@ -136,6 +148,8 @@ def record_task(
                     int(max_attempts),
                     str(run_id),
                     str(backend),
+                    active_goal_id_text,
+                    active_goal_json,
                     recorded_at,
                 ),
             )
@@ -159,20 +173,21 @@ def query_history(
             if status_filter:
                 rows = conn.execute(
                     "SELECT task_id, title, status, task_status, reason, detail, files, cycle_idx, "
-                    "attempt, max_attempts, run_id, backend, recorded_at "
+                    "attempt, max_attempts, run_id, backend, active_goal_id, active_goal, recorded_at "
                     "FROM task_history WHERE status = ? ORDER BY id DESC LIMIT ?",
                     (str(status_filter), int(max_items)),
                 ).fetchall()
             else:
                 rows = conn.execute(
                     "SELECT task_id, title, status, task_status, reason, detail, files, cycle_idx, "
-                    "attempt, max_attempts, run_id, backend, recorded_at "
+                    "attempt, max_attempts, run_id, backend, active_goal_id, active_goal, recorded_at "
                     "FROM task_history ORDER BY id DESC LIMIT ?",
                     (int(max_items),),
                 ).fetchall()
             cols = [
                 "task_id", "title", "status", "task_status", "reason", "detail", "files",
-                "cycle_idx", "attempt", "max_attempts", "run_id", "backend", "recorded_at",
+                "cycle_idx", "attempt", "max_attempts", "run_id", "backend",
+                "active_goal_id", "active_goal", "recorded_at",
             ]
             result = []
             for row in rows:
@@ -181,6 +196,10 @@ def query_history(
                     d["files"] = json.loads(d.get("files") or "[]")
                 except Exception:
                     d["files"] = []
+                try:
+                    d["active_goal"] = json.loads(d.get("active_goal") or "{}")
+                except Exception:
+                    d["active_goal"] = {}
                 result.append(d)
             return result
         finally:

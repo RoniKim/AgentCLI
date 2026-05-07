@@ -12,6 +12,7 @@ from .runtime_contract import (
     default_role_string,
     enterprise_role_string,
 )
+from .active_goal import ACTIVE_GOAL_AUTONOMY_PRESET_KEYS, ACTIVE_GOAL_TEMPLATE_KEYS
 from .config import (
     app_home,
     legacy_config_path,
@@ -407,6 +408,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wizard", action="store_true", help="Run wizard to create/update config")
     p.add_argument("--non-interactive", action="store_true", help="Disable interactive prompts")
     p.add_argument("--init-prompts", action="store_true", help="Create prompt templates in prompts_dir and exit")
+    p.add_argument("--active-goal-status", action="store_true", default=None, help="Print the repo-local active goal status and exit unless --run-now is also set")
+    p.add_argument("--active-goal-templates", action="store_true", default=None, help="Print active-goal workflow templates and exit")
+    p.add_argument("--active-goal-presets", action="store_true", default=None, help="Print active-goal autonomy presets and exit")
+    p.add_argument("--active-goal-recommend", action="store_true", default=None, help="Recommend next active goals from GOALS, Experience DB, PR queue, validation, and TODO signals")
+    p.add_argument("--active-goal-timeline", action="store_true", default=None, help="Print the active-goal timeline view and exit")
+    p.add_argument("--active-goal-analytics", action="store_true", default=None, help="Print active-goal retrospective analytics and exit")
+    p.add_argument("--active-goal-export", action="store_true", default=None, help="Write and print a redacted active-goal export payload")
+    p.add_argument("--active-goal-import", default=None, help="Import active-goal state from a redacted export JSON file")
+    p.add_argument("--active-goal-objective", default=None, help="Create or replace the repo-local active goal objective")
+    p.add_argument("--active-goal-mode", default=None, choices=["strict", "adaptive", "exploratory"], help="Active goal execution mode")
+    p.add_argument("--active-goal-template", default=None, choices=list(ACTIVE_GOAL_TEMPLATE_KEYS), help="Active goal workflow template key")
+    p.add_argument("--active-goal-preset", default=None, choices=list(ACTIVE_GOAL_AUTONOMY_PRESET_KEYS), help="Active goal autonomy preset key")
+    p.add_argument("--active-goal-token-budget", type=int, default=None, help="Active goal token budget (0 = unlimited/unset)")
+    p.add_argument("--active-goal-time-budget-seconds", type=int, default=None, help="Active goal wall-clock budget in seconds (0 = unlimited/unset)")
+    p.add_argument("--active-goal-cycle-budget", type=int, default=None, help="Active goal cycle budget (0 = unlimited/unset)")
+    p.add_argument("--active-goal-replace", action=argparse.BooleanOptionalAction, default=None, help="Allow --active-goal-objective to replace an existing active goal")
+    p.add_argument("--active-goal-complete", nargs="?", const="", default=None, help="Mark the active goal complete with optional evidence text and exit")
+    p.add_argument("--active-goal-cancel", nargs="?", const="", default=None, help="Cancel the active goal with optional reason text and exit")
+    p.add_argument("--active-goal-clear", action="store_true", default=None, help="Clear the active goal artifact and exit")
+    p.add_argument("--active-goal-etag", default=None, help="Expected active goal stale-write token")
     p.add_argument("--telegram", dest="telegram_service", action="store_true", default=None, help="Run hybrid mode (local shell + Telegram control-plane)")
     p.add_argument("--telegram-runner-mode", default=None, choices=["thread", "subprocess"], help="Runner execution mode for Telegram hybrid mode")
     p.add_argument("--telegram-poll-timeout", type=int, default=None, help="Telegram long-poll timeout seconds")

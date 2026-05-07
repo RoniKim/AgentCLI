@@ -67,6 +67,7 @@ from ..gitops import (
 )
 from ..inventory import build_repo_inventory, write_repo_inventory_files
 from ..todo import read_current_todo, format_todo_block
+from ..active_goal import active_goal_role_context, build_active_goal_status, format_active_goal_block, increment_active_goal_usage
 from ..metrics import MetricsLogger
 from ..logger import create_logger
 from ..policy import load_policy_rules, policy_scan_files
@@ -75,6 +76,7 @@ from ..scan import DEFAULT_SCAN_IGNORE_GLOBS
 from ..prompts import (
     PromptStore,
     ensure_pm_instructions_have_output_schema,
+    append_active_goal_context,
     append_pm_output_contract,
     append_pm_essential_context,
     PM_BOOTSTRAP_TEMPLATE_DEFAULT,
@@ -1647,6 +1649,8 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
 
         todo_path, todo_text = read_current_todo(repo)
         todo_block = format_todo_block(todo_path, todo_text)
+        active_goal_status = build_active_goal_status(source_repo if worktree_dir is not None else repo)
+        active_goal_block = format_active_goal_block(active_goal_status)
 
         # Goals context
         goals_block, goals_instruction = build_goals_prompt_context(
@@ -1680,6 +1684,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "analysis_md": str(analysis_md), "inv_md": str(inv_md),
                     "repo": str(repo), "run_dir": str(run_dir),
                     "todo_block": todo_block,
+                    "active_goal_block": active_goal_block,
                     "docs_dir": str(docs_dir) if docs_dir else "(none)",
                     "docs_read_mode": docs_read_mode, "digest_rel": str(digest_rel),
                     "skills_index_summary": skills_index_summary,
@@ -1694,6 +1699,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     failed_tasks_block=_failed_blk,
                     goals_block=goals_block,
                     goals_instruction=goals_instruction,
+                    active_goal_block=active_goal_block,
                     experience_summary_block=experience_summary_block,
                 ))
                 pm_out = await _run_pm_structured(pm_prompt, max_turns=_pm_max_turns_boot, cycle_idx=cycle_idx, kind="bootstrap", output_path=pm_output_path)
@@ -1714,6 +1720,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     done_ids=done_ids,
                     failed_ids=failed_ids,
                     completion_level=goals_completion_level,
+                    active_goal_status=active_goal_status,
                 )
                 gate = pm_postprocess["pm_gate"]
                 accepted_tasks = pm_postprocess["accepted_pm_tasks"]
@@ -1816,6 +1823,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "analysis_md": str(analysis_md), "inv_md": str(inv_md),
                     "repo": str(repo), "run_dir": str(run_dir),
                     "todo_block": todo_block,
+                    "active_goal_block": active_goal_block,
                     "docs_dir": str(docs_dir) if docs_dir else "(none)",
                     "docs_read_mode": docs_read_mode, "digest_rel": str(digest_rel),
                     "skills_index_summary": skills_index_summary,
@@ -1835,6 +1843,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     failed_tasks_block=_failed_blk_i,
                     goals_block=goals_block,
                     goals_instruction=goals_instruction,
+                    active_goal_block=active_goal_block,
                     build_warnings_block=build_warnings_block,
                     experience_summary_block=experience_summary_block,
                 ))
@@ -1856,6 +1865,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     done_ids=done_ids,
                     failed_ids=failed_ids,
                     completion_level=goals_completion_level,
+                    active_goal_status=active_goal_status,
                 )
                 gate = pm_postprocess["pm_gate"]
                 accepted_tasks = pm_postprocess["accepted_pm_tasks"]
@@ -2353,6 +2363,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 detail: str = "",
                 task_status: str = "",
             ) -> Path:
+                active_goal_status = build_active_goal_status(source_repo if worktree_dir is not None else repo)
                 return write_task_validation_artifacts(
                     attempt_dir=attempt_dir,
                     task_id=next_task.id,
@@ -2366,6 +2377,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     reason=reason,
                     detail=detail,
                     task_status=task_status,
+                    active_goal_context=active_goal_role_context(active_goal_status, role="Validation"),
                 )
 
             def _isolate_or_stop(
@@ -2623,7 +2635,13 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     "analysis_hint_out": str(analysis_hint_out),
                     "codex_call_hint": "Use Claude Code built-in tools (Read, Write, Edit, Grep, Glob, Bash) directly. Do NOT call Codex MCP.",
                 }
-                dev_prompt = _patch_prompt_for_claude(store.render("dev_task_prompt", DEV_TASK_TEMPLATE_DEFAULT, dev_ctx))
+                active_goal_status = build_active_goal_status(source_repo if worktree_dir is not None else repo)
+                dev_prompt = append_active_goal_context(
+                    store.render("dev_task_prompt", DEV_TASK_TEMPLATE_DEFAULT, dev_ctx),
+                    active_goal_block=format_active_goal_block(active_goal_status),
+                    role="Dev",
+                )
+                dev_prompt = _patch_prompt_for_claude(dev_prompt)
 
                 # Inject gate failure context from a previous failed attempt.
                 gate_error_for_prompt = _prev_gate_error
@@ -2670,6 +2688,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     dev_final = text or ""
                     _inp, _out = extract_claude_tokens(_structured)
                     token_tracker.add("Dev", _inp, _out)
+                    increment_active_goal_usage(source_repo if worktree_dir is not None else repo, tokens_used=_inp + _out)
                     task_duration = time.time() - task_start_time
                     logger.timing("dev_task_execution", task_duration, task_id=next_task.id, attempt=attempt)
                 except StopRequested:
@@ -3589,6 +3608,11 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             duration_seconds=cycle_dt,
             tokens=token_tracker.summary(),
         )
+        increment_active_goal_usage(
+            source_repo if worktree_dir is not None else repo,
+            time_used_seconds=int(cycle_dt),
+            cycles_used=1,
+        )
         print_cycle_report(cycle_idx, cycle_dt, task_results, done_count, total_count, failed_count, skipped_count, token_tracker=token_tracker)
 
         done_delta = done_count - before_done
@@ -3672,8 +3696,14 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                 build_skills_context_fn=build_skills_context,
             )
 
+            active_goal_status = build_active_goal_status(source_repo if worktree_dir is not None else repo)
             qa_ctx = {"repo": str(repo), "run_dir": str(run_dir), "skills_context": skills_context}
-            qa_prompt = _patch_prompt_for_claude(store.render("qa_prompt", QA_TEMPLATE_DEFAULT, qa_ctx))
+            qa_prompt = append_active_goal_context(
+                store.render("qa_prompt", QA_TEMPLATE_DEFAULT, qa_ctx),
+                active_goal_block=format_active_goal_block(active_goal_status),
+                role="QA",
+            )
+            qa_prompt = _patch_prompt_for_claude(qa_prompt)
             if bool(getattr(args, "qa_to_backlog", False)):
                 qa_prompt = qa_prompt.rstrip() + "\n\n" + QA_FOLLOWUPS_OUTPUT_CONTRACT + "\n"
 
@@ -3790,7 +3820,17 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
         # Try PM-authored report via Claude SDK
         reporter_instructions = store.get("reporter_instructions", REPORTER_INSTRUCTIONS_DEFAULT)
         try:
-            reporter_prompt = _patch_prompt_for_claude(store.render("pm_shutdown_report_prompt", PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT, {"stop_reason": stop_reason, "context_json": json.dumps(ctx_obj, ensure_ascii=False, indent=2)}))
+            active_goal_status = build_active_goal_status(source_repo if worktree_dir is not None else repo)
+            reporter_prompt = append_active_goal_context(
+                store.render(
+                    "pm_shutdown_report_prompt",
+                    PM_SHUTDOWN_REPORT_TEMPLATE_DEFAULT,
+                    {"stop_reason": stop_reason, "context_json": json.dumps(ctx_obj, ensure_ascii=False, indent=2)},
+                ),
+                active_goal_block=format_active_goal_block(active_goal_status),
+                role="Reporter",
+            )
+            reporter_prompt = _patch_prompt_for_claude(reporter_prompt)
             if ext_ctx:
                 ext_ctx.current_stage = "Reporter"
                 ext_ctx.current_task_id = ""
@@ -3849,6 +3889,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
             SharedCycleDeps(
                 args=args,
                 repo=repo,
+                active_goal_repo=source_repo if worktree_dir is not None else repo,
                 run_dir=run_dir,
                 stop_path=stop_path,
                 metrics=metrics,
