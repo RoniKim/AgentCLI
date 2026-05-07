@@ -4,6 +4,8 @@ import shutil
 import unittest
 from pathlib import Path
 
+import agent_cli
+
 from agent_runner.docs import (
     build_docs_digest_text,
     collect_fastapi_route_inventory,
@@ -200,6 +202,21 @@ class DocsValidationTests(unittest.TestCase):
         ]
         for token in required:
             self.assertIn(token, text)
+
+        documented_one_shot_flags = {
+            "--active-goal-status",
+            "--active-goal-templates",
+            "--active-goal-presets",
+            "--active-goal-recommend",
+            "--active-goal-timeline",
+            "--active-goal-analytics",
+            "--active-goal-export",
+            "--active-goal-import",
+            "--active-goal-update",
+        }
+        for flag in documented_one_shot_flags:
+            self.assertIn(flag, text)
+            self.assertIn(flag, agent_cli._ONE_SHOT_FLAGS)
 
     def test_web_console_doc_rejects_stale_server_flag(self) -> None:
         text = (ROOT / "docs" / "WEB_CONSOLE.md").read_text(encoding="utf-8")

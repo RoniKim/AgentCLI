@@ -31,6 +31,7 @@ The shell, non-interactive CLI, Web Console, Telegram, PM/PL/Dev/QA/reporter/ana
 | `exploratory` | Bounded investigation | May propose discovery or spike tasks when tied to unchecked GOALS.md items or proposal-only GOALS updates. |
 
 Mode never bypasses GOALS.md admission, validation gates, worktree policy, PR policy, network/LAN safety, or operator confirmation requirements.
+If a PM output only matches the active goal and does not reference an admitted GOALS.md item, AgentCLI keeps it as proposal evidence instead of writing it to executable `BACKLOG.json`.
 
 ## Recommended Presets
 
@@ -53,9 +54,13 @@ python agent_cli.py --repo . --active-goal-recommend
 python agent_cli.py --repo . --active-goal-timeline
 python agent_cli.py --repo . --active-goal-analytics
 python agent_cli.py --repo . --active-goal-export
+python agent_cli.py --repo . --active-goal-import .AgentCLI/goals/ACTIVE_GOAL_EXPORT.json --active-goal-replace --active-goal-etag <etag>
 
 # Create
 python agent_cli.py --repo . --active-goal-objective "Fix flaky web status tests" --active-goal-template bug_fix --active-goal-preset one_shot
+
+# Update
+python agent_cli.py --repo . --active-goal-update --active-goal-objective "Fix flaky web status tests and status docs" --active-goal-mode strict --active-goal-etag <etag>
 
 # Shell
 /goal status

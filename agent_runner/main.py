@@ -16,6 +16,7 @@ from .active_goal import (
     list_active_goal_autonomy_presets,
     list_active_goal_templates,
     recommend_next_active_goals,
+    update_active_goal,
     write_active_goal_export,
 )
 from .cli import parse_args
@@ -81,6 +82,30 @@ def _handle_active_goal_command(args: object) -> int | None:
     if cancel_text is not None:
         _print_json(cancel_active_goal(repo, reason=str(cancel_text or ""), expected_etag=expected_etag))
         return 0
+
+    if bool(getattr(args, "active_goal_update", False)):
+        update_kwargs: dict[str, object] = {"expected_etag": expected_etag}
+        if getattr(args, "active_goal_objective", None) is not None:
+            update_kwargs["objective"] = str(getattr(args, "active_goal_objective") or "")
+        if getattr(args, "active_goal_mode", None) is not None:
+            update_kwargs["mode"] = str(getattr(args, "active_goal_mode") or "")
+        if getattr(args, "active_goal_template", None) is not None:
+            update_kwargs["template_key"] = str(getattr(args, "active_goal_template") or "")
+        if getattr(args, "active_goal_preset", None) is not None:
+            update_kwargs["autonomy_preset_key"] = str(getattr(args, "active_goal_preset") or "")
+        if getattr(args, "active_goal_token_budget", None) is not None:
+            update_kwargs["token_budget"] = int(getattr(args, "active_goal_token_budget") or 0)
+        if getattr(args, "active_goal_time_budget_seconds", None) is not None:
+            update_kwargs["time_budget_seconds"] = int(getattr(args, "active_goal_time_budget_seconds") or 0)
+        if getattr(args, "active_goal_cycle_budget", None) is not None:
+            update_kwargs["cycle_budget"] = int(getattr(args, "active_goal_cycle_budget") or 0)
+        if getattr(args, "active_goal_notes", None) is not None:
+            update_kwargs["notes"] = str(getattr(args, "active_goal_notes") or "")
+        if set(update_kwargs) == {"expected_etag"}:
+            _print_json({"ok": False, "error": {"code": "active_goal_update_empty", "message": "Active goal update has no changes."}})
+            return 2
+        _print_json(update_active_goal(repo, **update_kwargs))
+        return None if run_now else 0
 
     objective = getattr(args, "active_goal_objective", None)
     if objective is not None:
