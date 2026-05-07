@@ -309,6 +309,90 @@ def _goal_save_serialize_draft(draft: dict[str, list[dict[str, Any]]]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _goal_save_structured_draft_loss_report(current_text: str) -> dict[str, Any]:
+    issues: list[dict[str, Any]] = []
+    current_bucket: str | None = None
+    last_goal_line = False
+    checkbox_re = re.compile(r"^\s*-\s*\[(x| )\]\s*(.*)$", re.IGNORECASE)
+
+    for line_number, line in enumerate((current_text or "").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        heading = re.match(r"^(#+)\s+(.+)$", stripped)
+        if heading:
+            level = len(heading.group(1))
+            title = heading.group(2).strip()
+            normalized_title = title.lower()
+            last_goal_line = False
+            if level == 1 and normalized_title == "project goals":
+                continue
+            if level == 2 and re.match(r"p0\b", normalized_title):
+                current_bucket = "p0"
+                continue
+            if level == 2 and re.match(r"p1\b", normalized_title):
+                current_bucket = "p1"
+                continue
+            if current_bucket in ("p0", "p1") and level >= 3:
+                issues.append(
+                    {
+                        "line_number": line_number,
+                        "line": line,
+                        "reason": "subgroup_heading",
+                        "message": "Structured goal drafts cannot preserve subgroup headings.",
+                    }
+                )
+                continue
+            current_bucket = None
+            issues.append(
+                {
+                    "line_number": line_number,
+                    "line": line,
+                    "reason": "surrounding_heading",
+                    "message": "Structured goal drafts cannot preserve non-priority headings.",
+                }
+            )
+            continue
+
+        if checkbox_re.match(line):
+            if current_bucket in ("p0", "p1"):
+                last_goal_line = True
+                continue
+            issues.append(
+                {
+                    "line_number": line_number,
+                    "line": line,
+                    "reason": "checkbox_outside_goal_section",
+                    "message": "Structured goal drafts cannot preserve checklist items outside P0/P1.",
+                }
+            )
+            continue
+
+        if stripped.startswith("<!--") and stripped.endswith("-->"):
+            comment_body = stripped[4:-3].strip().lower()
+            if current_bucket in ("p0", "p1") and last_goal_line and comment_body.startswith("goal-note:"):
+                continue
+
+        issues.append(
+            {
+                "line_number": line_number,
+                "line": line,
+                "reason": "unsupported_goal_line" if current_bucket in ("p0", "p1") else "surrounding_note",
+                "message": "Structured goal drafts cannot preserve raw markdown around goal checkboxes.",
+            }
+        )
+        last_goal_line = False
+
+    return {
+        "would_lose_structure": bool(issues),
+        "wouldLoseStructure": bool(issues),
+        "issues": issues,
+        "issue_count": len(issues),
+        "issueCount": len(issues),
+    }
+
+
 def _goal_save_has_required_sections(raw_text: str) -> bool:
     return bool(
         re.search(r"^##\s+p0\b", raw_text or "", re.IGNORECASE | re.MULTILINE)
@@ -447,6 +531,17 @@ def _goal_save_validate_request(body: dict[str, Any], *, repo_root: Path, goal_p
         raise GoalSaveFailure(400, "goals_read_error", "Existing GOALS.md could not be read.", path=goal_path.as_posix())
 
     current_text = current_raw or ""
+    if isinstance(raw_draft, dict):
+        loss_report = _goal_save_structured_draft_loss_report(current_text)
+        if loss_report["would_lose_structure"]:
+            raise GoalSaveFailure(
+                400,
+                "goals_structured_draft_would_lose_markdown",
+                "Structured goal draft save would lose GOALS.md headings, notes, or unsupported raw markdown; submit raw_text instead.",
+                path=goal_path.as_posix(),
+                loss=loss_report,
+                use_raw_text=True,
+            )
     current_items = _goal_save_normalize_draft(_goal_items(current_text))
     risk_report = _goal_save_risk_report(current_items, next_items, use_line_numbers=use_line_numbers)
 

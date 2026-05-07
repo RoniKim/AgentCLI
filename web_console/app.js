@@ -592,6 +592,38 @@
         todoNoChanges: 'No TODO changes to save.',
         todoTooLarge: 'TODO exceeds the maximum editable size.',
         todoBackupPath: 'Backup path',
+        activeGoalPanel: 'Active goal',
+        activeGoalObjective: 'Objective',
+        activeGoalEvidence: 'Completion evidence',
+        activeGoalCreate: 'Create goal',
+        activeGoalUpdate: 'Update goal',
+        activeGoalComplete: 'Complete goal',
+        activeGoalMutating: 'Saving active goal',
+        activeGoalSaved: 'Active goal saved',
+        activeGoalFailed: 'Active goal request failed',
+        activeGoalLocked: 'Active goal changes require runner controls and local trusted access.',
+        activeGoalRedacted: 'Active goal content is redacted in the current web mode.',
+        activeGoalObjectiveRequired: 'Enter an active goal objective.',
+        activeGoalEvidenceRequired: 'Enter completion evidence.',
+        activeGoalMissing: 'No active goal is set.',
+        activeGoalAlreadyActive: 'Update or complete the current active goal first.',
+        activeGoalMode: 'Mode',
+        activeGoalTemplate: 'Template',
+        activeGoalPreset: 'Autonomy preset',
+        activeGoalCheckpoints: 'Checkpoints',
+        activeGoalRecommendations: 'Recommendations',
+        activeGoalTimeline: 'Timeline',
+        activeGoalAnalytics: 'Analytics',
+        activeGoalBudgets: 'Budgets',
+        activeGoalUsage: 'Usage',
+        activeGoalTokenBudget: 'Token budget',
+        activeGoalTimeBudget: 'Time budget (sec)',
+        activeGoalCycleBudget: 'Cycle budget',
+        activeGoalRevision: 'Revision',
+        activeGoalEtag: 'ETag',
+        activeGoalProgress: 'Progress',
+        activeGoalRemaining: 'Remaining',
+        activeGoalPolicy: 'GOALS-first policy',
       },
       goals: {
         title: 'Goals',
@@ -1523,6 +1555,38 @@
         todoNoChanges: '저장할 TODO 변경이 없습니다.',
         todoTooLarge: 'TODO가 편집 가능한 최대 크기를 초과했습니다.',
         todoBackupPath: '백업 경로',
+        activeGoalPanel: '활성 목표',
+        activeGoalObjective: '목표',
+        activeGoalEvidence: '완료 증거',
+        activeGoalCreate: '목표 생성',
+        activeGoalUpdate: '목표 수정',
+        activeGoalComplete: '목표 완료',
+        activeGoalMutating: '활성 목표 저장 중',
+        activeGoalSaved: '활성 목표가 저장되었습니다',
+        activeGoalFailed: '활성 목표 요청 실패',
+        activeGoalLocked: '활성 목표 변경은 러너 컨트롤과 로컬 신뢰 접근이 필요합니다.',
+        activeGoalRedacted: '현재 웹 모드에서는 활성 목표 내용이 레닥션됩니다.',
+        activeGoalObjectiveRequired: '활성 목표를 입력하세요.',
+        activeGoalEvidenceRequired: '완료 증거를 입력하세요.',
+        activeGoalMissing: '설정된 활성 목표가 없습니다.',
+        activeGoalAlreadyActive: '현재 활성 목표를 먼저 수정하거나 완료하세요.',
+        activeGoalMode: '모드',
+        activeGoalTemplate: '템플릿',
+        activeGoalPreset: '자율성 preset',
+        activeGoalCheckpoints: '체크포인트',
+        activeGoalRecommendations: '추천 목표',
+        activeGoalTimeline: '타임라인',
+        activeGoalAnalytics: '분석',
+        activeGoalBudgets: '예산',
+        activeGoalUsage: '사용량',
+        activeGoalTokenBudget: '토큰 예산',
+        activeGoalTimeBudget: '시간 예산(초)',
+        activeGoalCycleBudget: '사이클 예산',
+        activeGoalRevision: '리비전',
+        activeGoalEtag: 'ETag',
+        activeGoalProgress: '진행률',
+        activeGoalRemaining: '남은 예산',
+        activeGoalPolicy: 'GOALS 우선 정책',
       },
       goals: {
         title: '목표',
@@ -3503,7 +3567,7 @@
     backlog: ['backlog'],
     'pr-queue': ['prQueue'],
     runbook: ['activeRun', 'runnerControl', 'worktree'],
-    operations: ['todo', 'skills', 'claude', 'mcp', 'plugins', 'enterprise'],
+    operations: ['activeGoal', 'todo', 'skills', 'claude', 'mcp', 'plugins', 'enterprise'],
     goals: ['goals'],
     config: ['config', 'runnerControl'],
     prompts: ['prompts'],
@@ -3511,7 +3575,7 @@
     notifications: ['notifications'],
     worktree: ['worktree'],
     'instance-health': ['instanceHealth'],
-    mobile: ['activeRun', 'stages', 'logs', 'backlog', 'prQueue', 'todo', 'skills', 'claude', 'mcp', 'goals', 'config', 'prompts', 'notifications', 'worktree', 'instanceHealth', 'runnerControl'],
+    mobile: ['activeRun', 'stages', 'logs', 'backlog', 'prQueue', 'activeGoal', 'todo', 'skills', 'claude', 'mcp', 'goals', 'config', 'prompts', 'notifications', 'worktree', 'instanceHealth', 'runnerControl'],
     landing: ['activeRun'],
   };
 
@@ -5740,6 +5804,7 @@
       metrics: t('common.noDataAvailableYet'),
       history: t('history.emptyState'),
       experience: t('experience.unavailable'),
+      activeGoal: t('operations.activeGoalMissing'),
       todo: t('operations.todoPanel'),
       skills: t('operations.skillsPanel'),
       claude: t('operations.claudePanel'),
@@ -6566,6 +6631,10 @@
       qa_validation_report: toObject(raw.qa_validation_report || raw.qaValidationReport),
       finalRunReport: toObject(raw.finalRunReport || raw.final_run_report),
       final_run_report: toObject(raw.final_run_report || raw.finalRunReport),
+      activeGoalContext: toObject(raw.activeGoalContext || raw.active_goal_context),
+      active_goal_context: toObject(raw.active_goal_context || raw.activeGoalContext),
+      activeGoalProgress: toObject(raw.activeGoalProgress || raw.active_goal_progress),
+      active_goal_progress: toObject(raw.active_goal_progress || raw.activeGoalProgress),
       cycleChangeSummary: toObject(raw.cycleChangeSummary || raw.cycle_change_summary),
       cycle_change_summary: toObject(raw.cycle_change_summary || raw.cycleChangeSummary),
       failedTasks: toObject(raw.failedTasks || raw.failed_tasks),
@@ -7311,6 +7380,124 @@
           requiresOptIn: Boolean(edit.requiresOptIn ?? edit.requires_opt_in),
           maxChars: toNumber(edit.maxChars ?? edit.max_chars, 12000),
         },
+      },
+    };
+  }
+
+  function normalizeActiveGoalStatus(raw) {
+    const data = toObject(raw);
+    const goal = toObject(data.goal);
+    const budgets = toObject(goal.budgets);
+    const usage = toObject(goal.usage);
+    const template = toObject(goal.template);
+    const autonomyPreset = toObject(goal.autonomyPreset || goal.autonomy_preset);
+    const pmInjection = toObject(data.pmInjection || data.pm_injection);
+    const progress = toObject(data.progress || data.activeGoalProgress || data.active_goal_progress);
+    const progressCycle = toObject(progress.cycle || progress.cycles);
+    const progressToken = toObject(progress.token || progress.tokens);
+    const progressTime = toObject(progress.time || progress.timeSeconds || progress.time_seconds);
+    const checkpointProgress = toObject(progress.checkpointProgress || progress.checkpoint_progress);
+    const templatePayload = toObject(data.activeGoalTemplates || data.templates);
+    const presetPayload = toObject(data.autonomyPresets || data.autonomy_presets);
+    const recommendations = toObject(data.recommendations);
+    const timeline = toObject(data.timeline);
+    const analytics = toObject(data.analytics);
+    return {
+      ok: Boolean(data.ok ?? data.state !== 'error'),
+      exists: Boolean(data.exists),
+      active: Boolean(data.active),
+      state: toText(data.state, 'missing'),
+      message: toText(data.message, ''),
+      path: toText(data.path, ''),
+      etag: toText(data.etag, ''),
+      revision: toNumber(data.revision ?? goal.revision, 0),
+      goal: {
+        id: toText(goal.id || goal.goal_id, ''),
+        objective: toText(goal.objective, ''),
+        status: toText(goal.status, data.state || 'missing'),
+        mode: toText(goal.mode, 'adaptive'),
+        createdAt: toText(goal.createdAt || goal.created_at, ''),
+        updatedAt: toText(goal.updatedAt || goal.updated_at, ''),
+        completedAt: toText(goal.completedAt || goal.completed_at, ''),
+        canceledAt: toText(goal.canceledAt || goal.canceled_at, ''),
+        notes: toText(goal.notes, ''),
+        template: {
+          key: toText(template.key || goal.templateKey || goal.template_key, ''),
+          label: toText(template.label, ''),
+        },
+        autonomyPreset: {
+          key: toText(autonomyPreset.key || goal.autonomyPresetKey || goal.autonomy_preset_key, ''),
+          label: toText(autonomyPreset.label, ''),
+        },
+        checkpoints: toArray(goal.checkpoints).map((item) => toObject(item)),
+        budgets: {
+          tokenBudget: toNumber(budgets.tokenBudget ?? budgets.token_budget, 0),
+          timeBudgetSeconds: toNumber(budgets.timeBudgetSeconds ?? budgets.time_budget_seconds, 0),
+          cycleBudget: toNumber(budgets.cycleBudget ?? budgets.cycle_budget, 0),
+        },
+        usage: {
+          tokensUsed: toNumber(usage.tokensUsed ?? usage.tokens_used, 0),
+          timeUsedSeconds: toNumber(usage.timeUsedSeconds ?? usage.time_used_seconds, 0),
+          cyclesUsed: toNumber(usage.cyclesUsed ?? usage.cycles_used, 0),
+        },
+        completionEvidence: toArray(goal.completionEvidence || goal.completion_evidence).map((item) => toObject(item)),
+      },
+      progress: {
+        summary: toText(progress.summary, ''),
+        state: toText(progress.state, data.state || 'missing'),
+        mode: toText(progress.mode, goal.mode || 'adaptive'),
+        cycle: {
+          budget: toNumber(progressCycle.budget, 0),
+          used: toNumber(progressCycle.used, 0),
+          remaining: toNumber(progressCycle.remaining, 0),
+          percent: toMaybeNumber(progressCycle.percent, null),
+          exhausted: Boolean(progressCycle.exhausted),
+          bounded: Boolean(progressCycle.bounded),
+        },
+        token: {
+          budget: toNumber(progressToken.budget, 0),
+          used: toNumber(progressToken.used, 0),
+          remaining: toNumber(progressToken.remaining, 0),
+          percent: toMaybeNumber(progressToken.percent, null),
+          exhausted: Boolean(progressToken.exhausted),
+          bounded: Boolean(progressToken.bounded),
+        },
+        time: {
+          budget: toNumber(progressTime.budget, 0),
+          used: toNumber(progressTime.used, 0),
+          remaining: toNumber(progressTime.remaining, 0),
+          percent: toMaybeNumber(progressTime.percent, null),
+          exhausted: Boolean(progressTime.exhausted),
+          bounded: Boolean(progressTime.bounded),
+        },
+        completionEvidenceCount: toNumber(progress.completionEvidenceCount ?? progress.completion_evidence_count, 0),
+        checkpointProgress: {
+          total: toNumber(checkpointProgress.total, 0),
+          completed: toNumber(checkpointProgress.completed, 0),
+          remaining: toNumber(checkpointProgress.remaining, 0),
+          percent: toMaybeNumber(checkpointProgress.percent, null),
+          activeCheckpointId: toText(checkpointProgress.activeCheckpointId || checkpointProgress.active_checkpoint_id, ''),
+          activeCheckpointTitle: toText(checkpointProgress.activeCheckpointTitle || checkpointProgress.active_checkpoint_title, ''),
+        },
+        budgetExhausted: Boolean(progress.budgetExhausted ?? progress.budget_exhausted),
+        subordinateToGoalsMd: Boolean(progress.subordinateToGoalsMd ?? progress.subordinate_to_goals_md ?? true),
+      },
+      templates: toArray(templatePayload.templates || templatePayload.items).map((item) => toObject(item)),
+      autonomyPresets: toArray(presetPayload.presets || presetPayload.items).map((item) => toObject(item)),
+      recommendations: toArray(recommendations.recommendations || recommendations.items).map((item) => toObject(item)),
+      timeline: toArray(timeline.items).map((item) => toObject(item)),
+      analytics: {
+        successRate: toMaybeNumber(analytics.successRate ?? analytics.success_rate, null),
+        medianCyclesToCompletion: toMaybeNumber(analytics.medianCyclesToCompletion ?? analytics.median_cycles_to_completion, null),
+        budgetExhaustionCount: toNumber(analytics.budgetExhaustionCount ?? analytics.budget_exhaustion_count, 0),
+        manualInterventionCount: toNumber(analytics.manualInterventionCount ?? analytics.manual_intervention_count, 0),
+      },
+      pmInjection: {
+        enabled: Boolean(pmInjection.enabled),
+        state: toText(pmInjection.state, 'missing'),
+        priorityPolicy: toText(pmInjection.priorityPolicy || pmInjection.priority_policy, ''),
+        doesNotOverrideGoals: Boolean(pmInjection.doesNotOverrideGoals ?? pmInjection.does_not_override_goals),
+        summary: toText(pmInjection.summary, ''),
       },
     };
   }
@@ -8799,6 +8986,7 @@
     const rawSectionState = toObject(raw.sectionState || raw.section_state);
     const hasInstanceHealthPayload = Object.prototype.hasOwnProperty.call(raw, 'instance_health') || Object.prototype.hasOwnProperty.call(raw, 'instanceHealth');
     const instanceHealth = normalizeInstanceHealth(hasInstanceHealthPayload ? (raw.instance_health || raw.instanceHealth || {}) : {});
+    const activeGoal = normalizeActiveGoalStatus(raw.active_goal || raw.activeGoal || {});
     const todo = normalizeTodoStatus(raw.todo || {});
     const skillsStatus = normalizeSkillsStatus(raw.skills_status || raw.skillsStatus || {});
     const claudeAdvanced = normalizeClaudeAdvanced(raw.claude_advanced || raw.claudeAdvanced || {});
@@ -8898,6 +9086,7 @@
       worktreeDiagnostics,
       instanceHealth,
       instanceHealthPresent: hasInstanceHealthPayload,
+      activeGoal,
       todo,
       skillsStatus,
       claudeAdvanced,
@@ -8929,6 +9118,7 @@
         experience: experience.state,
         prQueue: prQueue.stateInfo,
         worktree: worktree.state,
+        activeGoal: sectionStateFromPayload(rawSectionState, 'activeGoal') || buildSectionState('activeGoal', activeGoal.active ? 'ready' : activeGoal.state === 'error' ? 'error' : activeGoal.state === 'completed' || activeGoal.state === 'canceled' ? 'partial' : 'empty', activeGoal.message || t('operations.activeGoalMissing')),
         todo: sectionStateFromPayload(rawSectionState, 'todo') || buildSectionState('todo', todo.state === 'ready' ? 'ready' : todo.state === 'missing' ? 'empty' : todo.state === 'error' ? 'error' : 'partial', todo.message || fallbackSectionMessage('todo')),
         skills: sectionStateFromPayload(rawSectionState, 'skills') || buildSectionState('skills', skillsStatus.enabled ? (skillsStatus.warnings.length || skillsStatus.missingSkillIds.length ? 'partial' : 'ready') : 'disabled', skillsStatus.enabled ? '' : fallbackSectionMessage('skills')),
         claude: sectionStateFromPayload(rawSectionState, 'claude') || buildSectionState('claude', claudeAdvanced.status === 'ok' ? 'ready' : claudeAdvanced.status === 'warning' ? 'partial' : claudeAdvanced.status === 'error' ? 'error' : 'empty', claudeAdvanced.status === 'ok' ? '' : fallbackSectionMessage('claude')),
@@ -9563,6 +9753,8 @@
       worktreeDiagnostics: normalizeWorktreeDiagnostics({}),
       worktreeDiagnosticsFilter: normalizeWorktreeDiagnosticsFilter({}),
       instanceHealth: normalizeInstanceHealth({}),
+      activeGoal: normalizeActiveGoalStatus({}),
+      activeGoalMutation: createBlankActiveGoalMutation(),
       todo: normalizeTodoStatus({}),
       todoEditor: createBlankTodoEditor(),
       skillsStatus: normalizeSkillsStatus({}),
@@ -10358,6 +10550,15 @@
     loadTodoEditor,
     saveTodoDraft,
     resetTodoEditor,
+    normalizeActiveGoalStatus,
+    createBlankActiveGoalMutation,
+    activeGoalMutationFromStatus,
+    activeGoalMutationData,
+    updateActiveGoalMutationField,
+    activeGoalRequestPath,
+    normalizeActiveGoalMutationResponse,
+    activeGoalActionDisabledReason,
+    submitActiveGoalAction,
     normalizeSkillsStatus,
     normalizeClaudeAdvanced,
     normalizeMcpDiagnostics,
@@ -10563,6 +10764,10 @@
     state.worktreeDiagnostics = normalizeWorktreeDiagnostics(next.worktreeDiagnostics || next.worktree_diagnostics || {});
     if (next.instanceHealthPresent !== false) {
       state.instanceHealth = normalizeInstanceHealth(next.instanceHealth || next.instance_health || {});
+    }
+    state.activeGoal = normalizeActiveGoalStatus(next.activeGoal || next.active_goal || {});
+    if (!state.activeGoalMutation || (!state.activeGoalMutation.dirty && !state.activeGoalMutation.submitting)) {
+      state.activeGoalMutation = activeGoalMutationFromStatus(state.activeGoal);
     }
     state.todo = normalizeTodoStatus(next.todo || {});
     if (
@@ -16807,6 +17012,16 @@
     const budgetCardSub = budgetCap != null
       ? `${t('common.of')} ${fmtMoney(budgetCap)} | ${metricText(run.budgetAvailable, run.budgetUsed, fmtPercent)}`
       : `${t('common.of')} ${t('common.unavailable')} | ${metricText(run.budgetAvailable, run.budgetUsed, fmtPercent)}`;
+    const activeGoal = normalizeActiveGoalStatus(state.activeGoal || {});
+    const activeGoalGoal = toObject(activeGoal.goal);
+    const activeGoalProgress = toObject(activeGoal.progress);
+    const activeGoalCycle = toObject(activeGoalProgress.cycle);
+    const activeGoalToken = toObject(activeGoalProgress.token);
+    const activeGoalProgressText = activeGoalProgress.summary || `${activeGoal.state} | ${activeGoalGoal.mode || 'adaptive'}`;
+    const activeGoalRemainingText = [
+      activeGoalCycle.bounded ? `${t('operations.activeGoalCycleBudget')}: ${activeGoalCycle.remaining}` : '',
+      activeGoalToken.bounded ? `${t('operations.activeGoalTokenBudget')}: ${fmtNumberShort(activeGoalToken.remaining)}` : '',
+    ].filter(Boolean).join(' | ') || t('common.unavailable');
 
     const body = `
       <div class="view-grid view-grid--two">
@@ -16891,6 +17106,25 @@
                     </div>
                   </div>
                 `).join('') : `<div class="summary-note">${escapeHTML(t('dashboard.noGoalsPublishedYet'))}</div>`}
+              </div>
+            `
+          )}
+
+          ${panel(
+            t('operations.activeGoalPanel'),
+            `${escapeHTML(activeGoal.state)} | ${escapeHTML(activeGoalGoal.mode || 'adaptive')}`,
+            `
+              ${sectionNotice('activeGoal')}
+              <div class="compact-list">
+                <div class="compact-list__item">
+                  <span class="compact-list__bullet" style="background:${activeGoal.active ? 'var(--accent)' : 'var(--text-sub)'}"></span>
+                  <div>
+                    <div class="compact-list__body">${escapeHTML(activeGoalGoal.objective || t('operations.activeGoalMissing'))}</div>
+                    <div class="compact-list__meta">${escapeHTML(activeGoalProgressText)}</div>
+                  </div>
+                </div>
+                ${compactFactItem(t('operations.activeGoalProgress'), activeGoalProgressText, activeGoalProgress.budgetExhausted ? t('notifications.severityWarning') : '')}
+                ${compactFactItem(t('operations.activeGoalRemaining'), activeGoalRemainingText, activeGoalProgress.subordinateToGoalsMd ? t('operations.goalsFirst') : '')}
               </div>
             `
           )}
@@ -18364,6 +18598,10 @@
     const tokenInputText = metricText(hasTokenTelemetry, tokenIn, fmtNumberShort);
     const tokenOutputText = metricText(hasTokenTelemetry, tokenOut, fmtNumberShort);
     const tokenBudgetText = metricText(run.budgetAvailable, run.budgetUsed, fmtPercent);
+    const activeGoal = normalizeActiveGoalStatus(state.activeGoal || {});
+    const activeGoalProgress = toObject(activeGoal.progress);
+    const activeGoalGoal = toObject(activeGoal.goal);
+    const activeGoalPipelineText = activeGoalProgress.summary || `${activeGoal.state} | ${activeGoalGoal.mode || 'adaptive'}`;
     const tokenSparkline = state.metrics.tokens24h.length
       ? buildSparkline(state.metrics.tokens24h, 320, 44, 'rgba(126,227,138,0.12)', '#7ee38a')
       : `<div class="summary-note">${escapeHTML(t('pipeline.tokenTelemetryUnavailable'))}</div>`;
@@ -18433,6 +18671,10 @@
                   <div class="compact-list__item">
                     <span class="compact-list__bullet"></span>
                     <div class="compact-list__body">${escapeHTML(t('pipeline.devStage'))}: ${escapeHTML(run.task || t('common.unavailable'))} | ${escapeHTML(t('dashboard.budget').toLowerCase())} ${escapeHTML(tokenBudgetText)}</div>
+                  </div>
+                  <div class="compact-list__item">
+                    <span class="compact-list__bullet" style="background:${activeGoal.active ? 'var(--accent)' : 'var(--text-sub)'}"></span>
+                    <div class="compact-list__body">${escapeHTML(t('operations.activeGoalPanel'))}: ${escapeHTML(activeGoalPipelineText)} | ${escapeHTML(activeGoalProgress.subordinateToGoalsMd ? t('operations.goalsFirst') : t('operations.activeGoalPolicy'))}</div>
                   </div>
                 </div>
               `
@@ -19486,6 +19728,12 @@
     const selectedRunDir = selected ? selected.runDir || t('common.unknown') : t('common.unknown');
     const selectedExecutionStatus = selected ? toText(selected.executionStatus || selected.status, selected.status || '') : '';
     const selectedProjectStatus = selected ? toText(selected.projectStatus || (selected.projectComplete ? 'complete' : 'incomplete'), selected.projectComplete ? 'complete' : 'incomplete') : '';
+    const selectedActiveGoalContext = selected ? toObject(selected.activeGoalContext || selected.active_goal_context) : {};
+    const selectedActiveGoal = toObject(selectedActiveGoalContext.activeGoal || selectedActiveGoalContext.active_goal);
+    const selectedActiveGoalProgress = selected
+      ? toObject(selected.activeGoalProgress || selected.active_goal_progress || selectedActiveGoalContext.progress)
+      : {};
+    const selectedActiveGoalSummary = selectedActiveGoalProgress.summary || selectedActiveGoal.objective || t('operations.activeGoalMissing');
 
     const body = `
       <div class="history-layout">
@@ -19549,6 +19797,7 @@
                           ${compactFactItem(t('history.shutdownReason'), selectedShutdownReason || t('common.unavailable'), t('history.readOnlyRunArtifacts'))}
                           ${compactFactItem(t('history.persistedSummary'), selectedSummary, t('history.readOnlyRunArtifacts'))}
                           ${compactFactItem(t('history.worktreeOutcome'), selectedWorktreeOutcome, t('history.worktreeOutcomeMeta'))}
+                          ${compactFactItem(t('operations.activeGoalPanel'), selectedActiveGoalSummary, selectedActiveGoalContext.active ? t('operations.activeGoalProgress') : t('operations.activeGoalMissing'))}
                         </div>
                         <div class="history-report-grid">
                           ${renderHistoryReportPanel(t('history.finalRunReport'), selectedFinalRunReport, 'final')}
@@ -19890,6 +20139,143 @@
     return `<div class="compact-list">${items.slice(0, 6).map((item) => compactFactItem(t('operations.warnings'), item, '')).join('')}</div>`;
   }
 
+  function activeGoalMutationData() {
+    if (!state.activeGoalMutation || typeof state.activeGoalMutation !== 'object') {
+      state.activeGoalMutation = activeGoalMutationFromStatus(state.activeGoal || {});
+    }
+    return state.activeGoalMutation;
+  }
+
+  function updateActiveGoalMutationField(field, value) {
+    const current = activeGoalMutationData();
+    state.activeGoalMutation = {
+      ...current,
+      [field]: value,
+      status: current.status === 'success' ? 'idle' : current.status,
+      message: '',
+      errorCode: '',
+      dirty: true,
+    };
+  }
+
+  function activeGoalRequestPath(action) {
+    return `/api/active-goal/${encodeURIComponent(action)}`;
+  }
+
+  function normalizeActiveGoalMutationResponse(payload) {
+    const raw = toObject(payload);
+    const error = toObject(raw.error);
+    return {
+      ok: Boolean(raw.ok !== false),
+      action: toText(raw.action, ''),
+      status: toText(raw.status, ''),
+      message: toText(raw.message, ''),
+      activeGoal: normalizeActiveGoalStatus(raw.activeGoal || raw.active_goal || {}),
+      snapshot: toObject(raw.snapshot),
+      error,
+    };
+  }
+
+  function activeGoalActionDisabledReason(action, activeGoal = normalizeActiveGoalStatus(state.activeGoal || {}), mutation = activeGoalMutationData()) {
+    if (mutation.submitting) return t('operations.activeGoalMutating');
+    if (state.sourceMode !== 'api') return t('snapshot.backendUnavailable');
+    if (state.redaction?.active) return t('operations.activeGoalRedacted');
+    if (!state.runnerControl?.enabled) return t('operations.activeGoalLocked');
+    if (action === 'create' && activeGoal.active) return t('operations.activeGoalAlreadyActive');
+    if (action === 'create' && !toText(mutation.objective, '').trim()) return t('operations.activeGoalObjectiveRequired');
+    if (action === 'update' && !activeGoal.active) return t('operations.activeGoalMissing');
+    if (action === 'complete' && !activeGoal.active) return t('operations.activeGoalMissing');
+    if (action === 'complete' && !toText(mutation.evidence, '').trim()) return t('operations.activeGoalEvidenceRequired');
+    return '';
+  }
+
+  async function submitActiveGoalAction(action) {
+    const activeGoal = normalizeActiveGoalStatus(state.activeGoal || {});
+    const mutation = activeGoalMutationData();
+    const disabledReason = activeGoalActionDisabledReason(action, activeGoal, mutation);
+    const requestPath = activeGoalRequestPath(action);
+    if (disabledReason) {
+      state.activeGoalMutation = {
+        ...mutation,
+        status: 'error',
+        message: disabledReason,
+        errorCode: 'active_goal_disabled',
+      };
+      renderShell({ preserveScroll: true });
+      return;
+    }
+
+    const body = {};
+    if (action === 'create' || action === 'update') {
+      body.objective = toText(mutation.objective, '').trim();
+      body.mode = toText(mutation.mode, 'adaptive') || 'adaptive';
+      body.templateKey = toText(mutation.template, '');
+      body.autonomyPresetKey = toText(mutation.preset, '');
+      body.notes = toText(mutation.notes, '');
+      body.tokenBudget = toNumber(mutation.tokenBudget, 0);
+      body.timeBudgetSeconds = toNumber(mutation.timeBudgetSeconds, 0);
+      body.cycleBudget = toNumber(mutation.cycleBudget, 0);
+    }
+    if (action === 'update' || action === 'complete') {
+      body.etag = activeGoal.etag;
+    }
+    if (action === 'complete') {
+      body.evidence = toText(mutation.evidence, '').trim();
+    }
+
+    state.activeGoalMutation = {
+      ...mutation,
+      status: 'saving',
+      message: t('operations.activeGoalMutating'),
+      errorCode: '',
+      submitting: true,
+    };
+    renderShell({ preserveScroll: true });
+
+    try {
+      const response = await fetch(requestPath, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+      const payload = await response.json().catch(() => ({}));
+      const normalized = normalizeActiveGoalMutationResponse(payload);
+      if (!response.ok || normalized.ok === false) {
+        const actionError = new Error(toText(normalized.message || t('operations.activeGoalFailed'), t('operations.activeGoalFailed')));
+        actionError.code = toText(normalized.error.code || 'active_goal_failed', 'active_goal_failed');
+        throw actionError;
+      }
+      if (normalized.snapshot && Object.keys(normalized.snapshot).length) {
+        applyServerSnapshot(normalized.snapshot);
+      } else {
+        state.activeGoal = normalized.activeGoal;
+      }
+      state.activeGoalMutation = {
+        ...activeGoalMutationFromStatus(state.activeGoal),
+        status: 'success',
+        message: normalized.message || t('operations.activeGoalSaved'),
+        errorCode: '',
+        submitting: false,
+        dirty: false,
+        evidence: '',
+        savedAt: nowMs(),
+      };
+      renderShell({ preserveScroll: true });
+    } catch (error) {
+      state.activeGoalMutation = {
+        ...activeGoalMutationData(),
+        status: 'error',
+        message: error instanceof Error ? error.message : t('operations.activeGoalFailed'),
+        errorCode: error instanceof Error && error.code ? error.code : 'active_goal_failed',
+        submitting: false,
+      };
+      renderShell({ preserveScroll: true });
+    }
+  }
+
   function todoEditorData() {
     if (!state.todoEditor || typeof state.todoEditor !== 'object') {
       state.todoEditor = createBlankTodoEditor();
@@ -20097,6 +20483,8 @@
   }
 
   function renderOperations() {
+    const activeGoal = normalizeActiveGoalStatus(state.activeGoal || {});
+    const activeGoalMutation = activeGoalMutationData();
     const todo = normalizeTodoStatus(state.todo || {});
     const skills = normalizeSkillsStatus(state.skillsStatus || {});
     const claude = normalizeClaudeAdvanced(state.claudeAdvanced || {});
@@ -20135,6 +20523,39 @@
       ? `<div class="compact-list">${Object.keys(budgetFloors).map((key) => compactFactItem(key, String(budgetValues[key] ?? 0), `${t('operations.budgetFloors')} ${budgetFloors[key]}`)).join('')}</div>`
       : `<div class="summary-note">${escapeHTML(t('common.none'))}</div>`;
     const todoEditor = todoEditorData();
+    const activeGoalGoal = toObject(activeGoal.goal);
+    const activeGoalBudgets = toObject(activeGoalGoal.budgets);
+    const activeGoalUsage = toObject(activeGoalGoal.usage);
+    const activeGoalCheckpointProgress = toObject(activeGoal.progress.checkpointProgress);
+    const activeGoalTemplateOptions = activeGoal.templates.length
+      ? activeGoal.templates
+      : [{ key: '', label: t('common.none') }];
+    const activeGoalPresetOptions = activeGoal.autonomyPresets.length
+      ? activeGoal.autonomyPresets
+      : [{ key: '', label: t('common.none') }];
+    const activeGoalRecommendations = activeGoal.recommendations.length
+      ? `<div class="compact-list">${activeGoal.recommendations.slice(0, 4).map((item) => compactFactItem(toText(item.objective, t('common.unknown')), toText(item.reason, ''), toText(item.sourceKind || item.source, ''))).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('common.none'))}</div>`;
+    const activeGoalTimeline = activeGoal.timeline.length
+      ? `<div class="compact-list">${activeGoal.timeline.slice(-5).map((item) => compactFactItem(toText(item.kind, 'event'), toText(item.label || item.status, ''), toText(item.ts, ''))).join('')}</div>`
+      : `<div class="summary-note">${escapeHTML(t('common.none'))}</div>`;
+    const activeGoalAnalytics = `${t('operations.activeGoalAnalytics')}: ${activeGoal.analytics.successRate === null ? t('common.none') : activeGoal.analytics.successRate} | ${t('operations.activeGoalCycleBudget')}: ${activeGoal.analytics.medianCyclesToCompletion ?? t('common.none')}`;
+    const activeGoalMutationStatus = activeGoalMutation.status === 'error'
+      ? 'failure'
+      : activeGoalMutation.status === 'success'
+        ? 'success'
+        : activeGoalMutation.submitting
+          ? 'busy'
+          : 'ready';
+    const activeGoalBanner = activeGoalMutation.message
+      ? renderActionStateBanner(actionPresentation('active-goal', activeGoalMutationStatus, activeGoalMutation.message), t('operations.activeGoalPanel'), activeGoalMutation.message)
+      : '';
+    const activeGoalCreateReason = activeGoalActionDisabledReason('create', activeGoal, activeGoalMutation);
+    const activeGoalUpdateReason = activeGoalActionDisabledReason('update', activeGoal, activeGoalMutation);
+    const activeGoalCompleteReason = activeGoalActionDisabledReason('complete', activeGoal, activeGoalMutation);
+    const activeGoalCreatePresentation = actionPresentation('active-goal-create', activeGoalMutation.submitting ? 'busy' : activeGoalCreateReason ? 'disabled' : 'ready', activeGoalCreateReason);
+    const activeGoalUpdatePresentation = actionPresentation('active-goal-update', activeGoalMutation.submitting ? 'busy' : activeGoalUpdateReason ? 'disabled' : 'ready', activeGoalUpdateReason);
+    const activeGoalCompletePresentation = actionPresentation('active-goal-complete', activeGoalMutation.submitting ? 'busy' : activeGoalCompleteReason ? 'disabled' : 'ready', activeGoalCompleteReason);
     const todoSaveReason = todoSaveDisabledReason(todo, todoEditor);
     const todoLoadDisabled = todoEditor.loading || todoEditor.saving || state.sourceMode !== 'api' || Boolean(state.redaction?.active);
     const todoLoadPresentation = actionPresentation('todo-load', todoEditor.loading ? 'busy' : todoLoadDisabled ? 'disabled' : 'ready', todoLoadDisabled && !todoEditor.loading ? (state.redaction?.active ? t('operations.todoRedacted') : t('snapshot.backendUnavailable')) : '');
@@ -20153,6 +20574,7 @@
     const todoDraftChars = toText(todoEditor.draftContent, '').length;
     const todoMaxChars = Math.max(1, toNumber(todo.controls.edit.maxChars, 12000));
     const summaryCards = [
+      detailCard(t('operations.activeGoalPanel'), activeGoal.state, activeGoal.active ? 'runner-control__value--accent' : activeGoal.state === 'error' ? 'runner-control__value--err' : 'runner-control__value--muted'),
       detailCard(t('operations.todoPanel'), todo.state, todo.state === 'ready' ? 'runner-control__value--accent' : 'runner-control__value--warn'),
       detailCard(t('operations.skillsPanel'), `${skills.discoveredCount}/${skills.rootCount}`, skills.warnings.length || skills.missingSkillIds.length ? 'runner-control__value--warn' : 'runner-control__value--accent'),
       detailCard(t('operations.claudePanel'), claude.status, claude.status === 'error' ? 'runner-control__value--err' : claude.status === 'warning' ? 'runner-control__value--warn' : 'runner-control__value--accent'),
@@ -20166,6 +20588,7 @@
       t('operations.subtitle'),
       `${button(t('topbar.refresh'), 'refresh-status', 'button--quiet')} ${button(t('operations.openConfig'), 'nav-config', 'button--quiet')}`,
       `
+        ${sectionNotice('activeGoal')}
         ${sectionNotice('todo')}
         ${sectionNotice('skills')}
         ${sectionNotice('claude')}
@@ -20174,6 +20597,86 @@
         ${sectionNotice('enterprise')}
         <div class="runner-control__details">${summaryCards}</div>
         <div class="view-grid view-grid--two">
+          ${panel(t('operations.activeGoalPanel'), `${escapeHTML(activeGoal.state)} | ${escapeHTML(activeGoalGoal.mode || 'adaptive')}`, `
+            <div class="compact-list">
+              ${compactFactItem(t('operations.activeGoalObjective'), activeGoalGoal.objective || t('operations.activeGoalMissing'), activeGoalGoal.updatedAt ? fmtRelative(activeGoalGoal.updatedAt) : '')}
+              ${compactFactItem(t('operations.pmInjection'), activeGoal.pmInjection.state, activeGoal.pmInjection.doesNotOverrideGoals ? t('operations.goalsFirst') : '')}
+              ${compactFactItem(t('operations.activeGoalRevision'), String(activeGoal.revision), activeGoalGoal.id || t('common.none'))}
+              ${compactFactItem(t('operations.activeGoalTemplate'), toText(toObject(activeGoalGoal.template).key, t('common.none')), toText(toObject(activeGoalGoal.autonomyPreset).key, ''))}
+              ${compactFactItem(t('operations.activeGoalCheckpoints'), `${activeGoalCheckpointProgress.completed || 0}/${activeGoalCheckpointProgress.total || 0}`, activeGoalCheckpointProgress.activeCheckpointTitle || '')}
+              ${compactFactItem(t('operations.activeGoalBudgets'), `${t('operations.activeGoalCycleBudget')}: ${activeGoalBudgets.cycleBudget || 0}`, `${t('operations.activeGoalTokenBudget')}: ${activeGoalBudgets.tokenBudget || 0}`)}
+              ${compactFactItem(t('operations.activeGoalUsage'), `${activeGoalUsage.cyclesUsed || 0} cycles`, `${activeGoalUsage.tokensUsed || 0} tokens`)}
+              ${compactFactItem(t('operations.activeGoalEtag'), activeGoal.etag || t('common.none'), '')}
+              ${compactFactItem(t('operations.activeGoalAnalytics'), activeGoalAnalytics, '')}
+            </div>
+            <div class="prompt-editor" data-active-goal-root data-action-state="${escapeHTML(activeGoalMutationStatus)}">
+              ${activeGoalBanner}
+              <div class="prompt-editor__field">
+                <label class="prompt-editor__label" for="active-goal-objective">${escapeHTML(t('operations.activeGoalObjective'))}</label>
+                <textarea
+                  id="active-goal-objective"
+                  class="field-control field-control--textarea prompt-editor__textarea"
+                  rows="4"
+                  data-active-goal-field="objective"
+                  ${activeGoalMutation.submitting || Boolean(state.redaction?.active) ? 'disabled' : ''}
+                >${escapeHTML(activeGoalMutation.objective)}</textarea>
+              </div>
+              <div class="config-grid">
+                <label class="field-label">
+                  <span>${escapeHTML(t('operations.activeGoalMode'))}</span>
+                  <select class="field-control" data-active-goal-field="mode" ${activeGoalMutation.submitting || Boolean(state.redaction?.active) ? 'disabled' : ''}>
+                    ${['adaptive', 'strict', 'exploratory'].map((mode) => `<option value="${escapeHTML(mode)}" ${activeGoalMutation.mode === mode ? 'selected' : ''}>${escapeHTML(mode)}</option>`).join('')}
+                  </select>
+                </label>
+                <label class="field-label">
+                  <span>${escapeHTML(t('operations.activeGoalTemplate'))}</span>
+                  <select class="field-control" data-active-goal-field="template" ${activeGoalMutation.submitting || Boolean(state.redaction?.active) ? 'disabled' : ''}>
+                    <option value="">${escapeHTML(t('common.none'))}</option>
+                    ${activeGoalTemplateOptions.filter((item) => toText(item.key, '')).map((item) => `<option value="${escapeHTML(toText(item.key, ''))}" ${activeGoalMutation.template === toText(item.key, '') ? 'selected' : ''}>${escapeHTML(toText(item.label || item.key, ''))}</option>`).join('')}
+                  </select>
+                </label>
+                <label class="field-label">
+                  <span>${escapeHTML(t('operations.activeGoalPreset'))}</span>
+                  <select class="field-control" data-active-goal-field="preset" ${activeGoalMutation.submitting || Boolean(state.redaction?.active) ? 'disabled' : ''}>
+                    <option value="">${escapeHTML(t('common.none'))}</option>
+                    ${activeGoalPresetOptions.filter((item) => toText(item.key, '')).map((item) => `<option value="${escapeHTML(toText(item.key, ''))}" ${activeGoalMutation.preset === toText(item.key, '') ? 'selected' : ''}>${escapeHTML(toText(item.label || item.key, ''))}</option>`).join('')}
+                  </select>
+                </label>
+                <label class="field-label">
+                  <span>${escapeHTML(t('operations.activeGoalCycleBudget'))}</span>
+                  <input class="field-control" type="number" min="0" data-active-goal-field="cycleBudget" value="${escapeHTML(activeGoalMutation.cycleBudget)}" ${activeGoalMutation.submitting || Boolean(state.redaction?.active) ? 'disabled' : ''}>
+                </label>
+                <label class="field-label">
+                  <span>${escapeHTML(t('operations.activeGoalTokenBudget'))}</span>
+                  <input class="field-control" type="number" min="0" data-active-goal-field="tokenBudget" value="${escapeHTML(activeGoalMutation.tokenBudget)}" ${activeGoalMutation.submitting || Boolean(state.redaction?.active) ? 'disabled' : ''}>
+                </label>
+                <label class="field-label">
+                  <span>${escapeHTML(t('operations.activeGoalTimeBudget'))}</span>
+                  <input class="field-control" type="number" min="0" data-active-goal-field="timeBudgetSeconds" value="${escapeHTML(activeGoalMutation.timeBudgetSeconds)}" ${activeGoalMutation.submitting || Boolean(state.redaction?.active) ? 'disabled' : ''}>
+                </label>
+              </div>
+              <div class="prompt-editor__field">
+                <label class="prompt-editor__label" for="active-goal-evidence">${escapeHTML(t('operations.activeGoalEvidence'))}</label>
+                <textarea
+                  id="active-goal-evidence"
+                  class="field-control field-control--textarea prompt-editor__textarea"
+                  rows="3"
+                  data-active-goal-field="evidence"
+                  ${activeGoalMutation.submitting || Boolean(state.redaction?.active) ? 'disabled' : ''}
+                >${escapeHTML(activeGoalMutation.evidence)}</textarea>
+              </div>
+              <div class="modal-actions" style="margin-top:12px;">
+                ${button(t('operations.activeGoalCreate'), 'active-goal-create', actionButtonClass(activeGoalCreatePresentation, 'button--quiet'), actionButtonAttrs(activeGoalCreatePresentation))}
+                ${button(t('operations.activeGoalUpdate'), 'active-goal-update', actionButtonClass(activeGoalUpdatePresentation, 'button--quiet'), actionButtonAttrs(activeGoalUpdatePresentation))}
+                ${button(t('operations.activeGoalComplete'), 'active-goal-complete', actionButtonClass(activeGoalCompletePresentation, 'button--primary'), actionButtonAttrs(activeGoalCompletePresentation))}
+              </div>
+              ${[activeGoalCreateReason, activeGoalUpdateReason, activeGoalCompleteReason].find(Boolean) ? `<div class="summary-note">${escapeHTML([activeGoalCreateReason, activeGoalUpdateReason, activeGoalCompleteReason].find(Boolean))}</div>` : ''}
+            </div>
+            <div class="summary-note">${escapeHTML(t('operations.activeGoalRecommendations'))}</div>
+            ${activeGoalRecommendations}
+            <div class="summary-note">${escapeHTML(t('operations.activeGoalTimeline'))}</div>
+            ${activeGoalTimeline}
+          `)}
           ${panel(t('operations.todoPanel'), `${escapeHTML(todo.state)} | ${escapeHTML(todo.freshness)}`, `
             <div class="compact-list">
               ${compactFactItem(t('operations.activePath'), todo.activeRelativePath || todo.activePath || t('common.none'), todo.updatedAt ? fmtRelative(todo.updatedAt) : '')}
@@ -21834,6 +22337,15 @@
       case 'todo-reset':
         resetTodoEditor();
         return;
+      case 'active-goal-create':
+        void submitActiveGoalAction('create');
+        return;
+      case 'active-goal-update':
+        void submitActiveGoalAction('update');
+        return;
+      case 'active-goal-complete':
+        void submitActiveGoalAction('complete');
+        return;
       case 'toggle-logs':
         setLiveTailPaused(!isLiveTailPaused());
         renderShell({ preserveScroll: true });
@@ -22229,6 +22741,43 @@
     };
   }
 
+  function createBlankActiveGoalMutation() {
+    return {
+      status: 'idle',
+      message: '',
+      errorCode: '',
+      objective: '',
+      mode: 'adaptive',
+      template: '',
+      preset: '',
+      notes: '',
+      tokenBudget: '',
+      timeBudgetSeconds: '',
+      cycleBudget: '',
+      evidence: '',
+      dirty: false,
+      submitting: false,
+      savedAt: 0,
+    };
+  }
+
+  function activeGoalMutationFromStatus(activeGoal = normalizeActiveGoalStatus({})) {
+    const normalized = normalizeActiveGoalStatus(activeGoal);
+    const goal = toObject(normalized.goal);
+    const budgets = toObject(goal.budgets);
+    return {
+      ...createBlankActiveGoalMutation(),
+      objective: toText(goal.objective, ''),
+      mode: toText(goal.mode, 'adaptive') || 'adaptive',
+      template: toText(toObject(goal.template).key, ''),
+      preset: toText(toObject(goal.autonomyPreset).key, ''),
+      notes: toText(goal.notes, ''),
+      tokenBudget: budgets.tokenBudget ? String(budgets.tokenBudget) : '',
+      timeBudgetSeconds: budgets.timeBudgetSeconds ? String(budgets.timeBudgetSeconds) : '',
+      cycleBudget: budgets.cycleBudget ? String(budgets.cycleBudget) : '',
+    };
+  }
+
   function createBlankConfigRestoreState() {
     return {
       status: 'idle',
@@ -22350,6 +22899,8 @@
     worktreeDiagnostics: clone(defaults.worktreeDiagnostics),
     worktreeDiagnosticsFilter: clone(defaults.worktreeDiagnosticsFilter || normalizeWorktreeDiagnosticsFilter({})),
     instanceHealth: clone(defaults.instanceHealth),
+    activeGoal: clone(defaults.activeGoal),
+    activeGoalMutation: clone(defaults.activeGoalMutation || createBlankActiveGoalMutation()),
     todo: clone(defaults.todo),
     todoEditor: clone(defaults.todoEditor || createBlankTodoEditor()),
     skillsStatus: clone(defaults.skillsStatus),
@@ -24381,6 +24932,11 @@
       return;
     }
 
+    if (event.target.matches('[data-active-goal-field]')) {
+      updateActiveGoalMutationField(event.target.dataset.activeGoalField, event.target.value);
+      return;
+    }
+
     if (event.target.matches('[data-prompt-restore-confirmation]')) {
       updatePromptEditorMutationField('restoreConfirmation', event.target.value);
       return;
@@ -24429,6 +24985,11 @@
 
     if (event.target.matches('[data-config-backup-select]')) {
       updateConfigRestoreMutationField('backupSelection', event.target.value);
+      return;
+    }
+
+    if (event.target.matches('[data-active-goal-field]')) {
+      updateActiveGoalMutationField(event.target.dataset.activeGoalField, event.target.value);
       return;
     }
 

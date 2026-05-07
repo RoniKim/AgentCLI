@@ -197,6 +197,111 @@ def _redact_web_todo_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return redacted
 
 
+def _redact_web_active_goal_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    redacted = deepcopy(payload)
+    for key in (
+        "path",
+        "dir",
+        "goal_dir",
+        "goalDir",
+        "events_path",
+        "eventsPath",
+        "etag",
+        "raw_text",
+        "rawText",
+    ):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
+
+    def redact_goal(goal: dict[str, Any]) -> dict[str, Any]:
+        goal_redacted = deepcopy(goal)
+        for key in ("objective", "notes"):
+            if goal_redacted.get(key) not in (None, "", False):
+                goal_redacted[key] = REDACTED_VALUE
+        source = goal_redacted.get("source")
+        if isinstance(source, dict):
+            source_redacted = deepcopy(source)
+            for key in ("actor", "prompt", "text", "detail"):
+                if source_redacted.get(key) not in (None, "", False):
+                    source_redacted[key] = REDACTED_VALUE
+            goal_redacted["source"] = source_redacted
+        evidence = goal_redacted.get("completion_evidence")
+        if evidence is None:
+            evidence = goal_redacted.get("completionEvidence")
+        if isinstance(evidence, list):
+            evidence_redacted = []
+            for item in evidence:
+                if not isinstance(item, dict):
+                    evidence_redacted.append(item)
+                    continue
+                next_item = deepcopy(item)
+                for key in ("text", "message", "summary", "ref", "path", "url"):
+                    if next_item.get(key) not in (None, "", False):
+                        next_item[key] = REDACTED_VALUE
+                evidence_redacted.append(next_item)
+            goal_redacted["completion_evidence"] = evidence_redacted
+            goal_redacted["completionEvidence"] = evidence_redacted
+        return goal_redacted
+
+    goal = redacted.get("goal")
+    if isinstance(goal, dict):
+        redacted["goal"] = redact_goal(goal)
+    recommendations = redacted.get("recommendations")
+    if isinstance(recommendations, dict):
+        rec_items = recommendations.get("recommendations") if isinstance(recommendations.get("recommendations"), list) else recommendations.get("items")
+        if isinstance(rec_items, list):
+            next_items = []
+            for item in rec_items:
+                if not isinstance(item, dict):
+                    next_items.append(item)
+                    continue
+                next_item = deepcopy(item)
+                for key in ("objective", "reason"):
+                    if next_item.get(key) not in (None, "", False):
+                        next_item[key] = REDACTED_VALUE
+                evidence = next_item.get("evidence")
+                if isinstance(evidence, list):
+                    for evidence_item in evidence:
+                        if isinstance(evidence_item, dict):
+                            for key in ("text", "summary", "ref", "path"):
+                                if evidence_item.get(key) not in (None, "", False):
+                                    evidence_item[key] = REDACTED_VALUE
+                next_items.append(next_item)
+            recommendations["recommendations"] = next_items
+            recommendations["items"] = next_items
+            redacted["recommendations"] = recommendations
+    timeline = redacted.get("timeline")
+    if isinstance(timeline, dict) and isinstance(timeline.get("items"), list):
+        next_timeline = []
+        for item in timeline.get("items") or []:
+            if not isinstance(item, dict):
+                next_timeline.append(item)
+                continue
+            next_item = deepcopy(item)
+            for key in ("objective", "title", "artifact"):
+                if next_item.get(key) not in (None, "", False):
+                    next_item[key] = REDACTED_VALUE
+            next_timeline.append(next_item)
+        timeline["items"] = next_timeline
+        redacted["timeline"] = timeline
+    for nested_key in ("active_goal", "activeGoal"):
+        nested = redacted.get(nested_key)
+        if isinstance(nested, dict):
+            redacted[nested_key] = _redact_web_active_goal_payload(nested)
+    redacted["redaction"] = _web_redaction_meta(
+        "path",
+        "etag",
+        "raw_text",
+        "rawText",
+        "goal.objective",
+        "goal.notes",
+        "goal.source.actor",
+        "goal.completion_evidence.text",
+        "goal.completion_evidence.ref",
+    )
+    return redacted
+
+
 def _redact_web_log_payload(payload: dict[str, Any]) -> dict[str, Any]:
     redacted = deepcopy(payload)
     entries = redacted.get("entries")
@@ -838,6 +943,7 @@ __all__ = [
     "_is_sensitive_config_key",
     "_lan_safety_blocks_mutations",
     "_redact_config",
+    "_redact_web_active_goal_payload",
     "_redact_web_backlog_item",
     "_redact_web_backlog_payload",
     "_redact_web_config_contract",

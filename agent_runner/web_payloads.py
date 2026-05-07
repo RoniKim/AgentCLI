@@ -830,6 +830,26 @@ def build_history_item(
     report_summary = _pick_text(final_run_report.get("summary"), "")
     report_status = _pick_text(final_run_report.get("status"), "")
     qa_report_status = _pick_text(qa_validation_report.get("status"), "")
+    active_goal_context = (
+        final_run_report.get("active_goal_context")
+        if isinstance(final_run_report.get("active_goal_context"), dict)
+        else final_run_report.get("activeGoalContext")
+        if isinstance(final_run_report.get("activeGoalContext"), dict)
+        else qa_validation_report.get("active_goal_context")
+        if isinstance(qa_validation_report.get("active_goal_context"), dict)
+        else qa_validation_report.get("activeGoalContext")
+        if isinstance(qa_validation_report.get("activeGoalContext"), dict)
+        else {}
+    )
+    active_goal_progress = (
+        final_run_report.get("active_goal_progress")
+        if isinstance(final_run_report.get("active_goal_progress"), dict)
+        else final_run_report.get("activeGoalProgress")
+        if isinstance(final_run_report.get("activeGoalProgress"), dict)
+        else active_goal_context.get("progress")
+        if isinstance(active_goal_context.get("progress"), dict)
+        else {}
+    )
     failed_tasks = cycle_change_summary.get("failed_tasks") if isinstance(cycle_change_summary.get("failed_tasks"), dict) else {}
 
     last_cycle = _tail_text(run_dir / "cycle_summary.log", 1).strip()
@@ -898,6 +918,10 @@ def build_history_item(
         "qa_validation_report": qa_validation_report,
         "finalRunReport": final_run_report,
         "final_run_report": final_run_report,
+        "activeGoalContext": active_goal_context,
+        "active_goal_context": active_goal_context,
+        "activeGoalProgress": active_goal_progress,
+        "active_goal_progress": active_goal_progress,
         "cycleChangeSummary": cycle_change_summary,
         "cycle_change_summary": cycle_change_summary,
         "operationsSummary": operations_summary,
@@ -1598,6 +1622,7 @@ def build_snapshot(
     _build_pr_queue_payload = web._build_pr_queue_payload
     _build_experience_payload = web._build_experience_payload
     build_todo_status = web.build_todo_status
+    build_active_goal_status = web.build_active_goal_status
     build_skills_status = web.build_skills_status
     selected_skill_ids_from_tasks = web.selected_skill_ids_from_tasks
     scan_worktree_diagnostics = web.scan_worktree_diagnostics
@@ -1619,6 +1644,7 @@ def build_snapshot(
     _redact_web_history_payload = web._redact_web_history_payload
     _redact_web_pr_queue_payload = web._redact_web_pr_queue_payload
     _redact_web_todo_payload = web._redact_web_todo_payload
+    _redact_web_active_goal_payload = web._redact_web_active_goal_payload
     _redact_web_runner_control = web._redact_web_runner_control
     _resolve_log_tail_source_record = web._resolve_log_tail_source_record
     _build_log_tail_payload = web._build_log_tail_payload
@@ -1696,6 +1722,7 @@ def build_snapshot(
     goals = _build_goals_payload(repo_root, completion_level=goals_completion_level)
     prompt_items = _load_prompt_items(repo_root, prompts_dir, profile=profile)
     todo = build_todo_status(repo_root, include_preview=True)
+    active_goal = build_active_goal_status(repo_root)
     branch = _branch_name(repo_root)
     controller = runner_controller
     if controller is None and runner_controller_auto_build:
@@ -1885,6 +1912,7 @@ def build_snapshot(
     history = _web_apply_redaction(history, active=redaction_active, redactor=_redact_web_history_payload)
     pr_queue = _web_apply_redaction(pr_queue, active=redaction_active, redactor=_redact_web_pr_queue_payload)
     todo = _web_apply_redaction(todo, active=redaction_active, redactor=_redact_web_todo_payload)
+    active_goal = _web_apply_redaction(active_goal, active=redaction_active, redactor=_redact_web_active_goal_payload)
     runner_control = _web_apply_redaction(
         runner_control,
         active=redaction_active,
@@ -2107,6 +2135,20 @@ def build_snapshot(
         "ready" if todo_state == "ready" else "partial" if todo_state in {"empty", "stale"} else "empty" if todo_state == "missing" else "error",
         str(todo.get("message") or fallbackSectionMessage("todo")) if isinstance(todo, dict) else fallbackSectionMessage("todo"),
     )
+    active_goal_state = (
+        str(active_goal.get("state") or "missing").strip().lower() if isinstance(active_goal, dict) else "missing"
+    )
+    active_goal_section_state = buildSectionState(
+        "activeGoal",
+        "ready"
+        if active_goal_state == "active"
+        else "partial"
+        if active_goal_state in {"completed", "canceled"}
+        else "empty"
+        if active_goal_state == "missing"
+        else "error",
+        str(active_goal.get("message") or "No active goal is set.") if isinstance(active_goal, dict) else "No active goal is set.",
+    )
     skills_enabled = bool(skills_status.get("enabled")) if isinstance(skills_status, dict) else False
     skills_warnings = skills_status.get("warnings") if isinstance(skills_status, dict) and isinstance(skills_status.get("warnings"), list) else []
     skills_missing = skills_status.get("missing_skill_ids") if isinstance(skills_status, dict) and isinstance(skills_status.get("missing_skill_ids"), list) else []
@@ -2309,6 +2351,8 @@ def build_snapshot(
         "metrics": metrics,
         "notifications": notifications,
         "todo": todo,
+        "active_goal": active_goal,
+        "activeGoal": active_goal,
         "skills_status": skills_status,
         "skillsStatus": skills_status,
         "plugin_status": plugin_status,
@@ -2362,6 +2406,8 @@ def build_snapshot(
             "backlogComplete": bool(progress.get("backlogComplete", progress.get("backlog_complete", False))),
             "goals": progress.get("goals", {}),
             "backlog": backlog,
+            "active_goal": active_goal,
+            "activeGoal": active_goal,
             "final_reason": progress.get("final_reason", ""),
             "final_rc": progress.get("final_rc"),
             "state": state,
@@ -2388,6 +2434,7 @@ def build_snapshot(
             "logs": logs_section_state,
             "notifications": notifications_section_state,
             "todo": todo_section_state,
+            "activeGoal": active_goal_section_state,
             "skills": skills_section_state,
             "plugins": plugins_section_state,
             "enterprise": enterprise_section_state,
@@ -2583,6 +2630,8 @@ def status_snapshot_for_scope(snapshot: dict[str, Any], *, scope: str = "full") 
         "mcp_diagnostics": snapshot.get("mcp_diagnostics", {}),
         "mcpDiagnostics": snapshot.get("mcpDiagnostics", snapshot.get("mcp_diagnostics", {})),
         "todo": snapshot.get("todo", {}),
+        "active_goal": snapshot.get("active_goal", {}),
+        "activeGoal": snapshot.get("activeGoal", snapshot.get("active_goal", {})),
         "skills_status": snapshot.get("skills_status", {}),
         "skillsStatus": snapshot.get("skillsStatus", snapshot.get("skills_status", {})),
         "plugin_status": snapshot.get("plugin_status", {}),

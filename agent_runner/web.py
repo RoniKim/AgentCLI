@@ -91,6 +91,23 @@ from .state import TaskItem, count_state_task_ids, load_backlog_json, load_backl
 from .skills.status import build_skills_status, selected_skill_ids_from_tasks
 from .task_history import query_history
 from .todo import TODO_CONTENT_MAX_CHARS, build_todo_status, save_current_todo_text
+from .active_goal import (
+    ActiveGoalConflict,
+    ActiveGoalError,
+    build_active_goal_analytics,
+    build_active_goal_status,
+    build_active_goal_timeline,
+    cancel_active_goal,
+    clear_active_goal,
+    complete_active_goal,
+    create_active_goal,
+    export_active_goal_state,
+    import_active_goal_state,
+    list_active_goal_autonomy_presets,
+    list_active_goal_templates,
+    recommend_next_active_goals,
+    update_active_goal,
+)
 from .failure_policy import (
     STATUS_GROUP_BLOCKED_ENV,
     STATUS_GROUP_REGRESSION,
@@ -103,6 +120,7 @@ from . import web_payloads as _web_payloads
 from .web_redaction import (
     _lan_safety_blocks_mutations,
     _redact_config,
+    _redact_web_active_goal_payload,
     _redact_web_backlog_item,
     _redact_web_backlog_payload,
     _redact_web_config_contract,
@@ -6597,6 +6615,19 @@ def create_app(
         payload = _build_goals_payload(repo_root, completion_level=completion_level)
         return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_goals_payload)
 
+    def _active_goal(*, include_intelligence: bool = False) -> dict[str, Any]:
+        payload = build_active_goal_status(repo_root)
+        if include_intelligence:
+            payload = dict(payload)
+            payload["templates"] = list_active_goal_templates()
+            payload["activeGoalTemplates"] = payload["templates"]
+            payload["autonomy_presets"] = list_active_goal_autonomy_presets()
+            payload["autonomyPresets"] = payload["autonomy_presets"]
+            payload["recommendations"] = recommend_next_active_goals(repo_root)
+            payload["timeline"] = build_active_goal_timeline(repo_root)
+            payload["analytics"] = build_active_goal_analytics(repo_root)
+        return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_active_goal_payload)
+
     def _runner_control_snapshot() -> dict[str, Any]:
         snap = _snapshot()
         control = snap.get("runner_control", {})
@@ -8282,6 +8313,8 @@ def create_app(
             "config": snap.get("config", {}),
             "prompts": snap.get("prompts", {}),
             "todo": snap.get("todo", {}),
+            "active_goal": snap.get("active_goal", {}),
+            "activeGoal": snap.get("activeGoal", snap.get("active_goal", {})),
             "history": snap.get("history", {}),
             "metrics": snap.get("metrics", {}),
             "notifications": snap.get("notifications", []),
@@ -8713,6 +8746,303 @@ def create_app(
             preview_max_chars=char_limit,
         )
         return _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_todo_payload)
+
+    @app.get("/api/active-goal")
+    def api_active_goal() -> dict[str, Any]:
+        return _active_goal(include_intelligence=True)
+
+    @app.get("/api/active-goal/templates")
+    def api_active_goal_templates() -> dict[str, Any]:
+        return _web_apply_redaction(list_active_goal_templates(), active=web_redaction_active, redactor=_redact_web_active_goal_payload)
+
+    @app.get("/api/active-goal/presets")
+    def api_active_goal_presets() -> dict[str, Any]:
+        return _web_apply_redaction(
+            list_active_goal_autonomy_presets(),
+            active=web_redaction_active,
+            redactor=_redact_web_active_goal_payload,
+        )
+
+    @app.get("/api/active-goal/recommendations")
+    def api_active_goal_recommendations() -> dict[str, Any]:
+        return _web_apply_redaction(
+            recommend_next_active_goals(repo_root),
+            active=web_redaction_active,
+            redactor=_redact_web_active_goal_payload,
+        )
+
+    @app.get("/api/active-goal/timeline")
+    def api_active_goal_timeline() -> dict[str, Any]:
+        return _web_apply_redaction(
+            build_active_goal_timeline(repo_root),
+            active=web_redaction_active,
+            redactor=_redact_web_active_goal_payload,
+        )
+
+    @app.get("/api/active-goal/analytics")
+    def api_active_goal_analytics() -> dict[str, Any]:
+        return _web_apply_redaction(
+            build_active_goal_analytics(repo_root),
+            active=web_redaction_active,
+            redactor=_redact_web_active_goal_payload,
+        )
+
+    @app.get("/api/active-goal/export")
+    def api_active_goal_export() -> dict[str, Any]:
+        return _web_apply_redaction(
+            export_active_goal_state(repo_root),
+            active=web_redaction_active,
+            redactor=_redact_web_active_goal_payload,
+        )
+
+    def _active_goal_action_route(action: str) -> str:
+        return f"/api/active-goal/{action}"
+
+    def _active_goal_audit_result(status: dict[str, Any] | None, *, mutation: str) -> dict[str, Any]:
+        raw_status = status if isinstance(status, dict) else {}
+        goal = raw_status.get("goal") if isinstance(raw_status.get("goal"), dict) else {}
+        budgets = goal.get("budgets") if isinstance(goal.get("budgets"), dict) else {}
+        return {
+            "mutation": mutation,
+            "goal_id": str(goal.get("id") or ""),
+            "active": bool(raw_status.get("active")),
+            "state": str(raw_status.get("state") or ""),
+            "goal_status": str(goal.get("status") or ""),
+            "mode": str(goal.get("mode") or ""),
+            "revision": int(goal.get("revision") or raw_status.get("revision") or 0),
+            "token_budget": int(budgets.get("token_budget") or 0),
+            "time_budget_seconds": int(budgets.get("time_budget_seconds") or 0),
+            "cycle_budget": int(budgets.get("cycle_budget") or 0),
+            "does_not_override_goals": bool(
+                (raw_status.get("pmInjection") if isinstance(raw_status.get("pmInjection"), dict) else {}).get(
+                    "doesNotOverrideGoals",
+                    True,
+                )
+            ),
+        }
+
+    def _active_goal_action_error(status_code: int, action: str, code: str, message: str, **details: Any) -> JSONResponse:
+        route = _active_goal_action_route(action)
+        payload: dict[str, Any] = {
+            "ok": False,
+            "action": f"active-goal-{action}",
+            "status": "error",
+            "message": message,
+            "active_goal": _active_goal(),
+            "activeGoal": _active_goal(),
+            "error": {
+                "code": code,
+                "message": message,
+            },
+        }
+        if details:
+            payload["error"]["details"] = details
+        _record_web_action(
+            action=f"active_goal.{action}",
+            route=route,
+            status=_audit_error_status(status_code, code),
+            ok=False,
+            message=message,
+            error_code=code,
+            details=details,
+        )
+        redacted = _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_active_goal_payload)
+        return JSONResponse(status_code=status_code, content=redacted)
+
+    def _active_goal_action_success(action: str, status: dict[str, Any], message: str) -> JSONResponse:
+        snapshot = _snapshot(busy_override=False)
+        payload = {
+            "ok": True,
+            "action": f"active-goal-{action}",
+            "status": str(status.get("state") or "saved"),
+            "message": message,
+            "active_goal": status,
+            "activeGoal": status,
+            "snapshot": snapshot,
+        }
+        _record_web_action(
+            action=f"active_goal.{action}",
+            route=_active_goal_action_route(action),
+            status=str(status.get("state") or action),
+            ok=True,
+            message=message,
+            result=_active_goal_audit_result(status, mutation=action),
+        )
+        redacted = _web_apply_redaction(payload, active=web_redaction_active, redactor=_redact_web_active_goal_payload)
+        return JSONResponse(status_code=200, content=redacted)
+
+    def _active_goal_body_etag(body: dict[str, Any]) -> str:
+        return _pick_text(body.get("etag"), body.get("expected_etag"), body.get("expectedEtag"), body.get("if_match"), body.get("ifMatch"))
+
+    def _active_goal_body_budget(body: dict[str, Any], *names: str) -> int | None:
+        present = any(name in body for name in names)
+        raw = _pick_value(*(body.get(name) for name in names))
+        if not present:
+            return None
+        parsed = _coerce_optional_int(raw)
+        if parsed is None:
+            raise ActiveGoalError(f"Active goal budget must be numeric: {names[0]}")
+        return max(0, parsed)
+
+    async def _handle_active_goal_action(action: str, request: Request) -> Any:
+        if lan_safety_active:
+            return _active_goal_action_error(
+                403,
+                action,
+                "lan_safety_mutation_blocked",
+                LAN_SAFETY_MUTATION_DISABLED_MESSAGE,
+                **_lan_safety_error_details(f"active-goal-{action}"),
+            )
+        if not controls_enabled:
+            return _active_goal_action_error(
+                403,
+                action,
+                "active_goal_controls_disabled",
+                controls_disabled_reason or "Active goal mutations require runner controls to be enabled.",
+            )
+        if not control_lock.acquire(blocking=False):
+            return _active_goal_action_error(409, action, "active_goal_busy", "A mutating action is already in flight.")
+        try:
+            body = await _config_save_body(request)
+            if body is None:
+                return _active_goal_action_error(400, action, "invalid_json", "Active goal request body must be JSON.")
+            expected_etag = _active_goal_body_etag(body)
+            if action == "create":
+                objective = _pick_text(
+                    body.get("objective"),
+                    body.get("text"),
+                    body.get("goal"),
+                    body.get("active_goal_objective"),
+                    body.get("activeGoalObjective"),
+                )
+                if not objective:
+                    return _active_goal_action_error(400, action, "active_goal_objective_required", "Active goal objective is required.")
+                replace = _coerce_optional_bool(body.get("replace"))
+                status = create_active_goal(
+                    repo_root,
+                    objective,
+                    mode=_pick_text(body.get("mode"), body.get("execution_mode"), body.get("executionMode")) or "adaptive",
+                    token_budget=_active_goal_body_budget(body, "token_budget", "tokenBudget") or 0,
+                    time_budget_seconds=_active_goal_body_budget(body, "time_budget_seconds", "timeBudgetSeconds") or 0,
+                    cycle_budget=_active_goal_body_budget(body, "cycle_budget", "cycleBudget") or 0,
+                    template_key=_pick_text(body.get("template_key"), body.get("templateKey"), body.get("template")) or "",
+                    autonomy_preset_key=_pick_text(
+                        body.get("autonomy_preset_key"),
+                        body.get("autonomyPresetKey"),
+                        body.get("preset"),
+                    )
+                    or "",
+                    source={"kind": "operator", "surface": "web"},
+                    replace=bool(replace),
+                    expected_etag=expected_etag,
+                )
+                return _active_goal_action_success(action, status, "Active goal created.")
+
+            if action == "update":
+                update_kwargs: dict[str, Any] = {"expected_etag": expected_etag}
+                if any(key in body for key in ("objective", "text", "goal", "active_goal_objective", "activeGoalObjective")):
+                    update_kwargs["objective"] = _pick_text(
+                        body.get("objective"),
+                        body.get("text"),
+                        body.get("goal"),
+                        body.get("active_goal_objective"),
+                        body.get("activeGoalObjective"),
+                    )
+                if any(key in body for key in ("mode", "execution_mode", "executionMode")):
+                    update_kwargs["mode"] = _pick_text(body.get("mode"), body.get("execution_mode"), body.get("executionMode"))
+                if any(key in body for key in ("template_key", "templateKey", "template")):
+                    update_kwargs["template_key"] = _pick_text(body.get("template_key"), body.get("templateKey"), body.get("template"))
+                if any(key in body for key in ("autonomy_preset_key", "autonomyPresetKey", "preset")):
+                    update_kwargs["autonomy_preset_key"] = _pick_text(
+                        body.get("autonomy_preset_key"),
+                        body.get("autonomyPresetKey"),
+                        body.get("preset"),
+                    )
+                if any(key in body for key in ("notes", "note")):
+                    update_kwargs["notes"] = str(_pick_value(body.get("notes"), body.get("note")) or "")
+                for target, names in {
+                    "token_budget": ("token_budget", "tokenBudget"),
+                    "time_budget_seconds": ("time_budget_seconds", "timeBudgetSeconds"),
+                    "cycle_budget": ("cycle_budget", "cycleBudget"),
+                }.items():
+                    parsed_budget = _active_goal_body_budget(body, *names)
+                    if parsed_budget is not None:
+                        update_kwargs[target] = parsed_budget
+                if set(update_kwargs) == {"expected_etag"}:
+                    return _active_goal_action_error(400, action, "active_goal_update_empty", "Active goal update has no changes.")
+                status = update_active_goal(repo_root, **update_kwargs)
+                return _active_goal_action_success(action, status, "Active goal updated.")
+
+            if action == "complete":
+                evidence = _pick_value(body.get("evidence"), body.get("text"), body.get("message"), body.get("summary"))
+                evidence_text = str(evidence or "").strip()
+                if not evidence_text:
+                    return _active_goal_action_error(
+                        400,
+                        action,
+                        "active_goal_completion_evidence_required",
+                        "Active goal completion requires evidence text.",
+                    )
+                status = complete_active_goal(repo_root, evidence=evidence_text, expected_etag=expected_etag)
+                return _active_goal_action_success(action, status, "Active goal completed.")
+
+            if action == "cancel":
+                status = cancel_active_goal(
+                    repo_root,
+                    reason=_pick_text(body.get("reason"), body.get("message"), body.get("text")),
+                    expected_etag=expected_etag,
+                )
+                return _active_goal_action_success(action, status, "Active goal canceled.")
+
+            if action == "clear":
+                status = clear_active_goal(repo_root, expected_etag=expected_etag)
+                return _active_goal_action_success(action, status, "Active goal cleared.")
+
+            if action == "import":
+                import_payload = body.get("payload") if isinstance(body.get("payload"), dict) else body.get("export")
+                if not isinstance(import_payload, dict):
+                    import_payload = body
+                status = import_active_goal_state(
+                    repo_root,
+                    import_payload,
+                    replace=bool(_coerce_optional_bool(body.get("replace"))),
+                    expected_etag=expected_etag,
+                )
+                return _active_goal_action_success(action, status, "Active goal imported.")
+
+            return _active_goal_action_error(404, action, "active_goal_action_unknown", "Unknown active goal action.")
+        except ActiveGoalConflict as ex:
+            return _active_goal_action_error(409, action, "active_goal_conflict", str(ex))
+        except ActiveGoalError as ex:
+            return _active_goal_action_error(400, action, "active_goal_invalid", str(ex))
+        except Exception as ex:
+            return _active_goal_action_error(500, action, "active_goal_failed", f"Active goal {action} failed: {ex}")
+        finally:
+            control_lock.release()
+
+    @app.post("/api/active-goal/create")
+    async def api_active_goal_create(request: Request) -> Any:
+        return await _handle_active_goal_action("create", request)
+
+    @app.post("/api/active-goal/update")
+    async def api_active_goal_update(request: Request) -> Any:
+        return await _handle_active_goal_action("update", request)
+
+    @app.post("/api/active-goal/complete")
+    async def api_active_goal_complete(request: Request) -> Any:
+        return await _handle_active_goal_action("complete", request)
+
+    @app.post("/api/active-goal/cancel")
+    async def api_active_goal_cancel(request: Request) -> Any:
+        return await _handle_active_goal_action("cancel", request)
+
+    @app.post("/api/active-goal/clear")
+    async def api_active_goal_clear(request: Request) -> Any:
+        return await _handle_active_goal_action("clear", request)
+
+    @app.post("/api/active-goal/import")
+    async def api_active_goal_import(request: Request) -> Any:
+        return await _handle_active_goal_action("import", request)
 
     def _todo_save_error(status_code: int, code: str, message: str, **details: Any) -> JSONResponse:
         payload = {
