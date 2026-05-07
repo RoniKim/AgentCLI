@@ -66,6 +66,7 @@ from .active_goal import (
     active_goal_role_context,
     active_goal_role_context_from_task_snapshot,
     build_active_goal_status,
+    format_active_goal_block_from_task_snapshot,
     format_active_goal_block,
     increment_active_goal_usage,
 )
@@ -2378,10 +2379,9 @@ async def main_async(args: argparse.Namespace) -> int:
                     active_goal_status = build_active_goal_status(source_repo if worktree_dir is not None else repo)
                     dev_prompt = append_active_goal_context(
                         dev_prompt,
-                        active_goal_block=format_active_goal_block(
-                            {"active": True, "goal": next_task.active_goal}
-                            if isinstance(next_task.active_goal, dict)
-                            else active_goal_status
+                        active_goal_block=format_active_goal_block_from_task_snapshot(
+                            next_task.active_goal,
+                            fallback_status=active_goal_status,
                         ),
                         role="Dev",
                     )

@@ -2089,6 +2089,17 @@ def active_goal_role_context_from_task_snapshot(
     return active_goal_role_context(fallback_status, role=role)
 
 
+def format_active_goal_block_from_task_snapshot(
+    active_goal: dict[str, Any] | None,
+    *,
+    fallback_status: dict[str, Any] | None = None,
+) -> str:
+    """Format prompt context from a task-bound active-goal snapshot when present."""
+    if isinstance(active_goal, dict) and str(active_goal.get("id") or "").strip() and str(active_goal.get("objective") or "").strip():
+        return format_active_goal_block({"active": True, "goal": dict(active_goal)})
+    return format_active_goal_block(fallback_status)
+
+
 def attach_active_goal_to_tasks(tasks: list[dict[str, Any]], status: dict[str, Any] | None) -> list[dict[str, Any]]:
     metadata = active_goal_task_metadata(status)
     if not metadata:

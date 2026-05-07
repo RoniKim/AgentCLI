@@ -44,6 +44,7 @@ from agent_runner.active_goal import (
     complete_active_goal,
     create_active_goal,
     export_active_goal_state,
+    format_active_goal_block_from_task_snapshot,
     format_active_goal_block,
     increment_active_goal_usage,
     import_active_goal_state,
@@ -287,6 +288,8 @@ class ActiveGoalTests(unittest.TestCase):
 
         for source in (codex_source, claude_source):
             self.assertIn("append_active_goal_context", source)
+            self.assertIn("format_active_goal_block_from_task_snapshot", source)
+            self.assertIn("active_goal_role_context_from_task_snapshot", source)
             self.assertIn('role="Dev"', source)
             self.assertIn('role="QA"', source)
             self.assertIn('role="Reporter"', source)
@@ -762,6 +765,10 @@ class ActiveGoalTests(unittest.TestCase):
         create_active_goal(self.repo, "New live active goal", replace=True)
 
         context = active_goal_role_context_from_task_snapshot(original_snapshot, role="Validation")
+        prompt_block = format_active_goal_block_from_task_snapshot(
+            original_snapshot,
+            fallback_status=build_active_goal_status(self.repo),
+        )
         record_history(
             self.repo,
             self.root / "run-drift",
@@ -775,6 +782,8 @@ class ActiveGoalTests(unittest.TestCase):
         rows = query_history(self.repo, max_items=1)
         self.assertEqual(original["goal"]["id"], context["active_goal_id"])
         self.assertEqual("Original task-bound active goal", context["active_goal"]["objective"])
+        self.assertIn("Original task-bound active goal", prompt_block)
+        self.assertNotIn("New live active goal", prompt_block)
         self.assertEqual(original["goal"]["id"], rows[0]["active_goal_id"])
         self.assertEqual("Original task-bound active goal", rows[0]["active_goal"]["objective"])
 
