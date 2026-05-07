@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 import uuid
 
 from agent_runner.analyzer import write_analyzer_artifacts
-from agent_runner.experience import experience_db_path, list_lessons
+from agent_runner.active_goal import active_goal_role_context, build_active_goal_status, create_active_goal, increment_active_goal_usage
+from agent_runner.experience import experience_db_path, list_lessons, load_pm_experience_summary
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -57,6 +59,7 @@ def _write_validation(
     records: list[dict] | None = None,
     detail: str = "",
     goal_refs: list[str] | None = None,
+    active_goal_context: dict | None = None,
 ) -> Path:
     path = run_dir / "tasks" / task_id / "attempt_01" / "validation.json"
     payload = {
@@ -72,6 +75,9 @@ def _write_validation(
         "goal_trace": [{"goal_ref": ref} for ref in (goal_refs or [])],
         "validation_records": records or [],
     }
+    if active_goal_context:
+        payload["active_goal_context"] = active_goal_context
+        payload["activeGoalContext"] = active_goal_context
     _write_json(path, payload)
     return path
 
@@ -168,6 +174,87 @@ class ExperienceAnalyzerLessonsTests(unittest.TestCase):
         self.assertEqual("validation_gap", lesson["task_status"])
         self.assertEqual("no_tests_found", lesson["validation_status"])
         self.assertEqual(["P0-U"], lesson["goal_refs"])
+
+    def test_analyzer_summary_records_subordinate_active_goal_context(self) -> None:
+        repo = self._repo_path()
+        run_dir = repo / ".AgentCLI" / "agent_runs" / "20260503-121500"
+        active_goal = create_active_goal(repo, "Learn from active goal validations", mode="adaptive")
+        _write_backlog(run_dir, task_id="T12", files=["agent_runner/analyzer.py"])
+        _write_state(run_dir, failed=[])
+
+        summary = write_analyzer_artifacts(repo, run_dir)["summary"]
+
+        context = summary["active_goal_context"]
+        self.assertEqual("Analyzer", context["role"])
+        self.assertEqual(active_goal["goal"]["id"], context["active_goal_id"])
+        self.assertTrue(context["subordinate_to_goals_md"])
+        self.assertEqual("goals_first", context["priority_policy"])
+
+    def test_active_goal_lessons_feed_future_pm_summary(self) -> None:
+        repo = self._repo_path()
+        run_dir = repo / ".AgentCLI" / "agent_runs" / "20260503-121700"
+        active_goal = create_active_goal(repo, "Learn from active goal decomposition gaps", cycle_budget=1)
+        increment_active_goal_usage(repo, cycles_used=1)
+        active_status = build_active_goal_status(repo)
+        active_context = active_goal_role_context(active_status, role="Validation")
+        active_goal_id = active_goal["goal"]["id"]
+
+        _write_json(
+            run_dir / "BACKLOG.json",
+            {
+                "generated_at": "2026-05-03T12:17:00",
+                "tasks": [
+                    {
+                        "id": "T12",
+                        "title": "Active goal broad task",
+                        "prompt": "Implement active goal broad task.",
+                        "files": ["agent_runner/active_goal.py", "web_console/app.js"],
+                        "done_when": "Validation exists.",
+                        "active_goal_id": active_goal_id,
+                        "activeGoalId": active_goal_id,
+                        "active_goal": active_status["goal"],
+                        "activeGoal": active_status["goal"],
+                    }
+                ],
+            },
+        )
+        _write_state(run_dir, failed=["T12"])
+        _write_json(
+            run_dir / "BACKLOG_REFINEMENT_cycle_000.json",
+            {
+                "items": [
+                    {
+                        "task_id": "T12",
+                        "decision": "split",
+                        "active_goal_id": active_goal_id,
+                        "activeGoalId": active_goal_id,
+                        "split_axes": ["file_scope", "risk", "dependency", "remaining_budget"],
+                        "reason": "active goal touches broad runtime and UI scope",
+                        "children": ["T12a", "T12b"],
+                    }
+                ]
+            },
+        )
+        _write_validation(
+            run_dir,
+            task_id="T12",
+            gate="test",
+            status="no_tests_found",
+            active_goal_context=active_context,
+        )
+
+        summary = write_analyzer_artifacts(repo, run_dir)["summary"]
+
+        kinds = {lesson["kind"] for lesson in summary["lessons"]}
+        self.assertIn("active_goal_decomposition", kinds)
+        self.assertIn("active_goal_validation_gap", kinds)
+        self.assertIn("active_goal_budget", kinds)
+        lessons = list_lessons(repo)
+        self.assertTrue(any(lesson["kind"] == "active_goal_budget" for lesson in lessons))
+        pm_summary = load_pm_experience_summary(repo, run_dir, SimpleNamespace(experience={}))
+        self.assertIn("decompose broad tasks", pm_summary)
+        self.assertIn("Do not complete active-goal work", pm_summary)
+        self.assertIn("budget is exhausted", pm_summary)
 
     def test_pr_decision_lesson_keeps_goal_refs_and_evidence_pointers(self) -> None:
         repo = self._repo_path()

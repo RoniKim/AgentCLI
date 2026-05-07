@@ -3503,6 +3503,125 @@ class WebConsoleSafetyTests(unittest.TestCase):
         backups = list(self.goals_path.parent.glob(f"{self.goals_path.stem}.*.bak{self.goals_path.suffix}"))
         self.assertEqual([], backups)
 
+    def test_active_goal_mutations_require_opt_in_and_block_lan(self) -> None:
+        from agent_runner.active_goal import active_goal_path
+
+        client, _ = _create_client(self.repo, enable_runner_controls=False, config_path=self.config_path)
+        response = client.post("/api/active-goal/create", json={"objective": "Blocked active goal"})
+        self.assertEqual(403, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("active_goal_controls_disabled", payload["error"]["code"])
+        self.assertFalse(active_goal_path(self.repo).exists())
+
+        lan_client, _ = _create_client(
+            self.repo,
+            enable_runner_controls=True,
+            config_path=self.config_path,
+            host="0.0.0.0",
+        )
+        lan_response = lan_client.post("/api/active-goal/create", json={"objective": "LAN blocked active goal"})
+        self.assertEqual(403, lan_response.status_code)
+        lan_payload = lan_response.json()
+        self.assertFalse(lan_payload["ok"])
+        self.assertEqual("lan_safety_mutation_blocked", lan_payload["error"]["code"])
+        self.assertFalse(active_goal_path(self.repo).exists())
+
+    def test_active_goal_web_create_update_complete_use_etag_and_audit(self) -> None:
+        secret = "DO_NOT_LOG_ACTIVE_GOAL_SECRET_20260507"
+        client, app = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+
+        self.assertTrue(app.state.runner_control_lock.acquire(blocking=False))
+        try:
+            busy_response = client.post("/api/active-goal/create", json={"objective": "Busy active goal"})
+        finally:
+            app.state.runner_control_lock.release()
+        self.assertEqual(409, busy_response.status_code)
+        self.assertEqual("active_goal_busy", busy_response.json()["error"]["code"])
+
+        created_response = client.post(
+            "/api/active-goal/create",
+            json={
+                "objective": f"Ship active goal web mutation {secret}",
+                "mode": "strict",
+                "templateKey": "bug_fix",
+                "autonomyPresetKey": "one_shot",
+                "cycleBudget": 3,
+            },
+        )
+        self.assertEqual(200, created_response.status_code)
+        created = created_response.json()
+        self.assertTrue(created["ok"])
+        self.assertEqual("active", created["activeGoal"]["state"])
+        self.assertEqual("strict", created["activeGoal"]["goal"]["mode"])
+        self.assertEqual("bug_fix", created["activeGoal"]["goal"]["template"]["key"])
+        self.assertEqual("one_shot", created["activeGoal"]["goal"]["autonomy_preset"]["key"])
+        self.assertEqual(3, created["activeGoal"]["goal"]["budgets"]["cycle_budget"])
+        first_etag = created["activeGoal"]["etag"]
+
+        updated_response = client.post(
+            "/api/active-goal/update",
+            json={
+                "etag": first_etag,
+                "objective": f"Ship active goal web mutation updated {secret}",
+                "mode": "adaptive",
+                "notes": f"Local operator note {secret}",
+            },
+        )
+        self.assertEqual(200, updated_response.status_code)
+        updated = updated_response.json()
+        self.assertEqual("adaptive", updated["activeGoal"]["goal"]["mode"])
+        self.assertEqual(2, updated["activeGoal"]["goal"]["revision"])
+
+        stale_response = client.post(
+            "/api/active-goal/update",
+            json={"etag": first_etag, "objective": "Stale update should fail"},
+        )
+        self.assertEqual(409, stale_response.status_code)
+        stale_payload = stale_response.json()
+        self.assertFalse(stale_payload["ok"])
+        self.assertEqual("active_goal_conflict", stale_payload["error"]["code"])
+
+        evidence_missing = client.post("/api/active-goal/complete", json={"etag": updated["activeGoal"]["etag"]})
+        self.assertEqual(400, evidence_missing.status_code)
+        self.assertEqual("active_goal_completion_evidence_required", evidence_missing.json()["error"]["code"])
+
+        completed_response = client.post(
+            "/api/active-goal/complete",
+            json={
+                "etag": updated["activeGoal"]["etag"],
+                "evidence": f"Validation artifacts reviewed {secret}",
+            },
+        )
+        self.assertEqual(200, completed_response.status_code)
+        completed = completed_response.json()
+        self.assertFalse(completed["activeGoal"]["active"])
+        self.assertEqual("completed", completed["activeGoal"]["state"])
+
+        export_payload = client.get("/api/active-goal/export").json()
+        import_response = client.post(
+            "/api/active-goal/import",
+            json={"payload": export_payload, "replace": True},
+        )
+        self.assertEqual(200, import_response.status_code)
+        imported = import_response.json()
+        self.assertEqual("import", imported["activeGoal"]["goal"]["source"]["kind"])
+
+        records = self._read_web_action_audit()
+        actions = [record["action"] for record in records]
+        self.assertIn("active_goal.create", actions)
+        self.assertIn("active_goal.update", actions)
+        self.assertIn("active_goal.complete", actions)
+        self.assertIn("active_goal.import", actions)
+        self.assertIn("active_goal.create", [record["action"] for record in records if record["status"] == "busy"])
+        self.assertIn("active_goal.update", [record["action"] for record in records if record["status"] == "conflict"])
+        complete_record = next(record for record in records if record["action"] == "active_goal.complete" and record["ok"])
+        self.assertEqual("completed", complete_record["result"]["state"])
+        self.assertTrue(complete_record["result"]["does_not_override_goals"])
+
+        audit_text = self._web_action_audit_path().read_text(encoding="utf-8", errors="replace")
+        self.assertNotIn(secret, audit_text)
+
     def test_goals_save_creates_backup_and_updates_file(self) -> None:
         from agent_runner import web_goals
         from agent_runner.web import _goal_save_serialize_draft
@@ -3699,6 +3818,54 @@ class WebConsoleSafetyTests(unittest.TestCase):
                 self.assertEqual(original, self.goals_path.read_text(encoding="utf-8"))
                 backups = list(self.goals_path.parent.glob(f"{self.goals_path.stem}.*.bak{self.goals_path.suffix}"))
                 self.assertEqual([], backups)
+
+    def test_goals_structured_save_blocks_lossy_subgroups_and_raw_markdown(self) -> None:
+        _write_config(self.config_path, self.repo)
+        client, _ = _create_client(self.repo, enable_runner_controls=True, config_path=self.config_path)
+        original = """# Project Goals
+
+Project-level note that structured drafts cannot preserve.
+
+## P0
+
+### P0-A. Foundation
+
+- [x] Expose read-only progress views
+- [ ] Add FastAPI web console
+Manual implementation note.
+
+## P1
+- [ ] Surface the safety banner
+
+## Completion Criteria
+- Keep non-priority notes.
+"""
+        _write(self.goals_path, original)
+
+        response = client.post(
+            "/api/goals/save",
+            json={
+                "draft": {
+                    "p0": [
+                        self._goal_item("Expose read-only progress views", done=True),
+                        self._goal_item("Add FastAPI web console", done=False),
+                    ],
+                    "p1": [self._goal_item("Surface the safety banner", done=False)],
+                }
+            },
+        )
+
+        self.assertEqual(400, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual("goals_structured_draft_would_lose_markdown", payload["error"]["code"])
+        reasons = {issue["reason"] for issue in payload["error"]["details"]["loss"]["issues"]}
+        self.assertIn("subgroup_heading", reasons)
+        self.assertIn("surrounding_note", reasons)
+        self.assertIn("unsupported_goal_line", reasons)
+        self.assertEqual(original, self.goals_path.read_text(encoding="utf-8"))
+        backups = list(self.goals_path.parent.glob(f"{self.goals_path.stem}.*.bak{self.goals_path.suffix}"))
+        self.assertEqual([], backups)
 
     def test_shell_status_and_doctor_use_configured_goals_completion_level(self) -> None:
         from contextlib import redirect_stdout

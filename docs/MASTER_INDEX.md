@@ -39,6 +39,7 @@
 | 문서 | 상태 | 우선순위 | 비고 |
 |---|---|---|---|
 | [OPERATIONS.md](OPERATIONS.md) | ✅ OK | MEDIUM | budgets 기본값, `/doctor`, worktree 운영 계약 |
+| [ACTIVE_GOALS.md](ACTIVE_GOALS.md) | ✅ OK | MEDIUM | active-goal 운영 모델, preset, safety boundary, 예시 |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | ✅ OK | MEDIUM | Stop Reason, failover, budget 대응표 |
 | [TELEGRAM.md](TELEGRAM.md) | ✅ OK | MEDIUM | 13개 명령, 11개 CLI 플래그 정합 |
 

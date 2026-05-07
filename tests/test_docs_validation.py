@@ -171,6 +171,36 @@ class DocsValidationTests(unittest.TestCase):
         self.assertTrue(any("goals_completion_level" in error for error in advanced_errors), advanced_errors)
         self.assertTrue(any("goals_completion_level" in error for error in troubleshooting_errors), troubleshooting_errors)
 
+    def test_active_goals_doc_covers_runtime_presets_and_boundaries(self) -> None:
+        text = (ROOT / "docs" / "ACTIVE_GOALS.md").read_text(encoding="utf-8")
+
+        required = [
+            ".AgentCLI/goals/ACTIVE_GOAL.json",
+            "The project contract remains [../.doc/GOALS.md](../.doc/GOALS.md)",
+            "`strict`",
+            "`adaptive`",
+            "`exploratory`",
+            "One-shot work",
+            "Overnight work",
+            "Exploratory improvement",
+            "operator_confirmation",
+            "It never means:",
+            "PR merge approval",
+            "`gitops.worktree_merge_mode=manual`",
+            "`bug_fix`",
+            "`feature_build`",
+            "`release_prep`",
+            "`one_shot`",
+            "`overnight`",
+            "recommendation view is proposal-only",
+            "Each checkpoint has status, evidence, and a resume point",
+            "timeline view combines objective and budget events",
+            "ACTIVE_GOAL_EXPORT.json",
+            "success rate, median cycles to completion",
+        ]
+        for token in required:
+            self.assertIn(token, text)
+
     def test_web_console_doc_rejects_stale_server_flag(self) -> None:
         text = (ROOT / "docs" / "WEB_CONSOLE.md").read_text(encoding="utf-8")
         stale = text.replace(
@@ -204,7 +234,7 @@ class DocsValidationTests(unittest.TestCase):
     def test_web_console_doc_rejects_stale_status_and_role_order(self) -> None:
         text = (ROOT / "docs" / "WEB_CONSOLE.md").read_text(encoding="utf-8")
         stale_status = text.replace(
-            "Verified on 2026-05-06 with local API, unit, and checked-in browser smoke coverage:",
+            "Verified on 2026-05-07 with local API, unit, and checked-in browser smoke coverage:",
             "Verified on 2026-04-26 with a local server and Playwright:\n\nThis is not yet a complete operational web runner. Treat the current implementation as an alpha shell.",
             1,
         )
@@ -225,7 +255,7 @@ class DocsValidationTests(unittest.TestCase):
         route_inventory = collect_fastapi_route_inventory(ROOT)
         stale_routes = text.replace("`/api/reports/export`, ", "", 1)
         stale_scope = text.replace(
-            "Future polish can split the Operations route into deeper drill-down panels, but the current first-class route surfaces the checked TODO, Skills, Claude, MCP, plugin, and enterprise diagnostics.",
+            "Future polish can split the Operations route into deeper drill-down panels, but the current first-class route surfaces the checked active-goal, TODO, Skills, Claude, MCP, plugin, and enterprise diagnostics.",
             "Report export and TODO, Skills, Claude, and MCP diagnostics remain tracked.",
             1,
         )

@@ -42,6 +42,21 @@ class WebConsoleStaticTests(unittest.TestCase):
         self.assertIn("artifact-open-separator", self.app_js)
         self.assertIn(".artifact-open-link", self.styles_css)
 
+    def test_active_goal_operator_view_surfaces_intelligence_contracts(self) -> None:
+        for token in [
+            "activeGoalTemplate: 'Template'",
+            "activeGoalPreset: 'Autonomy preset'",
+            "activeGoalRecommendations: 'Recommendations'",
+            "activeGoalTimeline: 'Timeline'",
+            "activeGoalAnalytics: 'Analytics'",
+            "templateKey",
+            "autonomyPresetKey",
+            "checkpointProgress",
+            "data-active-goal-field=\"template\"",
+            "data-active-goal-field=\"preset\"",
+        ]:
+            self.assertIn(token, self.app_js)
+
     def test_command_palette_operator_actions_have_stateful_rows(self) -> None:
         app_tokens = [
             "function inspectCommandPaletteCommands",
@@ -686,6 +701,15 @@ class WebConsoleStaticTests(unittest.TestCase):
             "inspectPromptEditorState",
             "savePromptDraft",
             "restorePromptDraft",
+            "normalizeActiveGoalStatus",
+            "createBlankActiveGoalMutation",
+            "activeGoalMutationFromStatus",
+            "activeGoalMutationData",
+            "updateActiveGoalMutationField",
+            "activeGoalRequestPath",
+            "normalizeActiveGoalMutationResponse",
+            "activeGoalActionDisabledReason",
+            "submitActiveGoalAction",
             "goalBucketLabel",
             "goalBucketName",
             "goalItemLineNumber",

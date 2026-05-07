@@ -27,6 +27,7 @@ This directory contains current operator guides, implementation plans, design re
 | Document | Purpose |
 |---|---|
 | [OPERATIONS.md](OPERATIONS.md) | Daily operation, Git safety, budgets, build/test gates, artifacts |
+| [ACTIVE_GOALS.md](ACTIVE_GOALS.md) | Active-goal runtime model, presets, safety boundaries, and examples |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Stop reasons, failures, recovery procedures |
 | [TELEGRAM.md](TELEGRAM.md) | Telegram control plane and notifications |
 

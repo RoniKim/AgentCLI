@@ -4372,6 +4372,150 @@ class WebConsoleReadonlyTests(unittest.TestCase):
         self.assertFalse(edit_payload["preview"]["truncated"])
         self.assertIn("Keep this inside unmet GOALS", edit_payload["preview"]["text"])
 
+    def test_api_active_goal_status_progress_and_dashboard_scope_expose_goals_first_policy(self) -> None:
+        from agent_runner.active_goal import create_active_goal
+
+        created = create_active_goal(
+            self.repo,
+            "Ship active goal web status",
+            mode="adaptive",
+            cycle_budget=4,
+            source={"kind": "operator", "surface": "web-test"},
+        )
+
+        status_payload = self.client.get("/api/status").json()
+        active_goal = status_payload["activeGoal"]
+        self.assertTrue(active_goal["active"])
+        self.assertEqual(created["goal"]["id"], active_goal["goal"]["id"])
+        self.assertEqual("Ship active goal web status", active_goal["goal"]["objective"])
+        self.assertTrue(active_goal["pmInjection"]["doesNotOverrideGoals"])
+        self.assertEqual("goals_first", active_goal["pmInjection"]["priorityPolicy"])
+        self.assertEqual(4, active_goal["progress"]["cycle"]["remaining"])
+        self.assertIn("cycles=0/4", active_goal["progress"]["summary"])
+        self.assertEqual("ready", status_payload["sectionState"]["activeGoal"]["status"])
+
+        progress_payload = self.client.get("/api/progress").json()
+        self.assertEqual(created["goal"]["id"], progress_payload["activeGoal"]["goal"]["id"])
+        self.assertEqual(created["goal"]["id"], progress_payload["progress"]["activeGoal"]["goal"]["id"])
+        self.assertTrue(progress_payload["activeGoal"]["activeGoalProgress"]["subordinateToGoalsMd"])
+
+        detail_payload = self.client.get("/api/active-goal").json()
+        self.assertEqual(created["etag"], detail_payload["etag"])
+        self.assertEqual("active", detail_payload["state"])
+        self.assertIn("bug_fix", {item["key"] for item in detail_payload["templates"]["templates"]})
+        self.assertIn("one_shot", {item["key"] for item in detail_payload["autonomyPresets"]["presets"]})
+        self.assertIn("recommendations", detail_payload)
+        self.assertIn("timeline", detail_payload)
+        self.assertIn("analytics", detail_payload)
+        self.assertGreaterEqual(detail_payload["timeline"]["count"], 1)
+
+        templates_payload = self.client.get("/api/active-goal/templates").json()
+        presets_payload = self.client.get("/api/active-goal/presets").json()
+        timeline_payload = self.client.get("/api/active-goal/timeline").json()
+        analytics_payload = self.client.get("/api/active-goal/analytics").json()
+        export_payload = self.client.get("/api/active-goal/export").json()
+        self.assertTrue(templates_payload["subordinateToGoalsMd"])
+        self.assertTrue(presets_payload["subordinateToGoalsMd"])
+        self.assertEqual(created["goal"]["id"], timeline_payload["goalId"])
+        self.assertIn("successRate", analytics_payload)
+        self.assertTrue(export_payload["redaction_policy"]["rawPromptsExcluded"])
+
+        dashboard_payload = self.client.get("/api/status?scope=dashboard").json()
+        self.assertEqual(created["goal"]["id"], dashboard_payload["activeGoal"]["goal"]["id"])
+        self.assertEqual(4, dashboard_payload["activeGoal"]["progress"]["cycle"]["remaining"])
+
+    def test_api_active_goal_redacts_operator_text_on_lan_bind(self) -> None:
+        from agent_runner.active_goal import create_active_goal
+        from fastapi.testclient import TestClient
+
+        secret = "SECRET-ACTIVE-GOAL-LAN"
+        create_active_goal(
+            self.repo,
+            f"Ship active goal web status {secret}",
+            source={"kind": "operator", "actor": secret, "surface": "web-test"},
+        )
+        client = TestClient(self._create_app(self.repo, bind_host="0.0.0.0"))
+
+        detail_payload = client.get("/api/active-goal").json()
+        status_payload = client.get("/api/status").json()
+
+        self.assertNotIn(secret, json.dumps(detail_payload, ensure_ascii=False))
+        self.assertNotIn(secret, json.dumps(status_payload["activeGoal"], ensure_ascii=False))
+        self.assertEqual("[redacted]", detail_payload["path"])
+        self.assertEqual("[redacted]", detail_payload["goal"]["objective"])
+        self.assertTrue(detail_payload["redaction"]["active"])
+
+    def test_adapter_normalizes_active_goal_status_and_mutation_routes(self) -> None:
+        snapshot = _make_no_run_snapshot()
+        snapshot["activeGoal"] = {
+            "ok": True,
+            "exists": True,
+            "active": True,
+            "state": "active",
+            "message": "Active goal is ready for subordinate PM context injection.",
+            "path": ".AgentCLI/goals/ACTIVE_GOAL.json",
+            "etag": "etag-active-goal",
+            "revision": 2,
+            "goal": {
+                "id": "active-123",
+                "objective": "Ship active goal UI",
+                "status": "active",
+                "mode": "adaptive",
+                "revision": 2,
+                "template": {"key": "feature_build", "label": "Feature build"},
+                "autonomyPreset": {"key": "one_shot", "label": "One-shot work"},
+                "checkpoints": [{"id": "cp-01-plan", "title": "Plan", "status": "active"}],
+                "budgets": {"cycle_budget": 3, "token_budget": 1000, "time_budget_seconds": 600},
+                "usage": {"cycles_used": 1, "tokens_used": 250, "time_used_seconds": 120},
+            },
+            "pmInjection": {
+                "enabled": True,
+                "state": "ready",
+                "priorityPolicy": "goals_first",
+                "doesNotOverrideGoals": True,
+            },
+            "progress": {
+                "summary": "state=active mode=adaptive cycles=1/3 tokens=250/1000 time=120/600s evidence=0",
+                "cycle": {"budget": 3, "used": 1, "remaining": 2, "percent": 33.33, "bounded": True},
+                "token": {"budget": 1000, "used": 250, "remaining": 750, "percent": 25, "bounded": True},
+                "time": {"budget": 600, "used": 120, "remaining": 480, "percent": 20, "bounded": True},
+                "checkpointProgress": {"total": 1, "completed": 0, "remaining": 1, "activeCheckpointId": "cp-01-plan"},
+                "subordinateToGoalsMd": True,
+            },
+            "templates": {"templates": [{"key": "feature_build", "label": "Feature build"}]},
+            "autonomyPresets": {"presets": [{"key": "one_shot", "label": "One-shot work"}]},
+            "recommendations": {"items": [{"objective": "Fix validation", "sourceKind": "failing_validation"}]},
+            "timeline": {"items": [{"kind": "goal_event", "label": "create"}]},
+            "analytics": {"successRate": 1.0, "medianCyclesToCompletion": 1},
+        }
+        snapshot["sectionState"] = {
+            **snapshot.get("sectionState", {}),
+            "activeGoal": {"status": "ready", "message": ""},
+        }
+
+        normalized, standalone, complete_route = _run_adapter_harness(
+            [
+                {"kind": "snapshot", "data": snapshot},
+                {"kind": "call", "name": "normalizeActiveGoalStatus", "args": [snapshot["activeGoal"]]},
+                {"kind": "call", "name": "activeGoalRequestPath", "args": ["complete"]},
+            ]
+        )
+
+        self.assertTrue(normalized["activeGoal"]["active"])
+        self.assertEqual("Ship active goal UI", normalized["activeGoal"]["goal"]["objective"])
+        self.assertEqual("feature_build", normalized["activeGoal"]["goal"]["template"]["key"])
+        self.assertEqual("one_shot", normalized["activeGoal"]["goal"]["autonomyPreset"]["key"])
+        self.assertEqual(3, normalized["activeGoal"]["goal"]["budgets"]["cycleBudget"])
+        self.assertEqual(2, normalized["activeGoal"]["progress"]["cycle"]["remaining"])
+        self.assertEqual("cp-01-plan", normalized["activeGoal"]["progress"]["checkpointProgress"]["activeCheckpointId"])
+        self.assertEqual("Fix validation", normalized["activeGoal"]["recommendations"][0]["objective"])
+        self.assertEqual("goal_event", normalized["activeGoal"]["timeline"][0]["kind"])
+        self.assertEqual(1, normalized["activeGoal"]["analytics"]["medianCyclesToCompletion"])
+        self.assertEqual("ready", normalized["sectionState"]["activeGoal"]["status"])
+        self.assertTrue(standalone["pmInjection"]["doesNotOverrideGoals"])
+        self.assertTrue(standalone["progress"]["subordinateToGoalsMd"])
+        self.assertEqual("/api/active-goal/complete", complete_route)
+
     def test_status_and_operations_view_surface_operator_diagnostics(self) -> None:
         skills_root = self.repo / "Skills"
         _write(

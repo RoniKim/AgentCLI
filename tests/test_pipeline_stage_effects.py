@@ -18,6 +18,7 @@ from agent_runner.pipeline.stages.base import (
     StageOutcome,
 )
 from agent_runner.pipeline.stages.backlog_refiner_stage import BacklogRefinerStage
+from agent_runner.active_goal import active_goal_task_metadata, build_active_goal_status, create_active_goal
 from agent_runner.state import load_backlog_json, write_backlog_files
 
 
@@ -66,6 +67,32 @@ def _oversized_task() -> dict[str, object]:
         "depends_on": ["T1"],
         "goal_trace": goal_trace,
     }
+
+
+def _broad_active_goal_task(active_goal_metadata: dict[str, object]) -> dict[str, object]:
+    task = {
+        "id": "T2",
+        "title": "Active goal shell, UI, and docs polish",
+        "prompt": "Implement active goal shell, UI, and docs polish.",
+        "files": [
+            "agent_runner/shell.py",
+            "web_console/app.js",
+            "docs/ACTIVE_GOALS.md",
+        ],
+        "done_when": "Shell command works; UI panel works; docs mention safety.",
+        "skills": [],
+        "depends_on": ["T1"],
+        "active_goal_admission": {
+            "admission": "active_goal_runtime",
+            "does_not_mark_goals_complete": True,
+        },
+        "activeGoalAdmission": {
+            "admission": "active_goal_runtime",
+            "doesNotMarkGoalsComplete": True,
+        },
+    }
+    task.update(active_goal_metadata)
+    return task
 
 
 async def _noop_phase(cycle_idx: int) -> StageOutcome:
@@ -315,6 +342,7 @@ class PipelineStageEffectsTests(unittest.TestCase):
     def test_backlog_mutation_keeps_existing_run_artifact_filenames(self) -> None:
         run_dir = self._make_temp_run_dir()
         write_backlog_files(run_dir, [_task("T1", "Prepare queue data"), _oversized_task()])
+        active_goal = create_active_goal(run_dir, "Split active-goal backlog safely")
         state_payload = {"done": ["T0"], "failed": [], "warnings": []}
         (run_dir / "STATE.json").write_text(json.dumps(state_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         session = self._make_real_session(run_dir)
@@ -339,6 +367,9 @@ class PipelineStageEffectsTests(unittest.TestCase):
         refinement_payload = json.loads((run_dir / "BACKLOG_REFINEMENT_cycle_000.json").read_text(encoding="utf-8"))
         self.assertEqual("backlog_write_cycle_000.json", pl_output_payload["backlog_write_artifact"])
         self.assertEqual("backlog_write_cycle_000.json", refinement_payload["backlog_write_artifact"])
+        self.assertEqual(active_goal["goal"]["id"], pl_output_payload["active_goal_context"]["active_goal_id"])
+        self.assertTrue(pl_output_payload["active_goal_context"]["subordinate_to_goals_md"])
+        self.assertIn("do not override GOALS.md", pl_output_payload["active_goal_block"])
 
         root_names = {path.name for path in run_dir.iterdir()}
         stage_artifact_names = {path.name for path in (run_dir / "stage_artifacts" / "PL").iterdir()}
@@ -392,6 +423,55 @@ class PipelineStageEffectsTests(unittest.TestCase):
         self.assertEqual(["T2d"], by_id["T3"]["depends_on"])
         self.assertTrue((run_dir / "PL_OUTPUT_cycle_000.json").exists())
         self.assertEqual(STAGE_EFFECTS_BACKLOG_MUTATION, session.pending_stage_effects())
+
+    def test_backlog_refiner_splits_active_goal_task_by_risk_scope_dependency_and_budget(self) -> None:
+        run_dir = self._make_temp_run_dir()
+        created = create_active_goal(
+            run_dir,
+            "Polish active goal shell, UI, and docs safely",
+            cycle_budget=2,
+        )
+        status = build_active_goal_status(run_dir)
+        active_goal_metadata = active_goal_task_metadata(status)
+        broad_task = _broad_active_goal_task(active_goal_metadata)
+        write_backlog_files(
+            run_dir,
+            [
+                _task("T1", "Prepare active goal context"),
+                broad_task,
+                {**_task("T3", "Consume active goal refinement"), "depends_on": ["T2"]},
+            ],
+        )
+        session = self._make_real_session(run_dir)
+
+        outcome = asyncio.run(BacklogRefinerStage().run(session, 0))
+
+        self.assertEqual("ok", outcome.status)
+        self.assertEqual("backlog_refined", outcome.reason)
+        payload = json.loads((run_dir / "BACKLOG.json").read_text(encoding="utf-8"))
+        tasks = payload["tasks"]
+        by_id = {task["id"]: task for task in tasks}
+        self.assertEqual(["T1", "T2a", "T2b", "T3"], [task["id"] for task in tasks])
+        for child_id in ["T2a", "T2b"]:
+            self.assertNotIn("goal_trace", by_id[child_id])
+            self.assertEqual(created["goal"]["id"], by_id[child_id]["active_goal_id"])
+            self.assertEqual(created["goal"]["id"], by_id[child_id]["activeGoalId"])
+            self.assertEqual("active_goal_runtime", by_id[child_id]["active_goal_admission"]["admission"])
+            self.assertEqual("T2", by_id[child_id]["parent_task_id"])
+            self.assertEqual("T2", by_id[child_id]["split_from_task_id"])
+        self.assertEqual(["T1"], by_id["T2a"]["depends_on"])
+        self.assertEqual(["T2a"], by_id["T2b"]["depends_on"])
+        self.assertEqual(["T2b"], by_id["T3"]["depends_on"])
+
+        refinement_payload = json.loads((run_dir / "BACKLOG_REFINEMENT_cycle_000.json").read_text(encoding="utf-8"))
+        decision = refinement_payload["items"][0]
+        self.assertEqual("T2", decision["task_id"])
+        self.assertEqual(created["goal"]["id"], decision["active_goal_id"])
+        self.assertIn("file_scope", decision["split_axes"])
+        self.assertIn("risk", decision["split_axes"])
+        self.assertIn("dependency", decision["split_axes"])
+        self.assertIn("remaining_budget", decision["split_axes"])
+        self.assertEqual(2, decision["remaining_active_goal_cycles"])
 
     def test_dev_observes_reloaded_refined_task_list_after_pl_runs(self) -> None:
         run_dir = self._make_temp_run_dir()

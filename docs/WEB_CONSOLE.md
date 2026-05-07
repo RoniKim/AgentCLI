@@ -17,10 +17,10 @@ AgentCLI Web currently runs as `one repo, one web instance`.
 
 ## Current Status
 
-Verified on 2026-05-06 with local API, unit, and checked-in browser smoke coverage:
+Verified on 2026-05-07 with local API, unit, and checked-in browser smoke coverage:
 
 - Static console serving works from `agent_runner.web`.
-- Live FastAPI routes cover `/api/health`, `/api/status`, `/api/progress`, `/api/history`, `/api/reports/export`, `/api/retention/dry-run`, `/api/todo`, `/api/todo/save`, `/api/experience`, `/api/logs`, `/api/logs/tail`, `/api/logs/live`, `/api/artifacts/open`, `/api/worktree`, `/api/worktree/diagnostics`, guarded `/api/config`, `/api/config/restore`, `/api/config/save`, `/api/prompts`, `/api/prompts/read`, `/api/prompts/content`, `/api/prompts/save`, `/api/prompts/restore`, `/api/goals`, `/api/goals/save`, `/api/runner/status`, `/api/runner/start`, `/api/runner/stop`, `/api/runner/reload`, `/api/runner/restart`, `/api/worktree/merge`, `/api/worktree/discard`, `/api/pr-queue`, `/api/pr-queue/{packet_id}`, `/api/pr-queue/validate`, `/api/pr-queue/merge`, `/api/pr-queue/discard`, `/api/pr-queue/rebase`, `/api/pr_queue/validate`, `/api/pr_queue/merge`, `/api/pr_queue/discard`, and `/api/pr_queue/rebase`.
+- Live FastAPI routes cover `/api/health`, `/api/status`, `/api/progress`, `/api/history`, `/api/reports/export`, `/api/retention/dry-run`, `/api/todo`, `/api/todo/save`, `/api/experience`, `/api/logs`, `/api/logs/tail`, `/api/logs/live`, `/api/artifacts/open`, `/api/worktree`, `/api/worktree/diagnostics`, guarded `/api/config`, `/api/config/restore`, `/api/config/save`, `/api/prompts`, `/api/prompts/read`, `/api/prompts/content`, `/api/prompts/save`, `/api/prompts/restore`, `/api/goals`, `/api/goals/save`, `/api/active-goal`, `/api/active-goal/templates`, `/api/active-goal/presets`, `/api/active-goal/recommendations`, `/api/active-goal/timeline`, `/api/active-goal/analytics`, `/api/active-goal/export`, `/api/active-goal/create`, `/api/active-goal/update`, `/api/active-goal/complete`, `/api/active-goal/cancel`, `/api/active-goal/clear`, `/api/active-goal/import`, `/api/runner/status`, `/api/runner/start`, `/api/runner/stop`, `/api/runner/reload`, `/api/runner/restart`, `/api/worktree/merge`, `/api/worktree/discard`, `/api/pr-queue`, `/api/pr-queue/{packet_id}`, `/api/pr-queue/validate`, `/api/pr-queue/merge`, `/api/pr-queue/discard`, `/api/pr-queue/rebase`, `/api/pr_queue/validate`, `/api/pr_queue/merge`, `/api/pr_queue/discard`, and `/api/pr_queue/rebase`.
 - `/api/health` exposes web diagnostics for FastAPI/uvicorn availability and repo `.venv` health, including missing executables and stale `pyvenv.cfg` base paths; startup dependency failures include the same diagnostic issue codes when the HTTP app cannot start.
 - The Runbook route renders active-repo commands for venv activation, shell/web startup, status/stop, worktree merge/discard, PR queue review, diagnostics, and long unattended runs.
 - Completed run report generation also writes `WORK_SUMMARY.md`, a short daily-work-log Markdown artifact without raw logs, prompts, transcripts, or diffs.
@@ -37,7 +37,7 @@ Verified on 2026-05-06 with local API, unit, and checked-in browser smoke covera
 - The shell now exposes `/worktree` for the same diagnostics summary.
 - PR Queue browser controls can validate, approve merge, discard, and request rebase for queued packets through guarded backend routes. Merge approval requires a validated packet plus exact `MERGE PR <packet_id>`; discard and rebase require exact `DISCARD PR <packet_id>` / `REBASE PR <packet_id>` confirmation phrases; every browser PR Queue decision uses shared packet helper gates plus the web opt-in, LAN, and confirmation gates.
 - Local retention dry-runs report stale `agent_runs`, `PM_CACHE`, logs, diagnostics, and backups from configurable settings without deleting files; active runs, pending worktree review markers, cleanup-failed artifacts, and queued PR packet evidence are preserved in the report.
-- The Operations route renders TODO active path/freshness/PM injection/safe preview/edit endpoint, Skills roots/discovered/selected/missing/suggestions, Claude advanced diagnostics, MCP mode fallback, plugin stage diagnostics, and enterprise profile budget/security policy status.
+- The Operations route renders active-goal objective/mode/template/preset/checkpoints/recommendations/timeline/analytics controls, TODO active path/freshness/PM injection/safe preview/edit endpoint, Skills roots/discovered/selected/missing/suggestions, Claude advanced diagnostics, MCP mode fallback, plugin stage diagnostics, and enterprise profile budget/security policy status.
 - TODO status is exposed in shell and web status with active path, freshness, and PM injection policy; `/api/todo` provides an explicit bounded preview, while guarded `/api/todo/save` writes only repo-local `.AgentCLI/todo` files and keeps TODO advisory under GOALS-first PM gating.
 - Checked-in Playwright smoke coverage now exercises Dashboard, Pipeline, Logs, Backlog, PR Queue, Runbook, Operations, Goals, Config, Prompts, Run History, Notifications, Worktree Review, Instance Health, EN/KO route rendering, browser console/page error checks, and a mobile-width viewport.
 - Runner controls are disabled by default and require explicit opt-in.
@@ -48,7 +48,7 @@ Verified on 2026-05-06 with local API, unit, and checked-in browser smoke covera
 
 Known remaining scope:
 
-- Future polish can split the Operations route into deeper drill-down panels, but the current first-class route surfaces the checked TODO, Skills, Claude, MCP, plugin, and enterprise diagnostics.
+- Future polish can split the Operations route into deeper drill-down panels, but the current first-class route surfaces the checked active-goal, TODO, Skills, Claude, MCP, plugin, and enterprise diagnostics.
 - There is no implemented authentication layer yet. Treat LAN binds as trusted-network-only until [AUTHENTICATION_PLAN.md](AUTHENTICATION_PLAN.md) is implemented.
 
 ## Web Server Flags

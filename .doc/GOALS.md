@@ -5,7 +5,7 @@
 > This file is the target backlog, not a status report. Current implementation notes belong in `docs/WEB_CONSOLE.md`, `docs/MASTER_INDEX.md`, or archived incident/design notes.
 > Do not downgrade, remove, or merge unmet P0 goals to make progress look complete; implement them until they are true.
 > Task sizing rule: each unchecked P0 item should be small enough for one focused AgentCLI task branch.
-> Last reviewed: 2026-05-06.
+> Last reviewed: 2026-05-07.
 
 ## P0 (Must-Have)
 
@@ -333,6 +333,30 @@
 - [x] A built-in PL/Backlog Refiner can run between PM and Dev and split oversized tasks while preserving GOALS trace and dependencies.
 - [x] Web Config and Pipeline views support PL and plugin stages without dropping unknown role specs.
 
+### P0-AA. Active Goal Runtime And Freeform Objective Control
+
+- [x] Add an AgentCLI active-goal runtime artifact under `.AgentCLI/goals/` that stores objective, status, token/time/cycle budgets, usage counters, timestamps, source, and completion evidence.
+- [x] Add shell and non-interactive commands for active goals: create, inspect, update, complete, cancel, and clear, with atomic writes and stale-write protection.
+- [x] Harden the Web Goals editor so saving `.doc/GOALS.md` preserves `###` subgroup headings, surrounding notes, and unsupported raw markdown, or blocks structured draft saves that would lose that structure.
+- [x] Add Web Console APIs and UI for active goal create/inspect/update/complete flows, using runner-controls opt-in, LAN mutation blocking, control locking, redaction, stale-write protection, and web action audit for every mutation.
+- [x] Inject the active goal into PM, PL, Dev, QA, reporter, and analyzer prompts as subordinate operator intent while keeping `.doc/GOALS.md` as the project-level safety contract and task-admission authority.
+- [x] Attach `active_goal_id`, objective snapshot, budget snapshot, and goal status metadata to backlog tasks, task history, local PR packets, validation artifacts, and shutdown reports.
+- [x] Add minimal namespaced active-goal status and terminal reasons for completion, cancellation, missing objective, budget exhaustion, and expired time budget, without changing unrelated run stop-priority behavior.
+- [x] Support goal execution modes such as `strict`, `adaptive`, and `exploratory`, where exploratory mode allows broader discovery tasks but cannot bypass policy, validation, worktree, or LAN safety gates.
+- [x] Persist active goal state across runner restarts, shell/web/Telegram control-plane actions, backend failover, and resumed runs without losing usage counters or audit trail.
+- [x] Add Codex and Claude backend parity tests proving active-goal prompt injection, status updates, budget stops, and artifact metadata stay consistent.
+
+### P0-AB. Goal-Driven Autonomy And Planning Quality
+
+- [x] Update PM planning so a freeform active goal can be decomposed into small reviewable tasks inside GOALS-first constraints, even when the active goal itself is not yet represented as a P0/P1 checkbox.
+- [x] Add a deterministic, proposal-first bridge that can suggest new `.doc/GOALS.md` P0/P1 items from an active goal, but requires operator confirmation before adding, downgrading, deleting, or completing project goals.
+- [x] Teach the Backlog Refiner to split active-goal tasks by risk, file scope, dependency, and remaining budget instead of only by oversized GOALS trace count.
+- [x] Surface active-goal progress in shell status, doctor, Web Dashboard, Pipeline, Run History, Telegram summaries, and final reports.
+- [x] Record active-goal lessons in Experience DB so future PM runs can avoid repeated bad decompositions, validation gaps, and budget overruns.
+- [x] Add readiness checks that warn when active-goal mode, completion level, loop/unattended settings, or worktree merge mode conflict with the requested autonomy level.
+- [x] Ensure active-goal completion requires evidence from task outcomes, validation artifacts, or explicit operator confirmation, and never counts as PR merge readiness or `.doc/GOALS.md` project completion by itself.
+- [x] Document the active-goal operating model, recommended presets, safety boundaries, and examples for one-shot work, overnight work, and exploratory improvement runs.
+
 ## P1 (Should-Have)
 
 - [x] Run History supports comparing two runs side-by-side with commits, task outcomes, token/quota usage, validation results, and worktree outcomes.
@@ -362,6 +386,16 @@
 - [x] Critical path smoke tests cover backend failover, quota wait, outer-loop reason handling, interrupted attempt recovery, and PR queue reconcile.
 - [x] Local retention dry-run includes `agent_runs`, `PM_CACHE`, logs, diagnostics, and backups while preserving pending review evidence.
 - [x] Latent risk hardening covers logger rotation, agent run retention, task-history indexes, and analysis-cache size caps.
+
+### P1-A. Goal Intelligence And Operator Ergonomics
+
+- [x] Add active-goal templates for bug fix, feature build, refactor, test hardening, documentation, release prep, and exploratory improvement workflows.
+- [x] Add goal recommendation support that proposes the next active goal from completed GOALS, Experience DB lessons, PR queue blockers, failing validations, and stale TODO priorities.
+- [x] Add nested milestones or checkpoints for long active goals, with per-checkpoint evidence and resume points.
+- [x] Add an active-goal timeline view that shows objective changes, budget use, task decomposition, validation evidence, PR packets, and final disposition.
+- [x] Add operator-selectable goal autonomy presets that bundle execution mode, loop settings, validation strictness, worktree merge mode, and notification behavior.
+- [x] Add import/export support for active-goal state so a goal can be reviewed, archived, or moved between machines without exposing raw prompts or secrets.
+- [x] Add analytics for active-goal success rate, median cycles to completion, validation failure reasons, budget exhaustion causes, and manual-intervention frequency.
 
 ## Completion Criteria
 
