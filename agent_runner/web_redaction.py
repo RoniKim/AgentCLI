@@ -212,6 +212,9 @@ def _redact_web_active_goal_payload(payload: dict[str, Any]) -> dict[str, Any]:
     ):
         if redacted.get(key) not in (None, "", False):
             redacted[key] = REDACTED_VALUE
+    for key in ("objective", "notes"):
+        if redacted.get(key) not in (None, "", False):
+            redacted[key] = REDACTED_VALUE
 
     def redact_goal(goal: dict[str, Any]) -> dict[str, Any]:
         goal_redacted = deepcopy(goal)
@@ -243,6 +246,41 @@ def _redact_web_active_goal_payload(payload: dict[str, Any]) -> dict[str, Any]:
             goal_redacted["completionEvidence"] = evidence_redacted
         return goal_redacted
 
+    def redact_evidence_list(value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        redacted_items = []
+        for item in value:
+            if not isinstance(item, dict):
+                redacted_items.append(item)
+                continue
+            next_item = deepcopy(item)
+            for key in ("text", "summary", "message", "ref", "path", "url"):
+                if next_item.get(key) not in (None, "", False):
+                    next_item[key] = REDACTED_VALUE
+            redacted_items.append(next_item)
+        return redacted_items
+
+    def redact_intelligence_item(item: dict[str, Any]) -> dict[str, Any]:
+        next_item = deepcopy(item)
+        for key in ("objective", "reason", "title", "artifact"):
+            if next_item.get(key) not in (None, "", False):
+                next_item[key] = REDACTED_VALUE
+        if isinstance(next_item.get("evidence"), list):
+            next_item["evidence"] = redact_evidence_list(next_item.get("evidence"))
+        return next_item
+
+    def redact_reason_map(value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        total = 0
+        for raw_count in value.values():
+            try:
+                total += int(raw_count or 0)
+            except Exception:
+                total += 1
+        return {REDACTED_VALUE: total or len(value)}
+
     goal = redacted.get("goal")
     if isinstance(goal, dict):
         redacted["goal"] = redact_goal(goal)
@@ -270,6 +308,15 @@ def _redact_web_active_goal_payload(payload: dict[str, Any]) -> dict[str, Any]:
             recommendations["recommendations"] = next_items
             recommendations["items"] = next_items
             redacted["recommendations"] = recommendations
+    elif isinstance(recommendations, list):
+        redacted["recommendations"] = [
+            redact_intelligence_item(item) if isinstance(item, dict) else item for item in recommendations
+        ]
+    items = redacted.get("items")
+    if isinstance(items, list):
+        redacted["items"] = [
+            redact_intelligence_item(item) if isinstance(item, dict) else item for item in items
+        ]
     timeline = redacted.get("timeline")
     if isinstance(timeline, dict) and isinstance(timeline.get("items"), list):
         next_timeline = []
@@ -284,6 +331,12 @@ def _redact_web_active_goal_payload(payload: dict[str, Any]) -> dict[str, Any]:
             next_timeline.append(next_item)
         timeline["items"] = next_timeline
         redacted["timeline"] = timeline
+    for key in ("validation_failure_reasons", "validationFailureReasons"):
+        if isinstance(redacted.get(key), dict):
+            redacted[key] = redact_reason_map(redacted.get(key))
+    analytics = redacted.get("analytics")
+    if isinstance(analytics, dict):
+        redacted["analytics"] = _redact_web_active_goal_payload(analytics)
     for nested_key in ("active_goal", "activeGoal"):
         nested = redacted.get(nested_key)
         if isinstance(nested, dict):
@@ -540,6 +593,11 @@ def _redact_web_history_item(item: dict[str, Any]) -> dict[str, Any]:
         if isinstance(report, dict):
             redacted[key] = _redact_web_history_summary(report)
             redaction_fields.append(key)
+    for key in ("activeGoalContext", "active_goal_context"):
+        context = redacted.get(key)
+        if isinstance(context, dict):
+            redacted[key] = _redact_web_active_goal_payload(context)
+            redaction_fields.append(key)
     if redaction_fields:
         redacted["redaction"] = _web_redaction_meta(*redaction_fields)
     return redacted
@@ -571,6 +629,8 @@ def _redact_web_history_summary(summary: Any) -> Any:
                     redacted_value[key] = REDACTED_VALUE if item not in (None, "", False) else item
                 elif key_text in {"start_options", "startOptions"} and isinstance(item, dict):
                     redacted_value[key] = _redact_web_runner_start_options(item)
+                elif key_text in {"active_goal_context", "activeGoalContext", "active_goal", "activeGoal"} and isinstance(item, dict):
+                    redacted_value[key] = _redact_web_active_goal_payload(item)
                 else:
                     redacted_value[key] = _walk(item)
             return redacted_value

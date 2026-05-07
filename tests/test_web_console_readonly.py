@@ -4434,13 +4434,25 @@ class WebConsoleReadonlyTests(unittest.TestCase):
             f"Ship active goal web status {secret}",
             source={"kind": "operator", "actor": secret, "surface": "web-test"},
         )
+        goals_dir = self.repo / ".doc"
+        goals_dir.mkdir(exist_ok=True)
+        (goals_dir / "GOALS.md").write_text(
+            f"# Project Goals\n\n## P0\n- [ ] Fix {secret} recommendation\n",
+            encoding="utf-8",
+        )
         client = TestClient(self._create_app(self.repo, bind_host="0.0.0.0"))
 
         detail_payload = client.get("/api/active-goal").json()
         status_payload = client.get("/api/status").json()
+        recommendations_payload = client.get("/api/active-goal/recommendations").json()
+        timeline_payload = client.get("/api/active-goal/timeline").json()
+        export_payload = client.get("/api/active-goal/export").json()
 
         self.assertNotIn(secret, json.dumps(detail_payload, ensure_ascii=False))
         self.assertNotIn(secret, json.dumps(status_payload["activeGoal"], ensure_ascii=False))
+        self.assertNotIn(secret, json.dumps(recommendations_payload, ensure_ascii=False))
+        self.assertNotIn(secret, json.dumps(timeline_payload, ensure_ascii=False))
+        self.assertNotIn(secret, json.dumps(export_payload, ensure_ascii=False))
         self.assertEqual("[redacted]", detail_payload["path"])
         self.assertEqual("[redacted]", detail_payload["goal"]["objective"])
         self.assertTrue(detail_payload["redaction"]["active"])

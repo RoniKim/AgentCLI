@@ -3573,6 +3573,13 @@ class WebConsoleSafetyTests(unittest.TestCase):
         self.assertEqual("adaptive", updated["activeGoal"]["goal"]["mode"])
         self.assertEqual(2, updated["activeGoal"]["goal"]["revision"])
 
+        missing_etag_response = client.post(
+            "/api/active-goal/update",
+            json={"objective": "Missing etag should fail"},
+        )
+        self.assertEqual(428, missing_etag_response.status_code)
+        self.assertEqual("active_goal_etag_required", missing_etag_response.json()["error"]["code"])
+
         stale_response = client.post(
             "/api/active-goal/update",
             json={"etag": first_etag, "objective": "Stale update should fail"},
@@ -3601,7 +3608,7 @@ class WebConsoleSafetyTests(unittest.TestCase):
         export_payload = client.get("/api/active-goal/export").json()
         import_response = client.post(
             "/api/active-goal/import",
-            json={"payload": export_payload, "replace": True},
+            json={"payload": export_payload, "replace": True, "etag": completed["activeGoal"]["etag"]},
         )
         self.assertEqual(200, import_response.status_code)
         imported = import_response.json()

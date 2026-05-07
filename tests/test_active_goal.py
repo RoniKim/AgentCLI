@@ -32,7 +32,9 @@ from agent_runner.active_goal import (
     active_goal_goals_proposal_path,
     active_goal_path,
     active_goal_role_context,
+    active_goal_role_context_from_task_snapshot,
     active_goal_mode_policy,
+    active_goal_task_metadata,
     build_active_goal_analytics,
     build_active_goal_status,
     build_active_goal_timeline,
@@ -53,7 +55,7 @@ from agent_runner.active_goal import (
     update_active_goal,
     write_active_goal_export,
 )
-from agent_runner.web_redaction import _redact_web_active_goal_payload
+from agent_runner.web_redaction import _redact_web_active_goal_payload, _redact_web_history_payload
 
 
 class ActiveGoalTests(unittest.TestCase):
@@ -192,6 +194,7 @@ class ActiveGoalTests(unittest.TestCase):
         )
         self.assertEqual("active_goal_time_budget_expired", time_status["terminal_reason"])
         self.assertTrue(time_status["active_goal_status"]["budget_status"]["time_budget_expired"])
+        self.assertTrue(time_status["active_goal_status"]["budget_status"]["budget_exhausted"])
 
         completed = complete_active_goal(self.repo, evidence="Done", expected_etag=time_status["etag"])
         self.assertEqual("active_goal_completed", completed["terminal_reason"])
@@ -444,7 +447,7 @@ class ActiveGoalTests(unittest.TestCase):
         self.assertEqual("Operator wants active goal runtime", task["active_goal"]["objective"])
         self.assertEqual("Operator wants active goal runtime", task["activeGoal"]["objective"])
 
-    def test_pm_postprocess_admits_active_goal_decomposition_without_goals_checkbox(self) -> None:
+    def test_pm_postprocess_keeps_active_goal_decomposition_proposal_only_without_goals_checkbox(self) -> None:
         (self.repo / ".doc").mkdir()
         (self.repo / ".doc" / "GOALS.md").write_text(
             "# Project Goals\n\n## P0\n- [ ] Preserve GOALS-first project safety\n",
@@ -477,14 +480,16 @@ class ActiveGoalTests(unittest.TestCase):
             active_goal_status=status,
         )
 
-        self.assertEqual("accepted", processed["pm_gate"]["status"])
-        self.assertEqual(1, len(processed["active_goal_admitted_tasks"]))
-        task = processed["backlog_tasks"][0]
-        self.assertTrue(str(task["id"]).startswith("T"))
-        self.assertEqual([], task.get("goal_trace") or [])
-        self.assertEqual(status["goal"]["id"], task["active_goal_id"])
-        self.assertEqual("active_goal_runtime", task["active_goal_admission"]["admission"])
-        self.assertTrue(task["active_goal_admission"]["does_not_mark_goals_complete"])
+        self.assertEqual("rejected", processed["pm_gate"]["status"])
+        self.assertEqual([], processed["active_goal_admitted_tasks"])
+        self.assertEqual([], processed["backlog_tasks"])
+        self.assertEqual(1, len(processed["active_goal_proposed_tasks"]))
+        proposal = processed["active_goal_proposed_tasks"][0]
+        self.assertEqual(status["goal"]["id"], proposal["active_goal_id"])
+        self.assertEqual("active_goal_proposal", proposal["active_goal_proposal"]["admission"])
+        self.assertTrue(proposal["active_goal_proposal"]["does_not_enter_backlog"])
+        self.assertTrue(proposal["active_goal_proposal"]["does_not_mark_goals_complete"])
+        self.assertIn("proposal-only", processed["pm_gate"]["message"])
 
     def test_pm_postprocess_rejects_unrelated_task_despite_active_goal(self) -> None:
         (self.repo / ".doc").mkdir()
@@ -751,6 +756,28 @@ class ActiveGoalTests(unittest.TestCase):
         self.assertEqual("Record task history active goal metadata", rows[0]["active_goal"]["objective"])
         self.assertEqual(321, rows[0]["active_goal"]["budgets"]["token_budget"])
 
+    def test_task_bound_active_goal_snapshot_prevents_history_context_drift(self) -> None:
+        original = create_active_goal(self.repo, "Original task-bound active goal", cycle_budget=2)
+        original_snapshot = active_goal_task_metadata(original)["active_goal"]
+        create_active_goal(self.repo, "New live active goal", replace=True)
+
+        context = active_goal_role_context_from_task_snapshot(original_snapshot, role="Validation")
+        record_history(
+            self.repo,
+            self.root / "run-drift",
+            "codex",
+            task_id="T-drift",
+            title="Persist task-bound metadata",
+            status="done",
+            active_goal=original_snapshot,
+        )
+
+        rows = query_history(self.repo, max_items=1)
+        self.assertEqual(original["goal"]["id"], context["active_goal_id"])
+        self.assertEqual("Original task-bound active goal", context["active_goal"]["objective"])
+        self.assertEqual(original["goal"]["id"], rows[0]["active_goal_id"])
+        self.assertEqual("Original task-bound active goal", rows[0]["active_goal"]["objective"])
+
     def test_active_goal_metadata_reaches_pr_validation_and_shutdown_reports(self) -> None:
         status = create_active_goal(self.repo, "Carry active goal through artifacts", cycle_budget=2)
         context = active_goal_role_context(status, role="Validation")
@@ -877,6 +904,30 @@ class ActiveGoalTests(unittest.TestCase):
         self.assertEqual("Scripted active goal", payload["goal"]["objective"])
         self.assertIn("cycles=0/2", payload["progress"]["summary"])
 
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            rc = runner_main(
+                [
+                    "--repo",
+                    str(self.repo),
+                    "--active-goal-update",
+                    "--active-goal-objective",
+                    "Scripted active goal updated",
+                    "--active-goal-mode",
+                    "strict",
+                    "--active-goal-notes",
+                    "operator note",
+                    "--active-goal-etag",
+                    payload["etag"],
+                ]
+            )
+
+        self.assertEqual(0, rc)
+        updated = json.loads(buffer.getvalue())
+        self.assertEqual("Scripted active goal updated", updated["goal"]["objective"])
+        self.assertEqual("strict", updated["goal"]["mode"])
+        self.assertEqual("operator note", updated["goal"]["notes"])
+
     def test_web_active_goal_redaction_hides_operator_text(self) -> None:
         secret = "SECRET-ACTIVE-GOAL"
         status = create_active_goal(self.repo, f"Ship {secret}", source={"kind": "operator", "actor": secret})
@@ -889,6 +940,47 @@ class ActiveGoalTests(unittest.TestCase):
         self.assertEqual("[redacted]", redacted["path"])
         self.assertEqual("[redacted]", redacted["goal"]["objective"])
         self.assertEqual("[redacted]", redacted["goal"]["completion_evidence"][0]["text"])
+
+    def test_web_active_goal_redaction_covers_history_and_intelligence_shapes(self) -> None:
+        secret = "SECRET-ACTIVE-GOAL-INTEL"
+        context = {
+            "active_goal": {"id": "goal-1", "objective": f"Ship {secret}", "notes": f"note {secret}"},
+            "activeGoal": {"id": "goal-1", "objective": f"Ship {secret}", "notes": f"note {secret}"},
+        }
+        history = {
+            "items": [
+                {
+                    "finalRunReport": {"active_goal_context": context},
+                    "qaValidationReport": {"activeGoalContext": context},
+                    "activeGoalContext": context,
+                }
+            ]
+        }
+        intelligence = {
+            "recommendations": [
+                {
+                    "objective": f"Fix {secret}",
+                    "reason": f"Because {secret}",
+                    "evidence": [{"ref": f".doc/{secret}.md", "text": f"evidence {secret}"}],
+                }
+            ],
+            "items": [{"objective": f"Timeline {secret}", "title": f"Task {secret}", "artifact": f"log-{secret}.json"}],
+            "analytics": {
+                "validation_failure_reasons": {f"failed {secret}": 2},
+                "validationFailureReasons": {f"failed {secret}": 2},
+            },
+        }
+
+        redacted_history = _redact_web_history_payload(history)
+        redacted_intelligence = _redact_web_active_goal_payload(intelligence)
+
+        self.assertNotIn(secret, json.dumps(redacted_history, ensure_ascii=False))
+        self.assertNotIn(secret, json.dumps(redacted_intelligence, ensure_ascii=False))
+        self.assertEqual(
+            "[redacted]",
+            redacted_history["items"][0]["finalRunReport"]["active_goal_context"]["active_goal"]["objective"],
+        )
+        self.assertEqual("[redacted]", redacted_intelligence["recommendations"][0]["objective"])
 
 
 if __name__ == "__main__":

@@ -8918,6 +8918,13 @@ def create_app(
                 if not objective:
                     return _active_goal_action_error(400, action, "active_goal_objective_required", "Active goal objective is required.")
                 replace = _coerce_optional_bool(body.get("replace"))
+                if replace and not expected_etag:
+                    return _active_goal_action_error(
+                        428,
+                        action,
+                        "active_goal_etag_required",
+                        "Replacing an active goal requires a current etag.",
+                    )
                 status = create_active_goal(
                     repo_root,
                     objective,
@@ -8937,6 +8944,14 @@ def create_app(
                     expected_etag=expected_etag,
                 )
                 return _active_goal_action_success(action, status, "Active goal created.")
+
+            if not expected_etag:
+                return _active_goal_action_error(
+                    428,
+                    action,
+                    "active_goal_etag_required",
+                    "Active goal mutation requires a current etag.",
+                )
 
             if action == "update":
                 update_kwargs: dict[str, Any] = {"expected_etag": expected_etag}
