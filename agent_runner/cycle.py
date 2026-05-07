@@ -62,7 +62,13 @@ from .gitops import (
 )
 from .inventory import build_repo_inventory, write_repo_inventory_files
 from .todo import read_current_todo, format_todo_block
-from .active_goal import active_goal_role_context, build_active_goal_status, format_active_goal_block, increment_active_goal_usage
+from .active_goal import (
+    active_goal_role_context,
+    active_goal_role_context_from_task_snapshot,
+    build_active_goal_status,
+    format_active_goal_block,
+    increment_active_goal_usage,
+)
 from .metrics import MetricsLogger
 from .logger import create_logger
 from .policy import load_policy_rules, policy_scan_files
@@ -1021,11 +1027,13 @@ async def main_async(args: argparse.Namespace) -> int:
         def _record_history(task_id: str, title: str, status: str, reason: str = "",
                             detail: str = "", files: list[str] | None = None, cycle: int = 0,
                             attempt: int = 0, max_attempts: int = 1, task_status: str = "") -> None:
+            task_active_goal = next((task.active_goal for task in tasks if task.id == task_id and task.active_goal), None)
             record_history(
                 repo, run_dir, "codex",
                 task_id=task_id, title=title, status=status,
                 task_status=task_status, reason=reason, detail=detail, files=files,
                 cycle=cycle, attempt=attempt, max_attempts=max_attempts,
+                active_goal=task_active_goal,
                 task_history_enabled=bool(getattr(args, "task_history_enabled", True)),
             )
 
@@ -1678,7 +1686,11 @@ async def main_async(args: argparse.Namespace) -> int:
             ) -> Path:
                 records = [record for record in validations if isinstance(record, dict)]
                 active_goal_status = build_active_goal_status(source_repo if worktree_dir is not None else repo)
-                active_goal_context = active_goal_role_context(active_goal_status, role="Validation")
+                active_goal_context = active_goal_role_context_from_task_snapshot(
+                    task.active_goal,
+                    role="Validation",
+                    fallback_status=active_goal_status,
+                )
                 artifact_path = write_task_validation_artifacts(
                     attempt_dir=attempt_context.attempt_dir,
                     task_id=task.id,
@@ -2366,7 +2378,11 @@ async def main_async(args: argparse.Namespace) -> int:
                     active_goal_status = build_active_goal_status(source_repo if worktree_dir is not None else repo)
                     dev_prompt = append_active_goal_context(
                         dev_prompt,
-                        active_goal_block=format_active_goal_block(active_goal_status),
+                        active_goal_block=format_active_goal_block(
+                            {"active": True, "goal": next_task.active_goal}
+                            if isinstance(next_task.active_goal, dict)
+                            else active_goal_status
+                        ),
                         role="Dev",
                     )
 
@@ -3461,6 +3477,11 @@ async def main_async(args: argparse.Namespace) -> int:
                                     qa_notes=task_validation_notes,
                                     goal_trace=tb.goal_trace,
                                     changed_files=completed_task_changed_files,
+                                    active_goal_context=active_goal_role_context_from_task_snapshot(
+                                        next_task.active_goal,
+                                        role="PR",
+                                        fallback_status=build_active_goal_status(source_repo),
+                                    ),
                                     merge_preflight={
                                         "base_ref": tb.base_branch if tb.base_branch != "HEAD" else tb.base_commit,
                                         "head_ref": branch_head,
@@ -4486,6 +4507,7 @@ async def main_async(args: argparse.Namespace) -> int:
                             qa_notes=[],
                             goal_trace=list(pending_payload.get("goal_trace") or pending_payload.get("goalTrace") or []),
                             changed_files=pending_payload.get("changed_files") or pending_payload.get("changedFiles") or [],
+                            active_goal_context=active_goal_role_context(build_active_goal_status(source_repo), role="PR"),
                             merge_preflight=pending_payload.get("preflight") or pending_payload.get("apply_check") or {},
                             status="pr_queued",
                         )

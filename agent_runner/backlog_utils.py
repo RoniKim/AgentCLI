@@ -298,30 +298,23 @@ def postprocess_pm_output_tasks(
     )
     accepted_pm_tasks = [dict(task) for task in pm_gate.get("accepted_tasks") or []]
     rejected_pm_tasks = [dict(task) for task in pm_gate.get("rejected_tasks") or []]
-    active_goal_admitted = _admit_active_goal_tasks(
+    active_goal_proposed = _propose_active_goal_tasks(
         raw_tasks=raw_tasks,
         rejected_tasks=rejected_pm_tasks,
         active_goal_status=active_goal_status,
     )
-    if active_goal_admitted:
+    active_goal_admitted: list[dict[str, Any]] = []
+    if active_goal_proposed:
         pm_gate = dict(pm_gate)
-        accepted_pm_tasks.extend(active_goal_admitted)
-        admitted_ids = {str(task.get("id") or "").strip() for task in active_goal_admitted}
-        rejected_pm_tasks = [
-            task for task in rejected_pm_tasks if str(task.get("id") or "").strip() not in admitted_ids
-        ]
         pm_gate["accepted_tasks"] = accepted_pm_tasks
         pm_gate["rejected_tasks"] = rejected_pm_tasks
-        pm_gate["active_goal_admitted_tasks"] = active_goal_admitted
-        pm_gate["active_goal_admitted_count"] = len(active_goal_admitted)
-        pm_gate["activeGoalAdmittedCount"] = len(active_goal_admitted)
-        if rejected_pm_tasks:
-            pm_gate["status"] = "partial"
-            pm_gate["message"] = "Some PM tasks were admitted by active-goal runtime context; unrelated tasks were rejected."
-        else:
-            pm_gate["status"] = "accepted"
-            pm_gate["message"] = "PM tasks were admitted by active-goal runtime context under GOALS-first safety policy."
-            pm_gate["error"] = None
+        pm_gate["active_goal_proposed_tasks"] = active_goal_proposed
+        pm_gate["active_goal_proposed_count"] = len(active_goal_proposed)
+        pm_gate["activeGoalProposedCount"] = len(active_goal_proposed)
+        pm_gate["message"] = (
+            str(pm_gate.get("message") or "").rstrip()
+            + " Active-goal-matched tasks were kept proposal-only until a GOALS.md bridge is confirmed."
+        ).strip()
 
     merged_tasks = merge_pm_tasks_with_existing_pending(
         pm_tasks=accepted_pm_tasks,
@@ -351,6 +344,8 @@ def postprocess_pm_output_tasks(
         "rejected_count": len(rejected_pm_tasks),
         "active_goal_admitted_count": len(active_goal_admitted),
         "activeGoalAdmittedCount": len(active_goal_admitted),
+        "active_goal_proposed_count": len(active_goal_proposed),
+        "activeGoalProposedCount": len(active_goal_proposed),
         "error": pm_gate.get("error"),
         "goals": pm_gate.get("goals", {}),
         "backlog_status": backlog_gate.get("status", ""),
@@ -366,6 +361,12 @@ def postprocess_pm_output_tasks(
         pm_dump["backlog_rejected_tasks"] = rejected_backlog_tasks
     else:
         pm_dump.pop("backlog_rejected_tasks", None)
+    if active_goal_proposed:
+        pm_dump["active_goal_proposed_tasks"] = active_goal_proposed
+        pm_dump["activeGoalProposedTasks"] = active_goal_proposed
+    else:
+        pm_dump.pop("active_goal_proposed_tasks", None)
+        pm_dump.pop("activeGoalProposedTasks", None)
 
     if pm_gate.get("error") or rejected_pm_tasks or backlog_gate.get("error") or rejected_backlog_tasks:
         _write_pm_goal_gate_error(
@@ -382,6 +383,7 @@ def postprocess_pm_output_tasks(
         "pm_gate": pm_gate,
         "accepted_pm_tasks": accepted_pm_tasks,
         "active_goal_admitted_tasks": active_goal_admitted,
+        "active_goal_proposed_tasks": active_goal_proposed,
         "rejected_pm_tasks": rejected_pm_tasks,
         "pm_output_model_dump": pm_dump,
         "backlog_gate": backlog_gate,
@@ -426,31 +428,33 @@ def _task_matches_active_goal(task: dict[str, Any], active_goal_status: dict[str
     return False
 
 
-def _active_goal_admission(task: dict[str, Any], active_goal_status: dict[str, Any]) -> dict[str, Any]:
+def _active_goal_proposal(task: dict[str, Any], active_goal_status: dict[str, Any]) -> dict[str, Any]:
     goal = active_goal_status.get("goal") if isinstance(active_goal_status.get("goal"), dict) else {}
     metadata = active_goal_task_metadata(active_goal_status)
-    admitted = dict(task)
+    proposal = dict(task)
     for key, value in metadata.items():
-        admitted[key] = dict(value) if isinstance(value, dict) else value
-    admission = {
-        "admission": "active_goal_runtime",
+        proposal[key] = dict(value) if isinstance(value, dict) else value
+    proposal_metadata = {
+        "admission": "active_goal_proposal",
         "active_goal_id": str(goal.get("id") or ""),
         "activeGoalId": str(goal.get("id") or ""),
         "objective": str(goal.get("objective") or ""),
         "status": str(goal.get("status") or "active"),
         "mode": str(goal.get("mode") or "adaptive"),
+        "does_not_enter_backlog": True,
+        "doesNotEnterBacklog": True,
         "does_not_mark_goals_complete": True,
         "doesNotMarkGoalsComplete": True,
         "requires_operator_goals_bridge_for_project_goal_changes": True,
         "requiresOperatorGoalsBridgeForProjectGoalChanges": True,
-        "policy": "GOALS.md remains task-admission authority; this runtime admission does not complete project goals.",
+        "policy": "GOALS.md remains task-admission authority; active-goal matches are proposal-only until the operator confirms a GOALS.md bridge.",
     }
-    admitted["active_goal_admission"] = admission
-    admitted["activeGoalAdmission"] = admission
-    return admitted
+    proposal["active_goal_proposal"] = proposal_metadata
+    proposal["activeGoalProposal"] = proposal_metadata
+    return proposal
 
 
-def _admit_active_goal_tasks(
+def _propose_active_goal_tasks(
     *,
     raw_tasks: list[dict[str, Any]],
     rejected_tasks: list[dict[str, Any]],
@@ -466,7 +470,7 @@ def _admit_active_goal_tasks(
             continue
         if not _task_matches_active_goal(raw_task, active_goal_status):
             continue
-        admitted.append(_active_goal_admission(raw_task, active_goal_status or {}))
+        admitted.append(_active_goal_proposal(raw_task, active_goal_status or {}))
     return admitted
 
 
@@ -705,17 +709,22 @@ def record_history(
     attempt: int = 0,
     max_attempts: int = 1,
     task_history_enabled: bool = True,
+    active_goal: dict[str, Any] | None = None,
 ) -> None:
     """Record a task result to the cross-run history database."""
     if not task_history_enabled:
         return
-    active_goal_metadata = active_goal_task_metadata(build_active_goal_status(repo))
-    active_goal_snapshot = active_goal_metadata.get("active_goal") if isinstance(active_goal_metadata, dict) else {}
+    active_goal_snapshot = dict(active_goal) if isinstance(active_goal, dict) else {}
+    active_goal_id = str(active_goal_snapshot.get("id") or "").strip()
+    if not active_goal_id:
+        active_goal_metadata = active_goal_task_metadata(build_active_goal_status(repo))
+        active_goal_snapshot = active_goal_metadata.get("active_goal") if isinstance(active_goal_metadata, dict) else {}
+        active_goal_id = str(active_goal_metadata.get("active_goal_id") or "")
     _record_task_history(
         repo, task_id=task_id, title=title, status=status,
         task_status=task_status, reason=reason, detail=detail, files=files,
         cycle_idx=cycle, attempt=attempt, max_attempts=max_attempts,
         run_id=run_dir.name, backend=backend,
-        active_goal_id=str(active_goal_metadata.get("active_goal_id") or ""),
+        active_goal_id=active_goal_id,
         active_goal=dict(active_goal_snapshot) if isinstance(active_goal_snapshot, dict) else {},
     )

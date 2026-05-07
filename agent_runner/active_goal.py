@@ -990,8 +990,8 @@ def _active_goal_namespaced_status(goal: dict[str, Any] | None, *, state: str) -
         "cyclesUsed": cycles_used,
         "cycle_budget_exhausted": cycle_exhausted,
         "cycleBudgetExhausted": cycle_exhausted,
-        "budget_exhausted": bool(token_exhausted or cycle_exhausted),
-        "budgetExhausted": bool(token_exhausted or cycle_exhausted),
+        "budget_exhausted": bool(token_exhausted or time_expired or cycle_exhausted),
+        "budgetExhausted": bool(token_exhausted or time_expired or cycle_exhausted),
     }
     return {
         "namespace": "active_goal",
@@ -2046,6 +2046,47 @@ def active_goal_role_context(status: dict[str, Any] | None, *, role: str) -> dic
         "completion_policy": _completion_policy(),
         "completionPolicy": _completion_policy(),
     }
+
+
+def active_goal_role_context_from_task_snapshot(
+    active_goal: dict[str, Any] | None,
+    *,
+    role: str,
+    fallback_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return role context from a task-bound active-goal snapshot when present."""
+    if isinstance(active_goal, dict):
+        goal_id = str(active_goal.get("id") or "").strip()
+        objective = str(active_goal.get("objective") or "").strip()
+        if goal_id and objective:
+            status = {
+                "active": True,
+                "state": str(active_goal.get("status") or "active"),
+                "goal": dict(active_goal),
+                "progress": {
+                    "subordinate_to_goals_md": True,
+                    "subordinateToGoalsMd": True,
+                },
+                "active_goal_progress": {
+                    "subordinate_to_goals_md": True,
+                    "subordinateToGoalsMd": True,
+                },
+                "activeGoalProgress": {
+                    "subordinate_to_goals_md": True,
+                    "subordinateToGoalsMd": True,
+                },
+                "active_goal_status": {
+                    "namespace": "active_goal",
+                    "state": str(active_goal.get("status") or "active"),
+                    "mode": str(active_goal.get("mode") or "adaptive"),
+                    "active": True,
+                    "terminal": False,
+                    "stop_priority_unchanged": True,
+                    "stopPriorityUnchanged": True,
+                },
+            }
+            return active_goal_role_context(status, role=role)
+    return active_goal_role_context(fallback_status, role=role)
 
 
 def attach_active_goal_to_tasks(tasks: list[dict[str, Any]], status: dict[str, Any] | None) -> list[dict[str, Any]]:

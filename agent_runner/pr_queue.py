@@ -644,6 +644,7 @@ def queue_review_packet(
     derived_validation_artifact_paths: list[str] = []
     derived_goal_trace: list[object] = []
     derived_qa_notes: list[str] = []
+    derived_active_goal_context: dict[str, Any] = {}
     for artifact_path, raw in derived_validation_artifacts:
         path_text = artifact_path.as_posix()
         if _is_validation_artifact_path(path_text):
@@ -659,6 +660,10 @@ def queue_review_packet(
         for note in _task_validation_notes(raw):
             if note not in derived_qa_notes:
                 derived_qa_notes.append(note)
+        if not derived_active_goal_context:
+            context = raw.get("active_goal_context") if isinstance(raw.get("active_goal_context"), dict) else raw.get("activeGoalContext")
+            if isinstance(context, dict):
+                derived_active_goal_context = dict(context)
 
     validation_artifacts_value = _normalize_str_list(validation_artifacts)
     validation_artifacts_value = [item for item in validation_artifacts_value if _is_validation_artifact_path(item)]
@@ -684,6 +689,8 @@ def queue_review_packet(
     active_goal_payload = (
         dict(active_goal_context)
         if isinstance(active_goal_context, Mapping)
+        else dict(derived_active_goal_context)
+        if derived_active_goal_context
         else active_goal_role_context(build_active_goal_status(source_repo_path), role="PR")
     )
 
