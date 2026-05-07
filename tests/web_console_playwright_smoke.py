@@ -381,7 +381,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
     def _wait_for_server_ready(self) -> None:
         deadline = time.monotonic() + SMOKE_TIMEOUT_SECONDS
         last_error: str = ""
-        status_url = f"{self.server_url}/api/status"
+        ready_url = f"{self.server_url}/"
         while time.monotonic() < deadline:
             if self.server_proc is not None and self.server_proc.poll() is not None:
                 raise AssertionError(
@@ -390,7 +390,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
                     f"Output:\n{self._server_log()}"
                 )
             try:
-                with urlopen(status_url, timeout=1) as response:
+                with urlopen(ready_url, timeout=5) as response:
                     if response.status == 200:
                         return
             except (URLError, OSError, TimeoutError) as exc:
@@ -440,6 +440,14 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
     def _assert_no_browser_errors(self, page) -> None:
         errors = list(getattr(page, "_agentcli_browser_errors", []))
         self.assertEqual([], errors, "Browser emitted console/page errors:\n" + "\n".join(errors))
+
+    def _consume_expected_browser_error(self, page, pattern: str) -> None:
+        errors = getattr(page, "_agentcli_browser_errors", [])
+        for index, error in enumerate(list(errors)):
+            if pattern in error:
+                del errors[index]
+                return
+        self.fail(f"Expected browser error containing {pattern!r}. Observed:\n" + "\n".join(errors))
 
     def _close_playwright(self, manager) -> None:
         try:
@@ -1686,6 +1694,7 @@ class WebConsolePlaywrightSmokeTests(unittest.TestCase):
             self.assertIn("HTTP 503", reconnect_state["lastError"])
             self.assertEqual(240000, reconnect_state["retryDelayMs"])
             self.expect(page.locator(".status-chip--snapshot")).to_contain_text("Reconnecting")
+            self._consume_expected_browser_error(page, "status of 503")
 
             page.evaluate("window.__AGENTCLI_ADAPTERS__.refreshSnapshot()")
             stale_state = page.evaluate("window.__AGENTCLI_ADAPTERS__.inspectSnapshotRefreshState()")
