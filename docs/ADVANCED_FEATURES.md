@@ -28,7 +28,7 @@ REPO/.AgentCLI/todo/
 |--------|------|
 | `/todo` | 현재 TODO 미리보기 (상위 40줄) |
 | `/todo --save` | 오늘의 TODO 생성 + 활성화 + OS 기본 에디터로 열기 |
-| `/todo --load <path>` | 특정 TODO 파일을 활성화 |
+| `/todo --load <path>` | `.AgentCLI/todo/` 안의 특정 TODO 파일을 활성화 |
 | `/todo --load latest` | 가장 최근 수정된 TODO를 활성화 |
 
 ## 사용 흐름

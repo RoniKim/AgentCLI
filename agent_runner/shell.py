@@ -26,7 +26,7 @@ from .runner_entry import run as run_runner
 from .run_dir import make_run_dir
 from .run_dir import find_latest_run_dir
 from .logger import close_all_loggers, register_structured_logger_cleanup
-from .todo import build_todo_status, ensure_todo_file, read_current_todo, set_current_todo, open_path
+from .todo import build_todo_status, ensure_todo_file, read_current_todo, set_current_todo, todo_dir, open_path
 from .skills.status import build_skills_status, format_skills_status_lines
 from .backends.claude_extensions import build_claude_advanced_diagnostics, format_claude_advanced_diagnostics_lines
 from .mcp_diagnostics import build_mcp_diagnostics, format_mcp_diagnostics_lines
@@ -515,6 +515,11 @@ class RunnerShell:
                 p = (self.repo / pp).resolve() if not pp.is_absolute() else pp.resolve()
                 if not p.exists() or not p.is_file():
                     print(f"[ERR] Todo not found: {p}")
+                    return
+                try:
+                    p.relative_to(todo_dir(self.repo).resolve())
+                except Exception:
+                    print(f"[ERR] Todo must be inside {todo_dir(self.repo).resolve()}: {p}")
                     return
                 set_current_todo(self.repo, p)
             print(f"[OK] Todo selected: {p}")

@@ -10,6 +10,7 @@ from agent_runner.todo import (
     build_todo_status,
     ensure_todo_file,
     format_todo_block,
+    last_pointer_path,
     save_current_todo_text,
 )
 
@@ -61,6 +62,18 @@ class TodoManagementTests(unittest.TestCase):
         ensure_todo_file(self.repo)
         with self.assertRaises(ValueError):
             save_current_todo_text(self.repo, "x" * (TODO_CONTENT_MAX_CHARS + 1))
+
+    def test_status_does_not_preview_todo_pointer_outside_repo_todo_dir(self) -> None:
+        outside = self.root / "outside_todo.md"
+        outside.write_text("# TODO\nsecret outside repo\n", encoding="utf-8")
+        last_pointer_path(self.repo).parent.mkdir(parents=True, exist_ok=True)
+        last_pointer_path(self.repo).write_text(outside.as_posix() + "\n", encoding="utf-8")
+
+        status = build_todo_status(self.repo, include_preview=True)
+
+        self.assertEqual("missing", status["state"])
+        self.assertEqual("", status["activePath"])
+        self.assertNotIn("secret outside repo", status["preview"]["text"])
 
 
 if __name__ == "__main__":

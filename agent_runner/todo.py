@@ -128,18 +128,19 @@ def get_current_todo_path(repo: Path) -> Optional[Path]:
     1) .AgentCLI/todo/LAST_TODO.txt
     2) latest modified *.md under .AgentCLI/todo
     """
+    repo_root = Path(repo).expanduser().resolve()
+    td = todo_dir(repo_root).resolve()
     try:
-        ptr = last_pointer_path(repo)
+        ptr = last_pointer_path(repo_root)
         if ptr.exists():
             rel = (ptr.read_text(encoding="utf-8", errors="replace").strip() or "").strip()
             if rel:
-                p = (repo / rel).resolve() if not Path(rel).is_absolute() else Path(rel).resolve()
-                if p.exists() and p.is_file():
+                p = (repo_root / rel).resolve() if not Path(rel).is_absolute() else Path(rel).resolve()
+                if p.exists() and p.is_file() and _path_is_within(p, td):
                     return p
     except Exception:
         pass
 
-    td = todo_dir(repo)
     if not td.exists():
         return None
     mds = sorted(td.glob("*.md"), key=lambda x: x.stat().st_mtime)
@@ -332,11 +333,23 @@ def build_todo_status(
 
 def _resolve_web_todo_edit_path(repo: Path) -> Path:
     repo_root = Path(repo).expanduser().resolve()
+    td = todo_dir(repo_root).resolve()
+    try:
+        ptr = last_pointer_path(repo_root)
+        if ptr.exists():
+            rel = (ptr.read_text(encoding="utf-8", errors="replace").strip() or "").strip()
+            if rel:
+                selected = (repo_root / rel).resolve() if not Path(rel).is_absolute() else Path(rel).resolve()
+                if not _path_is_within(selected, td):
+                    raise ValueError("Active TODO must stay inside .AgentCLI/todo for web edits.")
+    except ValueError:
+        raise
+    except Exception:
+        pass
     current = get_current_todo_path(repo_root)
     if current is None:
         return ensure_todo_file(repo_root)
     resolved = current.expanduser().resolve()
-    td = todo_dir(repo_root).resolve()
     if not _path_is_within(resolved, td):
         raise ValueError("Active TODO must stay inside .AgentCLI/todo for web edits.")
     return resolved
