@@ -25,8 +25,13 @@ FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES: tuple[str, ...] = (
     "agent_runner/cli.py",
     "agent_runner/cycle.py",
     "agent_runner/gates.py",
+    "agent_runner/reporting.py",
+    "agent_runner/shell.py",
+    "agent_runner/todo.py",
     "agent_runner/web.py",
+    "agent_runner/web_config.py",
     "agent_runner/web_payloads.py",
+    "agent_runner/backends/claude_extensions.py",
     "agent_runner/backends/claudecode.py",
     *FAST_WEB_WORKTREE_REGRESSION_TEST_FILES,
     "tests/web_console_playwright_smoke.py",
@@ -35,6 +40,35 @@ FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES: tuple[str, ...] = (
 FAST_WEB_WORKTREE_REGRESSION_SCOPE_FILES: tuple[str, ...] = (
     ".doc/goals.md",
 )
+
+
+def _repo_relative_existing_file(repo: Path, value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        repo_root = repo.expanduser().resolve()
+        raw_path = Path(text)
+        candidate = raw_path.resolve() if raw_path.is_absolute() else (repo_root / raw_path).resolve()
+        rel = candidate.relative_to(repo_root).as_posix()
+        if candidate.is_file():
+            return rel
+    except Exception:
+        return ""
+    return ""
+
+
+def fast_web_worktree_regression_compile_files(
+    repo: Path,
+    trigger_files: Sequence[str] | None = None,
+) -> list[str]:
+    """Return base compile files plus touched repo-local Python files."""
+    files = list(FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES)
+    for raw in trigger_files or []:
+        rel = _repo_relative_existing_file(repo, raw)
+        if rel and rel.lower().endswith(".py"):
+            files.append(rel)
+    return list(dict.fromkeys(files))
 
 
 def _tail_text(text: str, max_chars: int) -> str:
@@ -415,7 +449,7 @@ def should_run_fast_web_worktree_regression(
     return False
 
 
-def _fast_web_worktree_regression_commands() -> list[dict[str, object]]:
+def _fast_web_worktree_regression_commands(compile_files: Sequence[str]) -> list[dict[str, object]]:
     python = sys.executable or "python"
     commands: list[dict[str, object]] = [
         {
@@ -427,7 +461,7 @@ def _fast_web_worktree_regression_commands() -> list[dict[str, object]]:
                 "-B",
                 "-m",
                 "py_compile",
-                *FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES,
+                *[str(item) for item in compile_files],
             ],
         }
     ]
@@ -468,7 +502,8 @@ async def run_fast_web_worktree_regression_async(
 
     started_at = now_iso()
     suite_started_monotonic = time.monotonic()
-    command_specs = _fast_web_worktree_regression_commands()
+    compile_files = fast_web_worktree_regression_compile_files(repo, trigger_files)
+    command_specs = _fast_web_worktree_regression_commands(compile_files)
     records: list[dict[str, object]] = []
     result: dict[str, object] = {
         "schema_version": 1,
@@ -489,8 +524,8 @@ async def run_fast_web_worktree_regression_async(
         "failureSummary": "",
         "trigger_files": [str(item) for item in dict.fromkeys(str(file).replace("\\", "/") for file in (trigger_files or []) if str(file).strip())],
         "triggerFiles": [str(item) for item in dict.fromkeys(str(file).replace("\\", "/") for file in (trigger_files or []) if str(file).strip())],
-        "compile_files": list(FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES),
-        "compileFiles": list(FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES),
+        "compile_files": list(compile_files),
+        "compileFiles": list(compile_files),
         "suite_files": list(FAST_WEB_WORKTREE_REGRESSION_TEST_FILES),
         "suiteFiles": list(FAST_WEB_WORKTREE_REGRESSION_TEST_FILES),
     }

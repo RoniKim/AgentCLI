@@ -97,6 +97,29 @@ class ClaudeFailureSchemaTests(unittest.TestCase):
         for token in ("mcp_servers", "hooks", "can_use_tool", "agents", "strict_isolation"):
             self.assertIn(token, advanced_tests)
 
+    def test_claude_no_diff_success_paths_continue_to_validation_gates(self) -> None:
+        claude_source = inspect.getsource(claudecode_module)
+        start = claude_source.index("# Check if agent determined the task was already implemented")
+        end = claude_source.index("if build_enabled:", start)
+        no_diff_block = claude_source[start:end]
+
+        self.assertIn("dev_no_diff_validation_required", no_diff_block)
+        already_done_block = no_diff_block[
+            no_diff_block.index("if task_already_done:") : no_diff_block.index("# Detect phantom edits")
+        ]
+        self.assertIn("continuing to validation gates", already_done_block)
+        self.assertNotIn("task_completed = True", already_done_block)
+        self.assertNotIn("task_results.append", already_done_block)
+        self.assertNotIn("break", already_done_block)
+
+        phantom_success_block = no_diff_block[
+            no_diff_block.index("if changed:") : no_diff_block.index("# If still no diff after retry")
+        ]
+        self.assertIn("phantom_retry_success", phantom_success_block)
+        self.assertNotIn("task_completed = True", phantom_success_block)
+        self.assertNotIn("task_results.append", phantom_success_block)
+        self.assertNotIn("break", phantom_success_block)
+
     def test_blocked_env_helper_matches_shared_helpers(self) -> None:
         validation_artifact = "C:/tmp/tasks/T1/attempt_01/validation.json"
         outcome = _build_claude_failure_outcome(

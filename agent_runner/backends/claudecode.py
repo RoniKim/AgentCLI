@@ -2836,14 +2836,12 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     ]
                     dev_lower = dev_log.lower() if dev_log else ""
                     task_already_done = any(kw in dev_lower for kw in already_done_keywords)
+                    continue_to_validation_gates = False
                     if task_already_done:
-                        eprint(f"[INFO] Task {next_task.id} reports already implemented; marking as done (no diff expected).")
-                        metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=0, reason="already_implemented")
-                        logger.task_end(task_id=next_task.id, success=True, reason="already_implemented")
-                        task_results.append({"id": next_task.id, "title": next_task.title, "status": "done", "reason": "already_implemented", "duration": time.time() - task_outer_t0})
-                        task_completed = True
+                        eprint(f"[INFO] Task {next_task.id} reports already implemented; continuing to validation gates.")
+                        metrics.event("dev_no_diff_validation_required", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="already_implemented")
                         task_already_implemented = True
-                        break
+                        continue_to_validation_gates = True
 
                     # Detect phantom edits: agent claims success but no diff exists.
                     # Retry once with an explicit "your edits did not persist" warning.
@@ -2855,7 +2853,7 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                     agent_claims_edit = any(kw in dev_lower for kw in phantom_keywords)
                     no_diff_retry_key = f"_no_diff_retry_{next_task.id}"
                     already_retried = budget_state.get(no_diff_retry_key, False)
-                    if agent_claims_edit and not already_retried:
+                    if not continue_to_validation_gates and agent_claims_edit and not already_retried:
                         budget_state[no_diff_retry_key] = True
                         eprint(f"[RETRY] Task {next_task.id}: agent claims edits but no git diff detected. Retrying with explicit instructions...")
                         metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="phantom_edit_retry")
@@ -2894,39 +2892,37 @@ async def main_async_claudecode(args: argparse.Namespace, repo: Path) -> int:
                         changed = has_working_tree_changes(repo, before, after, before_untracked=before_untracked)
                         if changed:
                             eprint(f"[INFO] Phantom edit retry succeeded for {next_task.id} - diff now exists.")
-                            metrics.event("dev_attempt_end", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, rc=0, reason="phantom_retry_success")
-                            logger.task_end(task_id=next_task.id, success=True, reason="completed_after_retry", attempt=attempt)
-                            task_results.append({"id": next_task.id, "title": next_task.title, "status": "done", "reason": "phantom_retry_success", "duration": time.time() - task_outer_t0})
-                            task_completed = True
-                            break
+                            metrics.event("dev_no_diff_validation_required", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="phantom_retry_success")
+                            continue_to_validation_gates = True
                         # If still no diff after retry, fall through to normal no_diff handling
 
-                    if dev_is_max_turns and dev_auto_escalate and (attempt + 1) < max_attempts:
-                        logger.retry_event("dev", next_task.id, attempt=attempt, reason="max_turns_no_diff")
-                        metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="max_turns_no_diff")
-                        continue
-                    if dev_auto_escalate and (attempt + 1) < max_attempts and "no_diff" in dev_escalate_on:
-                        metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="no_diff")
-                        continue
-                    task_status = _task_failure_status("no_diff", detail=dev_log[:500])
-                    _record_failed_state("no_diff", detail=dev_log[:500], task_status=task_status)
-                    save_state(state_path, state)
-                    _record_failed_task_result("no_diff", task_status=task_status, detail=dev_log[:500])
-                    _record_history(next_task.id, next_task.title, "failed", reason="no_diff", detail=dev_log[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
-                    metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="no_diff", task_status=task_status)
-                    logger.task_end(task_id=next_task.id, success=False, reason="no_diff", task_status=task_status, was_max_turns=dev_is_max_turns)
-                    if tb or cp:
-                        ok, fail_reason = _isolate_or_stop("no_diff", task_status=task_status, detail=dev_log[:500])
-                        if not ok:
-                            if not continuous:
-                                return 1, fail_reason, 0, (len(done_set) > before_done)
-                            eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
-                    if continuous:
-                        logger.skip_event(next_task.id, "no diff produced")
-                        skipped_set.add(next_task.id)
-                        break
-                    else:
-                        return 1, "no_diff", 0, (len(done_set) > before_done)
+                    if not continue_to_validation_gates:
+                        if dev_is_max_turns and dev_auto_escalate and (attempt + 1) < max_attempts:
+                            logger.retry_event("dev", next_task.id, attempt=attempt, reason="max_turns_no_diff")
+                            metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="max_turns_no_diff")
+                            continue
+                        if dev_auto_escalate and (attempt + 1) < max_attempts and "no_diff" in dev_escalate_on:
+                            metrics.event("dev_attempt_retry", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt, reason="no_diff")
+                            continue
+                        task_status = _task_failure_status("no_diff", detail=dev_log[:500])
+                        _record_failed_state("no_diff", detail=dev_log[:500], task_status=task_status)
+                        save_state(state_path, state)
+                        _record_failed_task_result("no_diff", task_status=task_status, detail=dev_log[:500])
+                        _record_history(next_task.id, next_task.title, "failed", reason="no_diff", detail=dev_log[:500], files=next_task.files, cycle=cycle_idx, attempt=attempt + 1, max_attempts=max_attempts, task_status=task_status)
+                        metrics.event("task_end", cycle=cycle_idx, step=step, task_id=next_task.id, rc=1, reason="no_diff", task_status=task_status)
+                        logger.task_end(task_id=next_task.id, success=False, reason="no_diff", task_status=task_status, was_max_turns=dev_is_max_turns)
+                        if tb or cp:
+                            ok, fail_reason = _isolate_or_stop("no_diff", task_status=task_status, detail=dev_log[:500])
+                            if not ok:
+                                if not continuous:
+                                    return 1, fail_reason, 0, (len(done_set) > before_done)
+                                eprint(f"[WARN] Rollback {fail_reason} for {next_task.id}; continuing anyway.")
+                        if continuous:
+                            logger.skip_event(next_task.id, "no diff produced")
+                            skipped_set.add(next_task.id)
+                            break
+                        else:
+                            return 1, "no_diff", 0, (len(done_set) > before_done)
 
                 if build_enabled:
                     metrics.event("build_start", cycle=cycle_idx, step=step, task_id=next_task.id, attempt=attempt)

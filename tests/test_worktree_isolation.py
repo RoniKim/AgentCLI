@@ -1928,6 +1928,7 @@ class WorktreeIsolationTests(unittest.TestCase):
             "# Project Goals\n\n## P0\n- [ ] Keep the regression gate fast.\n",
             encoding="utf-8",
         )
+        (self.repo / "agent_runner" / "dynamic_compile.py").write_text("VALUE = 1\n", encoding="utf-8")
 
         self.assertTrue(repo_has_web_worktree_markers(self.repo))
         self.assertTrue(should_run_fast_web_worktree_regression(self.repo, ["agent_runner/web.py"]))
@@ -1956,7 +1957,13 @@ class WorktreeIsolationTests(unittest.TestCase):
 
         summary_path = self.run_dir / "fast_web_worktree_regression.json"
         with patch("agent_runner.gates.run_cmd_async", new=fake_run_cmd_async):
-            result = asyncio.run(run_fast_web_worktree_regression_async(self.repo, summary_path))
+            result = asyncio.run(
+                run_fast_web_worktree_regression_async(
+                    self.repo,
+                    summary_path,
+                    trigger_files=["agent_runner/dynamic_compile.py", "../outside.py", "docs/notes.md"],
+                )
+            )
 
         self.assertTrue(result["ok"])
         self.assertEqual(7, len(result["commands"]))
@@ -1980,15 +1987,22 @@ class WorktreeIsolationTests(unittest.TestCase):
         self.assertEqual("compile", summary["commands"][0]["kind"])
         self.assertIn("agent_runner/cycle.py", summary["commands"][0]["cmd"])
         self.assertIn("tests/web_console_playwright_smoke.py", summary["commands"][0]["cmd"])
+        self.assertIn("agent_runner/reporting.py", summary["commands"][0]["cmd"])
+        self.assertIn("agent_runner/dynamic_compile.py", summary["commands"][0]["cmd"])
         self.assertEqual(summary_path.as_posix(), summary["artifact_path"])
         self.assertEqual(summary_path.as_posix(), summary["artifactPath"])
         self.assertIn("agent_runner/web.py", summary["compile_files"])
+        self.assertIn("agent_runner/reporting.py", summary["compile_files"])
+        self.assertIn("agent_runner/dynamic_compile.py", summary["compile_files"])
+        self.assertNotIn("../outside.py", summary["compile_files"])
         self.assertEqual(expected_files, summary["suite_files"])
-        self.assertEqual([], summary["trigger_files"])
+        self.assertEqual(["agent_runner/dynamic_compile.py", "../outside.py", "docs/notes.md"], summary["trigger_files"])
         self.assertEqual("", summary["failure_summary"])
 
         self.assertEqual("py_compile", calls[0]["cmd"][3])
         self.assertIn("agent_runner/gates.py", calls[0]["cmd"])
+        self.assertIn("agent_runner/reporting.py", calls[0]["cmd"])
+        self.assertIn("agent_runner/dynamic_compile.py", calls[0]["cmd"])
         for call, expected_file in zip(calls[1:], expected_files, strict=True):
             self.assertEqual(Path(expected_file).name, call["cmd"][-1])
             self.assertEqual(self.repo, call["cwd"])

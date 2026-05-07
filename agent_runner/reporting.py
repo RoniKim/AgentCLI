@@ -11,6 +11,7 @@ from .docs import read_text_robust
 from .gates import (
     FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES,
     FAST_WEB_WORKTREE_REGRESSION_TEST_FILES,
+    fast_web_worktree_regression_compile_files,
     find_build_cmd,
     find_test_cmd,
     looks_like_no_tests_found,
@@ -1130,12 +1131,13 @@ def _build_qa_skip_reasons(
             rationale = "Fast web/worktree regression was not triggered by the task file scope."
         else:
             rationale = "Fast web/worktree regression was not reached."
+        compile_files = fast_web_worktree_regression_compile_files(repo, task_files) or list(FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES)
         compile_cmd = [
             sys.executable or "python",
             "-B",
             "-m",
             "py_compile",
-            *FAST_WEB_WORKTREE_REGRESSION_COMPILE_FILES,
+            *compile_files,
         ]
         skip_records.append(
             _skipped_command_record(
