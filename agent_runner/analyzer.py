@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .active_goal import active_goal_role_context, build_active_goal_status
 from .experience import load_run_experience_records
 from .failure_policy import count_task_status_groups
 from .state import TaskItem, load_backlog_json, load_state, parse_backlog_md
@@ -748,6 +749,7 @@ _VALIDATION_GAP_STATUSES = {"no_tests_found", "tests_skipped", "validation_pendi
 def _build_experience_analyzer_summary(repo: Path, run_dir: Path) -> dict[str, Any]:
     repo_path = Path(repo).expanduser().resolve()
     run_dir_path = Path(run_dir).expanduser().resolve()
+    active_goal_context = active_goal_role_context(build_active_goal_status(repo_path), role="Analyzer")
     backlog_map = _load_backlog_context(run_dir_path)
     state = load_state(run_dir_path / "STATE.json")
     validation_by_task = _load_validation_payloads(run_dir_path)
@@ -756,6 +758,7 @@ def _build_experience_analyzer_summary(repo: Path, run_dir: Path) -> dict[str, A
     lessons.extend(_build_failed_task_lessons(repo_path, run_dir_path, backlog_map, validation_by_task))
     lessons.extend(_build_validation_gap_lessons(repo_path, run_dir_path, backlog_map, validation_by_task))
     lessons.extend(_build_pr_decision_lessons(repo_path, run_dir_path))
+    lessons.extend(_build_active_goal_lessons(repo_path, run_dir_path, active_goal_context, backlog_map, validation_by_task))
 
     stored_lessons = upsert_lessons(repo_path, lessons)
     task_lessons = [lesson for lesson in stored_lessons if lesson.get("kind") not in {"merge"}]
@@ -791,6 +794,8 @@ def _build_experience_analyzer_summary(repo: Path, run_dir: Path) -> dict[str, A
         "pm_hints": [lesson["lesson"] for lesson in stored_lessons[:10]],
         "merge_hints": [lesson["lesson"] for lesson in merge_lessons[:10]],
         "operator_actions": [],
+        "active_goal_context": active_goal_context,
+        "activeGoalContext": active_goal_context,
         "counts": {
             "lessons": len(stored_lessons),
             "task_lessons": len(task_lessons),
@@ -823,6 +828,8 @@ def _write_experience_analyzer_artifacts(repo: Path, run_dir: Path) -> dict[str,
             "pm_hints": [],
             "merge_hints": [],
             "operator_actions": [],
+            "active_goal_context": active_goal_role_context(build_active_goal_status(repo_path), role="Analyzer"),
+            "activeGoalContext": active_goal_role_context(build_active_goal_status(repo_path), role="Analyzer"),
             "counts": {"lessons": 0, "task_lessons": 0, "validation_lessons": 0, "merge_lessons": 0},
             "artifacts": {
                 "summary_json": (run_dir_path / "ANALYZER_SUMMARY.json").as_posix(),
@@ -887,6 +894,8 @@ def _load_backlog_context(run_dir: Path) -> dict[str, dict[str, Any]]:
             "title": str(task.title),
             "goal_refs": _goal_refs(task.goal_trace),
             "file_globs": _normalize_file_globs(task.files),
+            "active_goal_id": str(getattr(task, "active_goal_id", "") or ""),
+            "active_goal": dict(getattr(task, "active_goal", {}) or {}),
         }
     return context
 
@@ -1063,6 +1072,185 @@ def _build_pr_decision_lessons(repo: Path, run_dir: Path) -> list[dict[str, Any]
             }
         )
     return lessons
+
+
+def _build_active_goal_lessons(
+    repo: Path,
+    run_dir: Path,
+    active_goal_context: dict[str, Any],
+    backlog_map: dict[str, dict[str, Any]],
+    validation_by_task: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    active_goal_id = str(active_goal_context.get("active_goal_id") or active_goal_context.get("activeGoalId") or "").strip()
+    lessons: list[dict[str, Any]] = []
+    if not active_goal_id:
+        return lessons
+    lessons.extend(_build_active_goal_decomposition_lessons(run_dir, active_goal_id))
+    lessons.extend(_build_active_goal_validation_gap_lessons(run_dir, active_goal_id, backlog_map, validation_by_task))
+    budget_lesson = _build_active_goal_budget_lesson(repo, run_dir, active_goal_id, active_goal_context)
+    if budget_lesson:
+        lessons.append(budget_lesson)
+    return lessons
+
+
+def _build_active_goal_decomposition_lessons(run_dir: Path, active_goal_id: str) -> list[dict[str, Any]]:
+    lessons: list[dict[str, Any]] = []
+    for path in sorted(run_dir.glob("BACKLOG_REFINEMENT_cycle_*.json")):
+        payload = _json_file(path)
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_goal_id = str(item.get("active_goal_id") or item.get("activeGoalId") or "").strip()
+            axes = [str(axis).strip() for axis in _as_list(item.get("split_axes") or item.get("splitAxes")) if str(axis).strip()]
+            if item_goal_id != active_goal_id and "remaining_budget" not in axes and "file_scope" not in axes:
+                continue
+            task_id = str(item.get("task_id") or item.get("taskId") or "").strip()
+            reason = str(item.get("reason") or "").strip()
+            children = [str(child).strip() for child in _as_list(item.get("children")) if str(child).strip()]
+            lessons.append(
+                {
+                    "kind": "active_goal_decomposition",
+                    "normalized_trigger": normalize_trigger(
+                        "active_goal_decomposition",
+                        active_goal_id,
+                        task_id,
+                        axes,
+                        reason,
+                    ),
+                    "lesson": (
+                        "For active-goal work, decompose broad tasks by risk, file scope, dependencies, "
+                        "and remaining budget before Dev starts."
+                    ),
+                    "goal_refs": [],
+                    "file_globs": [],
+                    "gate": "planning",
+                    "task_status": "active_goal_split",
+                    "validation_status": "",
+                    "evidence_pointers": [
+                        {
+                            "kind": "backlog_refinement",
+                            "path": _relative_path(run_dir, path),
+                            "run_id": run_dir.name,
+                            "task_id": task_id,
+                            "gate": "planning",
+                            "status": "split",
+                            "children": children[:6],
+                        }
+                    ],
+                    "confidence": 0.80,
+                }
+            )
+    return lessons
+
+
+def _validation_active_goal_id(payload: dict[str, Any], task_context: dict[str, Any]) -> str:
+    context = payload.get("active_goal_context") if isinstance(payload.get("active_goal_context"), dict) else payload.get("activeGoalContext")
+    if isinstance(context, dict):
+        goal_id = str(context.get("active_goal_id") or context.get("activeGoalId") or "").strip()
+        if goal_id:
+            return goal_id
+    return str(task_context.get("active_goal_id") or "").strip()
+
+
+def _build_active_goal_validation_gap_lessons(
+    run_dir: Path,
+    active_goal_id: str,
+    backlog_map: dict[str, dict[str, Any]],
+    validation_by_task: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    lessons: list[dict[str, Any]] = []
+    for task_id, payload in validation_by_task.items():
+        task_context = backlog_map.get(task_id, {})
+        if _validation_active_goal_id(payload, task_context) != active_goal_id:
+            continue
+        validation_status = _token(payload.get("validation_status") or payload.get("validationStatus") or payload.get("status"))
+        if validation_status not in _VALIDATION_GAP_STATUSES:
+            continue
+        gate = _validation_gate(payload) or "test"
+        goal_refs = _unique([*task_context.get("goal_refs", []), *_goal_refs(payload.get("goal_trace") or payload.get("goalTrace"))])
+        file_globs = _unique([*task_context.get("file_globs", []), *_normalize_file_globs(payload.get("files"))])
+        lessons.append(
+            {
+                "kind": "active_goal_validation_gap",
+                "normalized_trigger": normalize_trigger(
+                    "active_goal_validation_gap",
+                    active_goal_id,
+                    task_context.get("title") or payload.get("task_title") or task_id,
+                    gate,
+                    validation_status,
+                    file_globs,
+                ),
+                "lesson": (
+                    "Do not complete active-goal work on missing, skipped, or pending validation; "
+                    "plan a narrow validation follow-up with explicit evidence."
+                ),
+                "goal_refs": goal_refs,
+                "file_globs": file_globs,
+                "gate": gate,
+                "task_status": "active_goal_validation_gap",
+                "validation_status": validation_status,
+                "evidence_pointers": _evidence_from_validation_payload(
+                    payload,
+                    run_dir,
+                    task_id=task_id,
+                    gate=gate,
+                    status=validation_status,
+                ),
+                "confidence": 0.82,
+            }
+        )
+    return lessons
+
+
+def _build_active_goal_budget_lesson(
+    repo: Path,
+    run_dir: Path,
+    active_goal_id: str,
+    active_goal_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    progress = active_goal_context.get("progress") if isinstance(active_goal_context.get("progress"), dict) else {}
+    terminal_reason = str(
+        active_goal_context.get("terminal_reason")
+        or active_goal_context.get("terminalReason")
+        or progress.get("terminal_reason")
+        or progress.get("terminalReason")
+        or ""
+    ).strip()
+    budget_exhausted = bool(progress.get("budget_exhausted") or progress.get("budgetExhausted"))
+    if not budget_exhausted and "budget" not in terminal_reason:
+        return None
+    source_path = str(active_goal_context.get("source_path") or active_goal_context.get("sourcePath") or "").strip()
+    evidence_path = _relative_path(repo, source_path) if source_path else ".AgentCLI/goals/ACTIVE_GOAL.json"
+    return {
+        "kind": "active_goal_budget",
+        "normalized_trigger": normalize_trigger(
+            "active_goal_budget",
+            active_goal_id,
+            terminal_reason,
+            progress.get("summary"),
+        ),
+        "lesson": (
+            "When active-goal budget is exhausted, shrink the next PM decomposition and validation scope "
+            "before retrying."
+        ),
+        "goal_refs": [],
+        "file_globs": [],
+        "gate": "budget",
+        "task_status": terminal_reason or "active_goal_budget_exhausted",
+        "validation_status": "",
+        "evidence_pointers": [
+            {
+                "kind": "active_goal",
+                "path": evidence_path,
+                "run_id": run_dir.name,
+                "goal_id": active_goal_id,
+                "gate": "budget",
+                "status": terminal_reason or "budget_exhausted",
+            }
+        ],
+        "confidence": 0.84,
+    }
 
 
 def _validation_gate(payload: dict[str, Any]) -> str:
@@ -1600,6 +1788,7 @@ def run_advisory_analyzer(
     pm_hints: Sequence[str] | None = None,
     merge_hints: Sequence[str] | None = None,
     operator_actions: Sequence[str] | None = None,
+    active_goal_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return _run_advisory_analyzer_impl(
         run_dir,
@@ -1610,6 +1799,7 @@ def run_advisory_analyzer(
         pm_hints=pm_hints,
         merge_hints=merge_hints,
         operator_actions=operator_actions,
+        active_goal_context=active_goal_context,
     )
 
 
@@ -1624,6 +1814,7 @@ def execute_analyzer(
     merge_hints: Sequence[str] | None = None,
     operator_actions: Sequence[str] | None = None,
     experience_records: Sequence[Mapping[str, Any]] | None = None,
+    active_goal_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if experience_records is not None:
         derived = classify_experience_lessons(experience_records)
@@ -1643,6 +1834,7 @@ def execute_analyzer(
         pm_hints=pm_hints,
         merge_hints=merge_hints,
         operator_actions=operator_actions,
+        active_goal_context=active_goal_context,
     )
 
 
@@ -1770,11 +1962,12 @@ def _build_advisory_analyzer_summary(
     pm_hints: Sequence[str] | None = None,
     merge_hints: Sequence[str] | None = None,
     operator_actions: Sequence[str] | None = None,
+    active_goal_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     authority = analyzer_authority_metadata()
     normalized_task_lessons = _normalize_lessons(task_lessons, default_kind="task")
     normalized_validation_lessons = _normalize_lessons(validation_lessons, default_kind="validation")
-    return {
+    payload = {
         "schema_version": 1,
         "kind": "analyzer_summary",
         "generated_at": now_iso(),
@@ -1794,6 +1987,10 @@ def _build_advisory_analyzer_summary(
         "operator_actions": _coerce_text_list(operator_actions),
         "operatorActions": _coerce_text_list(operator_actions),
     }
+    if isinstance(active_goal_context, Mapping):
+        payload["active_goal_context"] = dict(active_goal_context)
+        payload["activeGoalContext"] = dict(active_goal_context)
+    return payload
 
 
 def _render_report(summary_payload: Mapping[str, Any]) -> str:
@@ -1865,6 +2062,7 @@ def _write_advisory_analyzer_artifacts(
     pm_hints: Sequence[str] | None = None,
     merge_hints: Sequence[str] | None = None,
     operator_actions: Sequence[str] | None = None,
+    active_goal_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     run_dir_path = Path(run_dir)
     summary_payload = _build_advisory_analyzer_summary(
@@ -1875,6 +2073,7 @@ def _write_advisory_analyzer_artifacts(
         pm_hints=pm_hints,
         merge_hints=merge_hints,
         operator_actions=operator_actions,
+        active_goal_context=active_goal_context,
     )
     summary_path = run_dir_path / ANALYZER_SUMMARY_FILENAME
     report_path = run_dir_path / ANALYZER_REPORT_FILENAME
@@ -1903,6 +2102,7 @@ def _run_advisory_analyzer_impl(
     pm_hints: Sequence[str] | None = None,
     merge_hints: Sequence[str] | None = None,
     operator_actions: Sequence[str] | None = None,
+    active_goal_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return _write_advisory_analyzer_artifacts(
         run_dir,
@@ -1913,6 +2113,7 @@ def _run_advisory_analyzer_impl(
         pm_hints=pm_hints,
         merge_hints=merge_hints,
         operator_actions=operator_actions,
+        active_goal_context=active_goal_context,
     )
 
 

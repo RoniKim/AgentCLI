@@ -661,6 +661,16 @@ def gate_pm_tasks_against_goals(
 
         if gate_required:
             if not accepted_matches:
+                active_goal_admission = (
+                    task.get("active_goal_admission")
+                    if isinstance(task.get("active_goal_admission"), dict)
+                    else task.get("activeGoalAdmission")
+                    if isinstance(task.get("activeGoalAdmission"), dict)
+                    else None
+                )
+                if isinstance(active_goal_admission, dict) and active_goal_admission.get("admission") == "active_goal_runtime":
+                    accepted_tasks.append(task)
+                    continue
                 rejected_tasks.append(
                     {
                         "id": str(task.get("id") or "").strip(),

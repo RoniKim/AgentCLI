@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
+from ..active_goal import build_active_goal_budget_stop_reason
 from ..scan import collect_scan_files
 from ..task_status import TASK_STATUS_REVIEW_REQUIRED
 from ..task_failures import record_task_failure_state
@@ -212,6 +213,8 @@ def merge_pm_tasks_with_existing_pending(
                     "priority": getattr(t, "priority", ""),
                     "touched_file_globs": getattr(t, "touched_file_globs", []),
                     "goal_trace": [dict(trace) for trace in (t.goal_trace or []) if isinstance(trace, dict)],
+                    "active_goal_id": str(getattr(t, "active_goal_id", "") or ""),
+                    "active_goal": dict(getattr(t, "active_goal", {}) or {}),
                 }
             )
     return merged_tasks
@@ -274,7 +277,19 @@ def _task_to_backlog_dict(task: Any) -> dict[str, Any]:
             "touched_file_globs": getattr(task, "touched_file_globs", []),
             "goal_trace": getattr(task, "goal_trace", []),
         }
-        for key in ("parent_task_id", "split_from_task_id", "split_reason", "split_index", "split_count"):
+        for key in (
+            "parent_task_id",
+            "split_from_task_id",
+            "split_reason",
+            "split_index",
+            "split_count",
+            "active_goal_id",
+            "activeGoalId",
+            "active_goal",
+            "activeGoal",
+            "active_goal_admission",
+            "activeGoalAdmission",
+        ):
             if hasattr(task, key):
                 raw[key] = getattr(task, key)
 
@@ -307,6 +322,22 @@ def _task_to_backlog_dict(task: Any) -> dict[str, Any]:
     goal_trace = _clean_task_goal_trace(raw.get("goal_trace"))
     if goal_trace:
         out["goal_trace"] = goal_trace
+    active_goal_id = str(raw.get("active_goal_id") or raw.get("activeGoalId") or "").strip()
+    active_goal = raw.get("active_goal") if isinstance(raw.get("active_goal"), dict) else raw.get("activeGoal")
+    active_goal_admission = (
+        raw.get("active_goal_admission")
+        if isinstance(raw.get("active_goal_admission"), dict)
+        else raw.get("activeGoalAdmission")
+    )
+    if active_goal_id:
+        out["active_goal_id"] = active_goal_id
+        out["activeGoalId"] = active_goal_id
+    if isinstance(active_goal, dict):
+        out["active_goal"] = dict(active_goal)
+        out["activeGoal"] = dict(active_goal)
+    if isinstance(active_goal_admission, dict):
+        out["active_goal_admission"] = dict(active_goal_admission)
+        out["activeGoalAdmission"] = dict(active_goal_admission)
     for key in ("parent_task_id", "split_from_task_id", "split_reason", "split_index", "split_count"):
         if key in raw:
             out[key] = raw[key]
@@ -400,6 +431,145 @@ def _ordered_unique(values: list[str]) -> list[str]:
     return out
 
 
+def _active_goal_id_from_status(status: dict[str, Any] | None) -> str:
+    if not isinstance(status, dict):
+        return ""
+    goal = status.get("goal") if isinstance(status.get("goal"), dict) else {}
+    return str(goal.get("id") or status.get("active_goal_id") or status.get("activeGoalId") or "").strip()
+
+
+def _active_goal_budget_status(status: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(status, dict):
+        return {}
+    namespaced = status.get("active_goal_status")
+    if not isinstance(namespaced, dict):
+        namespaced = status.get("activeGoalStatus")
+    if isinstance(namespaced, dict):
+        budget_status = namespaced.get("budget_status")
+        if not isinstance(budget_status, dict):
+            budget_status = namespaced.get("budgetStatus")
+        if isinstance(budget_status, dict):
+            return dict(budget_status)
+    return {}
+
+
+def _remaining_active_goal_cycles(status: dict[str, Any] | None) -> int:
+    budget_status = _active_goal_budget_status(status)
+    try:
+        cycle_budget = int(budget_status.get("cycle_budget") or budget_status.get("cycleBudget") or 0)
+        cycles_used = int(budget_status.get("cycles_used") or budget_status.get("cyclesUsed") or 0)
+    except Exception:
+        return 0
+    return max(0, cycle_budget - cycles_used) if cycle_budget > 0 else 0
+
+
+def _task_active_goal_id(task: dict[str, Any]) -> str:
+    active_goal = task.get("active_goal") if isinstance(task.get("active_goal"), dict) else task.get("activeGoal")
+    if isinstance(active_goal, dict):
+        nested_id = str(active_goal.get("id") or active_goal.get("goal_id") or active_goal.get("goalId") or "").strip()
+        if nested_id:
+            return nested_id
+    return str(task.get("active_goal_id") or task.get("activeGoalId") or "").strip()
+
+
+def _task_active_goal_admission(task: dict[str, Any]) -> dict[str, Any]:
+    admission = (
+        task.get("active_goal_admission")
+        if isinstance(task.get("active_goal_admission"), dict)
+        else task.get("activeGoalAdmission")
+    )
+    return dict(admission) if isinstance(admission, dict) else {}
+
+
+def _is_active_goal_task(task: dict[str, Any], active_goal_status: dict[str, Any] | None) -> bool:
+    task_goal_id = _task_active_goal_id(task)
+    status_goal_id = _active_goal_id_from_status(active_goal_status)
+    if task_goal_id and (not status_goal_id or task_goal_id == status_goal_id):
+        return True
+    admission = _task_active_goal_admission(task)
+    return str(admission.get("admission") or "").strip() == "active_goal_runtime"
+
+
+def _active_goal_split_axes(task: dict[str, Any], active_goal_status: dict[str, Any] | None) -> tuple[list[str], str, int]:
+    if not _is_active_goal_task(task, active_goal_status):
+        return [], "", 0
+    files = _clean_task_string_list(task.get("files"))
+    categories = {_task_file_category(path) for path in files}
+    text = " ".join(
+        [
+            str(task.get("title") or ""),
+            str(task.get("prompt") or ""),
+            str(task.get("done_when") or ""),
+            " ".join(files),
+        ]
+    ).lower()
+    axes: list[str] = []
+    details: list[str] = []
+    if len(files) >= 3:
+        axes.append("file_scope")
+        details.append(f"active goal touches {len(files)} files")
+    if len(categories) >= 2:
+        axes.append("file_scope")
+        details.append("active goal spans " + ", ".join(sorted(categories)))
+    if normalized_large_files := {path.replace("\\", "/").lower() for path in files}.intersection(_PL_LARGE_FILES):
+        axes.append("risk")
+        details.append("active goal touches large files " + ", ".join(sorted(normalized_large_files)))
+    if any(term in text for term in _PL_MUTATING_TERMS) and any(term in text for term in _PL_READONLY_TERMS):
+        axes.append("risk")
+        details.append("active goal mixes mutating and read-only work")
+    condition_count = _done_when_condition_count(task.get("done_when"))
+    if condition_count >= 3:
+        axes.append("risk")
+        details.append(f"active goal has {condition_count} acceptance conditions")
+    dependencies = _clean_task_string_list(task.get("depends_on"))
+    if dependencies:
+        axes.append("dependency")
+        details.append("active goal has upstream dependencies")
+    remaining_cycles = _remaining_active_goal_cycles(active_goal_status)
+    if remaining_cycles > 0:
+        groups = _task_file_groups(files)
+        expected_slices = max(2, len(groups) or 2) if (len(files) >= 3 or condition_count >= 3) else 1
+        if expected_slices >= remaining_cycles:
+            axes.append("remaining_budget")
+            details.append(f"active goal has {remaining_cycles} cycle(s) remaining")
+    unique_axes = list(dict.fromkeys(axes))
+    if "file_scope" in unique_axes and ("risk" in unique_axes or "remaining_budget" in unique_axes or len(files) >= 4):
+        return unique_axes, "; ".join(dict.fromkeys(details)), remaining_cycles
+    if "risk" in unique_axes and "remaining_budget" in unique_axes:
+        return unique_axes, "; ".join(dict.fromkeys(details)), remaining_cycles
+    return [], "", remaining_cycles
+
+
+def _budget_limited_groups(groups: list[tuple[str, str, list[str]]], remaining_cycles: int) -> list[tuple[str, str, list[str]]]:
+    if remaining_cycles <= 0 or len(groups) <= max(2, remaining_cycles):
+        return groups
+    max_groups = max(2, remaining_cycles)
+    if max_groups == 2:
+        implementation: list[str] = []
+        validation: list[str] = []
+        for key, _label, files in groups:
+            if key in {"tests", "e2e"}:
+                validation.extend(files)
+            else:
+                implementation.extend(files)
+        if implementation and validation:
+            return [
+                ("implementation", "Implementation scope", implementation),
+                ("validation", "Validation scope", validation),
+            ]
+    merged: list[tuple[str, str, list[str]]] = []
+    chunk_size = max(1, (len(groups) + max_groups - 1) // max_groups)
+    for idx in range(0, len(groups), chunk_size):
+        chunk = groups[idx : idx + chunk_size]
+        files: list[str] = []
+        labels: list[str] = []
+        for _key, label, group_files in chunk:
+            labels.append(label)
+            files.extend(group_files)
+        merged.append((f"budget_slice{len(merged) + 1}", " + ".join(labels), files))
+    return merged[:max_groups]
+
+
 def _remap_dependencies(dependencies: Any, replacement_ids: dict[str, str]) -> list[str]:
     return _ordered_unique([replacement_ids.get(dep, dep) for dep in _clean_task_string_list(dependencies)])
 
@@ -479,10 +649,30 @@ def _build_child_task(
     goal_trace = _clean_task_goal_trace(parent.get("goal_trace"))
     if goal_trace:
         child["goal_trace"] = goal_trace
+    active_goal_id = str(parent.get("active_goal_id") or parent.get("activeGoalId") or "").strip()
+    active_goal = parent.get("active_goal") if isinstance(parent.get("active_goal"), dict) else parent.get("activeGoal")
+    active_goal_admission = (
+        parent.get("active_goal_admission")
+        if isinstance(parent.get("active_goal_admission"), dict)
+        else parent.get("activeGoalAdmission")
+    )
+    if active_goal_id:
+        child["active_goal_id"] = active_goal_id
+        child["activeGoalId"] = active_goal_id
+    if isinstance(active_goal, dict):
+        child["active_goal"] = dict(active_goal)
+        child["activeGoal"] = dict(active_goal)
+    if isinstance(active_goal_admission, dict):
+        child["active_goal_admission"] = dict(active_goal_admission)
+        child["activeGoalAdmission"] = dict(active_goal_admission)
     return child
 
 
-def refine_backlog_tasks_for_pl(tasks: list[Any]) -> BacklogRefinementResult:
+def refine_backlog_tasks_for_pl(
+    tasks: list[Any],
+    *,
+    active_goal_status: dict[str, Any] | None = None,
+) -> BacklogRefinementResult:
     """Deterministically split oversized backlog tasks for the built-in PL stage."""
 
     original_tasks = [_task_to_backlog_dict(task) for task in tasks]
@@ -493,8 +683,13 @@ def refine_backlog_tasks_for_pl(tasks: list[Any]) -> BacklogRefinementResult:
 
     for task in original_tasks:
         task_id = str(task.get("id") or "").strip()
-        reason = _oversized_task_reason(task)
+        active_goal_axes, active_goal_reason, remaining_cycles = _active_goal_split_axes(task, active_goal_status)
+        oversized_reason = _oversized_task_reason(task)
+        reason_parts = [part for part in (oversized_reason, active_goal_reason) if part]
+        reason = "; ".join(dict.fromkeys(reason_parts))
         groups = _task_file_groups(_clean_task_string_list(task.get("files"))) if reason else []
+        if active_goal_axes and groups:
+            groups = _budget_limited_groups(groups, remaining_cycles)
         if reason and len(groups) < 2:
             groups = [("implementation", "Implementation", []), ("validation", "Validation", [])]
 
@@ -522,6 +717,11 @@ def refine_backlog_tasks_for_pl(tasks: list[Any]) -> BacklogRefinementResult:
                     "decision": "split",
                     "reason": reason,
                     "children": child_ids,
+                    "split_axes": active_goal_axes,
+                    "active_goal_id": _task_active_goal_id(task),
+                    "activeGoalId": _task_active_goal_id(task),
+                    "remaining_active_goal_cycles": remaining_cycles,
+                    "remainingActiveGoalCycles": remaining_cycles,
                 }
             )
             continue
@@ -1284,6 +1484,7 @@ class SharedCycleResult:
 class SharedCycleDeps:
     args: argparse.Namespace
     repo: Path
+    active_goal_repo: Path
     run_dir: Path
     stop_path: Path
     metrics: Any
@@ -1341,6 +1542,10 @@ async def run_shared_cycle_once(
 ) -> SharedCycleResult:
     if deps.stop_path.exists():
         return SharedCycleResult(rc=0, reason=deps.stop_reason_stop_file, done_delta=0, qa_followups_added=0)
+    active_goal_stop_reason = build_active_goal_budget_stop_reason(deps.active_goal_repo)
+    if active_goal_stop_reason:
+        deps.metrics.event("active_goal_budget_stop", cycle=cycle_idx, reason=active_goal_stop_reason)
+        return SharedCycleResult(rc=0, reason=active_goal_stop_reason, done_delta=0, qa_followups_added=0)
 
     deps.set_policy_scan_summary(None)
     deps.set_security_scan_summary(None)

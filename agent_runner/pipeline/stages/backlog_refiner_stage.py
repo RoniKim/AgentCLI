@@ -26,11 +26,16 @@ class BacklogRefinerStage(Stage):
 
         input_task_count = len(tasks)
         # Lazy imports keep agent_runner.pipeline.session -> stages.base acyclic.
+        from ...active_goal import active_goal_role_context, build_active_goal_status, format_active_goal_block
         from ...backlog_utils import normalize_backlog_tasks
         from ..shared_runtime import refine_backlog_tasks_for_pl
 
-        result = refine_backlog_tasks_for_pl(tasks)
-        self._record_result(session, cycle_idx, result, input_task_count)
+        repo = Path(getattr(session, "repo", "."))
+        active_goal_status = build_active_goal_status(repo)
+        active_goal_context = active_goal_role_context(active_goal_status, role=self.name)
+        active_goal_block = format_active_goal_block(active_goal_status)
+        result = refine_backlog_tasks_for_pl(tasks, active_goal_status=active_goal_status)
+        self._record_result(session, cycle_idx, result, input_task_count, active_goal_context)
         if not result.mutated:
             return StageOutcome.ok("backlog_refiner_noop")
 
@@ -43,10 +48,26 @@ class BacklogRefinerStage(Stage):
         if not callable(write_backlog_tasks):
             return StageOutcome.fail("backlog_write_not_supported", rc=2)
         audit_path = write_backlog_tasks(normalized_tasks, source_stage=self.name, cycle_idx=cycle_idx)
-        self._write_mutation_artifacts(session, cycle_idx, result, normalized_tasks, audit_path, input_task_count)
+        self._write_mutation_artifacts(
+            session,
+            cycle_idx,
+            result,
+            normalized_tasks,
+            audit_path,
+            input_task_count,
+            active_goal_context,
+            active_goal_block,
+        )
         return StageOutcome.ok("backlog_refined", effects=STAGE_EFFECTS_BACKLOG_MUTATION)
 
-    def _record_result(self, session: object, cycle_idx: int, result: Any, input_task_count: int) -> None:
+    def _record_result(
+        self,
+        session: object,
+        cycle_idx: int,
+        result: Any,
+        input_task_count: int,
+        active_goal_context: dict[str, Any],
+    ) -> None:
         data = getattr(session, "data", None)
         if isinstance(data, dict):
             data["pl_refinement"] = {
@@ -55,6 +76,8 @@ class BacklogRefinerStage(Stage):
                 "input_task_count": input_task_count,
                 "output_task_count": len(result.tasks),
                 "decisions": list(result.decisions),
+                "active_goal_context": active_goal_context,
+                "activeGoalContext": active_goal_context,
             }
 
     def _write_mutation_artifacts(
@@ -65,6 +88,8 @@ class BacklogRefinerStage(Stage):
         normalized_tasks: list[dict[str, Any]],
         audit_path: Path,
         input_task_count: int,
+        active_goal_context: dict[str, Any],
+        active_goal_block: str,
     ) -> None:
         write_stage_artifact = getattr(session, "write_stage_artifact", None)
         if not callable(write_stage_artifact):
@@ -77,6 +102,10 @@ class BacklogRefinerStage(Stage):
             "output_task_count": len(normalized_tasks),
             "items": list(result.decisions),
             "backlog_write_artifact": audit_path.name,
+            "active_goal_context": active_goal_context,
+            "activeGoalContext": active_goal_context,
+            "active_goal_block": active_goal_block if active_goal_context.get("active") else "",
+            "activeGoalBlock": active_goal_block if active_goal_context.get("active") else "",
         }
         write_stage_artifact(f"PL_OUTPUT_cycle_{cycle_idx:03d}.json", payload)
         write_stage_artifact(f"BACKLOG_REFINEMENT_cycle_{cycle_idx:03d}.json", payload)
