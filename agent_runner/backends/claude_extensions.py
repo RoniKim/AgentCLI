@@ -347,7 +347,7 @@ def build_can_use_tool(ctx: ClaudeExtensionContext, cfg: Any) -> Any:
     - All stages: block path traversal (..)
     - All stages: block writes outside repo
     - All stages: protect sensitive files
-    - Dev + strict_isolation: warn on edits outside task files
+    - Dev + strict_isolation: deny edits outside task files
     """
     try:
         from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
@@ -443,11 +443,13 @@ def build_can_use_tool(ctx: ClaudeExtensionContext, cfg: Any) -> Any:
                         task_paths = set()
                     if task_paths and abs_path.lower() not in task_paths:
                         ctx.metrics.event(
-                            "can_use_tool_warn", tool=tool_name,
+                            "can_use_tool_denied", tool=tool_name,
                             reason="outside_task_scope", path=file_path[:120],
                             task_id=ctx.current_task_id,
                         )
-                        return PermissionResultAllow()
+                        return PermissionResultDeny(
+                            message=f"Strict task isolation blocks edits outside task files: {file_path}",
+                        )
 
             return PermissionResultAllow()
         except Exception:

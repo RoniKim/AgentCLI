@@ -220,8 +220,9 @@ class ClaudeAdvancedControlsTests(unittest.TestCase):
         self.assertFalse(state_denied.allowed)
         self.assertIn("pipeline state file", state_denied.message)
 
-        strict_allowed = asyncio.run(can_use_tool("Write", {"file_path": (self.repo / "other.py").as_posix()}, None))
-        self.assertTrue(strict_allowed.allowed)
+        strict_denied = asyncio.run(can_use_tool("Write", {"file_path": (self.repo / "other.py").as_posix()}, None))
+        self.assertFalse(strict_denied.allowed)
+        self.assertIn("Strict task isolation blocks edits outside task files", strict_denied.message)
         self.assertIn("outside_task_scope", {event[1].get("reason") for event in metrics.events})
 
     def test_disabled_advanced_controls_do_not_mutate_claude_options(self) -> None:
