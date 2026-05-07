@@ -3,6 +3,7 @@
 > Status: active follow-up.
 > Evidence source: read-only Playwright pass against `http://127.0.0.1:8000/#dashboard` while run `20260430-113615` was active.
 > Scope: observation and display quality only. Runner control, merge, discard, validate, start, stop, reload, and restart actions were not exercised.
+> Current status (2026-05-07): This file preserves the 2026-04-30 UX audit. Several gaps were later promoted into `.doc/GOALS.md` P0-W/P1 and implemented or covered by tests. Treat the body as historical evidence unless a fresh browser pass reproduces the issue.
 
 ## Summary
 

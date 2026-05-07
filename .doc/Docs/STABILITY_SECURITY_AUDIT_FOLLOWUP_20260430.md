@@ -5,6 +5,7 @@
 > 입력: Claude "AgentCLI 안정성 전수조사 — Synthesis Report"
 > 검증: Codex read-only grep/code review at HEAD `91bd283`
 > 목적: 5일 연휴 동안 진행할 안정성/보안성 작업을 확정/조건부/추가검증으로 분리한다.
+> 현재 상태(2026-05-07): 본문은 HEAD `91bd283` 기준 후속 계획이다. 이후 P0/P1 GOALS에서 일부 안정성·보안성·무인운영 항목이 승격·구현됐으므로, 아래 항목은 그대로 현재 backlog가 아니다. 신규 작업화 전에는 `.doc/GOALS.md`, 관련 코드, 현재 테스트 결과로 재분류한다.
 
 ---
 

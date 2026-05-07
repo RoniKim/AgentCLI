@@ -4,7 +4,7 @@
 
 Use `docs/Design/project/AgentCLI Web - A.html` as the canonical target. The design bundle says this file was open when the handoff was exported.
 
-Before implementation, read `docs/Design/README.md`, then read `docs/Design/project/AgentCLI Web - A.html` in full, then follow its imports.
+When changing implementation, read `docs/Design/README.md`, then read `docs/Design/project/AgentCLI Web - A.html` in full, then follow its imports.
 
 Required imports to understand before implementation:
 
@@ -14,6 +14,16 @@ Required imports to understand before implementation:
 - `docs/Design/project/directions/direction-a-screens.jsx`
 
 Direction B and Direction C are useful alternatives, but P0 tracks Direction A unless the user changes the target.
+
+## Current Implementation Baseline
+
+As of 2026-05-07, Direction A remains the visual and workflow reference, but the production implementation is no longer a future mock-backed target.
+
+- Production static assets live under `web_console/`.
+- The local FastAPI server is implemented in `agent_runner.web`.
+- The first read-only server pass has been superseded by guarded local mutation support for runner controls, config, prompts, goals, TODO, PR queue, and worktree actions.
+- Guarded mutation must keep explicit opt-in controls, local/trusted access checks, confirmation-oriented UI, and audit-friendly status/error payloads.
+- Browser proof is covered by `tests/web_console_playwright_smoke.py` when it runs tests instead of skipping because of local browser/runtime constraints.
 
 ## Shell Structure
 
@@ -121,12 +131,12 @@ The intended server shape is a local FastAPI app that can:
 - Return read-only active run, stage, backlog, goals, logs, notifications, metrics, config/prompt summaries, pending worktree merge state, and run-history data.
 - Bind to `127.0.0.1` by default and optionally to `0.0.0.0` or a LAN interface when the user wants external viewing from another machine.
 
-The first server version should be read-only. Stop/restart/run-control, config/prompt mutation, and worktree merge/discard endpoints require a separate explicit task, confirmation UX, and documented safety contract.
+Historical first-pass guidance was read-only. The current server includes guarded mutation endpoints, so any new mutating surface must follow the same explicit tasking, confirmation UX, local/trusted-access checks, and documented safety contract.
 
-## Non-Goals For First Pass
+## Non-Goals
 
 - Do not build cloud hosting.
-- Do not add authentication unless a local API makes it necessary.
-- Do not implement destructive run control without a backend contract and explicit confirmation.
+- Do not add authentication casually; follow `docs/AUTHENTICATION_PLAN.md` before widening exposure beyond trusted local/LAN operation.
+- Do not implement destructive run control without a backend contract, explicit opt-in, and confirmation.
 - Do not auto-apply isolated worktree results in manual mode; expose pending merge/discard status for user approval.
-- Do not rewrite AgentCLI's Python backend just to render the first page.
+- Do not rewrite AgentCLI's Python backend or create a second web app just to render a new page.

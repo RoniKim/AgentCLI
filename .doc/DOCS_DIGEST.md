@@ -7,6 +7,7 @@ It is generated from the current `.doc/Docs` file inventory.
 - .doc/Docs/ARCHITECTURE.md
 - .doc/Docs/claude.md
 - .doc/Docs/CONVENTIONS.md
+- .doc/Docs/DOC_PROJECT_CONSISTENCY_AUDIT_20260507.md
 - .doc/Docs/DOCS_CLASSIFICATION_AND_GOALS_GAP_20260430.md
 - .doc/Docs/EXPERIENCE_DB_AND_ANALYZER_STAGE.md
 - .doc/Docs/incidents/MEMORY_AND_HANDLE_LEAK_20260428.md
@@ -26,7 +27,7 @@ It is generated from the current `.doc/Docs` file inventory.
 - headings:
   - # AgentCLI Architecture Notes
   - ## Current Product
-  - ## Web Console Target
+  - ## Web Console
   - ## Integration Direction
 
 ## .doc/Docs/claude.md
@@ -53,6 +54,18 @@ It is generated from the current `.doc/Docs` file inventory.
   - ## Python
   - ## Web Console
   - ## AgentCLI PM/Dev/QA Behavior
+
+## .doc/Docs/DOC_PROJECT_CONSISTENCY_AUDIT_20260507.md
+- path: `.doc/Docs/DOC_PROJECT_CONSISTENCY_AUDIT_20260507.md`
+- decoded_as: `utf-8-sig`
+- headings:
+  - # Doc/Project Consistency Audit - 2026-05-07
+  - ## Purpose
+  - ## Task Split
+  - ## Findings
+  - ## Corrections Applied
+  - ## Remaining Guidance
+  - ## Validation Commands
 
 ## .doc/Docs/DOCS_CLASSIFICATION_AND_GOALS_GAP_20260430.md
 - path: `.doc/Docs/DOCS_CLASSIFICATION_AND_GOALS_GAP_20260430.md`
@@ -376,11 +389,12 @@ It is generated from the current `.doc/Docs` file inventory.
 - headings:
   - # Web Console Design Target
   - ## Source Of Truth
+  - ## Current Implementation Baseline
   - ## Shell Structure
   - ## Visual System
   - ## Data Contract
   - ## FastAPI Server Target
-  - ## Non-Goals For First Pass
+  - ## Non-Goals
 
 ## .doc/Docs/WEB_OPERATIONAL_UX_GAPS_20260430.md
 - path: `.doc/Docs/WEB_OPERATIONAL_UX_GAPS_20260430.md`

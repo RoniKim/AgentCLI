@@ -15,7 +15,20 @@
 - Keep subprocess calls argv-list based.
 - Preserve Windows support.
 - Validate config and filesystem paths defensively.
-- Run `.venv/Scripts/python.exe -m compileall agent_runner agent_cli.py` after Python changes on this Windows repo.
+- Run the repo `.venv` Python after Python changes on this Windows repo:
+
+```powershell
+$env:PYTHONPYCACHEPREFIX = ".test-scratch\pycache-validation"
+.\.venv\Scripts\python.exe -B -m compileall -q agent_runner tests
+```
+
+- For docs/web changes, also run the relevant docs and web validation slices. At minimum:
+
+```powershell
+.\.venv\Scripts\python.exe -B -m unittest tests.test_docs_validation
+```
+
+- Browser-render proof comes from `.\.venv\Scripts\python.exe -B .\tests\web_console_playwright_smoke.py -v` only when the command runs tests rather than skipping because of local browser/runtime constraints.
 
 ## Web Console
 

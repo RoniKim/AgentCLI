@@ -3,6 +3,7 @@
 > 🔧 **OPEN INCIDENT** — 본 문서는 `.doc/Docs/incidents/`로 이동 (2026-04-28).
 > 인용된 9개 file:line 모두 코드와 일치 검증 완료. Fix A/B/C/D/E 모두 미적용 상태 유지.
 > 후속 조치는 `.doc/Docs/UNATTENDED_OPS_AUDIT_AND_FOLLOWUP.md`와 함께 추적.
+> 현재 상태(2026-05-07): 본문은 최초 인시던트 분석 원문이다. 이후 process guard, child cleanup, diagnostics, logger hardening 관련 GOALS 후속이 일부 구현됐으므로 "Fix A/B/C/D/E 모두 미적용" 문구는 원문 당시 상태로만 해석한다. 이 인시던트를 CLOSED로 바꾸려면 Windows handle/process 재감사를 별도로 수행해야 한다.
 
 **작성일**: 2026-04-28
 **상태**: 분석 완료, 수정 미적용

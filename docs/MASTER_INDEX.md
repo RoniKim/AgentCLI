@@ -1,7 +1,7 @@
 # AgentCLI 문서 인덱스
 
-> 마지막 갱신: 2026-05-06
-> Web Console 상태 문구와 런타임 role order 검증 반영
+> 마지막 갱신: 2026-05-07
+> `.doc/Docs`와 현재 프로젝트 구현의 정합성 감사 결과 반영
 > 모든 링크는 실제 파일 inventory + case-sensitive path 검증 대상이며, `⚠️ 업데이트 필요` 상태는 validator가 실패로 처리
 
 ---
@@ -60,6 +60,7 @@
 | `ARCHITECTURE.md` | 전체 아키텍처 + Web Console 타겟 통합 노트 |
 | `CONVENTIONS.md` | self-development 시 PM/Dev/QA 행동 계약 |
 | `WEB_CONSOLE_TARGET.md` | Web Console 시각/구조/데이터 계약 명세 (Direction A) |
+| `DOC_PROJECT_CONSISTENCY_AUDIT_20260507.md` | `docs/`/`.doc/Docs`와 현재 구현 정합성 감사, Task 분해, 보완사항 |
 | `.doc/Docs/claude.md` | Claude backend 운영 가이드 |
 | `UNATTENDED_OPS_AUDIT_AND_FOLLOWUP.md` | 무인운영 신뢰성 검증 결과 + 후속 작업 (T-A~T-I) |
 | `LOCAL_PR_QUEUE_AND_DEFERRED_VALIDATION.md` | 로컬 PR 큐, 지연 검증, oversized GOALS task 분할 계획 |
@@ -71,7 +72,7 @@
 
 | 문서 | 영향 | 상태 |
 |------|------|------|
-| `MEMORY_AND_HANDLE_LEAK_20260428.md` | HIGH (재부팅 전까지 회복 불가) | OPEN — Fix A/B/C/D/E 미적용 |
+| `MEMORY_AND_HANDLE_LEAK_20260428.md` | HIGH (재부팅 전까지 회복 불가) | OPEN / RE-AUDIT REQUIRED — 관련 GOALS 후속 구현 후 Windows handle/process 재검증 필요 |
 
 ## 6. 디자인 소스 (docs/Design/, read-only)
 
@@ -87,8 +88,9 @@
 
 ## 카테고리별 우선순위
 
-### 즉시 정합성 갱신이 필요한 문서 (HIGH)
+### 현재 정합성 유지 대상 (HIGH)
 - `CONFIG_REFERENCE_KO.md`, `CONFIGURATION.md`, `PIPELINE.md`, `ADVANCED_FEATURES.md`, `WEB_CONSOLE.md`
+- `.doc/Docs/ARCHITECTURE.md`, `.doc/Docs/WEB_CONSOLE_TARGET.md`, `.doc/Docs/CONVENTIONS.md`
 
 ### 후속 갱신 (MEDIUM)
 - `OPERATIONS.md`, `TROUBLESHOOTING.md`, `DEVELOPER_GUIDE.md`, `CUSTOMIZATION.md`
@@ -103,16 +105,16 @@
 
 본 인덱스의 각 문서 분류는 다음 방법으로 검증되었습니다:
 
-```bash
-# 코드 인벤토리 ↔ 문서 대조
-grep -rn "DEFAULTS" agent_runner/cli.py
-grep -rn "STOP_REASON_" agent_runner/utils.py
-grep -rn "GOALS_REFRESH_RESCUABLE_REASONS" agent_runner/goals.py
-grep -rn "skill_match_autofix_threshold" agent_runner/cli.py
+```powershell
+# docs validator
+.\.venv\Scripts\python.exe -B -m unittest tests.test_docs_validation
 
-# 모듈 누락 검사
-ls agent_runner/  # 31 .py + backends/ + pipeline/ + skills/ + remote/
+# Python compile safety for doc-adjacent validation helpers
+$env:PYTHONPYCACHEPREFIX = ".test-scratch\pycache-validation"
+.\.venv\Scripts\python.exe -B -m compileall -q agent_runner tests
 
-# 문서 작성일 확인
-ls -la docs/  # Feb 20 다수 = stale 의심
+# Web route and browser proof when web docs/UX claims change
+.\.venv\Scripts\python.exe -B .\tests\web_console_playwright_smoke.py -v
 ```
+
+Playwright smoke is browser-render proof only when it runs tests instead of skipping because of local browser/runtime constraints.

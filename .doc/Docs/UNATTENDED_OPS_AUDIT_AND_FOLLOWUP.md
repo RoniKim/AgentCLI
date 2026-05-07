@@ -3,6 +3,7 @@
 > 작성일: 2026-04-28
 > 검증 방식: 4개 병렬 코드 아키비스트 에이전트가 file:line 단위로 사실 확인 (`agent-debate` 스킬 + 후속 dispatch)
 > 목적: "wait → 자동 이어가기"·"continuous 이어하기"·"mid-kill recovery"·"multi-window overnight" 기능의 실제 구현 상태를 확정하고, 남은 갭을 후속 작업 단위로 명세화
+> 현재 상태(2026-05-07): 본문은 2026-04-28 감사 결과와 후속 작업 원문을 보존한다. stale STOP, heartbeat, Claude wait, stale cleanup, scheduler, diagnostics 관련 항목은 이후 `.doc/GOALS.md`의 P0-X/P1 후속으로 승격·구현된 항목이 있으므로, 남은 작업 여부는 현재 코드와 테스트로 재검증한 뒤 판단한다.
 
 ---
 

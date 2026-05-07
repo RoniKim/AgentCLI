@@ -4,6 +4,7 @@
 > 상태: 분류 노트. 현재 runner가 도는 동안 main worktree와 `.doc/GOALS.md`는 수정하지 않는다.
 > 범위: `docs/`, `.doc/Docs/`, `.doc/Docs/incidents/`
 > 목적: 과거 문서와 현재 필요한 문서를 분리하고, GOALS에 명시적으로 없는 기능 후보를 정리한다.
+> 현재 상태(2026-05-07): 본문은 2026-04-30 시점의 gap review다. TODO, Skills, Claude advanced controls, MCP, Plugin, Enterprise, Command Palette, Instance Health 등은 이후 `.doc/GOALS.md`에 승격되어 체크된 항목이 있으므로, 아래 unchecked 후보 목록을 현재 backlog로 재사용하지 않는다. 현재 기준은 `.doc/GOALS.md`, `docs/WEB_CONSOLE.md`, 그리고 체크인된 테스트다.
 
 ---
 
